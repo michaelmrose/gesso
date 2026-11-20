@@ -1508,6 +1508,46 @@
         (is (= (progression/requirement required)
                (:gesso.live/progression ctx)))))))
 
+(deftest empty-frontier-rejects-unverified-preexisting-biff-snapshot-test
+  ;; No completed XTDB transaction means Gesso cannot establish a current
+  ;; authoritative Biff snapshot. Returning ctx unchanged must not retain a
+  ;; previously supplied snapshot token and allow ordinary Biff reads to act
+  ;; on an unverified (possibly stale or foreign) time basis.
+  (let [t (Instant/parse "2026-09-10T18:38:03Z")
+        stale-token (xtdb-live/basis-snapshot-token
+                     (xtdb-live/basis :xtdb 33 t))
+        foreign-token (xtdb-live/basis-snapshot-token
+                       (xtdb-live/basis :analytics 11 t))
+        status {:latest-completed-txs {"xtdb" []}}
+        observations (atom 0)
+        base {:xtdb/node :authority-node :request/id :fresh}]
+    (with-xtdb-stub
+      '*status*
+      (fn [_] (swap! observations inc) status)
+      (fn []
+        (doseq [token [stale-token "not-a-valid-token" false]]
+          (let [ctx (assoc base :biff.xtdb/snapshot-token token)
+                result (try (xtdb-live/bind-request-frontier ctx)
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo result)
+                (str "Unobserved Biff snapshot must fail closed: " (pr-str token)))
+            (when (instance? clojure.lang.ExceptionInfo result)
+              (is (re-find #"preexisting Biff snapshot token" (.getMessage result)))
+              (is (= "xtdb" (:database (ex-data result))))
+              (is (= token (:snapshot-token (ex-data result)))))))
+        ;; No Biff token, including explicit nil, is the legitimate untouched
+        ;; database case and must remain non-mutating.
+        (is (identical? base (xtdb-live/bind-request-frontier base)))
+        (let [without-token (assoc base :biff.xtdb/snapshot-token nil)]
+          (is (identical? without-token
+                          (xtdb-live/bind-request-frontier without-token))))
+        ;; A valid token for an independent database must not be rejected or
+        ;; stripped simply because the selected default database is empty.
+        (let [foreign (assoc base :biff.xtdb/snapshot-token foreign-token)]
+          (is (identical? foreign (xtdb-live/bind-request-frontier foreign))))
+        (is (= 6 @observations))))))
+
 (deftest bind-request-frontier-does-not-fabricate-initial-basis-test
   (let [ctx {:xtdb/node :authority-node
              :request/id :request-2}

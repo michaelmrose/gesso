@@ -1073,6 +1073,37 @@
             (ex "XTDB has no completed transaction and cannot satisfy an existing authoritative progression requirement."
                 {:database database-name
                  :required required})))
+         ;; With no selected-database frontier, a preexisting Biff snapshot
+         ;; must not claim a timestamp for this unobserved database. A valid
+         ;; foreign-database token is independent evidence and may remain in
+         ;; the context. Reject malformed/noncanonical tokens rather than
+         ;; treating them as foreign, which would silently trust bad state.
+         (when-some [snapshot-token (:biff.xtdb/snapshot-token ctx)]
+           (let [token-databases
+                 (try
+                   (when-not (and (string? snapshot-token)
+                                  (not (str/blank? snapshot-token)))
+                     (throw (ex "Invalid Biff snapshot token."
+                                {:snapshot-token snapshot-token})))
+                   (let [decoded (xt.basis/<-time-basis-str snapshot-token)]
+                     (when-not (= snapshot-token
+                                  (xt.basis/->time-basis-str decoded))
+                       (throw (ex "Noncanonical Biff snapshot token."
+                                  {:snapshot-token snapshot-token})))
+                     (set (keys decoded)))
+                   (catch Throwable cause
+                     (throw
+                      (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."
+                          {:database database-name
+                           :snapshot-token snapshot-token
+                           :reason :invalid-snapshot-token}
+                          cause))))]
+             (when (contains? token-databases database-name)
+               (throw
+                (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."
+                    {:database database-name
+                     :snapshot-token snapshot-token
+                     :reason :unobserved-selected-database})))))
          ctx)))))
 
 ;; -----------------------------------------------------------------------------
