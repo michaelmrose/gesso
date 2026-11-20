@@ -1562,3 +1562,46 @@
               (deliver allow-acquisition true)
               (when-let [runner (deref request timeout-ms nil)]
                 (cancel-runner! runner)))))))))
+
+(deftest clear-key-completes-cancelled-singleflight-waiters-test
+  ;; Cancelling the physical render does not necessarily call a Missionary
+  ;; task's success/failure callback. Owners and joiners must still receive
+  ;; a terminal outcome instead of waiting on the shared flight forever.
+  (let [events (atom [])
+        manager (fragment/create {:ttl-ms 1000
+                                  :debug-fn #(swap! events conj %)})
+        started (promise)
+        release (promise)
+        cancelled (promise)
+        old-renders (atom 0)
+        task (controlled-success-task started release :old old-renders cancelled)
+        owner (start-task (fragment/protect-task manager fragment-key task))
+        joiner (atom nil)]
+    (try
+      (is (= :started (deref started timeout-ms ::timeout)))
+      (reset! joiner (start-task (fragment/protect-task manager fragment-key task)))
+      (is (eventually #(some (fn [event]
+                              (= :gesso.live.fragment/singleflight-joined (:event event)))
+                            @events)))
+      (let [old-flight (get @(:inflight manager) fragment-key)]
+        (fragment/clear-key! manager fragment-key)
+        (is (false? (boolean
+                     (@#'gesso.live.fragment/assign-flight!
+                      old-flight {:status :success :value :late})))
+            "late completion cannot overwrite the cancellation outcome"))
+      (is (= :cancelled (deref cancelled timeout-ms ::timeout)))
+      (doseq [runner [owner @joiner]]
+        (let [result (task-result runner)]
+          (is (= :failure (:status result))
+              "cancelled singleflight waiters must complete promptly")
+          (is (= :fragment-invalidated
+                 (:reason (ex-data (:error result))))
+              "cancellation must be distinguishable from an ordinary render failure")))
+      (is (zero? (:inflight-count (fragment/stats manager))))
+      (is (= {:status :success :value :fresh}
+             (run-task (fragment/render-task manager fragment-key (constantly :fresh)))))
+      (finally
+        (deliver release true)
+        (cancel-runner! owner)
+        (when-let [runner @joiner]
+          (cancel-runner! runner))))))

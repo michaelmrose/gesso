@@ -558,6 +558,14 @@
   (when-let [cancel! @(:cancel-ref flight)]
     (cancel!)))
 
+(defn- assign-flight!
+  "Resolve a shared flight at most once. Cancellation and physical render
+   completion may both try to finish it under concurrent invalidation."
+  [flight result]
+  (when (compare-and-set! (:resolved? flight) false true)
+    ((:cell flight) result)
+    true))
+
 (defn clear-key!
   "Clear cached and in-flight state for one key.
 
@@ -585,9 +593,18 @@
                                 flights))))
                    (swap! (:cache manager) dissoc key)
                    flight))]
-    ;; Do not invoke cancellation under the cache lock. A canceller can run
-    ;; callbacks that need cache publication or another fragment lifecycle.
+    ;; Complete waiters before invoking cancellation. A Missionary task's
+    ;; cancellation may suppress both completion callbacks, which otherwise
+    ;; leaves the shared deferred unresolved forever. The outcome guard also
+    ;; prevents a racing physical completion from assigning it a second time.
     (when flight
+      (assign-flight! flight
+                      {:status :failure
+                       :error (ex "gesso.live fragment render invalidated."
+                                  {:reason :fragment-invalidated
+                                   :key key})})
+      ;; Do not invoke cancellation under the cache lock: a canceller may
+      ;; run arbitrary application callbacks or wait for task termination.
       (cancel-flight! flight)))
   manager)
 
@@ -611,6 +628,7 @@
 (defn- new-flight
   [_manager]
   {:cell (m/dfv)
+   :resolved? (atom false)
    :cancel-ref (atom nil)
    :cancel-requested? (atom false)})
 
@@ -639,10 +657,6 @@
            (if (identical? flight (get m key))
              (dissoc m key)
              m))))
-
-(defn- assign-flight!
-  [flight result]
-  ((:cell flight) result))
 
 (defn- await-flight-task
   [key options flight role]
