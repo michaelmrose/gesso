@@ -3588,3 +3588,24 @@ data: client-1
       (finally
         (close-response!
          response)))))
+
+(deftest stream-response-escapes-client-id-line-breaks-in-sse-wake-test
+  ;; The client id comes from request params and is therefore untrusted. A
+  ;; CR/LF in that value must remain event data, never become a second SSE
+  ;; event, a new event type, or another parsed SSE field.
+  (let [channel (test-channel)
+        client-id "client-1\r\nevent: forged\rdata: payload\n\nmore"
+        response (connect! channel client-id)]
+    (try
+      (let [frame (await-result (s/take! (:body response)))]
+        (is (= (str "event: client-oob\n"
+                    "data: client-1\n"
+                    "data: event: forged\n"
+                    "data: data: payload\n"
+                    "data: \n"
+                    "data: more\n\n")
+               frame))
+        (is (= 1 (count (re-seq #"(?m)^event: " frame)))
+            "a client id cannot inject a second SSE event field"))
+      (finally
+        (close-response! response)))))

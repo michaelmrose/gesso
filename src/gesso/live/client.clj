@@ -123,8 +123,14 @@
 
 (defn- sse-frame
   [event data]
+  ;; EventSource treats CR and LF as SSE field boundaries. Client ids are
+  ;; received from request parameters, so preserve every line as data rather
+  ;; than allowing an embedded newline to inject a new event or SSE field.
   (str "event: " (event-name event) "\n"
-       "data: " (or data "1") "\n\n"))
+       (apply str
+              (map #(str "data: " % "\n")
+                   (str/split (str (or data "1")) #"\r\n|\r|\n" -1)))
+       "\n"))
 
 (defn- strip-runtime-fields
   [client]
