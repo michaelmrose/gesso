@@ -1208,6 +1208,49 @@
         (is (= [[:connectable sample-tx {:database :xtdb}]]
                @calls))))))
 
+(deftest execute-tx-requires-complete-committed-time-basis-test
+  ;; execute-tx is a completed operation and the adapter promises a complete
+  ;; read-after-write basis. A tx-id-only result or non-Instant system time
+  ;; must not become a successful response without any :progression.
+  ;; Unlike submit-tx, execute-tx must expose a usable system-time.
+  (let [bad-results [{:tx-id 301}
+                     {:tx-id 302 :system-time nil}
+                     (tx-key 303 nil)
+                     {:tx-id 304 :system-time "wrong type"}]]
+    (doseq [tx-result bad-results]
+      (let [calls (atom 0)
+            events (atom [])]
+        (with-xtdb-stub
+          '*execute-tx*
+          (fn [& _] (swap! calls inc) tx-result)
+          (fn []
+            (let [outcome (try
+                            (xtdb-live/execute-tx!
+                             :conn sample-tx
+                             {:debug-fn #(swap! events conj (:event %))})
+                            (catch Throwable e e))]
+              (is (xtdb-live/post-execute-result-failure? outcome)
+                  "A completed operation without a time basis cannot report success")
+              (is (= :committed (:commit/status (ex-data outcome)))
+                  "A returned identified execution must never be retried")
+              (is (= :post-execute-result (:failure/stage (ex-data outcome))))
+              (is (identical? tx-result (:tx-result (ex-data outcome))))
+              (is (and (instance? Throwable outcome)
+                       (some? (.getCause ^Throwable outcome)))
+                  "The missing result coordinate must remain diagnosable")
+              (is (= [:gesso.live.xtdb/execute-tx-started
+                      :gesso.live.xtdb/execute-tx-result-failed]
+                     @events)
+                  "No false successful-execution event")
+              (is (= 1 @calls)))))))
+    ;; A tx-id-only public submit-tx receipt remains legitimate.
+    (with-xtdb-stub
+      '*submit-tx*
+      (fn [& _] {:tx-id 305})
+      (fn []
+        (is (= {:tx-result {:tx-id 305} :consistency {:tx-id 305}}
+               (xtdb-live/submit-tx! :conn sample-tx)))))))
+
 (deftest execute-tx-invalid-return-never-proves-commit-test
   ;; Returning from the API is not by itself a reliable success receipt when
   ;; the result lacks an identifiable transaction. Avoid claiming a committed

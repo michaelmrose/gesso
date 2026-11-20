@@ -1919,6 +1919,36 @@
             (is (= 1 @transforms)
                 "Never reapply a swap transform after commit")))))))
 
+(deftest live-swap-missing-execute-time-does-not-report-success-or-retry-test
+  ;; execute-tx returned an identified transaction without a usable system
+  ;; time. Unlike submit-tx's accepted-only receipt, this cannot be treated
+  ;; as a successful read-after-write commit: its required snapshot is absent.
+  ;; The write has already returned and must not be retried.
+  (let [reads (atom 0)
+        writes (atom 0)
+        transforms (atom 0)
+        returned {:tx-id 308}]
+    (with-redefs-fn
+      {#'synced/live-read (fn [& _] (swap! reads inc) 1)
+       #'synced/guarded-tx-ops (fn [& _] [[:guard]])
+       (xtdb-var '*execute-tx*) (fn [& _] (swap! writes inc) returned)}
+      (fn []
+        (let [outcome (try
+                        (live/live-swap!
+                         {:xtdb/connectable :write-node}
+                         atomic-swap-counter
+                         (fn [n] (swap! transforms inc) (inc n))
+                         {:system {:options {}} :emit false})
+                        (catch Throwable error error))]
+          (is (xtdb-live/post-execute-result-failure? outcome)
+              "An identified but incomplete execute result must not appear successful")
+          (is (= :committed (:commit/status (ex-data outcome)))
+              "The identified returned write must not be blindly retried")
+          (is (identical? returned (:tx-result (ex-data outcome))))
+          (is (= 1 @writes))
+          (is (= 1 @reads))
+          (is (= 1 @transforms)))))))
+
 (deftest live-swap-cannot-claim-commit-from-missing-xtdb-result-test
   ;; The XTDB API returned without a usable transaction identity. A guarded
   ;; mutation cannot report success/committed, nor repeat the write in an
@@ -1953,7 +1983,7 @@
   (let [reads (atom 0)
         commits (atom 0)
         transforms (atom 0)
-        tx-result {:tx-id 42 :system-time :time-42}
+        tx-result {:tx-id 42 :system-time (java.time.Instant/parse "2026-01-01T00:00:00Z")}
         cause (ex-info "XTDB-shaped metadata failure"
                        {:xtdb.error/code :xtdb/assert-failed})]
     (with-redefs-fn

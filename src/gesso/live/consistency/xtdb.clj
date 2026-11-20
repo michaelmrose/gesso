@@ -1254,6 +1254,23 @@
     :tx-result tx-result}
    cause))
 
+(defn- require-execute-system-time!
+  "A successful XTDB execute-tx result must establish a complete snapshot.
+
+   Unlike submit-tx's accepted-only receipt, execute-tx promises a committed
+   TransactionKey with a java.time.Instant system-time. Reject identified
+   but incomplete results as committed post-result failures so callers never
+   silently render a fragment without the write's required read basis."
+  [tx-result]
+  (let [system-time (:system-time (tx-result-map tx-result))]
+    (when-not (instance? Instant system-time)
+      (throw
+       (post-execute-result-error
+        (ex "XTDB execute-tx result lacks a usable Instant system-time."
+            {:system-time system-time})
+        tx-result)))
+    tx-result))
+
 (def post-submit-result-failure-type
   "XTDB submit-tx returned, but its result could not establish usable
    submission metadata. A valid receipt is :submitted even if its metadata
@@ -1406,7 +1423,10 @@
       :progression ...} ; when complete basis data is available
 
    XTDB public execute-tx returns a TransactionKey containing tx-id and
-   system-time. The returned consistency includes:
+   system-time. An identified result missing a java.time.Instant system-time
+   is classified as a committed post-execute-result failure; it cannot be
+   returned as a successful write without its authoritative read basis.
+   The returned consistency includes:
 
      :tx-id
      :system-time
@@ -1438,6 +1458,7 @@
        (let [tx-result (invoke-xtdb-api! :execute-tx *execute-tx*
                                          connectable' tx-ops tx-options)
              _ (require-returned-tx-id! :execute-tx tx-result)
+             _ (require-execute-system-time! tx-result)
              ;; The XTDB call has returned: any failure deriving its public
              ;; result metadata is post-execution, not an ASSERT conflict.
              {:keys [consistency progression-value]}
