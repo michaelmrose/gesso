@@ -371,54 +371,82 @@
 
       (m/observe
        (fn [emit!]
-         (letfn [(stop! []
-                   (reset! stopped? true)
-                   (close-once!))
+         ;; A completed Manifold deferred can invoke its on-realized callback
+         ;; inline. Calling pull! from that callback used to reenter emit! before
+         ;; its preceding call returned, hanging Missionary on buffered input.
+         ;; The wip counter trampolines completions without changing the
+         ;; one-outstanding-take invariant or introducing a worker pool.
+         (let [ready (java.util.concurrent.ConcurrentLinkedQueue.)
+               wip (java.util.concurrent.atomic.AtomicInteger. 0)]
+           (letfn [(stop! []
+                     (reset! stopped? true)
+                     (close-once!))
 
-                 (emit-and-stop! [value]
-                   (when (emit-safely! emit! value debug-fn)
-                     (stop!)))
+                   (emit-and-stop! [value]
+                     (when (emit-safely! emit! value debug-fn)
+                       (stop!)))
 
-                 (emit-error-and-stop! [cause]
-                   (let [wrapped (ex "gesso.live stream failed."
-                                     {}
-                                     cause)]
-                     (debug!
-                      debug-fn
-                      :gesso.live.flow/stream-error
-                      {:error cause
-                       :at (now-ms)})
-                     (emit-and-stop! (stream-error-value wrapped))))
+                   (emit-error-and-stop! [cause]
+                     (let [wrapped (ex "gesso.live stream failed."
+                                       {}
+                                       cause)]
+                       (debug!
+                        debug-fn
+                        :gesso.live.flow/stream-error
+                        {:error cause
+                         :at (now-ms)})
+                       (emit-and-stop! (stream-error-value wrapped))))
 
-                 (pull! []
-                   (when-not @stopped?
-                     (let [deferred (take! stream closed-sentinel)]
-                       (d/on-realized
-                        deferred
-                        (fn [value]
-                          (when-not @stopped?
-                            (if (= closed-sentinel value)
-                              (do
-                                (debug!
-                                 debug-fn
-                                 :gesso.live.flow/stream-closed
-                                 {:at (now-ms)})
-                                (emit-and-stop! closed-sentinel))
-                              (do
-                                (debug!
-                                 debug-fn
-                                 :gesso.live.flow/stream-value
-                                 {:value value
-                                  :at (now-ms)})
-                                (when (emit-safely! emit! value debug-fn)
-                                  (pull!))))))
-                        (fn [cause]
-                          (when-not @stopped?
-                            (emit-error-and-stop! cause)))))))]
-           (pull!)
+                   (pull! []
+                     (when-not @stopped?
+                       (let [deferred (take! stream closed-sentinel)]
+                         (d/on-realized
+                          deferred
+                          (fn [value]
+                            (enqueue! :value value))
+                          (fn [cause]
+                            (enqueue! :error cause))))))
 
-           (fn cleanup []
-             (stop!)))))))))
+                   (process-completion! [kind payload]
+                     (when-not @stopped?
+                       (case kind
+                         :error (emit-error-and-stop! payload)
+                         :value (if (= closed-sentinel payload)
+                                  (do
+                                    (debug!
+                                     debug-fn
+                                     :gesso.live.flow/stream-closed
+                                     {:at (now-ms)})
+                                    (emit-and-stop! closed-sentinel))
+                                  (do
+                                    (debug!
+                                     debug-fn
+                                     :gesso.live.flow/stream-value
+                                     {:value payload
+                                      :at (now-ms)})
+                                    (when (emit-safely! emit! payload debug-fn)
+                                      (pull!)))))))
+
+                   (drain-ready! []
+                     (loop []
+                       (when-let [[kind payload] (.poll ready)]
+                         (process-completion! kind payload))
+                       (when (pos? (.decrementAndGet wip))
+                         (recur))))
+
+                   (enqueue! [kind payload]
+                     (.offer ready [kind payload])
+                     (when (zero? (.getAndIncrement wip))
+                       (drain-ready!)))]
+             ;; Do not drain an already-ready stream while m/observe is still
+             ;; installing its observer/cleanup. Only this initial pull needs
+             ;; asynchronous handoff; later completions run on their callback
+             ;; thread through the non-reentrant work-in-progress pump.
+             (.execute (java.util.concurrent.ForkJoinPool/commonPool)
+                       ^Runnable #(pull!))
+
+             (fn cleanup []
+               (stop!))))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Flow transforms

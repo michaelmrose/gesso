@@ -975,3 +975,27 @@
             :value [{:event "live-update"
                      :invalidation request-invalidation}]}
            (task-result runner)))))
+
+(deftest stream-flow-prebuffered-closed-stream-drains-without-reentrant-emission-test
+  ;; Manifold may complete take! synchronously when a value is already
+  ;; buffered. A second synchronous completion must not reenter Missionary's
+  ;; emit! while it is still processing the preceding value.
+  (let [stream (s/stream 128)
+        values (vec (range 64))]
+    (try
+      (doseq [value values]
+        (is (= true (put-value stream value))))
+      (s/close! stream)
+      (let [started (future (collect-runner (flow/stream-flow stream)))
+            runner (deref started timeout-ms ::timeout)]
+        (try
+          (is (not= ::timeout runner)
+              "a buffered stream must start collecting without hanging")
+          (when (map? runner)
+            (is (= {:status :success :value values}
+                   (task-result runner))
+                "the bridge must drain every queued value before close"))
+          (finally
+            (future-cancel started))))
+      (finally
+        (s/close! stream)))))
