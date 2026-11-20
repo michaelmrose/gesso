@@ -471,38 +471,48 @@
             miss))))))
 
 (defn- cache-store!
-  [manager key value options]
-  (when (cache-enabled? options)
-    (let [{:keys [clock ttl-ms max-cache-entries debug-fn]} options
-          now (clock)
-          entry (cache-entry value now ttl-ms)
-          prune-result (atom nil)]
-      (swap! (:cache manager)
-             (fn [cache]
-               (let [;; Compute order from the current cache inside swap!
-                     ;; so a CAS retry also refreshes publication order.
-                     ;; This keeps equal-millisecond eviction deterministic
-                     ;; without a separate mutable counter.
-                     next-order (inc (reduce max 0
-                                             (keep :write-order (vals cache))))
-                     entry' (assoc entry :write-order next-order)
-                     result (prune-cache (assoc cache key entry')
-                                         now
-                                         max-cache-entries)]
-                 (reset! prune-result result)
-                 (:cache result))))
-      (debug!
-       debug-fn
-       :gesso.live.fragment/cache-stored
-       {:key key
-        :stored-at (:stored-at entry)
-        :expires-at (:expires-at entry)
-        :ttl-ms ttl-ms
-        :expired-count (:expired-count @prune-result)
-        :evicted-count (:evicted-count @prune-result)
-        :cache-count (count @(:cache manager))
-        :at now})))
-  value)
+  ([manager key value options]
+   (cache-store! manager key value options nil))
+  ([manager key value options flight]
+   (when (cache-enabled? options)
+     (let [{:keys [clock ttl-ms max-cache-entries debug-fn]} options
+           now (clock)
+           entry (cache-entry value now ttl-ms)
+           prune-result (atom nil)
+           store! (fn []
+                    (swap! (:cache manager)
+                           (fn [cache]
+                             (let [;; Recompute publication order on CAS retries.
+                                   next-order (inc (reduce max 0
+                                                           (keep :write-order (vals cache))))
+                                   entry' (assoc entry :write-order next-order)
+                                   result (prune-cache (assoc cache key entry')
+                                                       now max-cache-entries)]
+                               (reset! prune-result result)
+                               (:cache result)))))]
+       ;; clear-key! and singleflight cache publication share the cache lock.
+       ;; If a flight was invalidated during rendering, it cannot publish
+       ;; obsolete markup after clear-key! has removed the old cache entry.
+       ;; Unprotected non-singleflight writes retain their existing behavior.
+       (let [stored? (if flight
+                       (locking (:cache manager)
+                         (when-not @(:cancel-requested? flight)
+                           (store!)
+                           true))
+                       (do (store!) true))]
+         (when stored?
+           (debug!
+            debug-fn
+            :gesso.live.fragment/cache-stored
+            {:key key
+             :stored-at (:stored-at entry)
+             :expires-at (:expires-at entry)
+             :ttl-ms ttl-ms
+             :expired-count (:expired-count @prune-result)
+             :evicted-count (:evicted-count @prune-result)
+             :cache-count (count @(:cache manager))
+             :at now})))))
+   value))
 
 (defn clear-cache!
   "Clear all cached fragment values."
@@ -534,13 +544,20 @@
    This is mostly useful for tests or explicit invalidation. Normal live refresh
    paths usually rely on short TTLs and progression-aware keys instead."
   [manager key]
-  (swap! (:cache manager) dissoc key)
-  (let [inflight (:inflight manager)]
-    (when-let [flight (get @inflight key)]
+  (let [inflight (:inflight manager)
+        ;; Mark the current flight cancelled before removing the cached value.
+        ;; A completed render publishing its result holds the same lock while
+        ;; checking this flag, so it cannot race between the check and store.
+        flight (locking (:cache manager)
+                 (let [flight (get @inflight key)]
+                   (when flight
+                     (reset! (:cancel-requested? flight) true))
+                   (swap! (:cache manager) dissoc key)
+                   flight))]
+    (when flight
       (cancel-flight! flight)
-      ;; Cancellation may synchronously release this flight. Another caller
-      ;; can install a replacement before the clear operation completes. Do
-      ;; not remove that newer owner's singleflight registration.
+      ;; Cancellation may synchronously release the old flight. Do not remove
+      ;; a replacement registered by another caller in that interval.
       (swap! inflight
              (fn [flights]
                (if (identical? flight (get flights key))
@@ -614,36 +631,38 @@
         value))))
 
 (defn- render-store-task
-  [manager key task options]
-  (let [{:keys [clock debug-fn]} options]
-    (m/sp
-      (debug!
-       debug-fn
-       :gesso.live.fragment/render-started
-       {:key key
-        :at (clock)})
-      (try
-        (let [value (m/? task)]
-          (cache-store! manager key value options)
-          (debug!
-           debug-fn
-           :gesso.live.fragment/render-succeeded
-           {:key key
-            :at (clock)})
-          value)
-        (catch Throwable e
-          (debug!
-           debug-fn
-           :gesso.live.fragment/render-failed
-           {:key key
-            :error e
-            :at (clock)})
-          (throw e))))))
+  ([manager key task options]
+   (render-store-task manager key task options nil))
+  ([manager key task options flight]
+    (let [{:keys [clock debug-fn]} options]
+      (m/sp
+        (debug!
+         debug-fn
+         :gesso.live.fragment/render-started
+         {:key key
+          :at (clock)})
+        (try
+          (let [value (m/? task)]
+            (cache-store! manager key value options flight)
+            (debug!
+             debug-fn
+             :gesso.live.fragment/render-succeeded
+             {:key key
+              :at (clock)})
+            value)
+          (catch Throwable e
+            (debug!
+             debug-fn
+             :gesso.live.fragment/render-failed
+             {:key key
+              :error e
+              :at (clock)})
+            (throw e)))))))
 
 (defn- start-flight!
   [manager key task options flight]
   (let [{:keys [clock debug-fn]} options
-        render-task (render-store-task manager key task options)
+        render-task (render-store-task manager key task options flight)
         cancel!
         (render-task
          (fn [value]

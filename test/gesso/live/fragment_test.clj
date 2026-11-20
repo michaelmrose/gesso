@@ -1229,3 +1229,44 @@
             (finally
               (deliver resume-first true)
               (deref early timeout-ms ::timeout))))))))
+
+(deftest clear-key-during-completion-must-not-cache-stale-flight-test
+  ;; Invalidation wins while a completed render is paused immediately before
+  ;; publishing to cache. An obsolete flight cannot repopulate that cache.
+  (let [manager (fragment/create {:ttl-ms 1000 :clock (constantly 0)})
+        reached-store (promise)
+        resume-store (promise)
+        completed-store (promise)
+        original-store @#'gesso.live.fragment/cache-store!]
+    (with-redefs-fn
+      {#'gesso.live.fragment/cache-store!
+       (fn [& args]
+         (deliver reached-store true)
+         @resume-store
+         (try
+           (apply original-store args)
+           (finally (deliver completed-store true))))}
+      (fn []
+        (let [runner-future (future (start-task
+                                    (fragment/render-task manager fragment-key
+                                                          (fn [] :stale))))
+              invalidation (atom nil)]
+          (try
+            (is (= true (deref reached-store timeout-ms ::timeout)))
+            (let [flight (get @(:inflight manager) fragment-key)]
+              (is (some? flight))
+              (reset! invalidation (future (fragment/clear-key! manager fragment-key)))
+              (is (eventually #(true? @(:cancel-requested? flight)))
+                  "invalidation records cancellation before the store unblocks"))
+            (deliver resume-store true)
+            (is (= true (deref completed-store timeout-ms ::timeout))
+                "obsolete render should attempt its delayed publication")
+            (is (not= ::timeout (deref @invalidation timeout-ms ::timeout)))
+            (is (nil? (get @(:cache manager) fragment-key))
+                "invalidated flight must not restore its stale cache entry")
+            (finally
+              (deliver resume-store true)
+              (when-let [invalidation-future @invalidation]
+                (deref invalidation-future timeout-ms ::timeout))
+              (when-let [runner (deref runner-future timeout-ms nil)]
+                (cancel-runner! runner)))))))))
