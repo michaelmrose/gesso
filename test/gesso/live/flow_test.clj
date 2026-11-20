@@ -340,8 +340,10 @@
 (deftest stream-flow-installs-one-take-at-a-time-test
   (let [stream (s/stream)
         take-count (atom 0)
-        takes (atom [])]
-    (with-redefs [s/take! (fn [_stream _closed-sentinel]
+        takes (atom [])
+        terminal-token (atom nil)]
+    (with-redefs [s/take! (fn [_stream stream-closed-sentinel]
+                            (reset! terminal-token stream-closed-sentinel)
                             (swap! take-count inc)
                             (let [p (d/deferred)]
                               (swap! takes conj p)
@@ -364,7 +366,7 @@
           (complete! (nth @takes 1) :b)
           (is (eventually #(= 3 @take-count)))
 
-          (complete! (nth @takes 2) flow/closed-sentinel)
+          (complete! (nth @takes 2) @terminal-token)
 
           (is (= {:status :success
                   :value [:a :b]}
@@ -1118,3 +1120,49 @@
             "trace errors must not prevent flow creation, delivery, or completion"))
       (finally
         (source/close! src)))))
+
+(deftest stream-flow-public-legacy-sentinel-is-ordinary-stream-data-test
+  ;; The v1920 identity token was a public var; callers could legitimately
+  ;; place that same object in a Manifold stream. It must not end the flow.
+  (let [stream (s/stream 4)
+        values [flow/closed-sentinel :after-legacy-marker]]
+    (try
+      (doseq [value values]
+        (is (true? (put-value stream value))))
+      (s/close! stream)
+      (let [result (task-result (collect-runner (flow/stream-flow stream)))]
+        (is (= :success (:status result)))
+        (is (= values (:value result))
+            "a publicly accessible value is not a structural close signal"))
+      (finally
+        (s/close! stream)))))
+
+(deftest stream-flow-distinguishes-terminal-tokens-between-flows-test
+  ;; The close marker supplied to each take! adapter must be owned by that
+  ;; flow. A marker from another flow is valid data here, not termination.
+  (let [first-token (promise)
+        first-stream (s/stream 4)
+        second-stream (s/stream 4)]
+    (try
+      (let [first (collect-runner
+                   (flow/stream-flow
+                    first-stream
+                    {:take! (fn [stream token]
+                              (deliver first-token token)
+                              (s/take! stream token))}))
+            token (deref first-token timeout-ms ::timeout)]
+        (is (not= ::timeout token))
+        (is (true? (put-value first-stream :done)))
+        (s/close! first-stream)
+        (is (= {:status :success :value [:done]}
+               (task-result first)))
+        (is (true? (put-value second-stream token)))
+        (is (true? (put-value second-stream :after-foreign-token)))
+        (s/close! second-stream)
+        (let [second (task-result
+                      (collect-runner (flow/stream-flow second-stream)))]
+          (is (= :success (:status second)))
+          (is (= [token :after-foreign-token] (:value second)))))
+      (finally
+        (s/close! first-stream)
+        (s/close! second-stream)))))

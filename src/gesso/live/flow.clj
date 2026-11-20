@@ -67,7 +67,9 @@
    :take! s/take!})
 
 (def closed-sentinel
-  ;; Keep stream control distinct from all ordinary user values.
+  ;; Retained for compatibility with callers that referenced this old marker.
+  ;; New streams use a distinct, locally owned terminal token instead: a
+  ;; public value can legitimately occur in ordinary stream data.
   (Object.))
 
 ;; -----------------------------------------------------------------------------
@@ -311,13 +313,13 @@
 (defn- stream-terminal-xf
   "Turn the m/observe event stream into a finite stream-flow.
 
-   closed-sentinel is emitted once when the Manifold stream closes. The
+   The per-stream closed-sentinel is emitted once when Manifold closes. The
    take-while stage turns that sentinel into normal flow termination.
 
    stream-error-value is emitted once when take! fails. The map stage unwraps
    it by throwing the wrapped exception so Missionary's downstream machinery
    sees a normal flow failure."
-  []
+  [closed-sentinel]
   (comp
    (map unwrap-stream-value)
    (take-while #(not (identical? closed-sentinel %)))))
@@ -361,7 +363,10 @@
    (stream-flow stream nil))
   ([stream {:keys [debug-fn on-close take!]
             :or {take! s/take!}}]
-   (let [stopped? (atom false)
+   (let [;; Each flow owns its terminal token. Even the formerly public
+         ;; flow/closed-sentinel must now be treated as ordinary stream data.
+         closed-sentinel (Object.)
+         stopped? (atom false)
 
          close-once!
          (once
@@ -375,7 +380,7 @@
              {:at (now-ms)})))]
 
      (m/eduction
-      (stream-terminal-xf)
+      (stream-terminal-xf closed-sentinel)
 
       (m/observe
        (fn [emit!]
