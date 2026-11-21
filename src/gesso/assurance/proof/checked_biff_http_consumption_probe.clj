@@ -573,7 +573,7 @@
                                      (reject! :local-checked-http-liveness-not-observed))
                                    (finally
                                      (reset! liveness-pending nil)))))))
-        verify! (fn [final-system base-url]
+        verify-within-lease! (fn [final-system base-url]
                   (when-not (.compareAndSet claimed false true)
                     (reject! :http-consumption-probe-already-attempted))
                   (reset! result :attempt-consumed-without-confirmation)
@@ -609,8 +609,11 @@
                           ;; replacement from later liveness inspections.
                           (when qualified?
                             (reset! verified-start-port (.getPort url)))
+                          ;; Stop closes admission before waiting for the
+                          ;; activation lease. A challenge result received
+                          ;; after stop begins must NOT re-activate this probe.
                           (reset! result
-                                  (if qualified?
+                                  (if (and qualified? (map? @state))
                                     :one-final-checked-wrapper-http-challenge-returned
                                     :http-consumption-challenge-unconfirmed))
                           ;; Separate one-use read-only real HTTP challenge for
@@ -663,6 +666,11 @@
                         (finally (reset! pending :inactive)
                                  (reset! route-pending :inactive)
                                  (reset! route-active nil)))
+                      ;; Verification does not outlive completed retirement.
+                      ;; The stop request may have marked :stopped while its
+                      ;; exclusive lease waited for this in-flight verifier.
+                      (when-not (map? @state)
+                        (reset! result :http-consumption-challenge-unconfirmed))
                       (report (current!) @result @hits (boolean typed-config)
                            @typed-outcome @typed-attempts
                            (some? (:principal-policy typed-config))
@@ -672,7 +680,16 @@
                            @observed-route-ids
                            (set (map :route-id
                                      (filter #(not= (:template %) (:path %))
-                                             @catalog-targets)))))))]
+                                             @catalog-targets)))))))
+        verify! (fn [final-system base-url]
+                  ;; The startup challenge is part of the issued lifecycle,
+                  ;; not an independent task allowed to outlive stop. Share
+                  ;; the same drain lease as admitted business dispatches.
+                  (let [lease (.readLock business-dispatch-lock)]
+                    (.lock lease)
+                    (try
+                      (verify-within-lease! final-system base-url)
+                      (finally (.unlock lease)))))]
     (locking issued
       (.put issued handle {:source contract-source
                            :host-handle host-handle

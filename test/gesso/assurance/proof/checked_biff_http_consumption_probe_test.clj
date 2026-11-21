@@ -29,6 +29,9 @@
 (defn- model [s] (helper model-ns s))
 (defn- earlier-helper [s] (helper earlier s))
 (def ^:dynamic *modules* [])
+;; Test-only hook for suspending the real HTTP adapter after its final
+;; issued handler returns, but before its response reaches verify-once!.
+(def ^:dynamic *after-http-handler!* nil)
 (use-fixtures :once
   (fn [run]
     ((model 'with-real-xtdb)
@@ -72,6 +75,7 @@
    :biff.core/start
    (fn [system]
      (let [real-handler (:biff.ring/handler system)
+           response-hook *after-http-handler!*
            served-handler (case mode
                             :honest real-handler
                             :ignored (fn [_] {:status 200 :body "fake 200"})
@@ -91,6 +95,8 @@
                                           :uri (.getPath uri)
                                           :headers headers
                                           :biff.xtdb/node ((model 'database))})
+                               _ (when response-hook
+                                   (response-hook headers response))
                                status (or (:status response) 500)
                                bytes (.getBytes (str (:body response))
                                                 StandardCharsets/UTF_8)]
@@ -235,6 +241,45 @@
               (finally (deliver release :continue)
                        (deref business 20000 :timed-out))))
           (finally (remove-watch constructs watch-key)))))))
+
+(deftest probe-retirement-drains-in-flight-http-activation
+  ;; The first real HTTP challenge can pass through the final handler while
+  ;; the response is still delayed by the independent server adapter. The
+  ;; retired probe must never subsequently report a new successful startup.
+  (let [entered (promise)
+        release (promise)]
+    (binding [*after-http-handler!*
+              (fn [headers response]
+                (when (contains? headers "x-gesso-consumption-probe")
+                  (deliver entered (= 200 (:status response)))
+                  (deref release 15000 :timed-out)))]
+      (with-adapter! :honest nil
+        (fn [{:keys [probe system base]}]
+          (let [verifying (future ((:verify-once! probe) system base))]
+            (try
+              (is (true? (deref entered 12000 false))
+                  "The original startup challenge must be pending on the wire")
+              (let [stop-started (promise)
+                    stopping (future
+                               (deliver stop-started true)
+                               ((:biff.core/stop (:module probe)) system)
+                               :retired)]
+                (is (true? (deref stop-started 5000 false)))
+                (is (= :in-flight (deref stopping 350 :in-flight))
+                    "Stop must wait for the in-flight activation verifier")
+                (deliver release :continue)
+                (let [verification (deref verifying 12000 :timed-out)]
+                  (is (map? verification))
+                  (is (= :stopped (:module-state verification)))
+                  (is (not= :one-final-checked-wrapper-http-challenge-returned
+                            (:status verification))
+                      "Retired verification must never publish successful startup"))
+                (is (= :retired (deref stopping 12000 :timed-out)))
+                (is (= 503 (post! base))
+                    "Business remains fenced after retirement"))
+              (finally
+                (deliver release :continue)
+                (deref verifying 12000 :timed-out)))))))))
 
 (deftest independent-server-consumes-the-final-biff-handler-over-real-http
   (with-adapter! :honest nil
