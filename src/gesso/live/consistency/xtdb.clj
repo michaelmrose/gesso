@@ -1487,33 +1487,38 @@
   consistency)
 
 (defn- require-tx-snapshot-minimum!
-  "Keep a complete tx receipt consistent with the selected-db query token.
+  "Validate a complete tx receipt and its selected-db query snapshot minimum.
 
-   Transaction metadata does not authenticate a committed write. However, a
-   single admitted request cannot claim one complete transaction/time pair
-   while its query token pins that same database to an earlier time. Check
-   before ordinary Biff reads or a deferred handler can consume the mixed
-   constraints. Independent databases and incomplete metadata are not an
-   observation of the selected transaction and do not participate."
+   A complete tx-id/time pair must have portable XTDB coordinates even when
+   the selected database has not completed its first transaction, or when
+   there is no accompanying query snapshot token. Otherwise empty-startup
+   request admission can pass malformed metadata to a deferred Biff handler.
+   This structural validation does NOT claim that the database observed the
+   receipt; populated nodes separately compare it with their real frontier.
+
+   When a query snapshot token is present, it also must not predate the
+   receipt. Independent databases and incomplete metadata do not establish
+   this transaction minimum and retain their existing handling."
   [database-name consistency origin]
-  (when (and (some? (:tx-id consistency))
-             (or (some? (:system-time consistency))
-                 (some? (:snapshot-time consistency)))
-             (some? (:snapshot-token consistency)))
-    (let [receipt (consistency->basis consistency database-name)
-          token-bases (decode-canonical-biff-snapshot!
-                       database-name (:snapshot-token consistency))
-          receipt-time (basis-system-time receipt)]
-      (when (some #(.isBefore ^Instant % receipt-time)
-                  (get token-bases database-name))
-        (throw
-         (ex "XTDB query snapshot token predates complete transaction metadata."
-             {:reason :snapshot-token-behind-transaction-metadata
-              :origin origin
-              :database database-name
-              :tx-id (:tx-id consistency)
-              :transaction-system-time receipt-time
-              :snapshot-token (:snapshot-token consistency)})))))
+  (when (complete-xtdb-tx-metadata? consistency)
+    ;; Always validate the pair. Previously this happened only if an explicit
+    ;; snapshot token accompanied it, leaving invalid complete receipts
+    ;; unchecked on the empty-database path.
+    (let [receipt (consistency->basis consistency database-name)]
+      (when-some [token (:snapshot-token consistency)]
+        (let [token-bases (decode-canonical-biff-snapshot!
+                           database-name token)
+              receipt-time (basis-system-time receipt)]
+          (when (some #(.isBefore ^Instant % receipt-time)
+                      (get token-bases database-name))
+            (throw
+             (ex "XTDB query snapshot token predates complete transaction metadata."
+                 {:reason :snapshot-token-behind-transaction-metadata
+                  :origin origin
+                  :database database-name
+                  :tx-id (:tx-id consistency)
+                  :transaction-system-time receipt-time
+                  :snapshot-token token})))))))
   consistency)
 
 (defn- require-observed-frontier-satisfies-tx-metadata!

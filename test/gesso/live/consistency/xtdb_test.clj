@@ -2610,6 +2610,57 @@
                               {:snapshot-token disjoint}}))))
             (is (= (+ 2 before) @calls))))))))
 
+(deftest empty-frontier-validates-complete-tx-receipt-shapes-test
+  ;; Empty selected databases cannot compare a proposed transaction receipt
+  ;; with an observed frontier. That is not license to accept a structurally
+  ;; impossible receipt: it must still be a portable signed-long tx id paired
+  ;; with a java.time.Instant. A valid but unobserved startup receipt remains
+  ;; permitted under the current empty-frontier contract.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        bad [{:tx-id (inc (bigint Long/MAX_VALUE)) :system-time t}
+             {:tx-id -1 :system-time t}
+             {:tx-id "2056" :system-time t}
+             {:tx-id 2056 :system-time "not-an-instant"}
+             {:tx-id 2056 :snapshot-time :not-an-instant}]
+        valid {:tx-id 2056 :system-time t}
+        calls (atom 0)]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (let [bound (xtdb-live/bind-request-frontier
+                     {:xtdb/node :authority-node})
+              wrapped ((:biff.core/wrap-db-snapshot bound)
+                       (fn [_] (swap! calls inc) :executed))]
+          (doseq [receipt bad]
+            (let [admitted (try
+                             (xtdb-live/bind-request-frontier
+                              {:xtdb/node :authority-node
+                               :gesso.live/consistency receipt})
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))
+                  deferred (try
+                             (wrapped {:xtdb/consistency receipt})
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo admitted)
+                  (str "Invalid empty-startup tx receipt admitted: "
+                       (pr-str receipt)))
+              (is (instance? clojure.lang.ExceptionInfo deferred)
+                  (str "Deferred invalid receipt entered Biff: "
+                       (pr-str receipt)))))
+          (is (zero? @calls)
+              "Invalid complete receipts must fail before any handler call")
+          ;; No completed frontier exists, so these structurally sound or
+          ;; partial claims retain the existing empty-startup behavior.
+          (is (ifn? (:biff.core/wrap-db-snapshot
+                     (xtdb-live/bind-request-frontier
+                      {:xtdb/node :authority-node
+                       :gesso.live/consistency valid}))))
+          (is (= :executed (wrapped {:gesso.live/consistency valid})))
+          (is (= :executed
+                 (wrapped {:xtdb/consistency {:tx-id 2056}})))
+          (is (= 2 @calls)))))))
+
 (deftest biff-frontier-rejects-unobserved-complete-tx-metadata-test
   ;; A complete tx/time pair is a request's claimed transaction minimum.
   ;; Without an observed node frontier at least as recent in BOTH coordinates,
