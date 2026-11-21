@@ -579,6 +579,69 @@
            (is (stream/closed? (:stream @acquired))))
          (finally ((:close! route))))))))
 
+(deftest provider-closes-during-sse-startup-returns-503-test
+  ;; This is a physical Live provider rather than a mock source. Replacing
+  ;; only the startup seam allows exact scheduling of the provider close
+  ;; between the route's pre-admission check and SSE startup/return.
+  (doseq [close-point [:before-start :after-start]]
+    (setup-host
+     (fn [started]
+       (let [sys (:gesso.live/system started)
+             src (:source sys)
+             request {:uri "/live/events" :request-method :get}
+             original-start live/start-sse!
+             authorized (atom 0)
+             route (http/wrap-authorized-sse
+                    started {:path "/live/events"
+                             :authorize-subscription
+                             (fn [_] (swap! authorized inc) scope)})]
+         (try
+           (let [response
+                 (try
+                   (with-redefs
+                   [live/start-sse!
+                    (fn [system subscription options]
+                      (case close-point
+                        :before-start (do
+                                        (live/close! system)
+                                        (original-start system subscription options))
+                        :after-start (let [session
+                                           (original-start system subscription options)]
+                                       (live/close! system)
+                                       session)))]
+                     ((:handler route) request))
+                   (catch Exception e e))]
+             (is (= {:status 503 :headers {} :body "Live shutting down"}
+                    response)
+                 (str close-point " must not produce an unusable SSE response")))
+           (is (true? (live/closed? sys)))
+           (is (= 1 @authorized))
+           (is (eventually #(zero? ((:active-count route))))
+               "A closed provider cannot leave an admitted HTTP session")
+           (is (eventually #(zero? (:subscription-count (source/stats src))))
+               "The real source must retain no Live subscription")
+           (finally ((:close! route))))))))
+  ;; Do not hide a genuine start failure when the provider remains live.
+  (setup-host
+   (fn [started]
+     (let [sys (:gesso.live/system started)
+           src (:source sys)
+           failure (ex-info "Injected SSE startup failure" {:test :v2130})
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})]
+       (try
+         (is (identical? failure
+                         (with-redefs [live/start-sse!
+                                       (fn [& _] (throw failure))]
+                           (try ((:handler route)
+                                 {:uri "/live/events" :request-method :get})
+                                (catch Exception e e)))))
+         (is (false? (live/closed? sys)))
+         (is (zero? ((:active-count route))))
+         (is (zero? (:subscription-count (source/stats src))))
+         (finally ((:close! route))))))))
+
 (deftest route-shutdown-cancels-active-sessions-and-rejects-new-get-test
   (setup-host
    (fn [started]

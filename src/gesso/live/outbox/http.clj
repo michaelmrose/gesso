@@ -68,7 +68,9 @@
    are reported after attempting all sessions; failed entries remain tracked
    so a repeated :close! can retry them. A failure to install a disconnect
    callback after SSE startup also triggers immediate session rollback; failed
-   rollback stays tracked for the same retry path."
+   rollback stays tracked for the same retry path. If Live shuts down
+   during session creation, the route returns 503 instead of surfacing a
+   source-closed error or returning an already-dead EventSource stream."
   [started {:keys [path authorize-subscription sse-options] :as options}]
   (when-not (and (map? options)
                  (= (set (keys options))
@@ -165,29 +167,46 @@
                     (reject! :invalid-authorized-subscription {})
 
                     :else
-                    (let [session (live/start-sse! live-system value
-                                                   {:sse-options validated-sse})
-                          key (random-uuid)]
-                      (swap! state assoc-in [:connections key] session)
-                      (try
-                        (stream/on-closed
-                         (:stream session)
-                         #(swap! state update :connections dissoc key))
-                        (:response session)
-                        (catch Throwable admission-error
-                          ;; Starting the source interest precedes registering
-                          ;; the HTTP disconnect hook. If that registration
-                          ;; fails, do not strand a stream the client never
-                          ;; received. Keep it tracked if rollback also fails,
-                          ;; so close! can retry the cancellation later.
+                    (let [[start-outcome session-or-error]
                           (try
-                            (live/cancel-sse! session)
-                            (swap! state update :connections dissoc key)
-                            (catch Throwable cancel-error
-                              (when-not (identical? admission-error cancel-error)
-                                (.addSuppressed ^Throwable admission-error
-                                                ^Throwable cancel-error))))
-                          (throw admission-error))))))))))]
+                            [:started (live/start-sse! live-system value
+                                                       {:sse-options validated-sse})]
+                            ;; A provider shutdown cannot suppress thread
+                            ;; interruption or fatal JVM failure.
+                            (catch InterruptedException e (throw e))
+                            (catch Exception e [:failed e]))]
+                      (if (= :failed start-outcome)
+                        (if (live/closed? live-system)
+                          {:status 503 :headers {} :body "Live shutting down"}
+                          (throw session-or-error))
+                        (let [session session-or-error
+                              key (random-uuid)]
+                          (swap! state assoc-in [:connections key] session)
+                          (try
+                            (stream/on-closed
+                             (:stream session)
+                             #(swap! state update :connections dissoc key))
+                            ;; Live may have closed between the initial guard
+                            ;; and the moment the transport returns a stream.
+                            ;; Never expose a 200 for a dead EventSource.
+                            (if (live/closed? live-system)
+                              (do
+                                (live/cancel-sse! session)
+                                (swap! state update :connections dissoc key)
+                                {:status 503 :headers {} :body "Live shutting down"})
+                              (:response session))
+                            (catch Throwable admission-error
+                              ;; A failed HTTP hook or rollback cannot orphan
+                              ;; a source interest. Failed cancellation stays
+                              ;; in :connections for the next close! retry.
+                              (try
+                                (live/cancel-sse! session)
+                                (swap! state update :connections dissoc key)
+                                (catch Throwable cancel-error
+                                  (when-not (identical? admission-error cancel-error)
+                                    (.addSuppressed ^Throwable admission-error
+                                                    ^Throwable cancel-error))))
+                              (throw admission-error))))))))))))]
     {:handler handler
      :close! close!
      :active-count (fn [] (count (:connections @state)))
