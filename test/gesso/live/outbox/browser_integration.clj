@@ -227,6 +227,10 @@
               node (:xtdb/connectable started)
               sys (:gesso.live/system started)
               requests (atom [])
+              ;; The real HTTP response Manifold stream is the server-owned
+              ;; test fault-control point. Closing it forces a native
+              ;; EventSource disconnect without mocking the browser APIs.
+              sse-responses (atom [])
               correlated-source (source/subscribe (:source sys) scope)
               route (http/wrap-authorized-sse
                      started {:path "/live/events"
@@ -244,7 +248,10 @@
               serve (fn [request]
                       (cond
                         (= "/live/events" (:uri request))
-                        ((:handler route) request)
+                        (let [response ((:handler route) request)]
+                          (when (stream/stream? (:body response))
+                            (swap! sse-responses conj (:body response)))
+                          response)
                         (contains? javascript (:uri request))
                         {:status 200 :headers js-headers
                          :body (get javascript (:uri request))}
@@ -385,7 +392,104 @@
                       (is (true?
                            (chromium/evaluate
                             page
-                            "() => window.__v2109.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2109.listener === document.querySelector('[data-gesso-live-invalidation]')")))))
+                            "() => window.__v2109.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2109.listener === document.querySelector('[data-gesso-live-invalidation]')"))))
+                  ;; v2116: after proving two canonical refreshes over one
+                  ;; connection, intentionally retire only the *first* SSE
+                  ;; response. EventSource must reconnect to a newly admitted
+                  ;; Live subscription without remounting the stable root.
+                  (let [disconnect-request-baseline (count @requests)
+                        original (first @sse-responses)]
+                    (is (= 1 (count @sse-responses)))
+                    (is (= 1 ((:active-count route))))
+                    (is (some? original))
+                    (stream/close! original)
+                    (is (stream/closed? original))
+                    (chromium/wait-for-js! page
+                                           "() => window.__v2109.opens >= 2")
+                    (is (eventually #(>= (count @sse-responses) 2)))
+                    (is (eventually #(= 1 ((:active-count route)))))
+                    (is (not (identical? original (second @sse-responses))))
+                    (is (true?
+                         (chromium/evaluate
+                          page
+                          "() => window.__v2109.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2109.listener === document.querySelector('[data-gesso-live-invalidation]')")))
+                    ;; An SSE open conveys no authoritative progression.
+                    ;; Its post-reconnect advisory GET must not invent one.
+                    (is (eventually #(> (count @requests)
+                                        disconnect-request-baseline)))
+                    (is (some #(nil? (get-in %
+                                             [:headers progression.http/request-header-name]))
+                              (drop disconnect-request-baseline @requests))
+                        "The reconnect advisory refresh must not invent authority")
+                    ;; The deliberate disconnect may produce one HTMX-sourced
+                    ;; EventSource.onerror console diagnostic. Classify just
+                    ;; that expected error; keep unrelated browser failures
+                    ;; fatal rather than globally suppressing diagnostics.
+                    (let [errors (chromium/browser-errors context)
+                          diagnostic (chromium/diagnostics context)]
+                      (is (<= (count errors) 1))
+                      (is (every? (fn [{:keys [kind type location]}]
+                                    (and (= :console-error kind)
+                                         (= "error" type)
+                                         (string? location)
+                                         (str/includes? location "/assets/htmx.js")))
+                                  errors))
+                      (is (empty? (:request-failures diagnostic)))
+                      (chromium/clear-diagnostics! context))
+                    ;; A third independent physical transaction must now
+                    ;; traverse the NEW EventSource and return EXACTLY its
+                    ;; authoritative XTDB progression in the fragment GET.
+                    (let [baseline-third (count @requests)
+                          refreshes-third (long (chromium/evaluate
+                                                 page "() => window.__v2109.refreshes"))
+                          third-id (random-uuid)
+                          third (outbox/prepare!
+                                 {:intent-ids [third-id]
+                                  :source-id source-id
+                                  :operation :request/reopen
+                                  :purpose :gesso.live/refresh}
+                                 [{:topic :request :id subject
+                                   :change/kind :updated}])]
+                      (xt/execute-tx node
+                                     (into (vec (:guard-ops third))
+                                           [[:put-docs :requests
+                                             {:xt/id subject :status :reopened}]
+                                            (:tx-op third)]))
+                      (is (eventually
+                           #(= :dispatch-accepted
+                               (:gesso.live.outbox/status
+                                (first (stable-q node
+                                     ["SELECT * FROM gesso_live_outbox WHERE _id = ?"
+                                      third-id]))))))
+                      (let [third-event (deref (stream/take! correlated-source)
+                                               5000 ::no-third-source-event)]
+                        (is (= subject (:id third-event)))
+                        (is (some? (:progression third-event)))
+                        (is (not= (:progression source-event)
+                                  (:progression third-event)))
+                        (chromium/wait-for-js! page
+                                               "() => window.__v2109.messages >= 3")
+                        (chromium/wait-for-js!
+                         page
+                         "() => document.getElementById('v2109-browser-panel') && document.getElementById('v2109-browser-panel').getAttribute('data-authoritative-status') === 'reopened'")
+                        (is (> (long (chromium/evaluate
+                                      page "() => window.__v2109.refreshes"))
+                               refreshes-third))
+                        (is (some (fn [req]
+                                    (when-let [header (get-in
+                                                       req [:headers
+                                                            progression.http/request-header-name])]
+                                      (= (:progression third-event)
+                                         (progression.http/decode-request-progression
+                                          header))))
+                                  (drop baseline-third @requests))
+                            "After reconnect the browser must GET with the third exact progression")
+                        (is (true?
+                             (chromium/evaluate
+                              page
+                              "() => window.__v2109.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2109.listener === document.querySelector('[data-gesso-live-invalidation]')")))
+                        (is (= 1 ((:active-count route)))))))
+                  )
                 (is (= [] (chromium/evaluate page "() => window.__v2109.errors")))
                 (is (true? (chromium/assert-clean! context))))))
             (finally
