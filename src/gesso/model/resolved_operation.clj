@@ -423,7 +423,12 @@
              :physical/source :gesso-model-transaction-ack
              :physical/receipt (:tx-result transaction)}
       (contains? transaction :consistency)
-      (assoc :physical/consistency (:consistency transaction)))
+      (assoc :physical/consistency (:consistency transaction))
+      ;; This is the actual Live/model transaction progression, not a value
+      ;; inferred from the successful HTTP response or invented by the probe.
+      ;; Preserve absence so a missing requirement cannot qualify a witness.
+      (contains? transaction :progression)
+      (assoc :physical/progression (:progression transaction)))
 
     (and error (live/post-commit-delivery-failure? error))
     {:physical/status :committed

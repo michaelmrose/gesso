@@ -17,8 +17,11 @@
    not merely a claimed committed outcome with no link to that API result.
    It also compares the model transaction's original read-your-writes
    consistency coordinates against those derived from the same adapter
-   receipt. Neither metadata agreement nor receipt identity authenticates
-   an actual XTDB server or proves externally durable incorporation.
+   receipt. It independently compares the model's transaction progression
+   with the requirement established by that same receipt and database, so a
+   correct read basis does not conceal missing/altered Live progression.
+   Neither metadata agreement nor receipt identity authenticates an actual
+   XTDB server or proves externally durable incorporation.
    It requires the original issued executor to have returned an
    incorporated resolution for a positive same-attempt physical/HTTP witness;
    a committed adapter call with a :unresolved application return is not
@@ -64,6 +67,7 @@
 (def ^:private original-operation-summary app/operation-summary)
 (def ^:private original-capture adapter/capture-tx-api-calls!)
 (def ^:private original-tx-result-consistency adapter/tx-result-consistency)
+(def ^:private original-tx-result-progression adapter/tx-result-progression)
 (def ^:private original-prepare tx/prepare)
 
 (def ^:private open-obligations
@@ -100,6 +104,8 @@
                              (var-get #'adapter/capture-tx-api-calls!))
                  (identical? original-tx-result-consistency
                              (var-get #'adapter/tx-result-consistency))
+                 (identical? original-tx-result-progression
+                             (var-get #'adapter/tx-result-progression))
                  (identical? original-prepare
                              (var-get #'tx/prepare)))
     (reject! :substituted-correlation-boundary)))
@@ -293,9 +299,23 @@
                                         (:tx-result end))
                                        (:physical/consistency outcome))
                                     (catch Throwable _ false))))
+        progression-agrees? (boolean
+                             (and consistency-agrees?
+                                  ;; Compare the actual model transaction's
+                                  ;; original Live requirement to what this
+                                  ;; adapter receipt and tx database establish.
+                                  ;; A missing progression is NOT equivalent to
+                                  ;; an unconstrained successful write.
+                                  (some? (:physical/progression outcome))
+                                  (try
+                                    (= (original-tx-result-progression
+                                        (:tx-result end) (:database (:tx-options begin)))
+                                       (:physical/progression outcome))
+                                    (catch Throwable _ false))))
         complete? (and (not poisoned) postcheck? pair adapter-events
                        operations-agree? options-agree? definitive?
                        receipt-identical? consistency-agrees?
+                       progression-agrees?
                        (= :committed (:physical/status outcome))
                        (= :incorporated issued-resolution-class)
                        original-response?
@@ -326,6 +346,8 @@
                  :model-receipt-not-identical-to-adapter
                  (not consistency-agrees?)
                  :model-consistency-basis-diverges-from-receipt
+                 (not progression-agrees?)
+                 :model-progression-diverges-from-receipt
                  (not complete?) :unconfirmed-or-uncertain-outcome
                  :else :bounded-installed-route-to-adapter-agreement)]
     {:type report-type
@@ -343,6 +365,7 @@
      :definitive-execute-key-observed? (boolean definitive?)
      :model-commit-receipt-identical-to-adapter? receipt-identical?
      :model-consistency-agrees-with-xtdb-receipt? consistency-agrees?
+     :model-progression-agrees-with-xtdb-receipt? progression-agrees?
      :post-execution-source-rechecked? (boolean postcheck?)
      :handler-invocation-count 1
      :ring-response-class ring-class

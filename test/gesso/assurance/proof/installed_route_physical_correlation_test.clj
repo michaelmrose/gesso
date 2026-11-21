@@ -144,10 +144,10 @@
    (let [api-calls (atom [])
          transactions (atom 0)
          {:keys [change-ops tx-options tx-mode result status extra-call?
-                 post-submit-error receipt-mode consistency-mode]
+                 post-submit-error receipt-mode consistency-mode progression-mode]
           :or {change-ops identity tx-mode :execute-tx
                result (fake-key) status :committed receipt-mode :matching
-               consistency-mode :matching}} settings]
+               consistency-mode :matching progression-mode :matching}} settings]
      (with-redefs-fn
        {#'tx/transact!
         (fn [ctx p]
@@ -183,7 +183,16 @@
                                              :tx-id 9999)
                          :wrong-snapshot (assoc (:consistency api-response)
                                                 :snapshot-time
-                                                (Instant/parse "2020-01-01T00:00:00Z"))))))))
+                                                (Instant/parse "2020-01-01T00:00:00Z"))))
+                (not= :missing progression-mode)
+                (assoc :progression
+                       (case progression-mode
+                         :matching (:progression api-response)
+                         :wrong-tx-id (adapter/tx-result-progression
+                                       (fake-key 999) (:database tx-options))
+                         :wrong-database (adapter/tx-result-progression
+                                          (:tx-result api-response)
+                                          :unexpected-database)))))))
         (ns-resolve 'gesso.live.consistency.xtdb '*execute-tx*)
         (fn [connectable ops opts]
           (swap! api-calls conj [:execute-tx connectable ops opts])
@@ -214,6 +223,7 @@
     (is (true? (:definitive-execute-key-observed? report)))
     (is (true? (:model-commit-receipt-identical-to-adapter? report)))
     (is (true? (:model-consistency-agrees-with-xtdb-receipt? report)))
+    (is (true? (:model-progression-agrees-with-xtdb-receipt? report)))
     (is (= :bounded-conditional-process-local-observation-only
            (:proof-status report)))
     (is (= :not-established (:actual-server-deployment report)))
@@ -287,6 +297,25 @@
           (is (= :model-consistency-basis-diverges-from-receipt
                  (:status report)))
           (is (false? (:model-consistency-agrees-with-xtdb-receipt? report)))
+          (is (nil? handle))
+          (is (= 1 @transactions))
+          (is (= 1 (count @api-calls))))))))
+
+(deftest committed-model-progression-must-match-xtdb-receipt
+  ;; A correct transaction receipt AND correct read-your-writes consistency
+  ;; still do not establish that Live returned the correct authoritative
+  ;; progression requirement to subsequent UI and invalidation paths.
+  (doseq [progression-mode [:missing :wrong-tx-id :wrong-database]]
+    (artificial-execution {:progression-mode progression-mode}
+      (fn [{:keys [transactions api-calls]}]
+        (let [{:keys [report handle execution]} (observe (options))]
+          (is (= :returned (:outcome execution)))
+          (is (= 200 (get-in execution [:result :status])))
+          (is (= :incorporated (:issued-resolution-class report)))
+          (is (true? (:model-commit-receipt-identical-to-adapter? report)))
+          (is (true? (:model-consistency-agrees-with-xtdb-receipt? report)))
+          (is (= :model-progression-diverges-from-receipt (:status report)))
+          (is (false? (:model-progression-agrees-with-xtdb-receipt? report)))
           (is (nil? handle))
           (is (= 1 @transactions))
           (is (= 1 (count @api-calls))))))))
