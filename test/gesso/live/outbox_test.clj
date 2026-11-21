@@ -1,8 +1,9 @@
 (ns gesso.live.outbox-test
-  "v2088 tests for transactional publication intent construction.
+  "v2088-v2089 tests for transactional Live publication intent construction.
 
-   These tests establish input validation and same-submission XTDB insertion,
-   not post-commit replay, publisher fairness, source authenticity, fencing,
+   v2089 adds bounded physical absence assertions before domain and outbox
+   writes. It does not prove arbitrary concurrent writer completeness,
+   post-commit replay, publisher fairness, source authenticity, fencing,
    browser receipt, or at-least-once delivery."
   (:require
    [clojure.test :refer [deftest is testing]]
@@ -40,6 +41,10 @@
     (is (= 2 (count intents)))
     (is (= (into [:put-docs :gesso_live_outbox] intents)
            (:tx-op plan)))
+    (is (= (mapv (fn [id]
+                   ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)"
+                    id]) ids)
+           (:guard-ops plan)))
     (is (= ids (mapv :xt/id intents)))
     (is (every? #(= :gesso.live.outbox/publication-intent
                     (:gesso.live.outbox/type %)) intents))
@@ -97,7 +102,9 @@
                      :emit false
                      :outbox spec})]
         (is (= 1 (count @seen)))
-        (is (= original (subvec (first @seen) 0 1)))
+        (is (= (:guard-ops (outbox/prepare! spec [(change "a")]))
+               (subvec (first @seen) 0 1)))
+        (is (= original (subvec (first @seen) 1 2)))
         (is (= [:put-docs :gesso_live_outbox]
                (subvec (last (first @seen)) 0 2)))
         (is (= [intent-id] (mapv :xt/id (:outbox/intents result))))
@@ -130,7 +137,7 @@
 
 (deftest physical-xtdb-commits-domain-and-intent-together-test
   ;; A controlled embedded node shows a single actual XTDB write carrying
-  ;; both documents. It does not establish replay or absence of competing IDs.
+  ;; both documents. It does not establish replay or universal concurrency.
   (with-open [node (xtn/start-node {})]
     (let [domain-id (str "outbox-domain-" (random-uuid))
           intent-id (random-uuid)
@@ -147,3 +154,68 @@
       (is (= [domain-id] (mapv :xt/id domain-rows)))
       (is (= [intent-id] (mapv :xt/id outbox-rows)))
       (is (= intent-id (get-in result [:outbox/intents 0 :xt/id]))))))
+
+(defn- xtdb-assert-conflict? [thunk]
+  (try
+    (thunk)
+    false
+    (catch Throwable error
+      (= :xtdb/assert-failed (:xtdb.error/code (ex-data error))))))
+
+(deftest physical-xtdb-rejects-id-reuse-and-rolls-back-domain-write-test
+  ;; An already recorded outbox identity must not be overwritten by a retry,
+  ;; even when the new transaction attempts a *different* domain mutation.
+  ;; The asserting transaction rolls back the entire submitted write batch.
+  (with-open [node (xtn/start-node {})]
+    (let [first-id (str "outbox-initial-" (random-uuid))
+          second-id (str "outbox-should-not-commit-" (random-uuid))
+          intent-id (random-uuid)
+          intent (specification [intent-id])]
+      (live/transact-and-notify!
+       {:options {}} {:xtdb/connectable node}
+       {:tx-ops [[:put-docs :requests {:xt/id first-id :status :open}]]
+        :change (change first-id) :emit false :outbox intent})
+      (is (xtdb-assert-conflict?
+           #(live/transact-and-notify!
+             {:options {}} {:xtdb/connectable node}
+             {:tx-ops [[:put-docs :requests {:xt/id second-id :status :claimed}]]
+              :change (change second-id) :emit false :outbox intent})))
+      (is (= [first-id]
+             (mapv :xt/id
+                   (xt/q node ["SELECT _id FROM requests WHERE _id = ?" first-id]))))
+      (is (empty?
+           (xt/q node ["SELECT _id FROM requests WHERE _id = ?" second-id])))
+      (is (= [intent-id]
+             (mapv :xt/id
+                   (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?"
+                               intent-id])))))))
+
+(deftest physical-xtdb-second-id-conflict-rolls-back-all-writes-test
+  ;; Even with two changes, a collision on the SECOND ID prevents the FIRST
+  ;; new intent and ALL associated domain writes from being committed.
+  (with-open [node (xtn/start-node {})]
+    (let [existing-id (random-uuid)
+          fresh-id (random-uuid)
+          first-id (str "outbox-first-" (random-uuid))
+          second-id (str "outbox-second-" (random-uuid))]
+      (live/transact-and-notify!
+       {:options {}} {:xtdb/connectable node}
+       {:tx-ops [[:put-docs :requests {:xt/id "existing" :status :open}]]
+        :change (change "existing") :emit false
+        :outbox (specification [existing-id])})
+      (is (xtdb-assert-conflict?
+           #(live/transact-and-notify!
+             {:options {}} {:xtdb/connectable node}
+             {:tx-ops [[:put-docs :requests {:xt/id first-id :status :claimed}]
+                       [:put-docs :requests {:xt/id second-id :status :claimed}]]
+              :changes [(change first-id) (change second-id)]
+              :emit false
+              :outbox (specification [fresh-id existing-id])})))
+      (is (empty? (xt/q node ["SELECT _id FROM requests WHERE _id = ?" first-id])))
+      (is (empty? (xt/q node ["SELECT _id FROM requests WHERE _id = ?" second-id])))
+      (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?"
+                               fresh-id])))
+      (is (= [existing-id]
+             (mapv :xt/id
+                   (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?"
+                               existing-id])))))))

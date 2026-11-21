@@ -1,8 +1,8 @@
 (ns gesso.live.outbox
   "Pre-commit construction of minimal, durable Live publication intent.
 
-   This constructs one XTDB :put-docs operation to be submitted in the SAME
-   transaction as an authoritative domain mutation. It does not publish or
+   This constructs one XTDB :put-docs operation and prewrite SQL ASSERT
+   operations to be submitted in the SAME transaction as the domain mutation. It does not publish or
    acknowledge any notice. A future recovery worker must establish the actual
    commit's provider basis, claim and retry pending intents, and acknowledge
    distribution at a declared boundary. An intent's declared source and scope
@@ -33,7 +33,8 @@
 
 (defn prepare!
   "Validate a caller-supplied publication declaration and primary changes,
-   then return {:intents [...] :tx-op [:put-docs ...]}.
+   then return {:intents [...] :guard-ops [SQL-assert-op ...]
+   :tx-op [:put-docs ...]}.
 
    All checks happen before the authoritative transaction. :intent-ids must
    provide a distinct UUID per change; retaining them across an uncertain
@@ -43,9 +44,13 @@
 
    Only topic/id/change-kind and explicitly declared operation/command metadata
    are persisted. Arbitrary app change payloads, untrusted :progression, and
-   private domain data are deliberately excluded. A physical absence/uniqueness
-   assertion for an outbox ID is NOT yet installed by this constructor, so it
-   does not independently prevent an existing ID from being overwritten."
+   private domain data are deliberately excluded. Each :guard-ops assertion
+   checks that its ID is absent from the outbox table at the corresponding
+   XTDB transaction statement. Callers MUST submit those assertions BEFORE
+   ALL writes, in the same transaction as :tx-op. As with other physical XTDB
+   guards this is bounded to the pinned provider's observed assertion behavior;
+   it is not an independent proof of arbitrary concurrent writer completeness,
+   nor does it validate caller-supplied raw transaction operations."
   [spec changes]
   (when-not (map? spec)
     (reject! :invalid-spec {:value spec}))
@@ -96,4 +101,12 @@
                (assoc :gesso.live.outbox/command-id (:command-id spec))))
            ids changes)]
       {:intents intents
+       ;; The table name is a fixed framework literal, NEVER caller supplied.
+       ;; ASSERT is evaluated before any domain/outbox DML when the caller
+       ;; prefixes :guard-ops to the one physical transaction.
+       :guard-ops
+       (mapv (fn [id]
+               ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)"
+                id])
+             ids)
        :tx-op (into [:put-docs intent-table] intents)})))

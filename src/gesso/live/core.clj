@@ -1252,8 +1252,9 @@
          Optional function of attached change -> dispatch entry metadata.
 
        :outbox
-         Optional trusted publication-intent declaration. Its prevalidated
-         minimal intent documents are appended to the SAME XTDB transaction
+         Optional trusted publication-intent declaration. Each declared ID
+         gets a prewrite XTDB absence ASSERT and its validated minimal
+         intent document is appended to the SAME XTDB transaction
          as :tx-ops; see gesso.live.outbox/prepare!. Requires a nonempty
          change batch. This records pending intent, not delivered notice or
          a complete recovery protocol.
@@ -1289,7 +1290,8 @@
                       (outbox/prepare! outbox changes))
         tx-ops' (if outbox-plan
                   (if (sequential? tx-ops)
-                    (conj (vec tx-ops) (:tx-op outbox-plan))
+                    (into (vec (concat (:guard-ops outbox-plan) tx-ops))
+                          [(:tx-op outbox-plan)])
                     (throw (ex "Outbox requires sequential XTDB tx ops."
                                {:error/type :gesso.live.core/invalid-outbox-tx-ops})))
                   tx-ops)
