@@ -482,6 +482,57 @@
                                      (source/stats src))))))
            (finally ((:close! route)))))))))
 
+(deftest managed-route-rejects-ambiguous-url-path-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           authorized (atom 0)
+           base {:path "/live/events"
+                 :authorize-subscription
+                 (fn [_] (swap! authorized inc) scope)}]
+       ;; A proxy may collapse adjacent slashes or remove dot segments before
+       ;; Ring sees :uri. The configured route must be unambiguous at both
+       ;; boundaries; detecting this only on requests is too late.
+       (doseq [path ["//live/events" "/live//events" "/live/events//"
+                     "/live/./events" "/live/../events"
+                     "/live/events/." "/live/events/.."]]
+         (let [result (try
+                        (http/wrap-authorized-sse
+                         started (assoc base :path path))
+                        (catch clojure.lang.ExceptionInfo e e))]
+           (try
+             (is (= :invalid-path
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:reason (ex-data result))))
+                 (str "Ambiguous SSE route path must fail: " path))
+             (is (= path
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:path (ex-data result))))
+                 "Typed rejection must identify the configured path")
+             (is (zero? @authorized)
+                 "Invalid route must not invoke authorization")
+             (is (zero? (:subscription-count (source/stats src)))
+                 "Invalid route must not allocate Live interests")
+             (finally
+               (when (map? result) ((:close! result)))))))
+       ;; Ordinary namespaced/versioned segments and an intentional trailing
+       ;; slash are legitimate. None of these requires normalization.
+       (doseq [path ["/live/events" "/live/v1.2/events"
+                     "/.well-known/live" "/live/events/"]]
+         (let [route (http/wrap-authorized-sse
+                      started (assoc base :path path))]
+           (try
+             (let [response ((:handler route)
+                             {:uri path :request-method :get})]
+               (is (= 200 (:status response)))
+               (is (false? (stream/closed? (:body response))))
+               (stream/close! (:body response))
+               (is (eventually #(zero? (:subscription-count
+                                       (source/stats src))))))
+             (finally ((:close! route))))))
+       (is (= 4 @authorized))
+       (is (zero? (:subscription-count (source/stats src))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]

@@ -49,8 +49,9 @@
 (defn wrap-authorized-sse
   "Return {:handler Ring-handler :close! callback :active-count callback}.
 
-   Requires a started concrete host, a fixed :path (absolute URL path with no
-   query string), and a trusted :authorize-subscription callback. The callback
+   Requires a started concrete host, a fixed canonical :path (absolute URL
+   path with no query string, repeated slash, or dot traversal segment), and
+   a trusted :authorize-subscription callback. The callback
    is responsible for authenticating the Ring request and deciding whether
    this requester may subscribe to the returned exact scope. Nil denies with
    403. Unknown paths are passed to the existing canonical Ring handler.
@@ -101,7 +102,12 @@
     (reject! :unknown-options {}))
   (when-not (and (string? path)
                  (re-matches #"/[A-Za-z0-9._~/-]+" path)
-                 (not= "/" path))
+                 (not= "/" path)
+                 ;; Proxies and HTTP servers may normalize repeated separators
+                 ;; or dot segments before Ring receives :uri. A managed SSE
+                 ;; route must have one unambiguous literal path at both ends.
+                 (not (str/includes? path "//"))
+                 (not-any? #{"." ".."} (rest (str/split path #"/" -1))))
     (reject! :invalid-path {:path path}))
   (when-not (fn? authorize-subscription)
     (reject! :missing-authorization-callback {}))
