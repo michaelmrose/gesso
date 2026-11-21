@@ -1326,6 +1326,32 @@
             :right-metadata (select-keys right [:tx-id :system-time :snapshot-time])})))
     (require-coherent-xtdb-transaction-times! merged origin)))
 
+(defn- compose-independent-snapshot-tokens!
+  "Compose canonical time bases supplied independently at a request boundary.
+
+   Snapshot tokens serialize a map of database time bases. Different tokens
+   are compatible when disjoint database identities or identical overlapping
+   time vectors are present; an overlapping different time is contradictory.
+   Always decode BOTH original tokens, preventing malformed or noncanonical
+   data from being silently hidden by reserialization of the merged result."
+  [earlier-token later-token origin conflict-reason]
+  (let [earlier (decode-canonical-biff-snapshot!
+                 default-database-name earlier-token)
+        later (decode-canonical-biff-snapshot!
+               default-database-name later-token)]
+    (doseq [[database incoming-times] later
+            :when (and (contains? earlier database)
+                       (not= (get earlier database) incoming-times))]
+      (throw
+       (ex "XTDB consistency sources disagree on a database snapshot."
+           {:reason conflict-reason
+            :origin origin
+            :field :snapshot-token
+            :database database
+            :existing-times (get earlier database)
+            :incoming-times incoming-times})))
+    (xt.basis/->time-basis-str (merge earlier later))))
+
 (defn- compose-wrapped-xtdb-consistency!
   "Preserve independently admitted XTDB query consistency into a fresh request.
 
@@ -1334,9 +1360,23 @@
    can add independent fields, but an opaque value supplied at admission must
    not be silently replaced by a different value for the same key."
   [admitted-consistency wrapped-ctx]
-  (let [runtime-consistency (consistency-from wrapped-ctx)]
+  (let [runtime-consistency (consistency-from wrapped-ctx)
+        ;; Deferred Ring contexts may introduce distinct foreign database
+        ;; snapshot bases, just as admission-time aliases may. Preserve the
+        ;; combined token before comparing ordinary opaque field values.
+        runtime-consistency
+        (if (and (contains? admitted-consistency :snapshot-token)
+                 (contains? runtime-consistency :snapshot-token))
+          (assoc runtime-consistency :snapshot-token
+                 (compose-independent-snapshot-tokens!
+                  (:snapshot-token admitted-consistency)
+                  (:snapshot-token runtime-consistency)
+                  :deferred-biff-request
+                  :conflicting-runtime-xtdb-consistency))
+          runtime-consistency)]
     (doseq [[field value] admitted-consistency
-            :when (and (contains? runtime-consistency field)
+            :when (and (not= field :snapshot-token)
+                       (contains? runtime-consistency field)
                        (not= value (get runtime-consistency field)))]
       (throw
        (ex "Deferred XTDB query consistency conflicts with an admitted read constraint."
@@ -1855,9 +1895,22 @@
     (reduce
      (fn [combined alias]
        (if-some [supplied (get x alias)]
-         (let [normalized (normalize-consistency supplied)]
+         (let [normalized (normalize-consistency supplied)
+               ;; Each alias may contribute a distinct database time basis.
+               ;; Only their overlapping database coordinates require exact
+               ;; equality; serialize the union before checking other fields.
+               normalized
+               (if (and (contains? combined :snapshot-token)
+                        (contains? normalized :snapshot-token))
+                 (assoc normalized :snapshot-token
+                        (compose-independent-snapshot-tokens!
+                         (:snapshot-token combined)
+                         (:snapshot-token normalized)
+                         alias :conflicting-xtdb-consistency-aliases))
+                 normalized)]
            (doseq [[field value] normalized
-                   :when (and (contains? combined field)
+                   :when (and (not= field :snapshot-token)
+                              (contains? combined field)
                               (not= (get combined field) value))]
              (throw
               (ex "XTDB context consistency aliases contain contradictory read obligations."

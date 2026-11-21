@@ -357,28 +357,154 @@
              :xtdb/consistency {:await-token "a"}})))))
 
 (deftest consistency-from-rejects-conflicting-context-aliases-test
-  ;; Alias precedence is not a safe ordering for independently supplied read
-  ;; constraints. Repeated values compose; distinct non-overlapping fields
-  ;; remain available to the authoritative read and Biff request boundaries.
-  (doseq [ctx [{:gesso.live/consistency {:snapshot-token "gesso"}
-                :gesso.live.xtdb/consistency {:snapshot-token "gesso-xtdb"}
-                :xtdb/consistency {:snapshot-token "xtdb"}
-                :consistency {:snapshot-token "plain"}}
-               {:gesso.live.xtdb/consistency {:snapshot-token "gesso-xtdb"}
-                :xtdb/consistency {:snapshot-token "xtdb"}
-                :consistency {:snapshot-token "plain"}}]]
-    (let [failure (try (xtdb-live/consistency-from ctx)
-                       nil
-                       (catch clojure.lang.ExceptionInfo e e))]
-      (is (instance? clojure.lang.ExceptionInfo failure))
-      (when failure
-        (is (= :conflicting-xtdb-consistency-aliases
-               (:reason (ex-data failure)))))))
+  ;; Independent aliases may combine disjoint snapshot bases, but two
+  ;; distinct times for the same database cannot become one admitted read.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        later (.plusSeconds t 60)
+        first-token (xt.basis/->time-basis-str {"analytics" [t]})
+        second-token (xt.basis/->time-basis-str {"analytics" [later]})]
+    (doseq [ctx [{:gesso.live/consistency {:snapshot-token first-token}
+                  :gesso.live.xtdb/consistency
+                  {:snapshot-token second-token}}
+                 {:xtdb/consistency {:snapshot-token first-token}
+                  :consistency {:snapshot-token second-token}}]]
+      (let [failure (try (xtdb-live/consistency-from ctx)
+                         nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo failure))
+        (when failure
+          (is (= :conflicting-xtdb-consistency-aliases
+                 (:reason (ex-data failure)))))))
+    (doseq [invalid [false "not-a-snapshot-token" 42]]
+      (let [failure (try
+                      (xtdb-live/consistency-from
+                       {:gesso.live/consistency {:snapshot-token first-token}
+                        :xtdb/consistency {:snapshot-token invalid}})
+                      nil
+                      (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo failure))
+        (when failure
+          (is (= :invalid-snapshot-token (:reason (ex-data failure))))))))
   (is (= {:await-token "wait" :default-tz "UTC"}
          (xtdb-live/consistency-from
           {:gesso.live.xtdb/consistency {:await-token "wait"}
            :xtdb/consistency {:default-tz "UTC"}
            :consistency {:await-token "wait"}}))))
+
+(deftest consistency-alias-snapshot-tokens-compose-independent-bases-test
+  ;; Each alias is a separate source of admitted query read obligations. Two
+  ;; canonical tokens for disjoint databases must retain BOTH bases instead
+  ;; of being rejected solely because their opaque strings differ.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        later (.plusSeconds t 60)
+        analytics (xt.basis/->time-basis-str {"analytics" [t]})
+        reports (xt.basis/->time-basis-str {"reports" [later]})
+        all-bases {"analytics" [t] "reports" [later]}
+        ctx {:xtdb/node :authority-node
+             :xtdb/read-connectable :read
+             :gesso.live/consistency {:snapshot-token analytics}
+             :xtdb/consistency {:snapshot-token reports}}
+        observed (atom [])
+        query (fn [_ _ opts] (swap! observed conj opts) :queried)]
+    (is (= all-bases
+           (-> ctx xtdb-live/consistency-from :snapshot-token
+               xt.basis/<-time-basis-str)))
+    (with-redefs-fn {(xtdb-var '*q*) query
+                     (xtdb-var '*plan-q*) query}
+      (fn []
+        (is (= :queried (xtdb-live/q-consistent-from ctx sample-query)))
+        (is (= :queried (xtdb-live/plan-q-consistent-from ctx sample-query)))))
+    (is (= [all-bases all-bases]
+           (mapv (comp xt.basis/<-time-basis-str :snapshot-token) @observed)))
+    ;; The selected XTDB database has no completed transaction; independent
+    ;; foreign database observations are still legitimate request evidence.
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (let [bound (xtdb-live/bind-request-frontier ctx)]
+          (is (= all-bases
+                 (-> bound xtdb-live/consistency-from :snapshot-token
+                     xt.basis/<-time-basis-str)))
+          (is (nil? (:biff.xtdb/snapshot-token bound))))))))
+
+(deftest consistency-alias-snapshot-tokens-preserve-overlap-and-reject-conflicts-test
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        later (.plusSeconds t 60)
+        analytics (xt.basis/->time-basis-str {"analytics" [t]})
+        both (xt.basis/->time-basis-str
+              {"analytics" [t] "reports" [later]})
+        conflicting (xt.basis/->time-basis-str {"analytics" [later]})
+        expected {"analytics" [t] "reports" [later]}
+        compatible {:gesso.live/consistency {:snapshot-token analytics}
+                    :xtdb/consistency {:snapshot-token both}}
+        incompatible {:gesso.live/consistency {:snapshot-token analytics}
+                      :xtdb/consistency {:snapshot-token conflicting}}
+        calls (atom 0)]
+    (is (= expected
+           (-> compatible xtdb-live/consistency-from :snapshot-token
+               xt.basis/<-time-basis-str))
+        "Overlapping matching coordinates must not discard an extra base")
+    (with-redefs-fn {(xtdb-var '*q*)
+                     (fn [& _] (swap! calls inc) :unexpected)}
+      (fn []
+        (doseq [invoke [#(xtdb-live/consistency-from incompatible)
+                        #(xtdb-live/q-consistent-from
+                          (assoc incompatible :xtdb/read-connectable :read)
+                          sample-query)]]
+          (let [failure (try (invoke)
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure))
+            (when failure
+              (is (= :conflicting-xtdb-consistency-aliases
+                     (:reason (ex-data failure)))))))))
+    (is (zero? @calls)
+        "Contradictory independent read snapshots must fail before XTDB")))
+
+(deftest deferred-biff-composes-compatible-query-snapshot-tokens-test
+  ;; A Biff wrapper may receive a new request after frontier admission.
+  ;; Preserve independent query snapshot bases across that boundary instead
+  ;; of rejecting two different serialized tokens on string inequality.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        later (.plusSeconds t 60)
+        analytics (xt.basis/->time-basis-str {"analytics" [t]})
+        reports (xt.basis/->time-basis-str {"reports" [later]})
+        different-analytics (xt.basis/->time-basis-str
+                             {"analytics" [later]})
+        expected {"analytics" [t] "reports" [later]}
+        called (atom 0)
+        bound-ctx {:xtdb/node :authority-node
+                   :gesso.live/consistency {:snapshot-token analytics}}]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub '*status*
+        (fn [_] {:latest-completed-txs
+                 {"xtdb" (if populated?
+                           [{:tx-id 2052 :system-time t}]
+                           [])}})
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier bound-ctx)
+                handler ((:biff.core/wrap-db-snapshot bound)
+                         (fn [ctx]
+                           (swap! called inc)
+                           (:snapshot-token
+                            (xtdb-live/consistency-from ctx))))]
+            (is (= expected
+                   (-> (handler {:xtdb/consistency
+                                 {:snapshot-token reports}})
+                       xt.basis/<-time-basis-str)))
+            (let [prior @called
+                  failure (try
+                            (handler {:xtdb/consistency
+                                      {:snapshot-token different-analytics}})
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure))
+              (when failure
+                (is (= :conflicting-runtime-xtdb-consistency
+                       (:reason (ex-data failure)))))
+              (is (= prior @called)
+                  "Conflicting runtime snapshot must fail before Biff body"))))))
+    (is (= 2 @called))))
 
 (deftest consistency-aliases-must-not-fabricate-tx-metadata-pairs-test
   ;; A tx-id and its system-time are one transaction observation. Combining
