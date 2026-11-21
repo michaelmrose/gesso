@@ -50,7 +50,8 @@
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
            [java.time Duration]
            [java.util WeakHashMap UUID]
-           [java.util.concurrent.atomic AtomicBoolean]))
+           [java.util.concurrent.atomic AtomicBoolean]
+           [java.util.concurrent.locks ReentrantReadWriteLock]))
 
 (def module-id
   :gesso.assurance.proof.checked-biff-http-consumption-probe/install)
@@ -263,6 +264,11 @@
                            (UUID/randomUUID))
         liveness-pending (atom nil)
         liveness-monitor (Object.)
+        ;; Concurrent business dispatches take read leases. Retiring a probe
+        ;; first closes admission, then obtains the exclusive write lease so
+        ;; stop cannot return while an already admitted request can still
+        ;; issue an XTDB mutation through this handler.
+        business-dispatch-lock (ReentrantReadWriteLock. true)
         verified-start-port (atom nil)
         secret-header (str (UUID/randomUUID))
         secret-response (str "gesso-consumed-" (UUID/randomUUID))
@@ -407,11 +413,15 @@
                                ;; no ordinary handler may dispatch until the
                                ;; original local HTTP verification succeeds,
                                ;; or after the probe has been retired.
-                               (not (and (map? @state)
-                                         (= :one-final-checked-wrapper-http-challenge-returned
-                                            @result)))
-                               {:status 503 :body "Checked HTTP activation not current"}
-                               :else (if (and selected
+                               :else
+                               (let [lease (.readLock business-dispatch-lock)]
+                                 (.lock lease)
+                                 (try
+                                   (if-not (and (map? @state)
+                                                (= :one-final-checked-wrapper-http-challenge-returned
+                                                   @result))
+                                     {:status 503 :body "Checked HTTP activation not current"}
+                                     (if (and selected
                                         (contains? (:route-keys selected)
                                                    [(:request-method request)
                                                     (:uri request)]))
@@ -469,7 +479,8 @@
                                         :body (if qualified?
                                                 "One local typed atomic operation acknowledged"
                                                 "Local typed execution unqualified")})))))
-                                 (original request))))
+                                 (original request)))
+                                   (finally (.unlock lease))))))
                    wrapped-system (assoc host-system original-handler-slot
                                          wrapped)]
                (when-not (compare-and-set! state :starting
@@ -482,9 +493,18 @@
                wrapped-system)))
          :biff.core/stop
          (fn [_]
-           (reset! pending :inactive)
-           (reset! liveness-pending nil)
-           (reset! state :stopped))}
+           ;; Close admission BEFORE waiting on existing dispatches. Read
+           ;; leases are held through the entire original Ring invocation,
+           ;; including its transactional effects; no business dispatch can
+           ;; outlive a completed stop. Read leases do not serialize normal
+           ;; concurrent requests with one another.
+           (reset! state :stopped)
+           (let [lease (.writeLock business-dispatch-lock)]
+             (.lock lease)
+             (try
+               (reset! pending :inactive)
+               (reset! liveness-pending nil)
+               (finally (.unlock lease)))))}
         current! (fn []
                    (pinned!)
                    (let [started @state]

@@ -187,6 +187,55 @@
         (is (nil? (read-command (resolution/record-id binding))))
         (is (zero? @(get-in env [:environment :constructs])))))))
 
+(deftest probe-retirement-waits-for-in-flight-business-dispatch
+  ;; v2071: The v2070 entry fence is not a retirement barrier if a request
+  ;; already passed it. Pause the real Claim handler before its XTDB write,
+  ;; initiate probe shutdown, then require stop to wait for that accepted
+  ;; handler. A listener retaining the wrapper remains alive throughout.
+  (with-adapter! :honest nil
+    (fn [{:keys [env probe system base]}]
+      (let [{:keys [request binding]} (:data env)
+            constructs (get-in env [:environment :constructs])
+            entered (promise)
+            release (promise)
+            stop-started (promise)
+            watch-key ::pause-before-claim-write]
+        (seed! [:requests request])
+        (is (= :one-final-checked-wrapper-http-challenge-returned
+               (:status ((:verify-once! probe) system base))))
+        ;; This is the real plan's construction atom. Its watch runs on the
+        ;; executing HTTP thread, after dispatch but BEFORE the DB mutation.
+        (add-watch constructs watch-key
+                   (fn [_ _ _ next]
+                     (when (= 1 next)
+                       (deliver entered true)
+                       (deref release 20000 :timed-out))))
+        (try
+          (let [business (future (post! base))]
+            (try
+              (is (true? (deref entered 15000 false))
+                  "The real business handler must reach the execution barrier")
+              (is (= request (read-request (:xt/id request))))
+              (is (nil? (read-command (resolution/record-id binding))))
+              (let [stopping (future
+                               (deliver stop-started true)
+                               ((:biff.core/stop (:module probe)) system)
+                               :retired)]
+                (is (true? (deref stop-started 5000 false)))
+                (is (= :in-flight (deref stopping 400 :in-flight))
+                    "Stop must not return while an admitted handler can still write")
+                (deliver release :continue)
+                (is (= 200 (deref business 20000 :timed-out)))
+                (is (= :retired (deref stopping 20000 :timed-out)))
+                (is (= ((model 'next-version) request {:owner "helper-a"})
+                       (read-request (:xt/id request))))
+                (is (some? (read-command (resolution/record-id binding))))
+                (is (= 503 (post! base))
+                    "The retained listener must still deny new business"))
+              (finally (deliver release :continue)
+                       (deref business 20000 :timed-out))))
+          (finally (remove-watch constructs watch-key)))))))
+
 (deftest independent-server-consumes-the-final-biff-handler-over-real-http
   (with-adapter! :honest nil
     (fn [{:keys [env probe system base]}]
