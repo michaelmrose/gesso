@@ -105,7 +105,7 @@
               (is (= (:receipt-id entry)
                      (:gesso.live.outbox/dispatch-receipt-id physical)))
               (s/close! stream)))
-          (is (empty? (:candidates (discovery/discover-eligible! node))))
+          (is (empty? (:candidates (discovery/discover-eligible! node {:source-id source-id}))))
           (is (zero? (:processed (cycle/process-cycle! node system {} source-id
                                                         {:worker-id "fresh"})))))
         (finally (live/close! system))))))
@@ -290,4 +290,29 @@
           (is (zero? (:completed-count failure)))
           (is (= :leased (:gesso.live.outbox/status (physical-row node id))))
           (s/close! stream))
+        (finally (live/close! system))))))
+
+(deftest physical-cycle-skips-interleaved-foreign-source-before-lease-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)
+          foreign-id (intent-id 88)
+          own-id (intent-id 89)]
+      (try
+        (seed! node [own-id])
+        (let [plan (outbox/prepare!
+                    {:intent-ids [foreign-id] :source-id "another/source"
+                     :operation :request/claim :purpose :gesso.live/refresh}
+                    [{:topic :request :id "foreign-request"}])]
+          (xt/execute-tx node (conj (vec (:guard-ops plan)) (:tx-op plan))))
+        (let [result (cycle/process-cycle! node system {} source-id
+                                           {:worker-id "own-worker" :max-items 1})]
+          (is (= :cycle-completed (:status result)))
+          (is (= 1 (:dispatch-accepted result)))
+          (is (= [own-id] (mapv :intent-id (:results result))))
+          (is (= :pending
+                 (:gesso.live.outbox/status (physical-row node foreign-id))))
+          (is (= :dispatch-accepted
+                 (:gesso.live.outbox/status (physical-row node own-id))))
+          (is (empty? (:candidates
+                       (discovery/discover-eligible! node {:source-id source-id})))))
         (finally (live/close! system))))))

@@ -2,6 +2,7 @@
   "v2090-v2092: physical pending-intent acquisition and provider-time guards."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.live.outbox :as outbox]
+            [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox.acquisition :as acquisition]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
@@ -120,3 +121,45 @@
         (is (= before (read-intent node id)) (name label))
         (is (= :pending (:gesso.live.outbox/status (read-intent node id)))
             (name label))))))
+
+(deftest source-scoped-physical-claim-rejects-foreign-row-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (pending! node id)
+          before (read-intent node id)
+          claim (assoc (claim id "worker-a") :source-id "foreign/source")]
+      (is (= {:status :unavailable :reason :source-mismatch :intent-id id}
+             (acquisition/acquire-pending! node claim)))
+      (is (= before (read-intent node id)))
+      (is (= :acquired
+             (:status (acquisition/acquire-pending!
+                       node (assoc claim :source-id "example/source"))))))))
+
+(deftest physical-source-change-after-read-is-stopped-by-cas-test
+  ;; Even if the row matches our source when acquisition reads it, an
+  ;; independent writer may reassign it before the claim's physical commit.
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (pending! node id)
+          original-execute xt/execute-tx
+          ;; Rebind the wrapper called by the acquisition implementation.
+          attempted (atom 0)
+          execute live.xtdb/execute-tx!
+          result (with-redefs [live.xtdb/execute-tx!
+                              (fn [n ops & rest-args]
+                                (when (= 1 (swap! attempted inc))
+                                  (let [row (read-intent n id)]
+                                  (original-execute n
+                                    [[:put-docs outbox/intent-table
+                                      (assoc (dissoc row :xt/system-from)
+                                             :gesso.live.outbox/source-id
+                                             "foreign/source")]])))
+                                (apply execute n ops rest-args))]
+                   (acquisition/acquire-pending!
+                     node (assoc (claim id "worker-a")
+                                 :source-id "example/source")))]
+      (is (pos? @attempted))
+      (is (= :contended (:status result)))
+      (is (= "foreign/source"
+             (:gesso.live.outbox/source-id (read-intent node id))))
+      (is (= :pending (:gesso.live.outbox/status (read-intent node id)))))))

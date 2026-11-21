@@ -238,7 +238,7 @@
           (is (= :drained (:outcome (lifecycle/stop! handle 10000))))
           (live/close! sys))))))
 
-(deftest mismatched-persisted-source-fails-and-retains-lease-for-reconciliation-test
+(deftest source-scoped-lifecycle-does-not-lease-foreign-work-test
   (with-open [node (xtn/start-node {})]
     (let [sys (system) id (intent-id 803)]
       (try
@@ -246,13 +246,12 @@
         (let [handle (lifecycle/start! node sys {} "another/source"
                                        {:worker-id "wrong-source" :poll-ms 20})]
           (try
-            (is (eventually #(= :failed (:status (lifecycle/status handle)))))
+            (is (eventually #(>= (:cycles (lifecycle/status handle)) 1)))
             (let [report (lifecycle/status handle)]
-              (is (= :delivery (get-in report [:failure :phase])))
-              (is (true? (get-in report [:failure :rescan-required?])))
-              (is (= id (get-in report [:failure :in-flight :intent-id])))
-              (is (= :leased (:gesso.live.outbox/status (row node id))))
+              (is (nil? (:failure report)))
+              (is (= :pending (:gesso.live.outbox/status (row node id))))
+              (is (zero? (:total-processed report)))
               (is (zero? (:total-dispatch-accepted report))))
             (finally
-              (is (= :failed (:outcome (lifecycle/stop! handle 10000)))))))
+              (is (= :drained (:outcome (lifecycle/stop! handle 10000)))))))
         (finally (live/close! sys))))))

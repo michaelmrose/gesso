@@ -42,6 +42,8 @@
   (doseq [[opts reason]
           [[nil :invalid-options]
            [{} :invalid-worker-id]
+           [{:worker-id "w" :source-id nil} :invalid-source-id]
+           [{:worker-id "w" :source-id " "} :invalid-source-id]
            [{:worker-id "   "} :invalid-worker-id]
            [{:worker-id "worker" :lease-millis 0} :invalid-lease-millis]
            [{:worker-id "worker" :lease-millis 300001} :invalid-lease-millis]
@@ -51,7 +53,7 @@
            [{:worker-id "worker" :max-pages 17} :invalid-max-pages]
            [{:worker-id "worker" :after nil} :invalid-cursor]
            [{:worker-id "worker" :unexpected :value} :unknown-fields]]]
-    (is (rejected? #(worker/acquire-sweep! :unconnected opts) reason)
+    (is (rejected? #(worker/acquire-sweep! :unconnected (if (map? opts) (cond-> opts (not (contains? opts :source-id)) (assoc :source-id "gesso/test-worker")) opts)) reason)
         (pr-str opts))))
 
 (deftest physical-worker-acquires-pending-and-reclaims-expired-test
@@ -65,7 +67,7 @@
                         :expires (.plusSeconds now 120)}
                        {:id (random-uuid) :status :delivered}])
           before-active (row node active)
-          result (worker/acquire-sweep! node {:worker-id "process-a"
+          result (worker/acquire-sweep! node {:source-id "gesso/test-worker" :worker-id "process-a"
                                                :page-size 1 :max-pages 4})
           statuses (set (map :status (:results result)))]
       (is (= 2 (:attempted result)))
@@ -87,15 +89,15 @@
       ;; The second sweep cannot rediscover still-active leases.
       (is (= :observed-end
              (:halt-reason (worker/acquire-sweep! node
-                                                  {:worker-id "process-b"}))))
+                                                  {:source-id "gesso/test-worker" :worker-id "process-b"}))))
       (is (zero? (:attempted (worker/acquire-sweep! node
-                                                      {:worker-id "process-b"})))))))
+                                                      {:source-id "gesso/test-worker" :worker-id "process-b"})))))))
 
 (deftest physical-page-budget-exposes-resumable-keyset-cursor-test
   (with-open [node (xtn/start-node {})]
     (let [ids (seed! node (mapv (fn [_] {:id (random-uuid) :status :pending})
                                 (range 5)))
-          options {:worker-id "worker-a" :page-size 2 :max-pages 1}
+          options {:source-id "gesso/test-worker" :worker-id "worker-a" :page-size 2 :max-pages 1}
           a (worker/acquire-sweep! node options)
           b (worker/acquire-sweep! node (assoc options :after (:next-after a)))
           c (worker/acquire-sweep! node (assoc options :after (:next-after b)))
@@ -129,7 +131,7 @@
                                                     :now now
                                                     :lease-until (.plusSeconds now 60)}))))))
                             page))]
-            (worker/acquire-sweep! node {:worker-id "loser"}))]
+            (worker/acquire-sweep! node {:source-id "gesso/test-worker" :worker-id "loser"}))]
       (is (= 1 (:attempted result)))
       (is (= 1 (:unavailable result)))
       (is (zero? (:acquired result)))
@@ -142,7 +144,7 @@
       (with-redefs [acquisition/acquire-pending!
                     (fn [& _] (throw (ex-info "indeterminate" {:phase :submit})))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"indeterminate"
-                              (worker/acquire-sweep! node {:worker-id "worker"}))))
+                              (worker/acquire-sweep! node {:source-id "gesso/test-worker" :worker-id "worker"}))))
       (is (= :pending (:gesso.live.outbox/status (row node id)))))))
 
 (deftest physical-empty-worker-sweep-is-bounded-and-read-only-test
@@ -150,4 +152,49 @@
     (is (= {:pages-scanned 1 :attempted 0 :acquired 0 :reclaimed 0
             :contended 0 :unavailable 0 :halt-reason :observed-end
             :next-after nil :results [] :worker-id "worker"}
-           (worker/acquire-sweep! node {:worker-id "worker"})))))
+           (worker/acquire-sweep! node {:source-id "gesso/test-worker" :worker-id "worker"})))))
+
+(deftest physical-worker-skips-other-source-without-leasing-test
+  (with-open [node (xtn/start-node {})]
+    (let [owned-id (java.util.UUID/fromString "00000000-0000-0000-0000-000000000002")
+          other-id (java.util.UUID/fromString "00000000-0000-0000-0000-000000000001")
+          own (seed! node [{:id owned-id :status :pending}])
+          other (outbox/prepare!
+                 {:intent-ids [other-id] :source-id "another/source"
+                  :operation :request/claim :purpose :gesso.live/refresh}
+                 [{:topic :request :id "foreign"}])]
+      (xt/execute-tx node (conj (vec (:guard-ops other)) (:tx-op other)))
+      (let [result (worker/acquire-sweep!
+                    node {:worker-id "local" :source-id "gesso/test-worker"
+                          :page-size 1 :max-pages 1})]
+        (is (= [owned-id] (mapv :intent-id (:results result))))
+        (is (= 1 (:acquired result)))
+        (is (= :leased (:gesso.live.outbox/status (row node owned-id))))
+        (is (= :pending (:gesso.live.outbox/status (row node other-id))))))))
+
+(deftest physical-source-change-after-discovery-cannot-acquire-test
+  ;; Advisory discovery sees the original source, then an external writer
+  ;; changes the physical row. Worker must skip rather than lease wrong work.
+  (with-open [node (xtn/start-node {})]
+    (let [[id] (seed! node [{:id (random-uuid) :status :pending}])
+          original discovery/discover-eligible!
+          changed? (atom false)
+          result
+          (with-redefs [discovery/discover-eligible!
+                        (fn [n opts]
+                          (let [page (original n opts)]
+                            (when (compare-and-set! changed? false true)
+                              (xt/execute-tx n
+                                [[:put-docs outbox/intent-table
+                                  (assoc (row n id)
+                                         :gesso.live.outbox/source-id
+                                         "another/source")]]))
+                            page))]
+            (worker/acquire-sweep!
+              node {:worker-id "local" :source-id "gesso/test-worker"}))]
+      (is @changed?)
+      (is (= 1 (:attempted result)))
+      (is (= 1 (:unavailable result)))
+      (is (= :source-mismatch (get-in result [:results 0 :reason])))
+      (is (= :pending (:gesso.live.outbox/status (row node id))))
+      (is (= "another/source" (:gesso.live.outbox/source-id (row node id)))))))

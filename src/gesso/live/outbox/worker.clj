@@ -4,8 +4,10 @@
    notifications, spawn a background worker, or claim that its scan is a
    snapshot of the entire queue.
 
-   A trusted host provides :worker-id. Candidate IDs come only from XTDB's
-   validated discovery API. Each attempt receives a fresh lease token; only
+   A trusted host provides BOTH :worker-id and a mandatory :source-id.
+   Discovery filters by that source before pagination, and the physical
+   acquisition checks it again under a system-time CAS to close read races.
+   Candidate IDs come only from XTDB's validated discovery API. Each attempt receives a fresh lease token; only
    an actual successful acquisition/reclaim makes that token usable. The
    underlying XTDB transaction (not the host clock) validates lease bounds.
 
@@ -20,7 +22,7 @@
   (:import [java.time Instant]))
 
 (def ^:private allowed-keys
-  #{:worker-id :lease-millis :page-size :max-pages :after})
+  #{:worker-id :source-id :lease-millis :page-size :max-pages :after})
 (def ^:private default-lease-millis 60000)
 (def ^:private default-page-size 32)
 (def ^:private default-max-pages 4)
@@ -44,6 +46,9 @@
   (when-not (and (string? (:worker-id opts))
                  (not (str/blank? (:worker-id opts))))
     (reject! :invalid-worker-id {:worker-id (:worker-id opts)}))
+  (when-not (and (string? (:source-id opts))
+                 (not (str/blank? (:source-id opts))))
+    (reject! :invalid-source-id {:source-id (:source-id opts)}))
   (let [duration (get opts :lease-millis default-lease-millis)
         page-size (get opts :page-size default-page-size)
         max-pages (get opts :max-pages default-max-pages)]
@@ -58,9 +63,10 @@
   opts)
 
 (defn- attempt!
-  [node worker-id lease-millis {:keys [intent-id action]}]
+  [node worker-id source-id lease-millis {:keys [intent-id action]}]
   (let [now (Instant/now)
         claim {:intent-id intent-id
+               :source-id source-id
                :worker-id worker-id
                :lease-id (random-uuid)
                :now now
@@ -82,7 +88,8 @@
 (defn acquire-sweep!
   "Discover and attempt to acquire a finite number of current outbox intents.
 
-   Trusted options: {:worker-id nonblank-string, :lease-millis 1..300000,
+   Trusted options: {:worker-id nonblank-string, :source-id REQUIRED
+   nonblank-string, :lease-millis 1..300000,
    :page-size 1..128, :max-pages 1..16, :after optional-UUID}.
    Defaults: 60-second lease, 32 candidates/page, 4 pages/sweep. No sleep,
    timer, delivery callback, or automatic retry is installed.
@@ -100,7 +107,7 @@
    Neither receipt processing nor lease acknowledgment is implemented here."
   [node opts]
   (validate-options! opts)
-  (let [{:keys [worker-id]} opts
+  (let [{:keys [worker-id source-id]} opts
         lease-millis (get opts :lease-millis default-lease-millis)
         page-size (get opts :page-size default-page-size)
         max-pages (get opts :max-pages default-max-pages)]
@@ -108,10 +115,10 @@
            remaining max-pages
            page-count 0
            results []]
-      (let [request (cond-> {:limit page-size}
+      (let [request (cond-> {:limit page-size :source-id source-id}
                       after (assoc :after after))
             page (discovery/discover-eligible! node request)
-            claimed (mapv #(attempt! node worker-id lease-millis %)
+            claimed (mapv #(attempt! node worker-id source-id lease-millis %)
                           (:candidates page))
             results' (into results claimed)
             count' (inc page-count)

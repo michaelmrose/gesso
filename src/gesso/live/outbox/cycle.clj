@@ -10,10 +10,10 @@
 
    This is an explicitly invoked processing cycle, not an installed loop,
    daemon, startup integration or restart-persistence test. The dispatcher
-   reports source acceptance rather than SSE/browser delivery. Acquiring a
-   source-mismatched record leaves it leased, and an external send can race
-   with lease reclamation. Those source-selection, recovery and convergence
-   obligations remain open."
+   reports source acceptance rather than SSE/browser delivery. Discovery
+   and acquisition enforce the caller-installed source before leasing work.
+   External sends can still race with lease reclamation; recovery and
+   convergence obligations remain open."
   (:require [clojure.string :as str]
             [gesso.live.outbox.delivery :as delivery]
             [gesso.live.outbox.worker :as worker]))
@@ -180,6 +180,7 @@
            remaining max-items
            completed []]
       (let [work-opts (cond-> {:worker-id worker-id
+                               :source-id expected-source-id
                                :lease-millis lease-millis
                                :page-size 1
                                :max-pages 1}

@@ -15,6 +15,10 @@
    constructor lets a future acknowledgment transaction demand that its
    original lease still owns the physical row at the time of its write.
 
+   An optional trusted :source-id fences either acquisition against the
+   currently read source under the same system-time CAS; scheduled workers
+   always supply it. Direct low-level callers may omit that extra scope.
+
    This does NOT scan for work, deliver notices, acknowledge delivery, fence
    external side effects, authenticate the caller, or prove arbitrary writer
    closure. A new claimant may duplicate an external send performed before the
@@ -29,7 +33,7 @@
 
 (def ^:private max-lease-millis 300000)
 (def ^:private claim-keys
-  #{:intent-id :worker-id :lease-id :now :lease-until})
+  #{:intent-id :worker-id :lease-id :now :lease-until :source-id})
 (def ^:private read-current-sql
   "SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?")
 (def ^:private guard-system-from-sql
@@ -63,6 +67,10 @@
   (when-not (and (string? (:worker-id claim))
                  (not (str/blank? (:worker-id claim))))
     (reject! :invalid-worker-id {:worker-id (:worker-id claim)}))
+  (when (contains? claim :source-id)
+    (when-not (and (string? (:source-id claim))
+                   (not (str/blank? (:source-id claim))))
+      (reject! :invalid-source-id {:source-id (:source-id claim)})))
   (when-not (uuid? (:lease-id claim))
     (reject! :invalid-lease-id {:lease-id (:lease-id claim)}))
   (when-not (and (instance? Instant (:now claim))
@@ -94,6 +102,11 @@
     (reject! :invalid-physical-intent {:intent-id intent-id}))
   intent)
 
+(defn- source-mismatch?
+  [intent claim]
+  (and (contains? claim :source-id)
+       (not= (:source-id claim) (:gesso.live.outbox/source-id intent))))
+
 (defn- acquire-ops
   [intent {:keys [intent-id worker-id lease-id lease-until]}]
   (let [original-system-from (:xt/system-from intent)
@@ -113,7 +126,8 @@
 (defn acquire-pending!
   "Attempt a single CAS acquisition of one pending intent from a live XTDB node.
 
-   :intent-id and :lease-id are UUIDs, :worker-id is nonblank, and :now and
+   :intent-id and :lease-id are UUIDs, :worker-id is nonblank, :source-id
+   is an optional caller-installed source fence, and :now and
    :lease-until are java.time.Instant values. Lease duration must be 1ms to
    5min relative to the supplied :now, AND the deadline must be within
    (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + 5min] in the XTDB transaction.
@@ -140,8 +154,14 @@
 
       :else
       (let [intent (require-intent! row intent-id)]
-        (if (not= :pending (:gesso.live.outbox/status intent))
+        (cond
+          (source-mismatch? intent claim)
+          {:status :unavailable :reason :source-mismatch :intent-id intent-id}
+
+          (not= :pending (:gesso.live.outbox/status intent))
           {:status :unavailable :reason :not-pending :intent-id intent-id}
+
+          :else
           (let [tx-ops (acquire-ops intent claim)]
             (try
               (let [result (live.xtdb/execute-tx! node tx-ops)]
@@ -244,8 +264,14 @@
 
       :else
       (let [intent (require-intent! row intent-id)]
-        (if (not= :leased (:gesso.live.outbox/status intent))
+        (cond
+          (source-mismatch? intent claim)
+          {:status :unavailable :reason :source-mismatch :intent-id intent-id}
+
+          (not= :leased (:gesso.live.outbox/status intent))
           {:status :unavailable :reason :not-leased :intent-id intent-id}
+
+          :else
           (do
             (require-leased! intent intent-id)
             (when (= lease-id (:gesso.live.outbox/lease-id intent))

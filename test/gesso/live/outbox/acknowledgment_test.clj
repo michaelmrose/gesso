@@ -98,7 +98,7 @@
                      :gesso.live.outbox/dispatch-receipt-id
                      :gesso.live.outbox/dispatch-adapter)))
       ;; Terminal acceptance is not eligible for work recovery.
-      (is (empty? (:candidates (discovery/discover-eligible! node))))
+      (is (empty? (:candidates (discovery/discover-eligible! node {:source-id "gesso/test-acknowledgment"}))))
       (is (= :unavailable (:status (acknowledgment/acknowledge-dispatch!
                                   node receipt))))
       (is (= after (row node id))))))

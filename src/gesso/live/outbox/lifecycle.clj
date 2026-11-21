@@ -14,8 +14,9 @@
 
    This is an opt-in in-process lifecycle, not installed Biff startup, a
    process-restart durability demonstration, or SSE/browser convergence.
-   Discovery is not source-scoped yet; a mismatched outbox source halts with
-   an acquired lease rather than silently publishing the wrong source.
+   Discovery and acquisition enforce the installed source before acquiring
+   its intents. Source identity still originates in the trusted host and is
+   not an independent proof of writer authorization.
    External sends can race with reclaimed leases; delivery is at least once
    compatible, not exactly once. No global cross-process leader is created."
   (:require [clojure.string :as str]

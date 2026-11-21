@@ -228,3 +228,17 @@
       (is (conflict? #(xt/execute-tx node (conj (vec guards)
                                                  [:put-docs outbox/intent-table
                                                   next-row])))))))
+
+(deftest expired-reclaim-respects-source-scope-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (seeded-lease! node id (.minusSeconds (Instant/now) 120))
+          before (read-intent node id)
+          claim (assoc (lease-claim id "new-worker")
+                       :source-id "another/source")]
+      (is (= {:status :unavailable :reason :source-mismatch :intent-id id}
+             (acquisition/reclaim-expired! node claim)))
+      (is (= before (read-intent node id)))
+      (is (= :reclaimed
+             (:status (acquisition/reclaim-expired!
+                       node (assoc claim :source-id "gesso/test-recovery"))))))))

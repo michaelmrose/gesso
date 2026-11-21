@@ -40,6 +40,8 @@
 (deftest discovery-options-are-closed-and-bounded-test
   (doseq [[opts reason] [[nil :invalid-options]
                          [1 :invalid-options]
+                         [{:source-id nil} :invalid-source-id]
+                         [{:source-id "  "} :invalid-source-id]
                          [{:limit 0} :invalid-limit]
                          [{:limit -1} :invalid-limit]
                          [{:limit 129} :invalid-limit]
@@ -49,7 +51,7 @@
                          [{:after "wrong"} :invalid-cursor]
                          [{:limit 1 :extra :untrusted} :unknown-fields]]]
     ;; Validation must precede even the attempted physical query.
-    (is (rejected? #(discovery/discover-eligible! :unconnected opts) reason)
+    (is (rejected? #(discovery/discover-eligible! :unconnected (if (map? opts) (cond-> opts (not (contains? opts :source-id)) (assoc :source-id "gesso/test-discovery")) opts)) reason)
         (str opts))))
 
 (deftest physical-discovery-returns-only-current-eligible-intents-test
@@ -68,7 +70,7 @@
                              :type :not/our-intent}
                             {:id wrong-version :status :pending
                              :version 99}])
-          page (discovery/discover-eligible! node)
+          page (discovery/discover-eligible! node {:source-id "gesso/test-discovery"})
           found (set (:candidates page))]
       (is (= #{{:intent-id pending :action :acquire-pending}
                {:intent-id expired :action :reclaim-expired}}
@@ -89,8 +91,8 @@
           pages (loop [after nil, pages [], remaining 10]
                   (when (zero? remaining)
                     (throw (ex-info "Pagination did not terminate" {:pages pages})))
-                  (let [opts (cond-> {:limit 2} after (assoc :after after))
-                        page (discovery/discover-eligible! node opts)
+                  (let [opts (cond-> {:limit 2 :source-id "gesso/test-discovery"} after (assoc :after after))
+                        page (discovery/discover-eligible! node (assoc opts :source-id "gesso/test-discovery"))
                         pages' (conj pages page)]
                     (if (:has-more? page)
                       (recur (:next-after page) pages' (dec remaining))
@@ -109,7 +111,7 @@
     (let [id (random-uuid)
           _ (seed-intents! node [{:id id :status :leased
                                    :lease-until (.plusSeconds (Instant/now) 120)}])
-          first-page (discovery/discover-eligible! node {:limit 1})
+          first-page (discovery/discover-eligible! node {:source-id "gesso/test-discovery" :limit 1})
           before (first (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" id]))]
       (is (= [] (:candidates first-page)))
       ;; A persisted lease can become eligible without an in-memory ID index.
@@ -117,20 +119,20 @@
                             (assoc (dissoc before :xt/system-from)
                                    :gesso.live.outbox/lease-until
                                    (.minusSeconds (Instant/now) 60))]])
-      (let [second-page (discovery/discover-eligible! node {:limit 1})
+      (let [second-page (discovery/discover-eligible! node {:source-id "gesso/test-discovery" :limit 1})
             now (Instant/now)
             claim {:intent-id id, :lease-id (random-uuid), :worker-id "fresh-worker",
                    :now now, :lease-until (.plusSeconds now 60)}]
         (is (= [{:intent-id id :action :reclaim-expired}]
                (:candidates second-page)))
         (is (= :reclaimed (:status (acquisition/reclaim-expired! node claim))))
-        (is (empty? (:candidates (discovery/discover-eligible! node))))))))
+        (is (empty? (:candidates (discovery/discover-eligible! node {:source-id "gesso/test-discovery"}))))))))
 
 (deftest physical-stale-discovery-does-not-bypass-acquisition-cas-test
   (with-open [node (xtn/start-node {})]
     (let [id (random-uuid)
           _ (seed-intents! node [{:id id :status :pending}])
-          read-only (discovery/discover-eligible! node)
+          read-only (discovery/discover-eligible! node {:source-id "gesso/test-discovery"})
           now (Instant/now)
           claim {:intent-id id, :lease-id (random-uuid), :worker-id "worker-a",
                  :now now, :lease-until (.plusSeconds now 60)}]
@@ -141,13 +143,13 @@
              (:status (acquisition/acquire-pending!
                        node (assoc claim :worker-id "worker-b"
                                    :lease-id (random-uuid))))))
-      (is (empty? (:candidates (discovery/discover-eligible! node)))))))
+      (is (empty? (:candidates (discovery/discover-eligible! node {:source-id "gesso/test-discovery"})))))))
 
 (deftest physical-discovery-on-empty-outbox-is-empty-test
   ;; A worker may start before Gesso has ever persisted an outbox document.
   (with-open [node (xtn/start-node {})]
     (is (= {:candidates [] :has-more? false :next-after nil}
-           (discovery/discover-eligible! node)))))
+           (discovery/discover-eligible! node {:source-id "gesso/test-discovery"})))))
 
 (deftest physical-discovery-rejects-malformed-current-identity-test
   ;; Do not quietly hand a downstream worker an ID which the CAS acquisition
@@ -158,6 +160,42 @@
                      {:xt/id "not-a-uuid"
                       :gesso.live.outbox/type outbox/intent-type
                       :gesso.live.outbox/version outbox/intent-version
+                      :gesso.live.outbox/source-id "gesso/test-discovery"
                       :gesso.live.outbox/status :pending}]])
-    (is (rejected? #(discovery/discover-eligible! node)
+    (is (rejected? #(discovery/discover-eligible! node {:source-id "gesso/test-discovery"})
                    :invalid-physical-candidate))))
+
+(deftest physical-source-scoped-discovery-filters-before-cursor-and-limit-test
+  ;; Interleaved IDs from a second source cannot fill our page or make a
+  ;; cursor skip later owned records; both pending and expired are scoped.
+  (with-open [node (xtn/start-node {})]
+    (let [[a1 b1 a2 b2 a3 b3]
+          (mapv #(java.util.UUID/fromString
+                   (format "00000000-0000-0000-0000-%012d" %))
+                (range 1 7))
+          _ (seed-intents! node [{:id a1 :status :pending}
+                                 {:id a2 :status :leased
+                                  :lease-until (.minusSeconds (Instant/now) 90)}
+                                 {:id a3 :status :pending}])
+          other (outbox/prepare!
+                 {:intent-ids [b1 b2 b3] :source-id "other/installed-source"
+                  :operation :request/claim :purpose :gesso.live/refresh}
+                 (mapv (fn [id] {:topic :request :id (str id)}) [b1 b2 b3]))
+          _ (xt/execute-tx node (conj (vec (:guard-ops other))
+                                     (:tx-op other)))
+          pages (loop [after nil pages []]
+                  (let [opts (cond-> {:source-id "gesso/test-discovery" :limit 1}
+                               after (assoc :after after))
+                        page (discovery/discover-eligible! node opts)]
+                    (if (:has-more? page)
+                      (recur (:next-after page) (conj pages page))
+                      (conj pages page))))
+          found (mapv (comp :intent-id first :candidates) pages)]
+      (is (= [a1 a2 a3] found))
+      (is (= [true true false] (mapv :has-more? pages)))
+      (is (= [:acquire-pending :reclaim-expired :acquire-pending]
+             (mapv (comp :action first :candidates) pages)))
+      (is (= #{b1 b2 b3}
+             (set (map :intent-id
+                       (:candidates (discovery/discover-eligible!
+                                     node {:source-id "other/installed-source"})))))))))

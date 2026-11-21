@@ -78,7 +78,7 @@
                  (:gesso.live.outbox/dispatch-receipt-id persisted)))
           (is (= :gesso.live/synchronous-source
                  (:gesso.live.outbox/dispatch-adapter persisted)))
-          (is (empty? (:candidates (discovery/discover-eligible! node))))
+          (is (empty? (:candidates (discovery/discover-eligible! node {:source-id source-id}))))
           (s/close! sse-input))
         (finally (live/close! system))))))
 
@@ -87,7 +87,7 @@
     (let [system (create-system) id (random-uuid)]
       (try
         (seed! node id)
-        (let [work (worker/acquire-sweep! node {:worker-id "worker-a" :max-pages 1})
+        (let [work (worker/acquire-sweep! node {:source-id source-id :worker-id "worker-a" :max-pages 1})
               lease (first (:results work))
               output (delivery/dispatch-acquired! node system {} lease source-id)]
           (is (= 1 (:acquired work)))
