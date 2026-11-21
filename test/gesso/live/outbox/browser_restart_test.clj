@@ -1,5 +1,5 @@
 (ns gesso.live.outbox.browser-restart-test
-  "v2121: Correlate independent tabs with physical server-side fragment reads.
+  "v2122: Verify denied SSE subscriptions across a physical host restart.
 
    The replacement host binds the SAME port, reopens the SAME local XTDB
    log/storage, and provides a newly owned Live source/worker. The browser
@@ -8,7 +8,9 @@
    observer checks outgoing headers separately and associates each header
    with an actual successful HTTP response and authoritative HTML. The child
    server independently logs the test-only tab marker and exact received
-   progression for every fragment read. This covers process death,
+   progression for every fragment read. Physical denial probes reject missing,
+   lookalike, duplicate and query-only session credentials before and after
+   recovery, without increasing active SSE interest. This covers process death,
    not an entire machine, disk, or network partition."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -114,6 +116,37 @@
       {:status :stopping}
       (edn/read-string (.body resp)))))
 
+(def ^:private denied-session-probes
+  ;; No probe presents the one exact authorized session cookie. The test-only
+  ;; callback must not authorize a substring, duplicate, or query parameter.
+  [{:label :missing-cookie :path "/live/events"}
+   {:label :longer-value :path "/live/events"
+    :cookie "v2109-test-session=10"}
+   {:label :lookalike-name :path "/live/events"
+    :cookie "not-v2109-test-session=1"}
+   {:label :duplicate-name :path "/live/events"
+    :cookie "v2109-test-session=1; v2109-test-session=0"}
+   {:label :query-only :path "/live/events?v2109-test-session=1"}])
+
+(defn- probe-sse-denial! [^HttpClient client base {:keys [label path cookie]}]
+  (let [builder (-> (HttpRequest/newBuilder (URI/create (str base path)))
+                    (.timeout (Duration/ofSeconds 10)))
+        _ (when cookie (.header builder "Cookie" cookie))
+        response (.send client (.build (.GET builder))
+                        (HttpResponse$BodyHandlers/ofString))]
+    (is (= 403 (.statusCode response))
+        (str "Denied SSE probe must return HTTP 403: " label))
+    (is (= "Forbidden" (.body response))
+        (str "Denied SSE probe must not become an SSE stream: " label))))
+
+(defn- verify-denials-with-two-live-tabs! [^HttpClient client base]
+  (is (= 2 (:active (http! client base "/control/status")))
+      "Both authorized EventSource connections must be present beforehand")
+  (doseq [probe denied-session-probes]
+    (probe-sse-denial! client base probe))
+  (is (= 2 (:active (http! client base "/control/status")))
+      "Denied HTTP attempts must not acquire a Live SSE interest"))
+
 (defn- start-child! [^Path root port phase]
   (let [java (str (System/getProperty "java.home") "/bin/java")
         ready (.resolve root (str phase ".ready.edn"))
@@ -159,7 +192,7 @@
 
 (deftest browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test
   (let [root (Files/createTempDirectory
-              "gesso-v2121-attributed-two-tab-restart-"
+              "gesso-v2122-denied-sse-restart-"
               (make-array java.nio.file.attribute.FileAttribute 0))
         port (random-loopback-port)
         base (str "http://127.0.0.1:" port)
@@ -196,6 +229,7 @@
               #(= 2 (:active (http! client base "/control/status")))
               10000))
             "Both independent EventSource subscriptions must be active")
+        (verify-denials-with-two-live-tabs! client base)
         (let [claim (http! client base "/control/claim")]
           (is (= :claimed (:status claim)))
           (is (string? (:expected-header claim)))
@@ -234,6 +268,7 @@
                     #(= 2 (:active (http! client base "/control/status")))
                     10000))
                   "Both EventSource sessions must reconnect to the new JVM")
+              (verify-denials-with-two-live-tabs! client base)
               ;; Clear only diagnostics caused by the intentionally lost host,
               ;; after BOTH independent EventSource connections are reopened.
               (chromium/clear-diagnostics! ctx)

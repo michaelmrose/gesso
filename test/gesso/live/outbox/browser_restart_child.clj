@@ -1,5 +1,5 @@
 (ns gesso.live.outbox.browser-restart-child
-  "v2121 physical child-JVM server records per-tab HTMX read attribution.
+  "v2122 physical child-JVM server enforces exact test-session cookies.
 
    Owns canonical Gesso/Biff app, local persistent XTDB, Live source, worker,
    and an actual loopback HTTP/SSE listener. The controlling test runs in a
@@ -147,6 +147,19 @@
     (.start server)
     {:stop! (fn [] (.stop server 0) (.shutdownNow pool))}))
 
+(defn- exact-test-session-cookie? [cookie-header]
+  ;; The browser's cookie is a test fixture credential, not application auth.
+  ;; Reject longer values, lookalike names, and duplicate session cookies.
+  ;; A substring search falsely grants access to each of these cases.
+  (let [values (->> (str/split (or cookie-header "") #";")
+                    (map str/trim)
+                    (keep (fn [entry]
+                            (let [[cookie-name value] (str/split entry #"=" 2)]
+                              (when (= "v2109-test-session" cookie-name)
+                                value))))
+                    vec)]
+    (= ["1"] values)))
+
 (defn- serve! [phase root port ready-file]
   (let [ops (standard-operations)
         ctx (render-context ops)
@@ -169,9 +182,8 @@
                      started {:path "/live/events"
                               :authorize-subscription
                               (fn [req]
-                                (when (str/includes?
-                                       (or (get-in req [:headers "cookie"]) "")
-                                       "v2109-test-session=1")
+                                (when (exact-test-session-cookie?
+                                       (get-in req [:headers "cookie"]))
                                   scope))})]
           (try
             (when (= phase "initial")
