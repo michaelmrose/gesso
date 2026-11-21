@@ -1410,6 +1410,36 @@
        (merge fixed-bases (dissoc incoming database-name))))
     (xt.basis/->time-basis-str fixed-bases)))
 
+(defn- require-compatible-biff-and-query-snapshots!
+  "Reject conflicting foreign snapshot obligations across Biff and XTDB reads.
+
+   Both request paths can carry independently admitted time-basis tokens.
+   Snapshot composition inside either path does not check that a database
+   appearing in both paths is pinned to the same time. The selected database
+   is handled by the authoritative request frontier (which may advance an
+   older explicit time); independent databases have no such reconciliation.
+   Check their intersection before admitting a context or invoking a handler."
+  [database-name biff-token consistency origin]
+  (when (and (some? biff-token)
+             (some? (:snapshot-token consistency)))
+    (let [biff-bases (decode-canonical-biff-snapshot!
+                      database-name biff-token)
+          query-bases (decode-canonical-biff-snapshot!
+                       database-name (:snapshot-token consistency))]
+      (doseq [[database times] query-bases
+              :when (and (not= database database-name)
+                         (contains? biff-bases database)
+                         (not= times (get biff-bases database)))]
+        (throw
+         (ex "XTDB Biff and query consistency disagree on an independent database snapshot."
+             {:reason :conflicting-biff-query-snapshot-bases
+              :origin origin
+              :database database
+              :selected-database database-name
+              :biff-times (get biff-bases database)
+              :query-times times})))))
+  consistency)
+
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper database-name snapshot-token frontier admitted-requirement
    admitted-consistency bound-node]
@@ -1450,7 +1480,10 @@
                     composed-token
                     (compose-fixed-biff-snapshot!
                      database-name fixed-bases
-                     (:biff.xtdb/snapshot-token ctx))]
+                     (:biff.xtdb/snapshot-token ctx))
+                    _ (require-compatible-biff-and-query-snapshots!
+                       database-name composed-token combined-consistency
+                       :deferred-biff-request)]
                 (f (preserve-admitted-xtdb-node
                     bound-node
                     (cond-> (assoc ctx
@@ -1557,7 +1590,10 @@
                      database-name nil admitted-requirement wrapped-ctx)
                     composed-token (compose-empty-biff-snapshot!
                                     database-name admitted-bases
-                                    (:biff.xtdb/snapshot-token wrapped-ctx))]
+                                    (:biff.xtdb/snapshot-token wrapped-ctx))
+                    _ (require-compatible-biff-and-query-snapshots!
+                       database-name composed-token combined-consistency
+                       :deferred-biff-request)]
                 (body (preserve-admitted-xtdb-node
                        bound-node
                        (cond-> wrapped-ctx
@@ -1691,7 +1727,10 @@
              ;; merely to whichever later Gesso-aware query happens to read
              ;; it. Reject an impossible/malformed selected-db constraint
              ;; before fixing ordinary Biff reads to the observed frontier.
-             _ (read-query-opts admitted-consistency current-requirement)]
+             _ (read-query-opts admitted-consistency current-requirement)
+             _ (require-compatible-biff-and-query-snapshots!
+                (basis-database basis-value) snapshot-token
+                admitted-consistency :admission)]
          (assoc ctx
                 :biff.xtdb/snapshot-token snapshot-token
                 :gesso.live/progression combined-requirement
@@ -1737,6 +1776,12 @@
                     {:database database-name
                      :snapshot-token snapshot-token
                      :reason :unobserved-selected-database})))))
+         ;; The selected database is unobserved, but independent databases
+         ;; can still be pinned by both ordinary Biff and Gesso-aware reads.
+         ;; Such overlapping foreign coordinates must agree at admission.
+         (require-compatible-biff-and-query-snapshots!
+          database-name (:biff.xtdb/snapshot-token ctx)
+          admitted-consistency :admission)
          ;; Even with no admitted constraint or existing Biff wrapper, a
          ;; fresh handler request can introduce a fabricated selected-db token
          ;; or progression after binding. Guard that execution boundary for

@@ -2394,6 +2394,67 @@
                 (is (= :invalid-snapshot-token (:reason (ex-data outcome))))
                 (is (= token (:snapshot-token (ex-data outcome))))))))))))
 
+(deftest biff-and-query-consistency-reject-conflicting-foreign-snapshots-test
+  ;; Biff and Gesso-aware XTDB queries may both carry a basis for the same
+  ;; independent database. Composing Biff with Biff or query with query is
+  ;; insufficient: their cross-path intersection must agree as well.
+  (let [now (Instant/parse "2026-11-20T21:00:00Z")
+        later (.plusSeconds now 60)
+        biff-token (xt.basis/->time-basis-str {"analytics" [now]})
+        conflicting (xt.basis/->time-basis-str {"analytics" [later]})
+        matching (xt.basis/->time-basis-str {"analytics" [now]})
+        disjoint (xt.basis/->time-basis-str {"reports" [later]})
+        calls (atom 0)
+        base {:xtdb/node :authority-node
+              :biff.xtdb/snapshot-token biff-token}
+        body (fn [request]
+               (swap! calls inc)
+               (xtdb-live/consistency-from request))]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub '*status*
+        (fn [_] {:latest-completed-txs
+                 {"xtdb" (if populated?
+                           [{:tx-id 2051 :system-time now}]
+                           [])}})
+        (fn []
+          (let [failure (try
+                          (xtdb-live/bind-request-frontier
+                           (assoc base :xtdb/consistency
+                                  {:snapshot-token conflicting}))
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                "Conflicting admitted Biff and query snapshots must fail")
+            (when failure
+              (is (= :conflicting-biff-query-snapshot-bases
+                     (:reason (ex-data failure))))))
+          (let [bound (xtdb-live/bind-request-frontier base)
+                handler ((:biff.core/wrap-db-snapshot bound) body)
+                before @calls
+                failure (try
+                          (handler {:gesso.live/consistency
+                                    {:snapshot-token conflicting}})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                "Deferred conflicting query snapshot must fail")
+            (when failure
+              (is (= :conflicting-biff-query-snapshot-bases
+                     (:reason (ex-data failure)))))
+            (is (= before @calls)
+                "A conflicting foreign snapshot must not reach the Biff body")
+            ;; Equal foreign observations and separate database observations
+            ;; remain independent, valid constraints on the same request.
+            (is (= matching
+                   (:snapshot-token
+                    (handler {:xtdb/consistency
+                              {:snapshot-token matching}}))))
+            (is (= disjoint
+                   (:snapshot-token
+                    (handler {:xtdb/consistency
+                              {:snapshot-token disjoint}}))))
+            (is (= (+ 2 before) @calls))))))))
+
 (deftest bind-request-frontier-rejects-unsatisfied-admitted-query-consistency-test
   ;; Admitted consistency is an independent read obligation. Merely fixing
   ;; Biff's snapshot to the observed status is not sufficient if an admitted
