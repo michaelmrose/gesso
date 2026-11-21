@@ -1065,52 +1065,78 @@
          ;; while its first element is promoted to an authoritative frontier.
          ;; Keep multiple valid completed keys acceptable, but validate each
          ;; remaining coordinate using the same portable basis rules.
-         (doseq [trailing (rest entries)]
-           (try
-             (when-not (map? trailing)
-               (throw
-                (ex "Trailing XTDB transaction must be map-like."
-                    {:entry trailing})))
-             (basis database-name
-                    (:tx-id trailing)
-                    (status-system-time->instant (:system-time trailing)))
-             (catch Throwable cause
-               (throw
-                (ex "XTDB latest-completed status contains malformed trailing transaction evidence."
-                    {:database database-name
-                     :status status
-                     :reason :malformed-completed-transaction-tail
-                     :entry trailing}
-                    cause)))))
-         (when-some [completed (first entries)]
-           (let [tx-id (:tx-id completed)
-                 system-time (:system-time completed)]
-             (cond
-               ;; An untouched XTDB 2.2 node reports one typed TxKey with
-               ;; both coordinates nil. This is its empty-database sentinel,
-               ;; not a partially observed committed transaction. Requiring
-               ;; the exact singleton, map-like TransactionKey prevents an
-               ;; ordinary malformed status map from masquerading as empty.
-               (and (= 1 (count entries))
-                    (transaction-key? completed)
-                    (map? completed)
-                    (= #{:tx-id :system-time} (set (keys completed)))
-                    (nil? tx-id)
-                    (nil? system-time))
-               nil
+         (let [trailing-bases
+               (mapv
+                (fn [trailing]
+                  (try
+                    (when-not (map? trailing)
+                      (throw
+                       (ex "Trailing XTDB transaction must be map-like."
+                           {:entry trailing})))
+                    (basis database-name
+                           (:tx-id trailing)
+                           (status-system-time->instant (:system-time trailing)))
+                    (catch Throwable cause
+                      (throw
+                       (ex "XTDB latest-completed status contains malformed trailing transaction evidence."
+                           {:database database-name
+                            :status status
+                            :reason :malformed-completed-transaction-tail
+                            :entry trailing}
+                           cause)))))
+                (rest entries))]
+           (when-some [completed (first entries)]
+             (let [tx-id (:tx-id completed)
+                   system-time (:system-time completed)]
+               (cond
+                 ;; An untouched XTDB 2.2 node reports one typed TxKey with
+                 ;; both coordinates nil. This is its empty-database sentinel,
+                 ;; not a partially observed committed transaction. Requiring
+                 ;; the exact singleton, map-like TransactionKey prevents an
+                 ;; ordinary malformed status map from masquerading as empty.
+                 (and (= 1 (count entries))
+                      (transaction-key? completed)
+                      (map? completed)
+                      (= #{:tx-id :system-time} (set (keys completed)))
+                      (nil? tx-id)
+                      (nil? system-time))
+                 nil
 
-               (or (nil? tx-id) (nil? system-time))
-               (throw
-                (ex "XTDB latest-completed transaction has incomplete authoritative coordinates."
-                    {:database database-name
-                     :latest-completed completed
-                     :tx-id tx-id
-                     :system-time system-time}))
+                 (or (nil? tx-id) (nil? system-time))
+                 (throw
+                  (ex "XTDB latest-completed transaction has incomplete authoritative coordinates."
+                      {:database database-name
+                       :latest-completed completed
+                       :tx-id tx-id
+                       :system-time system-time}))
 
-               :else
-               (basis database-name
-                      tx-id
-                      (status-system-time->instant system-time))))))))))
+                 :else
+                 (let [selected (basis database-name
+                                       tx-id
+                                       (status-system-time->instant system-time))
+                       selected-id (basis-tx-id selected)
+                       selected-time (basis-system-time selected)]
+                   ;; All entries belong to the same completed-status
+                   ;; observation. The first claims to be the latest; a
+                   ;; subsequent key cannot be newer in either coordinate,
+                   ;; nor assign a different time to the same transaction id.
+                   ;; Reject inconsistency rather than silently pinning Biff
+                   ;; to a frontier contradicted by the observed status.
+                   (doseq [trailing trailing-bases]
+                     (let [other-id (basis-tx-id trailing)
+                           other-time (basis-system-time trailing)]
+                       (when (or (> other-id selected-id)
+                                 (.isAfter ^Instant other-time selected-time)
+                                 (and (= other-id selected-id)
+                                      (not= other-time selected-time)))
+                         (throw
+                          (ex "XTDB latest-completed status contradicts its selected transaction frontier."
+                              {:database database-name
+                               :status status
+                               :reason :contradictory-completed-transaction-frontier
+                               :selected selected
+                               :contradictory trailing})))))
+                   selected))))))))))
 
 (defn- decode-canonical-biff-snapshot!
   "Validate the existing Biff token before preserving any of its database bases.

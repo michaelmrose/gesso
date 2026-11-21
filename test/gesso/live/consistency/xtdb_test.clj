@@ -1620,6 +1620,50 @@
         (is (= (xtdb-live/basis :xtdb 2041 observed)
                (xtdb-live/latest-completed-basis ctx)))))))
 
+(deftest latest-completed-basis-rejects-contradictory-status-frontier-test
+  ;; The first completed key is advertised as the latest transaction for the
+  ;; selected database. Other well-formed keys in that same observation must
+  ;; not contradict it by claiming a newer tx id, later snapshot time, or a
+  ;; different time for the exact same tx id. Otherwise Biff can be pinned to
+  ;; a frontier already contradicted by the status response itself.
+  (let [observed (Instant/parse "2026-11-20T23:58:00Z")
+        latest {:tx-id 2041 :system-time observed}
+        contradictory [{:tx-id 2042 :system-time observed}
+                       {:tx-id 2040 :system-time (.plusSeconds observed 1)}
+                       {:tx-id 2041 :system-time (.minusSeconds observed 1)}
+                       {:tx-id 2041 :system-time (.plusSeconds observed 1)}]
+        ctx {:xtdb/node :authority-node}
+        calls (atom 0)]
+    (doseq [trailing contradictory]
+      (with-xtdb-stub '*status*
+        (fn [_]
+          (swap! calls inc)
+          {:latest-completed-txs {"xtdb" [latest trailing]}})
+        (fn []
+          (doseq [invoke [#(xtdb-live/latest-completed-basis ctx)
+                          #(xtdb-live/bind-request-frontier ctx)]]
+            (let [failure (try (invoke)
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Contradictory completed evidence must fail: "
+                       (pr-str trailing)))
+              (when failure
+                (is (= :contradictory-completed-transaction-frontier
+                       (:reason (ex-data failure))))))))))
+    (is (= (* 2 (count contradictory)) @calls))
+    ;; Earlier keys and a repeated identical key do not weaken the observed
+    ;; frontier. The check should not reject otherwise valid status evidence.
+    (with-xtdb-stub '*status*
+      (fn [_]
+        {:latest-completed-txs
+         {"xtdb" [latest
+                  {:tx-id 2040 :system-time (.minusSeconds observed 1)}
+                  latest]}})
+      (fn []
+        (is (= (xtdb-live/basis :xtdb 2041 observed)
+               (xtdb-live/latest-completed-basis ctx)))))))
+
 (deftest latest-completed-basis-rejects-unobservable-status-shapes-test
   ;; A successful XTDB status observation is not interchangeable with an
   ;; absent or malformed status payload. In particular, nil for a selected
