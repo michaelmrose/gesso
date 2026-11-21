@@ -365,6 +365,71 @@
                                      (source/stats src))))))
            (finally ((:close! route)))))))))
 
+(deftest managed-route-rejects-unknown-sse-options-before-admission-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           calls (atom 0)
+           base {:path "/live/events"
+                 :authorize-subscription (fn [_]
+                                           (swap! calls inc)
+                                           scope)}]
+       ;; Generic SSE options are merged permissively. At the managed HTTP
+       ;; boundary, misspelled operational settings must not be silently
+       ;; ignored, especially keepalive and lifecycle callbacks.
+       (doseq [[opts missing-key]
+               [[{:keepalive-mis 1000} :keepalive-mis]
+                [{:on-erro (fn [_] nil)} :on-erro]
+                [{:header {"x-gesso-test" "present"}} :header]
+                [{:status 200 :keepalive-ms 1000 :unknown-setting true}
+                 :unknown-setting]]]
+         (let [result (try
+                        (http/wrap-authorized-sse
+                         started (assoc base :sse-options opts))
+                        (catch clojure.lang.ExceptionInfo e e))]
+           (try
+             (is (= :unknown-sse-options
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:reason (ex-data result))))
+                 (str "Unknown SSE setting must fail closed: " missing-key))
+             (is (= #{missing-key}
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:keys (ex-data result)))))
+             (is (zero? @calls)
+                 "Bad SSE preflight may not authorize a request")
+             (is (zero? (:subscription-count (source/stats src)))
+                 "Bad SSE preflight may not allocate a Live interest")
+             (finally
+               (when (map? result) ((:close! result)))))))
+       ;; A non-map must also fail with a managed, typed error rather than
+       ;; a generic exception thrown by option merging.
+       (doseq [opts [false [[:keepalive-ms 2000]] "keepalive-ms"]]
+         (is (= :invalid-sse-options
+                (exception-reason #(http/wrap-authorized-sse
+                                    started (assoc base :sse-options opts)))))
+         (is (zero? @calls))
+         (is (zero? (:subscription-count (source/stats src)))))
+       ;; Every advertised transport option remains accepted (using defaults
+       ;; for options not under test), and a real stream still cleans up.
+       (let [route (http/wrap-authorized-sse
+                    started (assoc base :sse-options
+                                   {:status 200
+                                    :keepalive-ms 30000
+                                    :headers {"x-gesso-trace" "yes"}
+                                    :on-error (fn [_] nil)}))]
+         (try
+           (let [response ((:handler route)
+                           {:uri "/live/events" :request-method :get})]
+             (is (= 200 (:status response)))
+             (is (= "yes" (get-in response [:headers "x-gesso-trace"])))
+             (is (false? (stream/closed? (:body response))))
+             (is (= 1 @calls))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (stream/close! (:body response))
+             (is (eventually #(zero? (:subscription-count
+                                     (source/stats src))))))
+           (finally ((:close! route)))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]

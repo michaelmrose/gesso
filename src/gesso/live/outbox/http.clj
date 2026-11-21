@@ -88,7 +88,9 @@
    during session creation, the route returns 503 instead of surfacing a
    source-closed error or returning an already-dead EventSource stream.
    A synchronously terminated SSE stream is likewise rejected before HTTP
-   handoff, even if the owning Live provider remains open."
+   handoff, even if the owning Live provider remains open. SSE options with
+   unrecognized keys or invalid shapes fail typed preflight instead of
+   silently ignoring a misspelled operational setting."
   [started {:keys [path authorize-subscription sse-options] :as options}]
   (when-not (and (map? options)
                  (= (set (keys options))
@@ -107,6 +109,15 @@
                  (map? (:gesso.live/system started))
                  (not (live/closed? (:gesso.live/system started))))
     (reject! :missing-or-closed-host {}))
+  ;; The generic SSE transport permits additional option keys for its own
+  ;; callers. A managed browser route has a narrower, explicit contract:
+  ;; misspelled keys must not silently disable keepalives or error hooks.
+  ;; Check the caller's raw options before defaults make them look complete.
+  (when-not (or (nil? sse-options) (map? sse-options))
+    (reject! :invalid-sse-options {:sse-options-type (type sse-options)}))
+  (when-let [unknown (seq (remove (set (keys sse/default-options))
+                                  (keys sse-options)))]
+    (reject! :unknown-sse-options {:keys (set unknown)}))
   ;; Validate the EventSource HTTP response contract before registering any
   ;; interest or exposing a route. The lower-level SSE transport intentionally
   ;; permits arbitrary valid HTTP statuses, but browser EventSource does not.
