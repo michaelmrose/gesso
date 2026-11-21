@@ -2987,6 +2987,75 @@
                               {:snapshot-token disjoint}}))))
             (is (= (+ 2 before) @calls))))))))
 
+(deftest biff-request-validates-unpaired-temporal-metadata-test
+  ;; A time coordinate with no tx-id is not a committed receipt, but it still
+  ;; crosses the request frontier as admitted metadata or an actual as-of
+  ;; constraint. Malformed :system-time and :snapshot-time must not reach a
+  ;; deferred handler just because neither completes a tx/time pair.
+  (let [now (Instant/parse "2026-11-20T23:00:00Z")
+        past (.minusSeconds now 60)
+        zoned (ZonedDateTime/ofInstant past (java.time.ZoneId/of "UTC"))
+        invalid [{:system-time "not-an-instant"}
+                 {:system-time false}
+                 {:system-time :malformed}
+                 {:snapshot-time "not-an-instant"}
+                 {:snapshot-time false}
+                 {:snapshot-time {:not :a-time}}]
+        valid [{:system-time past}
+               {:snapshot-time past}
+               {:snapshot-time zoned}]
+        calls (atom 0)]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub
+        '*status*
+        (fn [_] {:latest-completed-txs
+                 {"xtdb" (if populated?
+                           [{:tx-id 2066 :system-time now}]
+                           [])}})
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node :authority-node})
+                handler ((:biff.core/wrap-db-snapshot bound)
+                         (fn [_] (swap! calls inc) :ran))
+                before @calls]
+            (doseq [consistency invalid]
+              (let [field (first (keys consistency))
+                    expected (if (= field :system-time)
+                               :invalid-unpaired-xtdb-system-time
+                               :invalid-unpaired-xtdb-snapshot-time)
+                    admission (try
+                                (xtdb-live/bind-request-frontier
+                                 {:xtdb/node :authority-node
+                                  :gesso.live/consistency consistency})
+                                nil
+                                (catch clojure.lang.ExceptionInfo e e))
+                    deferred (try
+                               (handler {:xtdb/consistency consistency})
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+                (is (instance? clojure.lang.ExceptionInfo admission)
+                    (str "Malformed unpaired temporal evidence admitted: "
+                         (pr-str consistency)))
+                (is (instance? clojure.lang.ExceptionInfo deferred)
+                    (str "Malformed deferred time reached Biff: "
+                         (pr-str consistency)))
+                (when (instance? clojure.lang.ExceptionInfo admission)
+                  (is (= expected (:reason (ex-data admission)))))
+                (when (instance? clojure.lang.ExceptionInfo deferred)
+                  (is (= expected (:reason (ex-data deferred)))))))
+            (is (= before @calls)
+                "Malformed temporal metadata must fail before Biff execution")
+            ;; No tx-id is supplied here, so these are not committed bases.
+            ;; Keep ordinary Instant and ZonedDateTime as-of constraints valid.
+            (doseq [consistency valid]
+              (is (fn? (:biff.core/wrap-db-snapshot
+                        (xtdb-live/bind-request-frontier
+                         {:xtdb/node :authority-node
+                          :gesso.live/consistency consistency}))))
+              (is (= :ran
+                     (handler {:gesso.live/consistency consistency}))))))))
+    (is (= (* 2 (count valid)) @calls))))
+
 (deftest biff-request-validates-partial-transaction-identifiers-test
   ;; A tx-id-only receipt denotes submission metadata, not a committed basis.
   ;; It is intentionally permitted at empty and populated frontiers. However,

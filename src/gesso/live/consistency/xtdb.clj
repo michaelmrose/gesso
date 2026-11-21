@@ -1629,10 +1629,12 @@
   "Validate a complete tx receipt and its selected-db query snapshot minimum.
 
    A transaction id, including a submitted-only id without a time, must be
-   a nonnegative signed 64-bit XTDB id. A complete tx-id/time pair must also
-   have portable XTDB time coordinates even when the selected database has
-   not completed its first transaction, or when there is no accompanying
-   query snapshot token. Otherwise malformed metadata can reach Biff handlers.
+   a nonnegative signed 64-bit XTDB id. Independent :system-time must be an
+   Instant; a standalone query :snapshot-time may be Instant or ZonedDateTime.
+   A complete tx-id/time pair must also have portable XTDB coordinates even
+   when the selected database has not completed its first transaction or when
+   no query snapshot token accompanies it. Malformed partial time evidence
+   must not silently enter a Biff request as admissible metadata.
    This structural validation does NOT claim that the database observed the
    receipt; populated nodes separately compare it with their real frontier.
 
@@ -1645,6 +1647,24 @@
   ;; malformed submitted-only metadata cannot pass the request boundary.
   (when (contains? consistency :tx-id)
     (tx-id->wire (:tx-id consistency)))
+  ;; Every supplied time coordinate is independently meaningful even if
+  ;; there is no tx-id to form a committed receipt. Do not defer malformed
+  ;; temporal metadata to a Biff handler (or its eventual XTDB query).
+  (when-some [system-time (:system-time consistency)]
+    (when-not (instance? Instant system-time)
+      (throw
+       (ex "XTDB request system-time metadata must be an Instant."
+           {:reason :invalid-unpaired-xtdb-system-time
+            :origin origin
+            :system-time system-time}))))
+  (when-some [snapshot-time (:snapshot-time consistency)]
+    (when-not (or (instance? Instant snapshot-time)
+                  (instance? ZonedDateTime snapshot-time))
+      (throw
+       (ex "XTDB request snapshot-time must be an Instant or ZonedDateTime."
+           {:reason :invalid-unpaired-xtdb-snapshot-time
+            :origin origin
+            :snapshot-time snapshot-time}))))
   (when (complete-xtdb-tx-metadata? consistency)
     ;; Always validate the pair. Previously this happened only if an explicit
     ;; snapshot token accompanied it, leaving invalid complete receipts
