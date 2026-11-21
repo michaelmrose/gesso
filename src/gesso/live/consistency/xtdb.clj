@@ -380,11 +380,17 @@
 
 (defn- tx-id->wire
   [value]
+  ;; XTDB's public transaction identifier is a JVM long. The wire carrier
+  ;; uses decimal text to avoid CLJS precision loss, not to expand the set of
+  ;; authoritative transaction ids beyond the signed 64-bit XTDB range.
+  ;; Validate BEFORE casting; Clojure accepts arbitrarily large integers but
+  ;; long conversion otherwise leaks a raw Java range exception.
   (when-not (and (integer? value)
-                 (<= 0 value))
+                 (<= 0 value Long/MAX_VALUE))
     (throw
-     (ex "XTDB progression tx-id must be a non-negative integer."
-         {:tx-id value})))
+     (ex "XTDB progression tx-id must be a non-negative signed 64-bit integer."
+         {:tx-id value
+          :reason :invalid-xtdb-transaction-id-range})))
   (str (long value)))
 
 (defn- wire->tx-id

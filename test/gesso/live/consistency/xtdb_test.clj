@@ -1156,6 +1156,35 @@
     (aset-byte extended (inc (alength raw)) (byte 1))
     (.encodeToString (Base64/getEncoder) extended)))
 
+(deftest portable-xtdb-basis-rejects-out-of-range-transaction-ids-test
+  ;; A JVM transaction id is a signed 64-bit nonnegative integer. Basis
+  ;; construction must reject larger arbitrary-precision numbers as typed
+  ;; validation failures, not leak a Java long-cast exception or construct
+  ;; browser evidence that the closed basis decoder cannot accept.
+  (let [time (Instant/parse "2026-11-20T23:00:00Z")
+        in-range [0 1 9007199254740993N (bigint Long/MAX_VALUE)]
+        outside [(inc (bigint Long/MAX_VALUE))
+                 (+ (bigint Long/MAX_VALUE) 123456789N)]
+        expected (str Long/MAX_VALUE)]
+    (doseq [tx-id in-range]
+      (let [encoded (xtdb-live/basis :xtdb tx-id time)]
+        (is (xtdb-live/xtdb-basis? encoded))
+        (is (= (str tx-id) (:tx-id encoded)))
+        (is (= (long tx-id) (xtdb-live/basis-tx-id encoded)))))
+    (is (= expected (:tx-id (xtdb-live/basis :xtdb Long/MAX_VALUE time))))
+    (doseq [tx-id outside]
+      (doseq [produce [#(xtdb-live/basis :xtdb tx-id time)
+                       #(xtdb-live/consistency->basis
+                         {:tx-id tx-id :system-time time} :xtdb)
+                       #(xtdb-live/tx-result-basis
+                         {:tx-id tx-id :system-time time} :xtdb)]]
+        (let [failure (try (produce) nil (catch Throwable t t))]
+          (is (instance? clojure.lang.ExceptionInfo failure)
+              (str "Overflow must be rejected by Gesso, not JVM long cast: " tx-id))
+          (when (instance? clojure.lang.ExceptionInfo failure)
+            (is (= :invalid-xtdb-transaction-id-range
+                   (:reason (ex-data failure))))))))))
+
 (deftest portable-xtdb-basis-rejects-noncanonical-snapshot-tokens-test
   ;; An XTDB protobuf parser can ignore extra fields. A token with an extra
   ;; field therefore represents the same authoritative time as the canonical
