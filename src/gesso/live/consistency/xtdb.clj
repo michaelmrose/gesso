@@ -1274,6 +1274,37 @@
          require-frontier-satisfies-existing-xtdb!
          consistency-from)
 
+(defn- complete-xtdb-tx-metadata?
+  "A tx-id and time form one portable transaction observation.
+
+   A snapshot-time may stand in for system-time in consistency->basis, but a
+   tx-id supplied by one context layer and a time supplied by another do not
+   together establish that either layer ever observed the paired transaction."
+  [metadata]
+  (and (some? (:tx-id metadata))
+       (or (some? (:system-time metadata))
+           (some? (:snapshot-time metadata)))))
+
+(defn- merge-xtdb-consistency-with-witness!
+  "Merge compatible constraints without manufacturing complete tx metadata.
+
+   At least one individual input must already contain the complete tx-id/time
+   pair whenever the merged result does. This is a narrow source-local witness
+   invariant, not authentication that an application-supplied receipt is true.
+   Apply it both to consistency aliases and to deferred Biff request merging."
+  [left right origin]
+  (let [merged (merge left right)]
+    (when (and (complete-xtdb-tx-metadata? merged)
+               (not (or (complete-xtdb-tx-metadata? left)
+                        (complete-xtdb-tx-metadata? right))))
+      (throw
+       (ex "XTDB consistency composition cannot manufacture a complete transaction basis from independent metadata fragments."
+           {:reason :split-xtdb-transaction-metadata
+            :origin origin
+            :left-metadata (select-keys left [:tx-id :system-time :snapshot-time])
+            :right-metadata (select-keys right [:tx-id :system-time :snapshot-time])})))
+    merged))
+
 (defn- compose-wrapped-xtdb-consistency!
   "Preserve independently admitted XTDB query consistency into a fresh request.
 
@@ -1292,7 +1323,8 @@
             :field field
             :admitted-value value
             :runtime-value (get runtime-consistency field)})))
-    (merge admitted-consistency runtime-consistency)))
+    (merge-xtdb-consistency-with-witness!
+     admitted-consistency runtime-consistency :deferred-biff-request)))
 
 (defn- compose-wrapped-biff-progression!
   "Preserve admitted progression when a Biff wrapper supplies the handler ctx.
@@ -1730,7 +1762,8 @@
                    :field field
                    :existing-value (get combined field)
                    :incoming-value value})))
-           (merge combined normalized))
+           (merge-xtdb-consistency-with-witness!
+            combined normalized alias))
          combined))
      {}
      [:gesso.live/consistency

@@ -380,6 +380,114 @@
            :xtdb/consistency {:default-tz "UTC"}
            :consistency {:await-token "wait"}}))))
 
+(deftest consistency-aliases-must-not-fabricate-tx-metadata-pairs-test
+  ;; A tx-id and its system-time are one transaction observation. Combining
+  ;; independently supplied fragments can manufacture a complete basis that
+  ;; neither source ever actually established. The same applies to the
+  ;; snapshot-time fallback used by consistency->basis.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        split [{:gesso.live/consistency {:tx-id 2047}
+                :xtdb/consistency {:system-time t}}
+               {:gesso.live/consistency {:tx-id 2047}
+                :xtdb/consistency {:snapshot-time t}}
+               {:gesso.live/consistency {:system-time t}
+                :xtdb/consistency {:tx-id 2047}}
+               {:gesso.live/consistency {:snapshot-time t}
+                :xtdb/consistency {:tx-id 2047}}]
+        calls (atom [])
+        unexpected (fn [& args] (swap! calls conj args) :unexpected)]
+    (with-redefs-fn {(xtdb-var '*q*) unexpected
+                     (xtdb-var '*plan-q*) unexpected
+                     (xtdb-var '*status*) unexpected}
+      (fn []
+        (doseq [aliases split
+                :let [ctx (merge {:xtdb/node :authority-node
+                                  :xtdb/read-connectable :read} aliases)]]
+          (doseq [invoke [#(xtdb-live/consistency-from ctx)
+                          #(xtdb-live/q-consistent-from ctx sample-query)
+                          #(xtdb-live/plan-q-consistent-from ctx sample-query)
+                          #(xtdb-live/bind-request-frontier ctx)]]
+            (let [failure (try (invoke)
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Split transaction metadata should not be promoted: "
+                       (pr-str aliases)))
+              (when failure
+                (is (= :split-xtdb-transaction-metadata
+                       (:reason (ex-data failure)))))))
+          (is (empty? @calls)
+              "Incomplete independent receipts must fail before XTDB I/O"))))
+    ;; A complete same-source receipt can safely survive composition with
+    ;; other independent query obligations, including an equal snapshot time.
+    (is (= (xtdb-live/basis :xtdb 2047 t)
+           (-> {:gesso.live/consistency {:tx-id 2047 :system-time t}
+                :xtdb/consistency {:snapshot-time t :await-token "wait"}}
+               xtdb-live/consistency-from
+               (xtdb-live/consistency->basis :xtdb))))
+    (is (= {:tx-id 2047 :snapshot-time t :default-tz "UTC"}
+           (xtdb-live/consistency-from
+            {:gesso.live/consistency {:tx-id 2047 :snapshot-time t}
+             :consistency {:default-tz "UTC"}})))))
+
+(deftest deferred-biff-cannot-assemble-transaction-receipt-from-two-requests-test
+  ;; Biff may pass a new Ring context to the handler. Admission-time and
+  ;; deferred metadata are distinct sources; their merge must not manufacture
+  ;; a complete tx basis, whether the database is populated or empty.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        splits [[{:tx-id 2047} {:system-time t}]
+                [{:tx-id 2047} {:snapshot-time t}]
+                [{:system-time t} {:tx-id 2047}]
+                [{:snapshot-time t} {:tx-id 2047}]]
+        calls (atom 0)
+        body (fn [_] (swap! calls inc) :unexpected)]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub '*status*
+        (fn [_] {:latest-completed-txs
+                 {"xtdb" (if populated?
+                           [{:tx-id 2047 :system-time t}]
+                           [])}})
+        (fn []
+          (doseq [[admitted deferred] splits]
+            (let [bound (xtdb-live/bind-request-frontier
+                         {:xtdb/node :authority-node
+                          :gesso.live/consistency admitted})
+                  handler ((:biff.core/wrap-db-snapshot bound) body)
+                  failure (try (handler {:xtdb/consistency deferred})
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  "Deferred wrapper cannot synthesize tx-id/time pairing")
+              (when failure
+                (is (= :split-xtdb-transaction-metadata
+                       (:reason (ex-data failure))))))
+            (is (zero? @calls)
+                "Rejected pairing must not invoke the Biff handler")))))))
+
+(deftest deferred-biff-preserves-complete-admitted-transaction-metadata-test
+  ;; One complete admission-time pair remains usable after an independent
+  ;; deferred read constraint is added; the safety check is not a ban on
+  ;; composing query consistency or keeping matching metadata.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        expected {:tx-id 2047 :system-time t
+                  :snapshot-time t :await-token "fresh-wait"}]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub '*status*
+        (fn [_] {:latest-completed-txs
+                 {"xtdb" (if populated?
+                           [{:tx-id 2047 :system-time t}]
+                           [])}})
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node :authority-node
+                        :gesso.live/consistency
+                        {:tx-id 2047 :system-time t}})
+                handler ((:biff.core/wrap-db-snapshot bound)
+                         (fn [ctx] (:gesso.live/consistency ctx)))]
+            (is (= expected
+                   (handler {:xtdb/consistency
+                             {:snapshot-time t :await-token "fresh-wait"}})))))))))
+
 (deftest query-consistency-drops-tx-metadata-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]
     (is (= {:snapshot-time t
