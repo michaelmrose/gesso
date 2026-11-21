@@ -73,6 +73,7 @@
           calls (atom [])
           mode (atom :submit)
           on-input (atom nil)
+          response-status (atom 200)
           handler (certified/issue-certified-handler!
                    {:executor executor
                     :current-source plan-source
@@ -84,7 +85,7 @@
                     :result->response!
                     (fn [_ result]
                       (swap! calls conj :response)
-                      {:status 200 :body result})})]
+                      {:status @response-status :body result})})]
       (fixture/with-closed-application
         {:operations
          {operation (fixture/trusted-operation
@@ -104,7 +105,8 @@
             (binding [*case* {:source source
                               :system system
                               :host-handle (:handle issued)
-                              :calls calls :mode mode :on-input on-input}]
+                              :calls calls :mode mode :on-input on-input
+                              :response-status response-status}]
               (run))))))))
 
 (use-fixtures
@@ -113,6 +115,7 @@
     (reset! (:calls *case*) [])
     (reset! (:mode *case*) :submit)
     (reset! (:on-input *case*) nil)
+    (reset! (:response-status *case*) 200)
     (try (run)
          (finally (reset! (:on-input *case*) nil)))))
 
@@ -196,6 +199,38 @@
                  (correlation/require-current-installed-physical!
                   handle opts report)))
           (is (= 1 @transactions) "Witness recheck must never resubmit"))))))
+
+(deftest committed-adapter-with-error-http-response-is-not-qualified
+  ;; A definitive adapter observation is only one edge. The same installed
+  ;; handler may map a committed operation to an HTTP error response. This
+  ;; report must expose the disagreement rather than issue a positive witness
+  ;; which a later consumer could mistake for request-to-response agreement.
+  (let [opts (options)]
+    (reset! (:response-status *case*) 503)
+    (artificial-execution {}
+      (fn [{:keys [transactions api-calls]}]
+        (let [{:keys [execution handle report]} (observe opts)]
+          (is (= :returned (:outcome execution)))
+          (is (= 503 (get-in execution [:result :status])))
+          (is (= :physical-commit-with-unqualified-ring-response
+                 (:status report)))
+          (is (= :http-error-response (:ring-response-class report)))
+          (is (true? (:definitive-execute-key-observed? report)))
+          (is (nil? handle) "Do not issue a positive cross-boundary witness")
+          (is (= 1 @transactions))
+          (is (= 1 (count @api-calls))))))))
+
+(deftest malformed-ring-response-cannot-qualify-physical-observation
+  (let [opts (options)]
+    (reset! (:response-status *case*) nil)
+    (artificial-execution {}
+      (fn [{:keys [transactions]}]
+        (let [{:keys [report handle]} (observe opts)]
+          (is (= :physical-commit-with-unqualified-ring-response
+                 (:status report)))
+          (is (= :invalid-ring-response (:ring-response-class report)))
+          (is (nil? handle))
+          (is (= 1 @transactions)))))))
 
 (deftest later-observations-are-distinct-and-rechecks-are-side-effect-free
   (let [opts (options)]

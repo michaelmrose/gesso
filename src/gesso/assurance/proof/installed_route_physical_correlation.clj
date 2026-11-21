@@ -9,9 +9,11 @@
    guarded handler ONCE inside both the resolved-operation attempt observer
    and the XTDB adapter's actual call-site capture. The canonical prepared
    plan is independently translated by tx/prepare and compared to the actual
-   adapter arguments. A definitive execute-tx TransactionKey and a matching
-   committed resolved-operation result are required for positive local
-   correlation. No second transaction is performed to establish the result.
+   adapter arguments. A definitive execute-tx TransactionKey, a matching
+   committed resolved-operation result, and a non-error Ring response from
+   the SAME handler invocation are required for positive local correlation.
+   This checks response shape/status, NOT the semantic response mapping or
+   private disclosure contract. No second transaction is performed.
 
    This is a controlled, privileged IN-PROCESS DIAGNOSTIC, not a transparent
    production Ring middleware. The special observer is added to a new request
@@ -57,6 +59,7 @@
     :request-observer-visible-to-application-callbacks
     :callback-purity-and-input-authorization-not-proved
     :observer-and-adapter-hook-integrity-not-authenticated
+    :http-response-contract-correspondence-not-established
     :actual-xtdb-api-and-transaction-receipt-not-authenticated
     :atomic-transaction-internal-prestate-and-guards
     :complete-physical-writer-coverage
@@ -168,8 +171,23 @@
               (<= 0 (.getTxId key))
               (instance? Instant (.getSystemTime key))))))
 
+(defn- ring-response-class [capture]
+  ;; An actual Ring handler result is request-private. Only a coarse class
+  ;; escapes the diagnostic. Missing/malformed statuses and HTTP errors must
+  ;; not accompany a positive physical/request-to-response witness.
+  (if (not= :returned (:outcome capture))
+    :handler-threw
+    (let [response (:result capture)
+          status (when (map? response) (:status response))]
+      (cond
+        (not (and (integer? status) (<= 200 status 599)))
+        :invalid-ring-response
+        (<= status 399) :non-error-ring-response
+        :else :http-error-response))))
+
 (defn- classify [selected events poisoned capture observed-request postcheck?]
-  (let [pair (when-not poisoned
+  (let [ring-class (ring-response-class capture)
+        pair (when-not poisoned
                (resolved-pair events (:operation selected)))
         adapter-events (adapter-pair capture)
         [prepared outcome] pair
@@ -191,7 +209,7 @@
         complete? (and (not poisoned) postcheck? pair adapter-events
                        operations-agree? options-agree? definitive?
                        (= :committed (:physical/status outcome))
-                       (= :returned (:outcome capture)))
+                       (= :non-error-ring-response ring-class))
         status (cond
                  poisoned :observer-poisoned
                  (not postcheck?) :source-changed-after-execution
@@ -201,6 +219,10 @@
                  (not options-agree?) :prepared-options-diverge-from-adapter
                  (= :submit-tx (:api begin)) :submit-only-not-definitive
                  (not definitive?) :unconfirmed-execute-tx
+                 (not= :committed (:physical/status outcome))
+                 :unconfirmed-or-uncertain-outcome
+                 (not= :non-error-ring-response ring-class)
+                 :physical-commit-with-unqualified-ring-response
                  (not complete?) :unconfirmed-or-uncertain-outcome
                  :else :bounded-installed-route-to-adapter-agreement)]
     {:type report-type
@@ -218,6 +240,8 @@
      :definitive-execute-key-observed? (boolean definitive?)
      :post-execution-source-rechecked? (boolean postcheck?)
      :handler-invocation-count 1
+     :ring-response-class ring-class
+     :response-contract-correspondence :not-established
      :actual-server-deployment :not-established
      :xtdb-receipt-authenticated? false
      :complete-writer-coverage :not-established
