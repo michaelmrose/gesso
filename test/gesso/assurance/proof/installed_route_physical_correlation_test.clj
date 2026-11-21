@@ -21,6 +21,7 @@
             [gesso.live.application-preflight.certified-contract :as certified]
             [gesso.live.application-preflight.fixture :as fixture]
             [gesso.live.consistency.xtdb :as adapter]
+            [gesso.live.core :as live]
             [gesso.model.certified-plan :as plan]
             [gesso.model.resolved-operation :as resolved]
             [gesso.model.tx :as tx]
@@ -142,7 +143,8 @@
   ([settings thunk]
    (let [api-calls (atom [])
          transactions (atom 0)
-         {:keys [change-ops tx-options tx-mode result status extra-call?]
+         {:keys [change-ops tx-options tx-mode result status extra-call?
+                 post-submit-error]
           :or {change-ops identity tx-mode :execute-tx
                result (fake-key) status :committed}} settings]
      (with-redefs-fn
@@ -157,6 +159,11 @@
                            :skip nil))]
             (when extra-call? (invoke))
             (invoke)
+            ;; The adapter can have returned a definitive transaction key,
+            ;; then the model transaction may throw AFTER commit when Live
+            ;; delivery fails. The original resolved operation reconciles
+            ;; rather than claiming the command was incorporated.
+            (when post-submit-error (throw post-submit-error))
             {:commit/status status}))
         (ns-resolve 'gesso.live.consistency.xtdb '*execute-tx*)
         (fn [connectable ops opts]
@@ -180,6 +187,7 @@
     (is (= 1 (:handler-invocation-count report)))
     (is (true? (:original-issued-response-returned-unchanged? report)))
     (is (= :matched (:issued-response-status-declaration report)))
+    (is (= :incorporated (:issued-resolution-class report)))
     (is (true? (:actual-issued-executor-attempt-observed? report)))
     (is (true? (:one-adapter-call-observed? report)))
     (is (true? (:prepared-operations-agree? report)))
@@ -210,6 +218,29 @@
                  (correlation/require-current-installed-physical!
                   handle opts report)))
           (is (= 1 @transactions) "Witness recheck must never resubmit"))))))
+
+(deftest physically-committed-but-unresolved-operation-cannot-qualify-http-success
+  ;; A post-commit Live failure leaves the physical write committed, but
+  ;; after an authoritative read returns no command record, the application
+  ;; sees :unresolved. A trusted response callback may nevertheless return
+  ;; 200. Physical/HTTP correlation must not call that a resolved success.
+  (let [error (ex-info "Post-commit delivery failed"
+                       {:error/type live/post-commit-delivery-failure-type
+                        :commit/status :committed
+                        :failure/stage :post-commit-delivery})]
+    (artificial-execution {:post-submit-error error}
+      (fn [{:keys [transactions api-calls]}]
+        (let [{:keys [execution report handle]} (observe (options))]
+          (is (= :returned (:outcome execution)))
+          (is (= 200 (get-in execution [:result :status])))
+          (is (= :unresolved (get-in execution [:result :body :status])))
+          (is (true? (:definitive-execute-key-observed? report)))
+          (is (= :physical-commit-with-unresolved-operation-result
+                 (:status report)))
+          (is (= :unresolved (:issued-resolution-class report)))
+          (is (nil? handle))
+          (is (= 1 @transactions))
+          (is (= 1 (count @api-calls))))))))
 
 (deftest substituted-response-after-original-callback-is-not-correlated
   ;; A second Ring middleware stage can replace an otherwise successful

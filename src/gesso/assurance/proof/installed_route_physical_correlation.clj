@@ -12,8 +12,12 @@
    adapter arguments. A definitive execute-tx TransactionKey, a matching
    committed resolved-operation result, and a non-error Ring response from
    the SAME handler invocation are required for positive local correlation.
-   This checks response shape/status and conservatively withholds a positive
-   witness for unclassified response headers or redirects; it does NOT establish response
+   This also requires the original issued executor to have returned an
+   incorporated resolution for a positive same-attempt physical/HTTP witness;
+   a committed adapter call with a :unresolved application return is not
+   reported as a fully resolved success. Response shape/status is checked,
+   and unclassified headers or redirects withhold a positive witness; it does
+   NOT establish response
    effect admission, semantic response mapping, private disclosure or browser
    safety. No second transaction is performed.
 
@@ -63,6 +67,7 @@
     :observer-and-adapter-hook-integrity-not-authenticated
     :http-response-contract-correspondence-not-established
     :response-callback-honesty-and-effect-safety-not-established
+    :complete-committed-resolution-and-response-semantics-not-established
     :issued-response-allowance-not-derived-from-operation-semantics
     :browser-response-effect-admission-not-established
     :actual-xtdb-api-and-transaction-receipt-not-authenticated
@@ -236,7 +241,7 @@
         :else :non-error-ring-response))))
 
 (defn- classify [selected events poisoned capture observed-request postcheck?
-                  original-response? issued-status-declaration]
+                  original-response? issued-status-declaration issued-resolution-class]
   (let [ring-class (ring-response-class capture)
         pair (when-not poisoned
                (resolved-pair events (:operation selected)))
@@ -260,6 +265,7 @@
         complete? (and (not poisoned) postcheck? pair adapter-events
                        operations-agree? options-agree? definitive?
                        (= :committed (:physical/status outcome))
+                       (= :incorporated issued-resolution-class)
                        original-response?
                        (not= :mismatched issued-status-declaration)
                        (= :non-error-ring-response ring-class))
@@ -280,6 +286,10 @@
                  :installed-ring-response-not-original-issued-response
                  (= :mismatched issued-status-declaration)
                  :issued-response-status-declaration-mismatch
+                 (= :unresolved issued-resolution-class)
+                 :physical-commit-with-unresolved-operation-result
+                 (not= :incorporated issued-resolution-class)
+                 :physical-commit-with-unconfirmed-operation-result
                  (not complete?) :unconfirmed-or-uncertain-outcome
                  :else :bounded-installed-route-to-adapter-agreement)]
     {:type report-type
@@ -300,6 +310,7 @@
      :ring-response-class ring-class
      :original-issued-response-returned-unchanged? (boolean original-response?)
      :issued-response-status-declaration issued-status-declaration
+     :issued-resolution-class issued-resolution-class
      :response-contract-correspondence :not-established
      :actual-server-deployment :not-established
      :xtdb-receipt-authenticated? false
@@ -355,7 +366,8 @@
                         (catch Throwable _ false))
         report (classify selected @events @poisoned captured observed-request
                          postcheck? (:same-issued-response? observed-response)
-                         (:issued-response-status-declaration observed-response))
+                         (:issued-response-status-declaration observed-response)
+                         (:issued-resolution-class observed-response))
         positive? (= :bounded-installed-route-to-adapter-agreement
                      (:status report))
         handle (when positive? (InstalledPhysicalHandle.))]

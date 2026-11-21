@@ -202,7 +202,7 @@
                     (observe! certified-route-handler ctx))
                   (let [response (result->response! ctx result)]
                     (when-let [observe! *issued-response-observer*]
-                      (observe! certified-route-handler ctx response))
+                      (observe! certified-route-handler ctx result response))
                     response)))]
         (let [issued certified-route-handler
               entry (cond-> {:executor executor
@@ -224,7 +224,11 @@
    and request object, and object identity of the callback's returned value
    with the final Ring response. This is a bounded in-process observation:
    it does not verify the contents, HTML, headers, browser effects, or the
-   callback's honesty, and does not authenticate a deployed server. When
+   callback's honesty, and does not authenticate a deployed server. The
+   original resolved-operation return is also classified, without exposing
+   its potentially private outcome or transaction. A physical commit and
+   HTTP 200 do not establish resolved incorporation if that return reports
+   :unresolved (for example, after an uncertain post-commit failure). When
    the handler carries a static issuance-bound :response-status-contract,
    its actual returned status is checked independently of the callback's
    chosen result. Such a match is only issued-source-relative, NOT a
@@ -241,12 +245,22 @@
         calling-thread (Thread/currentThread)
         events (volatile! [])
         capture (binding [*issued-response-observer*
-                         (fn [actual-handler actual-request response]
+                         (fn [actual-handler actual-request executor-result response]
+                           ;; Preserve only a coarse stable status. A resolved
+                           ;; operation may return private outcome, transaction
+                           ;; or scope data that must NOT enter copyable proof.
                            (vswap! events conj
                                    {:right-handler? (identical? handler actual-handler)
                                     :right-request? (identical? request actual-request)
                                     :same-thread? (identical? calling-thread
                                                               (Thread/currentThread))
+                                    :resolution-class
+                                    (let [status (when (map? executor-result)
+                                                   (:status executor-result))]
+                                      (if (#{:incorporated :replay :unresolved
+                                             :incompatible :unavailable} status)
+                                        status
+                                        :other-or-invalid))
                                     :response response}))]
                   (capture!))
         event (first @events)
@@ -266,6 +280,9 @@
           :else :mismatched)]
     {:capture capture
      :same-issued-response? same-response?
+     :issued-resolution-class (if same-response?
+                                (:resolution-class event)
+                                :unconfirmed)
      ;; A redacted, source-relative result: never expose callback response
      ;; or claimed expected status in this copyable diagnostic evidence.
      :issued-response-status-declaration declared-status}))
