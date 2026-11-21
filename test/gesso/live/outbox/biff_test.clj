@@ -83,8 +83,17 @@
       (with-redefs [*modules* modules]
         (is (= :delegated (managed/start-biff-application!
                            assembly (config) #'*modules* start-order)))
-        (is (= [assembly (config) #'*modules* start-order]
-               (first @calls))))
+        (let [[actual-assembly actual-system tracked-var actual-order] (first @calls)]
+          (is (identical? assembly actual-assembly))
+          (is (= (config) actual-system))
+          (is (= start-order actual-order))
+          (is (var? tracked-var))
+          ;; Tracking may wrap provider/worker :start callbacks but must not
+          ;; modify the host module Var or the canonical handler identity.
+          (is (= (mapv :biff.core/id modules)
+                 (mapv :biff.core/id @tracked-var)))
+          (is (identical? (:biff.core/start application/application-handler-module)
+                          (:biff.core/start (first @tracked-var))))))
       (doseq [[bad-modules order expected]
               [[[] start-order :invalid-worker-module-inventory]
                [[application/application-handler-module
@@ -226,3 +235,196 @@
                   (finally (biff/stop started)))
                 (is (= [:stop-providers] @events))
                 (is (= :stopped (:status (lifecycle/status handle))))))))))))
+
+
+(defn- thrown-startup
+  [f]
+  (try (f) nil
+       (catch clojure.lang.ExceptionInfo error error)))
+
+(deftest checked-startup-undoes-completed-biff-modules-in-reverse-order-test
+  ;; Fail after two physical resource-owning modules have successfully
+  ;; returned, but BEFORE the managed worker starts. Native biff/start does
+  ;; not unwind those modules. The checked entry must close Live then XTDB.
+  (let [ops (standard-operations)
+        render (render-context ops)]
+    (with-surfaced-application
+      {:request-board
+       [:main (rendered-operation-button render :request/claim
+                                         "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [events (atom [])
+              resources (atom {})
+              boom (ex-info "provider startup exploded" {:test :last-module})
+              provider-node {:biff.core/id :fixture/xtdb
+                             :biff.core/start
+                             (fn [system]
+                               (let [node (xtn/start-node {})]
+                                 (swap! resources assoc :node node)
+                                 (swap! events conj :start-xtdb)
+                                 (assoc system :xtdb/connectable node)))
+                             :biff.core/stop
+                             (fn [system]
+                               (swap! events conj :stop-xtdb)
+                               (.close ^java.lang.AutoCloseable (:xtdb/connectable system)))}
+              provider-live {:biff.core/id :fixture/live
+                             :biff.core/start
+                             (fn [system]
+                               (let [source (live-system)]
+                                 (swap! resources assoc :live source)
+                                 (swap! events conj :start-live)
+                                 (assoc system :gesso.live/system source)))
+                             :biff.core/stop
+                             (fn [system]
+                               (swap! events conj :stop-live)
+                               (live/close! (:gesso.live/system system)))}
+              doomed {:biff.core/id :fixture/throw
+                      :biff.core/start (fn [_]
+                                         (swap! events conj :start-throw)
+                                         (throw boom))}]
+          (binding [*modules* [application/application-handler-module
+                               provider-node provider-live doomed managed/module]]
+            (let [error (thrown-startup
+                         #(managed/start-biff-application!
+                           assembly
+                           (assoc (config)
+                                  :biff.ring/handler
+                                  (fn [_] (g/html-response
+                                            [:main (rendered-operation-button
+                                                    render :request/claim
+                                                    "/operations/request/claim")])))
+                           #'*modules*
+                           [application/application-handler-module-id
+                            :fixture/xtdb :fixture/live :fixture/throw
+                            managed/module-id]))]
+              (is (= :gesso.live.outbox/checked-startup-failed
+                     (:error/type (ex-data error))))
+              (is (= :drained (:rollback/status (ex-data error))))
+              (is (identical? boom (.getCause error)))
+              (is (nil? (:cleanup/handle (ex-data error))))
+              (is (= [:start-xtdb :start-live :start-throw
+                      :stop-live :stop-xtdb]
+                     @events))
+              (is (live/closed? (:live @resources)))
+              (is (some? (:node @resources))))))))))
+
+(deftest checked-startup-blocked-unwind-retains-retryable-ownership-test
+  ;; When a provider's stop fails, it must not close the earlier dependency.
+  ;; A retry handle retaining the completed system is the only authority to
+  ;; resume teardown. Repeated retry after success must not double-close.
+  (let [events (atom [])
+        stop-attempts (atom 0)
+        boom (ex-info "failed provider start" {:test :startup})
+        dependency {:biff.core/id :fixture/dependency
+                    :biff.core/start (fn [s] (swap! events conj :start-dependency)
+                                       (assoc s :fixture/dependency :open))
+                    :biff.core/stop (fn [_] (swap! events conj :stop-dependency))}
+        upper {:biff.core/id :fixture/upper
+               :biff.core/start (fn [s] (swap! events conj :start-upper)
+                                  (assoc s :fixture/upper :open))
+               :biff.core/stop
+               (fn [_]
+                 (swap! events conj :stop-upper)
+                 (when (= 1 (swap! stop-attempts inc))
+                   (throw (ex-info "drain timed out" {:test :timeout}))))}
+        doomed {:biff.core/id :fixture/doomed
+                :biff.core/start (fn [_] (throw boom))}]
+    (binding [*modules* [application/application-handler-module
+                         dependency upper doomed managed/module]]
+      ;; Stub ONLY the canonical application startup validation. It still
+      ;; calls real native Biff.start on the tracked modules Var, so module
+      ;; start/stop semantics are physical Biff behavior, not a mocked loop.
+      (with-redefs [application/start-biff-application!
+                    (fn [_assembly initial modules order]
+                      ;; Bypass only the canonical handler's assembly
+                      ;; recognition; keep actual Biff provider lifecycle.
+                      (let [providers (clojure.lang.Var/create
+                                       (vec (rest @modules)))]
+                        (biff/start initial providers (vec (rest order)))))]
+        (let [error (thrown-startup
+                     #(managed/start-biff-application!
+                       ::assembly (config) #'*modules*
+                       [application/application-handler-module-id
+                        :fixture/dependency :fixture/upper :fixture/doomed
+                        managed/module-id]))
+              data (ex-data error)
+              handle (:cleanup/handle data)]
+          (is (= :blocked (:rollback/status data)))
+          (is (= :fixture/upper (:rollback/blocked-module-id data)))
+          (is (= [:fixture/dependency :fixture/upper]
+                 (:rollback/remaining-module-ids data)))
+          (is (identical? boom (.getCause error)))
+          (is (= 1 (count (.getSuppressed error))))
+          (is (= "drain timed out" (.getMessage (first (.getSuppressed error)))))
+          (is (= [:start-dependency :start-upper :stop-upper] @events))
+          (is (= "#<GessoOutboxStartupCleanup>" (str handle)))
+          (is (= :invalid-startup-cleanup-handle
+                 (invalid-reason #(managed/retry-startup-cleanup! nil))))
+          (is (= :drained (:status (managed/retry-startup-cleanup! handle))))
+          (is (= [:start-dependency :start-upper :stop-upper
+                  :stop-upper :stop-dependency] @events))
+          (is (= :drained (:status (managed/retry-startup-cleanup! handle))))
+          (is (= 2 @stop-attempts))
+          (is (= 5 (count @events))))))))
+
+(deftest checked-startup-worker-start-failure-rolls-back-earlier-providers-test
+  (let [events (atom [])
+        provider {:biff.core/id :fixture/provider
+                  :biff.core/start
+                  (fn [sys]
+                    (swap! events conj :start-provider)
+                    (assoc sys :xtdb/connectable :fake
+                               :gesso.live/system {:source :fake
+                                                   :closed? (atom false)}))
+                  :biff.core/stop (fn [_] (swap! events conj :stop-provider))}
+        failure (ex-info "thread could not start" {:test :worker})]
+    (binding [*modules* [application/application-handler-module provider
+                         managed/module]]
+      (with-redefs [application/start-biff-application!
+                    (fn [_assembly initial modules order]
+                      ;; Bypass only the canonical handler's assembly
+                      ;; recognition; keep actual Biff provider lifecycle.
+                      (let [providers (clojure.lang.Var/create
+                                       (vec (rest @modules)))]
+                        (biff/start initial providers (vec (rest order)))))
+                    lifecycle/start! (fn [& _] (throw failure))]
+        (let [e (thrown-startup
+                 #(managed/start-biff-application!
+                   ::assembly (config) #'*modules*
+                   [application/application-handler-module-id
+                    :fixture/provider managed/module-id]))]
+          (is (= :drained (:rollback/status (ex-data e))))
+          (is (identical? failure (.getCause e)))
+          (is (= [:start-provider :stop-provider] @events)))))))
+
+(deftest checked-startup-success-preserves-native-biff-stop-chain-test
+  (let [events (atom [])
+        provider {:biff.core/id :fixture/provider
+                  :biff.core/start
+                  (fn [sys]
+                    (swap! events conj :start-provider)
+                    (assoc sys :xtdb/connectable :fake
+                               :gesso.live/system {:source :fake
+                                                   :closed? (atom false)}))
+                  :biff.core/stop (fn [_] (swap! events conj :stop-provider))}]
+    (binding [*modules* [application/application-handler-module provider
+                         managed/module]]
+      (with-redefs [application/start-biff-application!
+                    (fn [_assembly initial modules order]
+                      ;; Bypass only the canonical handler's assembly
+                      ;; recognition; keep actual Biff provider lifecycle.
+                      (let [providers (clojure.lang.Var/create
+                                       (vec (rest @modules)))]
+                        (biff/start initial providers (vec (rest order)))))
+                    lifecycle/start! (fn [& _] :fake-handle)
+                    lifecycle/stop! (fn [& _]
+                                      (swap! events conj :stop-worker)
+                                      {:outcome :drained})]
+        (let [started (managed/start-biff-application!
+                       ::assembly (config) #'*modules*
+                       [application/application-handler-module-id
+                        :fixture/provider managed/module-id])]
+          (is (some? (get started managed/handle-key)))
+          (is (= [:start-provider] @events))
+          (biff/stop started)
+          (is (= [:start-provider :stop-worker :stop-provider] @events)))))))
