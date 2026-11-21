@@ -71,6 +71,7 @@
    [gesso.live.model :as model]
    [gesso.live.optimistic.capability :as optimistic.capability]
    [gesso.live.optimistic.server :as optimistic.server]
+   [gesso.live.outbox :as outbox]
    [gesso.live.progression :as progression]
    [gesso.live.progression.http :as progression.http]
    [gesso.live.schema :as schema]
@@ -1250,6 +1251,13 @@
        :entry-fn
          Optional function of attached change -> dispatch entry metadata.
 
+       :outbox
+         Optional trusted publication-intent declaration. Its prevalidated
+         minimal intent documents are appended to the SAME XTDB transaction
+         as :tx-ops; see gesso.live.outbox/prepare!. Requires a nonempty
+         change batch. This records pending intent, not delivered notice or
+         a complete recovery protocol.
+
    Returns on successful commit and delivery:
      {:tx-result ...
       :consistency ...
@@ -1268,7 +1276,7 @@
    after execute-tx! returned satisfy post-commit-preparation-failure?. Both
    post-commit classifications mean the mutation committed and MUST NOT be
    retried as if it had rolled back."
-  [system ctx {:keys [tx-ops tx-options emit entry entry-fn] :as options}]
+  [system ctx {:keys [tx-ops tx-options emit entry entry-fn outbox] :as options}]
   (when-not tx-ops
     (throw
      (ex "gesso.live transact-and-notify! requires :tx-ops."
@@ -1277,11 +1285,19 @@
         emit-mode (normalize-emit-mode emit)
         changes (normalize-changes options)
         _ (require-async-dispatch-options! system emit-mode changes options)
+        outbox-plan (when (contains? options :outbox)
+                      (outbox/prepare! outbox changes))
+        tx-ops' (if outbox-plan
+                  (if (sequential? tx-ops)
+                    (conj (vec tx-ops) (:tx-op outbox-plan))
+                    (throw (ex "Outbox requires sequential XTDB tx ops."
+                               {:error/type :gesso.live.core/invalid-outbox-tx-ops})))
+                  tx-ops)
         ;; Request progression is fully available before execution. Reject a
         ;; malformed refresh requirement at admission; otherwise an XTDB write
         ;; can commit before post-commit context composition discovers it.
         ctx-progression (progression ctx)
-        tx-result-map (execute-tx! ctx tx-ops tx-options)
+        tx-result-map (execute-tx! ctx tx-ops' tx-options)
         consistency' (:consistency tx-result-map)
         transaction-progression (:progression tx-result-map)
         {:keys [ctx' changes']}
@@ -1347,7 +1363,9 @@
            {:ctx ctx'
             :changes changes'
             :emit emit-mode
-            :emit-results emit-results})))
+            :emit-results emit-results}
+           (when outbox-plan
+             {:outbox/intents (:intents outbox-plan)}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Synced value facade
