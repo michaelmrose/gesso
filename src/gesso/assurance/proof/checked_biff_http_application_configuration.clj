@@ -262,8 +262,10 @@
                  (fn? (:base-url! config))
                  (or (not (contains? config :listener-instance!))
                      (fn? (:listener-instance! config)))
+                 ;; Only an ABSENT trial key selects the explicitly
+                 ;; unqualified legacy startup. A present nil trial must not
+                 ;; silently downgrade requested checked execution.
                  (or (not (contains? config :typed-trial))
-                     (nil? (:typed-trial config))
                      (and (plain-map? (:typed-trial config))
                           (contains? #{#{:catalog-source :operation :inputs}
                                        #{:catalog-source :operation :inputs

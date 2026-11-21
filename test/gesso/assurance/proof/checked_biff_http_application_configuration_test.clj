@@ -197,6 +197,26 @@
                                      {:policy-id :request/claim-authority})))))))
     (is (nil? @(:server-state s)))))
 
+(deftest selected-typed-trial-cannot-be-erased-with-explicit-nil
+  ;; A selected catalog trial is an application admission requirement, not a
+  ;; nullable option. The legacy no-trial source must omit its key entirely.
+  (let [s (scenario :honest)
+        selected (original-source s true)
+        unselected (original-source s)]
+    (is (= :issued (:status ((:summary!
+                             (config/issue-configured-checked-http-application!
+                              selected)))))
+        "A valid selected trial is still accepted")
+    (is (= :issued (:status ((:summary!
+                             (config/issue-configured-checked-http-application!
+                              unselected)))))
+        "An intentionally unselected legacy startup remains supported")
+    (is (= :invalid-application-owned-http-configuration
+           (reason #(config/issue-configured-checked-http-application!
+                     (assoc selected :typed-trial nil))))
+        "An explicit nil must not silently turn off a selected trial")
+    (is (nil? @(:server-state s)))))
+
 (deftest unexpected-preinstalled-biff-handler-rejected-before-server-start
   (let [s (scenario :honest)
         issued (config/issue-configured-checked-http-application!
