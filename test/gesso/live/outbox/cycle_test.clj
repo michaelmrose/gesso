@@ -1,0 +1,293 @@
+(ns gesso.live.outbox.cycle-test
+  "v2097: synchronous end-to-end worker cycles and fail-closed partial results.
+   Tests exercise embedded XTDB and the real Live source, not browser receipt."
+  (:require [clojure.test :refer [deftest is testing]]
+            [gesso.live.core :as live]
+            [gesso.live.outbox :as outbox]
+            [gesso.live.outbox.acquisition :as acquisition]
+            [gesso.live.outbox.acknowledgment :as acknowledgment]
+            [gesso.live.outbox.cycle :as cycle]
+            [gesso.live.outbox.delivery :as delivery]
+            [gesso.live.outbox.discovery :as discovery]
+            [gesso.live.outbox.worker :as worker]
+            [gesso.live.source :as source]
+            [manifold.stream :as s]
+            [xtdb.api :as xt]
+            [xtdb.node :as xtn])
+  (:import [java.util UUID]))
+
+(def ^:private source-id "gesso/test-cycle")
+
+(defn- intent-id [n]
+  (UUID/fromString (format "00000000-0000-0000-0000-%012d" n)))
+
+(defn- make-system []
+  (live/create {:rules [{:when-topic :request
+                         :expand (fn [_ctx change]
+                                   [(select-keys change [:topic :id :change/kind])])}]
+                :source-options {:coalesce-window-ms 0}
+                :dispatch-options {:threads 1 :queue-size 8 :on-overflow :throw}}))
+
+(defn- seed! [node ids]
+  (let [plan (outbox/prepare!
+              {:intent-ids ids :source-id source-id
+               :operation :request/claim :purpose :gesso.live/refresh}
+              (mapv (fn [id] {:topic :request :id (str "request-" id)
+                              :change/kind :updated}) ids))]
+    (xt/execute-tx node
+                   (into (vec (:guard-ops plan))
+                         [(into [:put-docs :requests]
+                                (mapv (fn [id] {:xt/id (str "request-" id)
+                                                :status :claimed}) ids))
+                          (:tx-op plan)]))))
+
+(defn- physical-row [node id]
+  (first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id])))
+
+(defn- exception-data [f]
+  (try (f) nil
+       (catch clojure.lang.ExceptionInfo e (ex-data e))))
+
+(deftest invalid-options-reject-before-discovery-test
+  (let [system (make-system)]
+    (try
+      (doseq [[opts expected]
+              [[nil :invalid-options]
+               [{} :invalid-worker-id]
+               [{:worker-id " "} :invalid-worker-id]
+               [{:worker-id "w" :max-items 0} :invalid-max-items]
+               [{:worker-id "w" :max-items 129} :invalid-max-items]
+               [{:worker-id "w" :lease-millis 0} :invalid-lease-millis]
+               [{:worker-id "w" :lease-millis 300001} :invalid-lease-millis]
+               [{:worker-id "w" :after nil} :invalid-cursor]
+               [{:worker-id "w" :extra true} :unknown-options]]]
+        (is (= expected (:reason (exception-data
+                                  #(cycle/process-cycle! :no-node system {}
+                                                         source-id opts))))))
+      (is (= :invalid-source-id
+             (:reason (exception-data
+                       #(cycle/process-cycle! :no-node system {} " "
+                                              {:worker-id "w"})))))
+      (is (= :invalid-context
+             (:reason (exception-data
+                       #(cycle/process-cycle! :no-node system nil source-id
+                                              {:worker-id "w"})))))
+      (finally (live/close! system)))))
+
+(deftest physical-cycle-delivers-and-acknowledges-two-intents-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)
+          ids [(intent-id 11) (intent-id 12)]]
+      (try
+        (seed! node ids)
+        (let [streams (mapv (fn [id]
+                              (source/subscribe (:source system)
+                                                {:topic :request
+                                                 :id (str "request-" id)})) ids)
+              result (cycle/process-cycle! node system {} source-id
+                                           {:worker-id "single-node-a"
+                                            :max-items 4 :lease-millis 60000})]
+          (is (= :cycle-completed (:status result)))
+          (is (= 2 (:processed result)))
+          (is (= 2 (:acquired result)))
+          (is (= 2 (:dispatch-accepted result)))
+          (is (zero? (:contended result)))
+          (is (= :observed-end (:halt-reason result)))
+          (is (nil? (:next-after result)))
+          (is (= ids (mapv :intent-id (:results result))))
+          (doseq [[id stream entry] (map vector ids streams (:results result))]
+            (let [event (deref (s/take! stream) 1500 ::timeout)
+                  physical (physical-row node id)]
+              (is (= (str "request-" id) (:id event)))
+              (is (= (:progression entry) (:progression event)))
+              (is (= :dispatch-accepted (:status entry)))
+              (is (= :dispatch-accepted (:gesso.live.outbox/status physical)))
+              (is (= (:receipt-id entry)
+                     (:gesso.live.outbox/dispatch-receipt-id physical)))
+              (s/close! stream)))
+          (is (empty? (:candidates (discovery/discover-eligible! node))))
+          (is (zero? (:processed (cycle/process-cycle! node system {} source-id
+                                                        {:worker-id "fresh"})))))
+        (finally (live/close! system))))))
+
+(deftest physical-budget-and-resume-do-not-leak-unprocessed-leases-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)
+          ids [(intent-id 21) (intent-id 22) (intent-id 23)]]
+      (try
+        (seed! node ids)
+        (let [a (cycle/process-cycle! node system {} source-id
+                                      {:worker-id "w" :max-items 1})]
+          (is (= 1 (:processed a)))
+          (is (= :page-budget (:halt-reason a)))
+          (is (= (first ids) (:next-after a)))
+          (is (= :pending (:gesso.live.outbox/status (physical-row node (second ids)))))
+          (is (= :pending (:gesso.live.outbox/status (physical-row node (last ids)))))
+          (let [b (cycle/process-cycle! node system {} source-id
+                                        {:worker-id "w" :max-items 1
+                                         :after (:next-after a)})
+                c (cycle/process-cycle! node system {} source-id
+                                        {:worker-id "w" :max-items 1
+                                         :after (:next-after b)})]
+            (is (= :page-budget (:halt-reason b)))
+            (is (= :observed-end (:halt-reason c)))
+            (is (= ids (mapv (comp :intent-id first :results) [a b c])))
+            (is (every? #(= :dispatch-accepted
+                            (:gesso.live.outbox/status (physical-row node %))) ids))))
+        (finally (live/close! system))))))
+
+(deftest physical-contention-continues-but-requires-fresh-sweep-for-leftovers-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)
+          ids [(intent-id 31) (intent-id 32)]
+          original acquisition/acquire-pending!]
+      (try
+        (seed! node ids)
+        (let [result (with-redefs [acquisition/acquire-pending!
+                                   (fn [n claim]
+                                     (if (= (first ids) (:intent-id claim))
+                                       {:status :contended :intent-id (:intent-id claim)}
+                                       (original n claim)))]
+                       (cycle/process-cycle! node system {} source-id
+                                             {:worker-id "w" :max-items 2}))]
+          (is (= 2 (:processed result)))
+          (is (= 1 (:contended result)))
+          (is (= 1 (:dispatch-accepted result)))
+          (is (= :pending (:gesso.live.outbox/status (physical-row node (first ids)))))
+          (is (= :dispatch-accepted (:gesso.live.outbox/status (physical-row node (second ids)))))
+          (is (= 1 (:dispatch-accepted
+                     (cycle/process-cycle! node system {} source-id
+                                           {:worker-id "w" :max-items 2})))))
+        (finally (live/close! system))))))
+
+(deftest failed-second-delivery-retains-completion-and-current-lease-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)
+          ids [(intent-id 41) (intent-id 42) (intent-id 43)]
+          calls (atom 0)
+          original delivery/dispatch-acquired!]
+      (try
+        (seed! node ids)
+        (let [failure
+              (with-redefs [delivery/dispatch-acquired!
+                            (fn [& args]
+                              (if (= 2 (swap! calls inc))
+                                (throw (ex-info "simulated send uncertainty"
+                                                {:error/type :test/indeterminate}))
+                                (apply original args)))]
+                (exception-data
+                 #(cycle/process-cycle! node system {} source-id
+                                        {:worker-id "w" :max-items 3})))]
+          (is (= :gesso.live.outbox/cycle-interrupted (:error/type failure)))
+          (is (= :delivery (:phase failure)))
+          (is (= :delivery-exception (:reason failure)))
+          (is (= :test/indeterminate (:original-error/type failure)))
+          (is (= :unknown (:source-acceptance failure)))
+          (is (true? (:rescan-required? failure)))
+          (is (= 1 (:completed-count failure)))
+          (is (= (first ids) (:last-completed-cursor failure)))
+          (is (= (first ids) (get-in failure [:completed 0 :intent-id])))
+          (is (= (second ids) (get-in failure [:in-flight :intent-id])))
+          (is (uuid? (get-in failure [:in-flight :lease-id])))
+          (is (= :dispatch-accepted (:gesso.live.outbox/status
+                                     (physical-row node (first ids)))))
+          (is (= :leased (:gesso.live.outbox/status
+                           (physical-row node (second ids)))))
+          (is (= :pending (:gesso.live.outbox/status
+                            (physical-row node (last ids)))))
+          (is (nil? (:gesso.live.outbox/dispatch-receipt-id
+                    (physical-row node (second ids))))))
+        (finally (live/close! system))))))
+
+(deftest post-send-unacknowledged-result-interrupts-cycle-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)
+          id (intent-id 51)]
+      (try
+        (seed! node [id])
+        (let [failure
+              (with-redefs [delivery/dispatch-acquired!
+                            (fn [_ _ _ _ _]
+                              {:status :dispatched-unacknowledged
+                               :acknowledgment {:status :contended}})]
+                (exception-data
+                 #(cycle/process-cycle! node system {} source-id
+                                        {:worker-id "w" :max-items 1})))]
+          (is (= :gesso.live.outbox/cycle-interrupted (:error/type failure)))
+          (is (= :acknowledgment (:phase failure)))
+          (is (= :not-dispatch-accepted (:reason failure)))
+          (is (= :reported (:source-acceptance failure)))
+          (is (= :contended (:acknowledgment-status failure)))
+          (is (zero? (:completed-count failure)))
+          (is (= id (get-in failure [:in-flight :intent-id])))
+          (is (= :leased (:gesso.live.outbox/status (physical-row node id)))))
+        (finally (live/close! system))))))
+
+(deftest unknown-acquisition-error-preserves-earlier-completion-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)
+          ids [(intent-id 61) (intent-id 62)]
+          calls (atom 0)
+          original worker/acquire-sweep!]
+      (try
+        (seed! node ids)
+        (let [failure
+              (with-redefs [worker/acquire-sweep!
+                            (fn [& args]
+                              (if (= 2 (swap! calls inc))
+                                (throw (ex-info "unknown claim state"
+                                                {:error/type :test/claim-unknown}))
+                                (apply original args)))]
+                (exception-data
+                 #(cycle/process-cycle! node system {} source-id
+                                        {:worker-id "w" :max-items 2})))]
+          (is (= :gesso.live.outbox/cycle-interrupted (:error/type failure)))
+          (is (= :acquisition (:phase failure)))
+          (is (= :test/claim-unknown (:original-error/type failure)))
+          (is (= 1 (:completed-count failure)))
+          (is (= (first ids) (:last-completed-cursor failure)))
+          (is (nil? (:in-flight failure)))
+          (is (= :dispatch-accepted (:gesso.live.outbox/status
+                                     (physical-row node (first ids)))))
+          (is (= :pending (:gesso.live.outbox/status
+                            (physical-row node (second ids))))))
+        (finally (live/close! system))))))
+
+(deftest physical-empty-cycle-is-bounded-and-does-not-claim-work-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)]
+      (try
+        (let [out (cycle/process-cycle! node system {} source-id
+                                        {:worker-id "w"})]
+          (is (= :cycle-completed (:status out)))
+          (is (= :observed-end (:halt-reason out)))
+          (is (zero? (:processed out)))
+          (is (nil? (:next-after out))))
+        (finally (live/close! system))))))
+
+(deftest physical-accepted-source-with-unknown-ack-propagates-with-context-test
+  ;; The v2096 adapter has emitted to the actual Live source before the
+  ;; injected acknowledgment uncertainty. Preserve that distinction.
+  (with-open [node (xtn/start-node {})]
+    (let [system (make-system)
+          id (intent-id 71)]
+      (try
+        (seed! node [id])
+        (let [stream (source/subscribe (:source system)
+                                       {:topic :request :id (str "request-" id)})
+              failure
+              (with-redefs [acknowledgment/acknowledge-dispatch!
+                            (fn [& _] (throw (ex-info "unknown commit" {})))]
+                (exception-data #(cycle/process-cycle! node system {} source-id
+                                                       {:worker-id "w" :max-items 1})))
+              event (deref (s/take! stream) 1500 ::timeout)]
+          (is (= :gesso.live.outbox/cycle-interrupted (:error/type failure)))
+          (is (= :delivery (:phase failure)))
+          (is (= :gesso.live.outbox/post-dispatch-ack-unknown
+                 (:original-error/type failure)))
+          (is (= :reported (:source-acceptance failure)))
+          (is (= (str "request-" id) (:id event)))
+          (is (zero? (:completed-count failure)))
+          (is (= :leased (:gesso.live.outbox/status (physical-row node id))))
+          (s/close! stream))
+        (finally (live/close! system))))))
