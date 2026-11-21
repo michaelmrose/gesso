@@ -74,6 +74,7 @@
           mode (atom :submit)
           on-input (atom nil)
           response-status (atom 200)
+          response-headers (atom {})
           handler (certified/issue-certified-handler!
                    {:executor executor
                     :current-source plan-source
@@ -85,7 +86,9 @@
                     :result->response!
                     (fn [_ result]
                       (swap! calls conj :response)
-                      {:status @response-status :body result})})]
+                      (cond-> {:status @response-status :body result}
+                        (seq @response-headers)
+                        (assoc :headers @response-headers)))})]
       (fixture/with-closed-application
         {:operations
          {operation (fixture/trusted-operation
@@ -106,7 +109,8 @@
                               :system system
                               :host-handle (:handle issued)
                               :calls calls :mode mode :on-input on-input
-                              :response-status response-status}]
+                              :response-status response-status
+                              :response-headers response-headers}]
               (run))))))))
 
 (use-fixtures
@@ -116,6 +120,7 @@
     (reset! (:mode *case*) :submit)
     (reset! (:on-input *case*) nil)
     (reset! (:response-status *case*) 200)
+    (reset! (:response-headers *case*) {})
     (try (run)
          (finally (reset! (:on-input *case*) nil)))))
 
@@ -231,6 +236,70 @@
           (is (= :invalid-ring-response (:ring-response-class report)))
           (is (nil? handle))
           (is (= 1 @transactions)))))))
+
+(deftest non-error-ring-status-with-unqualified-htmx-effects-is-not-a-witness
+  ;; A physical 200 can carry HTMX response-control instructions which mutate
+  ;; browser state. Merely observing the commit and an HTTP success status
+  ;; does NOT qualify that undeclared effect. Check headers case-insensitively.
+  (doseq [headers [{"HX-Trigger" "claim-committed"}
+                   {"hX-ReTaRgEt" "#other-panel"}
+                   {:HX-Redirect "/other-page"}]]
+    (reset! (:response-headers *case*) headers)
+    (artificial-execution {}
+      (fn [{:keys [transactions]}]
+        (let [{:keys [execution report handle]} (observe (options))]
+          (is (= :returned (:outcome execution)))
+          (is (= 200 (get-in execution [:result :status])))
+          (is (= :physical-commit-with-unqualified-ring-response
+                 (:status report)))
+          (is (= :unqualified-browser-effect-response
+                 (:ring-response-class report)))
+          (is (true? (:definitive-execute-key-observed? report)))
+          (is (nil? handle))
+          (is (= :not-established
+                 (:response-contract-correspondence report)))
+          (is (= 1 @transactions)))))))
+
+(deftest committed-adapter-with-http-redirect-is-not-a-witness
+  ;; A redirect may be an application-valid response but is not a qualified
+  ;; response to this operation until its navigation effect is declared.
+  (reset! (:response-status *case*) 302)
+  (reset! (:response-headers *case*) {"Location" "/changed-page"})
+  (artificial-execution {}
+    (fn [{:keys [transactions]}]
+      (let [{:keys [execution report handle]} (observe (options))]
+        (is (= 302 (get-in execution [:result :status])))
+        (is (= :physical-commit-with-unqualified-ring-response
+               (:status report)))
+        (is (= :unqualified-redirect-response (:ring-response-class report)))
+        (is (nil? handle))
+        (is (= 1 @transactions))))))
+
+(deftest malformed-ring-headers-cannot-qualify-physical-observation
+  ;; Even an apparently successful HTTP status cannot authorize a malformed
+  ;; header collection: the response must at least have Ring-shaped headers.
+  (reset! (:response-headers *case*) [:HX-Trigger])
+  (artificial-execution {}
+    (fn [{:keys [transactions]}]
+      (let [{:keys [report handle]} (observe (options))]
+        (is (= :invalid-ring-response (:ring-response-class report)))
+        (is (= :physical-commit-with-unqualified-ring-response
+               (:status report)))
+        (is (nil? handle))
+        (is (= 1 @transactions))))))
+
+(deftest inert-content-type-header-preserves-bounded-physical-correlation
+  ;; An ordinary content-type header alone is not an HTMX control directive.
+  ;; The physical witness still does not establish its response contract.
+  (reset! (:response-headers *case*) {"cOnTeNt-TyPe" "text/html"})
+  (artificial-execution {}
+    (fn [{:keys [transactions]}]
+      (let [{:keys [report handle]} (observe (options))]
+        (is (= :bounded-installed-route-to-adapter-agreement (:status report)))
+        (is (= :non-error-ring-response (:ring-response-class report)))
+        (is (some? handle))
+        (is (= :not-established (:response-contract-correspondence report)))
+        (is (= 1 @transactions))))))
 
 (deftest later-observations-are-distinct-and-rechecks-are-side-effect-free
   (let [opts (options)]

@@ -12,8 +12,10 @@
    adapter arguments. A definitive execute-tx TransactionKey, a matching
    committed resolved-operation result, and a non-error Ring response from
    the SAME handler invocation are required for positive local correlation.
-   This checks response shape/status, NOT the semantic response mapping or
-   private disclosure contract. No second transaction is performed.
+   This checks response shape/status and excludes some known undeclared HTMX
+   response-control effects and redirects; it does NOT establish response
+   effect admission, semantic response mapping, private disclosure or browser
+   safety. No second transaction is performed.
 
    This is a controlled, privileged IN-PROCESS DIAGNOSTIC, not a transparent
    production Ring middleware. The special observer is added to a new request
@@ -32,7 +34,7 @@
             [gesso.live.consistency.xtdb :as adapter]
             [gesso.model.resolved-operation :as resolved]
             [gesso.model.tx :as tx])
-  (:import (java.util WeakHashMap)
+  (:import (java.util WeakHashMap Locale)
            (java.time Instant)
            (xtdb.api TransactionKey)))
 
@@ -60,6 +62,7 @@
     :callback-purity-and-input-authorization-not-proved
     :observer-and-adapter-hook-integrity-not-authenticated
     :http-response-contract-correspondence-not-established
+    :browser-response-effect-admission-not-established
     :actual-xtdb-api-and-transaction-receipt-not-authenticated
     :atomic-transaction-internal-prestate-and-guards
     :complete-physical-writer-coverage
@@ -171,19 +174,42 @@
               (<= 0 (.getTxId key))
               (instance? Instant (.getSystemTime key))))))
 
+(def ^:private htmx-response-control-headers
+  ;; HTMX 2.x response headers can independently trigger requests, change
+  ;; targets/history or initiate navigation. The controlled diagnostic has
+  ;; NO declared permission for these effects. This is a narrow exclusion
+  ;; list, not a proof that unlisted headers or HTML bodies are inert.
+  #{"hx-trigger" "hx-trigger-after-swap" "hx-trigger-after-settle"
+    "hx-location" "hx-redirect" "hx-refresh" "hx-retarget"
+    "hx-reswap" "hx-reselect" "hx-push-url" "hx-replace-url"})
+
+(defn- ring-header-name [k]
+  (cond
+    (string? k) (.toLowerCase ^String k Locale/ROOT)
+    (and (keyword? k) (nil? (namespace k)))
+    (.toLowerCase ^String (name k) Locale/ROOT)
+    :else nil))
+
 (defn- ring-response-class [capture]
-  ;; An actual Ring handler result is request-private. Only a coarse class
-  ;; escapes the diagnostic. Missing/malformed statuses and HTTP errors must
-  ;; not accompany a positive physical/request-to-response witness.
+  ;; A Ring result is request-private. Only its coarse disposition escapes.
+  ;; HTTP success alone cannot qualify unadmitted navigation or HTMX effects.
   (if (not= :returned (:outcome capture))
     :handler-threw
     (let [response (:result capture)
-          status (when (map? response) (:status response))]
+          status (when (map? response) (:status response))
+          headers (:headers response)
+          names (when (map? headers) (map ring-header-name (keys headers)))]
       (cond
         (not (and (integer? status) (<= 200 status 599)))
         :invalid-ring-response
-        (<= status 399) :non-error-ring-response
-        :else :http-error-response))))
+        (and (some? headers) (not (map? headers)))
+        :invalid-ring-response
+        (some nil? names) :invalid-ring-response
+        (<= 300 status 399) :unqualified-redirect-response
+        (<= 400 status 599) :http-error-response
+        (some htmx-response-control-headers names)
+        :unqualified-browser-effect-response
+        :else :non-error-ring-response))))
 
 (defn- classify [selected events poisoned capture observed-request postcheck?]
   (let [ring-class (ring-response-class capture)
