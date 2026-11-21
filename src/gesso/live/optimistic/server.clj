@@ -348,7 +348,19 @@
     :required-capabilities
     :settlement-contract
     :published-change-topics
+    :response-status-contract
     :execute!})
+
+(defn- response-status-contract? [contract]
+  ;; This is a declaration of ONE successful HTTP status from the original
+  ;; trusted semantic operation, NOT proof of response effect/HTML correctness.
+  ;; Reject metadata-bearing data, extra keys, and falsey declarations.
+  (and (or (instance? clojure.lang.PersistentArrayMap contract)
+           (instance? clojure.lang.PersistentHashMap contract))
+       (nil? (meta contract))
+       (= #{:status} (set (keys contract)))
+       (integer? (:status contract))
+       (<= 200 (:status contract) 299)))
 
 (defn- operation-choreo-options
   [{:keys [name operation browser-role authority-role]}]
@@ -400,6 +412,13 @@
    settlement construction. It lets application authority adapters make stable
    commit/progression expectations inspectable without putting that evidence on
    the browser wire.
+
+   :response-status-contract, when explicitly supplied, is a closed static
+   {:status <2xx>} declaration on the ORIGINAL trusted semantic operation.
+   It can later be projected through the checked application operation summary
+   and compared independently with the certified-operation table and issued
+   Ring handler. It does not validate arbitrary response bodies, headers,
+   browser effects, or the correctness of opaque trusted callbacks.
 
    :published-change-topics is an optional closed set of semantic Gesso Live
    primary-change topics that this trusted operation declares it may publish
@@ -456,6 +475,16 @@
         (when (some? declared-settlement-contract)
           (settlement-contract declared-settlement-contract))
 
+        response-status-contract
+        (when (contains? options' :response-status-contract)
+          (let [contract (:response-status-contract options')]
+            (when-not (response-status-contract? contract)
+              (server-error
+               :invalid-response-status-contract
+               "Trusted operation HTTP response status must be a closed 2xx status contract."
+               {}))
+            contract))
+
         published-change-topics
         (when (contains? options' :published-change-topics)
           (let [topics (:published-change-topics options')]
@@ -484,11 +513,13 @@
       ;; Verification/projection is registry-construction work, not request work.
       ;; Every request for this operation executes the same canonical authority
       ;; ExecutablePlan.
-      (assoc entry
-             :authority-plan
-             (optimistic-choreo/command-plan
-              (operation-choreo-options entry)
-              (:authority-role entry))))))
+      (cond-> (assoc entry
+                     :authority-plan
+                     (optimistic-choreo/command-plan
+                      (operation-choreo-options entry)
+                      (:authority-role entry)))
+        (contains? options' :response-status-contract)
+        (assoc :response-status-contract response-status-contract)))))
 
 (defn operation?
   [value]
@@ -508,6 +539,8 @@
        (contains? value :settlement-contract)
        (or (nil? (:settlement-contract value))
            (settlement-contract? (:settlement-contract value)))
+       (or (not (contains? value :response-status-contract))
+           (response-status-contract? (:response-status-contract value)))
        (contains? value :published-change-topics)
        (or (nil? (:published-change-topics value))
            (published-change-topics? (:published-change-topics value)))

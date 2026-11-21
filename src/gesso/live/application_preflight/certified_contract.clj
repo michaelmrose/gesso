@@ -68,7 +68,7 @@
     :canonical-html-response-preflight-adoption
     ;; This is an application-owned assembly/handler agreement, not yet an
     ;; allowance independently derived from canonical operation semantics.
-    :response-status-allowance-not-derived-from-original-operation})
+    :response-status-allowance-not-derived-from-canonical-model-semantics})
 
 ;; No report/map/function metadata can substitute for the exact issued callable.
 ;; Weak references do not retain a handler solely because of registration.
@@ -459,6 +459,16 @@
                         (require-response-status-contract!
                          (:response-status-contract binding)
                          [:certified-operations operation :response-status-contract]))
+                      ;; The original trusted operation (not the checked host
+                      ;; table or the response callback) owns the allowance.
+                      ;; Presence-sensitive equality prevents both a forged
+                      ;; extra allowance and silent loss of a declared one.
+                      (when-not (= (select-keys (get summary operation)
+                                                [:response-status-contract])
+                                   (select-keys binding
+                                                [:response-status-contract]))
+                        (fail! :operation-response-status-contract-mismatch
+                               [:certified-operations operation] {}))
                       (let [{:keys [executor current-source]} binding
                             proof-description
                             (require-current-binding! executor current-source)
@@ -523,7 +533,8 @@
                     :supplied-semantic-route-table-closed
                     :original-plan-and-proof-source-rechecked
                     :exact-issued-handler-to-executor-identities
-                    :operation-table-to-issued-response-status-agreement}
+                    :operation-table-to-issued-response-status-agreement
+                    :original-trusted-operation-to-response-status-agreement}
          :open-assumptions open-assumptions
          :open-premises
          (into #{} (mapcat :open-premises (vals certified-descriptions)))

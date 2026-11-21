@@ -94,7 +94,8 @@
       (fixture/with-closed-application
         {:operations
          {operation (fixture/trusted-operation
-                     operation {:published-change-topics #{}})}}
+                     operation {:published-change-topics #{}
+                                :response-status-contract {:status 200}})}}
         (fn [{:keys [assembly]}]
           (let [source {:application-assembly assembly
                         :semantic-route-handlers {operation handler}

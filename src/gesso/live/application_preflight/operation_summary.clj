@@ -143,7 +143,7 @@
               route-requirement
               (get-in operation' [:route-requirements operation])]
           [operation
-           {:choreography-name (:choreography-name realization)
+           (cond-> {:choreography-name (:choreography-name realization)
             :browser-role (:browser-role realization)
             :authority-role (:authority-role realization)
             :browser-plan-key (:plan-key realization)
@@ -175,7 +175,15 @@
                     :stream-route
                     (select-keys (:stream-route acquisition-realization)
                                  [:method :path :boundary])}]))
-              (sort-by pr-str (get affected-fragments operation #{}))))}]))
+              (sort-by pr-str (get affected-fragments operation #{}))))}
+             ;; Project only an ORIGINAL trusted server-operation declaration.
+             ;; No second registry, invented default, or response allowance
+             ;; computed from the later Ring callback is authoritative here.
+             (contains? (get-in execution' [:server :operations operation])
+                        :response-status-contract)
+             (assoc :response-status-contract
+                    (get-in execution' [:server :operations operation
+                                        :response-status-contract])))]))
       (sort-by pr-str (keys (:operations operation')))))))
 
 ;; Preserve the existing derivation and exception shapes. The calling facade

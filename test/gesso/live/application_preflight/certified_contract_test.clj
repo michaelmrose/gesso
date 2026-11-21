@@ -149,7 +149,8 @@
         accepted (assoc original-source :semantic-route-handlers
                         (assoc (:semantic-route-handlers base)
                                route-1 issued route-2 issued))]
-    (with-summary summary
+    (with-summary (assoc-in summary [claim :response-status-contract]
+                            {:status 200})
       (fn []
         (let [report (check accepted)]
           (is (= :matched-issued-source
@@ -163,16 +164,40 @@
                                        (get-in base
                                                [:semantic-route-handlers route-2]))))]
           (is (= [:semantic-route-handlers route-2] (:at error))))
-        (reject-binding! :issued-response-status-contract-mismatch
+        (reject-binding! :operation-response-status-contract-mismatch
                          #(check (assoc-in accepted
                                            [:certified-operations claim
                                             :response-status-contract]
                                            {:status 201})))
-        (reject-binding! :issued-response-status-contract-mismatch
+        (reject-binding! :operation-response-status-contract-mismatch
                          #(check (update-in accepted
                                             [:certified-operations claim]
                                             dissoc :response-status-contract)))
         (is (empty? @calls))))))
+
+(deftest original-trusted-operation-status-owns-application-allowance
+  ;; A pair of matching checked application/issued-handler policies is not
+  ;; sufficient when the original semantic operation declared no such policy.
+  ;; Conversely an original declaration cannot simply be forgotten downstream.
+  (let [{:keys [base issue-source]} (environment)
+        issued (binding/issue-certified-handler!
+                (assoc issue-source :response-status-contract {:status 200}))
+        accepted (-> base
+                     (assoc-in [:certified-operations claim
+                                :response-status-contract] {:status 200})
+                     (assoc-in [:semantic-route-handlers route-1] issued)
+                     (assoc-in [:semantic-route-handlers route-2] issued))]
+    (with-summary summary
+      #(reject-binding! :operation-response-status-contract-mismatch
+                        (fn [] (check accepted))))
+    (with-summary (assoc-in summary [claim :response-status-contract]
+                            {:status 200})
+      (fn []
+        (reject-binding! :operation-response-status-contract-mismatch
+                         #(check base))
+        (is (= :matched-issued-source
+               (get-in (check accepted)
+                       [:certified-operations claim :response-status-binding])))))))
 
 (deftest issued-response-allowance-cannot-be-self-declared-outside-app-table
   (let [{:keys [base issue-source calls]} (environment)

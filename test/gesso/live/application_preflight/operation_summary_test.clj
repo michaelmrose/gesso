@@ -276,6 +276,18 @@
     (is (= {:fixture/capability :claim} (:execution-capabilities entry)))
     (is (= {:fixture/settlement :claim} (:settlement-contract entry)))))
 
+(deftest response-status-is-projected-from-original-prepared-server-only
+  (let [declared (assoc-in fixture
+                           [:execution-assembly :server :operations
+                            :request/claim :response-status-contract]
+                           {:status 200})
+        result (checked-summary declared current-report)]
+    (is (= {:status 200}
+           (get-in result [:request/claim :response-status-contract])))
+    (is (not (contains? (:request/cancel result) :response-status-contract)))
+    (is (not (contains? (:request/claim (checked-summary))
+                        :response-status-contract)))))
+
 (deftest routes-are-derived-and-sorted-without-inventing-extra-fields
   (let [routes (get-in (checked-summary) [:request/claim :routes])]
     (is (= [{:route-id :route/z-claim

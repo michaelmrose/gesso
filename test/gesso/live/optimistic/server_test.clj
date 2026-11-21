@@ -140,6 +140,23 @@
     (is (= :authority (:authority-role operation)))
     (is (= :browser (:browser-role operation)))))
 
+(deftest trusted-operation-owns-optional-closed-http-response-status
+  ;; The trusted semantic operation is a different declaration boundary from
+  ;; either the certified-operation table or the issued Ring callback.
+  (let [operation (base-operation (fn [_] (confirmed-result))
+                                  {:response-status-contract {:status 200}})]
+    (is (server/operation? operation))
+    (is (= {:status 200} (:response-status-contract operation)))
+    (is (not (contains? (base-operation (fn [_] (confirmed-result)))
+                        :response-status-contract)))
+    (doseq [invalid [nil false {:status nil} {:status 503}
+                     {:status 200 :extra true}]]
+      (is (= :invalid-response-status-contract
+             (error-kind #(base-operation
+                           (fn [_] (confirmed-result))
+                           {:response-status-contract invalid})))
+          (str "Must reject invalid original declaration: " (pr-str invalid))))))
+
 (deftest request-execution-reuses-precompiled-authority-plan
   (let [calls (atom 0)
         real-plan optimistic-choreo/command-plan
