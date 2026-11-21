@@ -107,6 +107,33 @@
    :main-opts
    ["-m" "cognitect.test-runner"]}
 
+  ;; Direct browser-gate entry point. :test deliberately has :main-opts
+  ;; [-m cognitect.test-runner], so appending another -m to -M:test sends
+  ;; those arguments to the TEST RUNNER instead of running the browser gate.
+  ;; Keep the standard :test runner intact, while sharing its browser
+  ;; dependencies in this main-opts-free alias for explicit -m dispatch.
+  :outbox-browser
+  {:extra-paths ["test"]
+
+   :extra-deps
+   {com.microsoft.playwright/playwright
+    {:mvn/version "1.61.0"}
+
+    org.webjars.npm/htmx.org
+    {:mvn/version "2.0.7"}
+
+    org.webjars.npm/htmx-ext-sse
+    {:mvn/version "2.2.4"}
+
+    org.clojure/test.check
+    {:mvn/version "1.1.2"}}
+
+   :jvm-opts
+   ["--add-opens=java.base/java.nio=ALL-UNNAMED"
+    "--enable-native-access=ALL-UNNAMED"
+    "-Dio.netty.tryReflectionSetAccessible=true"
+    "-Dio.netty.noUnsafe=false"]}
+
   :build
   {:deps
    {io.github.clojure/tools.build

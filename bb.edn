@@ -131,15 +131,15 @@
 
   test:outbox:browser:preflight
   {:doc "Check whether system Chromium can navigate to a local test page. This is NOT a browser convergence pass."
-   :task (shell "clojure" "-M:test" "-m" "gesso.live.outbox.browser-gate" "--preflight")}
+   :task (shell "clojure" "-M:outbox-browser" "-m" "gesso.live.outbox.browser-gate" "--preflight")}
 
   test:outbox:browser:readiness
   {:doc "Run HTTP/SSE/XTDB readiness tests without claiming Chromium convergence."
-   :task (shell "clojure" "-M:test" "-m" "gesso.live.outbox.browser-gate" "--readiness")}
+   :task (shell "clojure" "-M:outbox-browser" "-m" "gesso.live.outbox.browser-gate" "--readiness")}
 
   test:outbox:browser
   {:doc "Strict real Chromium EventSource/HTMX/DOM gate. Fails closed on browser policy or runtime errors; no fallback."
-   :task (shell "clojure" "-M:test" "-m" "gesso.live.outbox.browser-gate")}
+   :task (shell "clojure" "-M:outbox-browser" "-m" "gesso.live.outbox.browser-gate")}
 
   test:browser:integration
   {:doc "Run production gesso-live.js against real Chromium + HTMX/SSE + deterministic HTTP fixtures. Included by `bb test:cljs`."
