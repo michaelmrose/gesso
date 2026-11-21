@@ -488,6 +488,84 @@
                    (handler {:xtdb/consistency
                              {:snapshot-time t :await-token "fresh-wait"}})))))))))
 
+(deftest consistency-context-rejects-inconsistent-transaction-times-test
+  ;; A completed tx receipt has one system time. An independently admitted
+  ;; snapshot-time cannot silently change that receipt merely because it
+  ;; arrives through a different context alias (or the same alias).
+  (let [committed (Instant/parse "2026-11-20T18:00:00Z")
+        different (.minusSeconds committed 1)
+        cases [{:gesso.live/consistency {:tx-id 2048 :system-time committed}
+                :xtdb/consistency {:snapshot-time different}}
+               {:gesso.live/consistency {:tx-id 2048 :snapshot-time committed}
+                :consistency {:system-time different}}
+               {:gesso.live/consistency {:tx-id 2048
+                                         :system-time committed
+                                         :snapshot-time different}}]
+        calls (atom [])
+        unexpected (fn [& args] (swap! calls conj args) :unexpected)]
+    (with-redefs-fn {(xtdb-var '*q*) unexpected
+                     (xtdb-var '*plan-q*) unexpected
+                     (xtdb-var '*status*) unexpected}
+      (fn []
+        (doseq [aliases cases
+                :let [ctx (merge {:xtdb/node :authority-node
+                                  :xtdb/read-connectable :read} aliases)]]
+          (doseq [invoke [#(xtdb-live/consistency-from ctx)
+                          #(xtdb-live/q-consistent-from ctx sample-query)
+                          #(xtdb-live/plan-q-consistent-from ctx sample-query)
+                          #(xtdb-live/bind-request-frontier ctx)]]
+            (let [failure (try (invoke)
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Contradictory transaction times must fail: "
+                       (pr-str aliases)))
+              (when failure
+                (is (= :contradictory-xtdb-transaction-times
+                       (:reason (ex-data failure)))))))
+          (is (empty? @calls)
+              "Rejected transaction-time metadata must not reach XTDB"))))
+    ;; A complete transaction accompanied by an equal independent snapshot
+    ;; time is allowed and must retain its metadata and await requirement.
+    (is (= {:tx-id 2048 :system-time committed
+            :snapshot-time committed :await-token "write-token"}
+           (xtdb-live/consistency-from
+            {:gesso.live/consistency {:tx-id 2048
+                                      :system-time committed}
+             :xtdb/consistency {:snapshot-time committed
+                                :await-token "write-token"}})))))
+
+(deftest deferred-biff-rejects-contradictory-transaction-times-test
+  ;; Biff may introduce new consistency in the actual handler context.
+  ;; A complete admitted pair is not authority to overwrite its time from a
+  ;; different context; check both the populated and empty node paths.
+  (let [committed (Instant/parse "2026-11-20T18:00:00Z")
+        different (.minusSeconds committed 1)
+        calls (atom 0)]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub '*status*
+        (fn [_] {:latest-completed-txs
+                 {"xtdb" (if populated?
+                           [{:tx-id 2048 :system-time committed}]
+                           [])}})
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node :authority-node
+                        :gesso.live/consistency {:tx-id 2048
+                                                 :system-time committed}})
+                wrapped ((:biff.core/wrap-db-snapshot bound)
+                         (fn [_] (swap! calls inc) :unexpected))
+                failure (try (wrapped {:xtdb/consistency
+                                       {:snapshot-time different}})
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure))
+            (when failure
+              (is (= :contradictory-xtdb-transaction-times
+                     (:reason (ex-data failure)))))
+            (is (zero? @calls)
+                "A conflicting deferred time must not reach the handler")))))))
+
 (deftest query-consistency-drops-tx-metadata-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]
     (is (= {:snapshot-time t

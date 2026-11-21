@@ -1274,6 +1274,27 @@
          require-frontier-satisfies-existing-xtdb!
          consistency-from)
 
+(defn- require-coherent-xtdb-transaction-times!
+  "Reject inconsistent transaction/system and snapshot time coordinates.
+
+   Independent source maps may each be valid, yet their composition can
+   introduce two different times for the same alleged transaction receipt.
+   Neither map precedence nor delayed basis conversion may erase that
+   contradiction before a physical XTDB read or deferred Biff execution."
+  [metadata origin]
+  (let [system-time (:system-time metadata)
+        snapshot-time (:snapshot-time metadata)]
+    (when (and (some? system-time)
+               (some? snapshot-time)
+               (not= system-time snapshot-time))
+      (throw
+       (ex "XTDB consistency carries contradictory transaction and snapshot times."
+           {:reason :contradictory-xtdb-transaction-times
+            :origin origin
+            :system-time system-time
+            :snapshot-time snapshot-time})))
+    metadata))
+
 (defn- complete-xtdb-tx-metadata?
   "A tx-id and time form one portable transaction observation.
 
@@ -1303,7 +1324,7 @@
             :origin origin
             :left-metadata (select-keys left [:tx-id :system-time :snapshot-time])
             :right-metadata (select-keys right [:tx-id :system-time :snapshot-time])})))
-    merged))
+    (require-coherent-xtdb-transaction-times! merged origin)))
 
 (defn- compose-wrapped-xtdb-consistency!
   "Preserve independently admitted XTDB query consistency into a fresh request.
@@ -1725,7 +1746,9 @@
     (throw
      (ex "XTDB consistency must be a map or nil."
          {:consistency consistency})))
-  (select-compact consistency tx-consistency-keys))
+  (require-coherent-xtdb-transaction-times!
+   (select-compact consistency tx-consistency-keys)
+   :normalization))
 
 (defn consistency-from
   "Compose explicit XTDB consistency from all supported request/context aliases.
