@@ -1,15 +1,18 @@
 (ns gesso.live.outbox.browser-restart-test
-  "v2118: Two independent Chromium tabs survive physical host JVM death.
+  "v2119: Observe the exact HTMX progression sent by each surviving tab.
 
    The replacement host binds the SAME port, reopens the SAME local XTDB
    log/storage, and provides a newly owned Live source/worker. The browser
    reconnects both EventSource streams and delivers progression-correlated
-   HTTP/HTMX refreshes to each unchanged page. This covers process death,
+   HTTP/HTMX refreshes to each unchanged page. The per-tab configRequest
+   observer checks the outgoing headers separately, while the child server
+   retains aggregate physical readback. This covers process death,
    not an entire machine, disk, or network partition."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
-            [gesso.live.browser.chromium :as chromium])
+            [gesso.live.browser.chromium :as chromium]
+            [gesso.live.progression.http :as progression.http])
   (:import [java.net InetSocketAddress ServerSocket URI]
            [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
            [java.nio.file Files Path]
@@ -19,10 +22,30 @@
 (def ^:private panel "v2109-browser-panel")
 
 (def ^:private capture-dom-js
-  "() => { window.__v2118={root:document.querySelector('[data-gesso-live-fragment]'),listener:document.querySelector('[data-gesso-live-invalidation]'),href:location.href}; return !!window.__v2118.root && !!window.__v2118.listener; }")
+  ;; Gesso registers the document configRequest handler during page startup.
+  ;; This later observer reads the resulting header without modifying it.
+  ;; Per-page capture rules out two correct server reads from one tab being
+  ;; mistaken for evidence about both tabs.
+  (str "() => { window.__v2119={"
+       "root:document.querySelector('[data-gesso-live-fragment]'),"
+       "listener:document.querySelector('[data-gesso-live-invalidation]'),"
+       "href:location.href,headers:[]};"
+       "document.addEventListener('htmx:configRequest',function(event){"
+       "const detail=event.detail;"
+       "if(detail && detail.elt && "
+       "detail.elt.hasAttribute('data-gesso-live-fragment')){"
+       "window.__v2119.headers.push(detail.headers && detail.headers["
+       (pr-str progression.http/request-header-name)
+       "]);}});"
+       "return !!window.__v2119.root && !!window.__v2119.listener; }"))
 
 (def ^:private stable-dom-js
-  "() => window.__v2118.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2118.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2118.href === location.href")
+  "() => window.__v2119.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2119.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2119.href === location.href")
+
+(defn- wait-for-page-header! [page expected from-index]
+  (chromium/wait-for-js!
+   page (str "() => window.__v2119.headers.slice(" from-index
+             ").includes(" (pr-str expected) ")")))
 
 (defn- wait-for-status! [page status]
   (chromium/wait-for-js!
@@ -107,7 +130,7 @@
 
 (deftest browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test
   (let [root (Files/createTempDirectory
-              "gesso-v2118-two-tab-process-restart-"
+              "gesso-v2119-two-tab-headers-restart-"
               (make-array java.nio.file.attribute.FileAttribute 0))
         port (random-loopback-port)
         base (str "http://127.0.0.1:" port)
@@ -145,7 +168,9 @@
         (let [claim (http! client base "/control/claim")]
           (is (= :claimed (:status claim)))
           (is (string? (:expected-header claim)))
-          (doseq [page tabs] (wait-for-status! page :claimed))
+          (doseq [page tabs]
+            (wait-for-status! page :claimed)
+            (wait-for-page-header! page (:expected-header claim) 0))
           (is (true?
                (eventual!
                 #(at-least-two-fragment-reads?
@@ -182,11 +207,18 @@
               (chromium/clear-diagnostics! ctx)
               (let [baselines (mapv #(long (chromium/evaluate
                                            % "() => window.__v2109.refreshes")) tabs)
+                    header-baselines (mapv #(long (chromium/evaluate
+                                                  % "() => window.__v2119.headers.length")) tabs)
                     done (http! client base "/control/done")]
                 (is (= :done (:status done)))
                 (is (string? (:expected-header done)))
-                (doseq [[page baseline] (map vector tabs baselines)]
+                (is (not= (:expected-header claim) (:expected-header done))
+                    "The post-restart write must advance the source requirement")
+                (doseq [[page baseline header-baseline]
+                        (map vector tabs baselines header-baselines)]
                   (wait-for-status! page :done)
+                  (wait-for-page-header! page (:expected-header done)
+                                         header-baseline)
                   (is (> (long (chromium/evaluate
                                 page "() => window.__v2109.refreshes"))
                          baseline))
