@@ -858,6 +858,82 @@
             (xtdb-live/read-query-opts
              {:snapshot-token analytics} nil {:snapshot-token reports}))))))
 
+(deftest complete-receipts-preserve-admitted-query-await-tokens-test
+  ;; A complete transaction receipt is an admitted read minimum even without
+  ;; a separate generic progression carrier. An independent opaque await
+  ;; token can express an additional write visibility requirement: the
+  ;; caller's different token has no known stronger/weaker ordering and
+  ;; cannot silently replace it in either XTDB read path.
+  (let [time (Instant/parse "2026-11-20T21:00:00Z")
+        consistency {:tx-id 2059 :system-time time
+                     :await-token "admitted-wait"}
+        ctx {:xtdb/read-connectable :read
+             :gesso.live/consistency consistency}
+        alternate {:await-token "caller-wait"}
+        calls (atom [])
+        query (fn [& args]
+                (swap! calls conj args)
+                :queried)]
+    (doseq [builder [#(xtdb-live/consistent-query-opts consistency alternate)
+                     #(xtdb-live/read-query-opts consistency nil alternate)]]
+      (let [failure (try (builder)
+                         nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo failure)
+            "Different opaque wait tokens cannot satisfy each other")
+        (when failure
+          (is (= :conflicting-receipt-query-await-tokens
+                 (:reason (ex-data failure)))))))
+    (with-redefs-fn {(xtdb-var '*q*) query
+                     (xtdb-var '*plan-q*) query}
+      (fn []
+        (doseq [invoke [#(xtdb-live/q-consistent
+                          :read sample-query consistency alternate)
+                        #(xtdb-live/plan-q-consistent
+                          :read sample-query consistency alternate)
+                        #(xtdb-live/q-consistent-from
+                          ctx sample-query alternate)
+                        #(xtdb-live/plan-q-consistent-from
+                          ctx sample-query alternate)]]
+          (let [failure (try (invoke)
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                "Conflicting waits must fail before physical query I/O")
+            (when failure
+              (is (= :conflicting-receipt-query-await-tokens
+                     (:reason (ex-data failure)))))))
+        (is (empty? @calls)
+            "Neither physical query path may see a discarded admitted wait")
+        ;; Exact duplicate tokens and independent other option fields remain
+        ;; valid, preserving the original wait in the resulting XTDB opts.
+        (doseq [builder [#(xtdb-live/consistent-query-opts
+                            consistency {:await-token "admitted-wait"
+                                         :key-fn :kebab-case-keyword})
+                         #(xtdb-live/read-query-opts
+                            consistency nil {:await-token "admitted-wait"
+                                             :key-fn :kebab-case-keyword})]]
+          (is (= {:await-token "admitted-wait"
+                  :snapshot-time time
+                  :key-fn :kebab-case-keyword}
+                 (select-keys (builder)
+                              [:await-token :snapshot-time :key-fn]))))
+        (is (= :queried
+               (xtdb-live/q-consistent
+                :read sample-query consistency
+                {:await-token "admitted-wait"})))
+        (is (= "admitted-wait" (:await-token (last (last @calls)))))))
+    ;; Without a complete receipt, the ordinary caller override remains
+    ;; intentionally supported by both option constructors.
+    (is (= "caller-wait"
+           (:await-token
+            (xtdb-live/consistent-query-opts
+             {:await-token "admitted-wait"} alternate))))
+    (is (= "caller-wait"
+           (:await-token
+            (xtdb-live/read-query-opts
+             {:tx-id 2059 :await-token "admitted-wait"} nil alternate))))))
+
 (deftest query-consistency-drops-tx-metadata-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]
     (is (= {:snapshot-time t

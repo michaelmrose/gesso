@@ -916,17 +916,31 @@
 (declare compose-independent-snapshot-tokens!)
 
 (defn- merge-complete-receipt-query-opts
-  "Preserve independent query snapshot obligations for a complete receipt.
+  "Preserve independent query read obligations for a complete receipt.
 
-   Under generic progression, enforce-progression-query-opts already composes
-   both sources and advances the selected database to its required frontier.
-   Without that authority, normal caller-option precedence is preserved for
-   convenience-only consistency, but a complete tx/time receipt cannot permit
-   the caller's token to erase independently admitted database snapshots.
-   Validate both canonical tokens and reject conflicting overlapping bases."
+   Under generic progression, enforce-progression-query-opts already checks
+   independent await tokens and composes snapshot bases. Without that carrier,
+   a complete tx/time receipt still admits read requirements: a caller's
+   different opaque await token cannot supersede an admitted wait, and its
+   snapshot token cannot erase an independent database time basis.
+
+   Convenience-only consistency without a complete receipt retains ordinary
+   explicit caller option precedence."
   [consistency consistency-options caller-options]
-  (let [merged (merge consistency-options caller-options)]
-    (if (and (consistency->basis consistency (:database merged))
+  (let [merged (merge consistency-options caller-options)
+        complete-receipt? (boolean
+                           (consistency->basis consistency (:database merged)))]
+    (when (and complete-receipt?
+               (contains? consistency-options :await-token)
+               (contains? caller-options :await-token)
+               (not= (:await-token consistency-options)
+                     (:await-token caller-options)))
+      (throw
+       (ex "Complete XTDB transaction receipt has conflicting opaque query await tokens."
+           {:reason :conflicting-receipt-query-await-tokens
+            :consistency-await-token (:await-token consistency-options)
+            :caller-await-token (:await-token caller-options)})))
+    (if (and complete-receipt?
              (contains? consistency-options :snapshot-token)
              (contains? caller-options :snapshot-token))
       (assoc merged :snapshot-token
