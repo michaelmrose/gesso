@@ -1,10 +1,10 @@
 (ns gesso.live.outbox.browser-restart-test
-  "v2117: Chromium remains alive while the entire concrete host JVM dies.
+  "v2118: Two independent Chromium tabs survive physical host JVM death.
 
    The replacement host binds the SAME port, reopens the SAME local XTDB
    log/storage, and provides a newly owned Live source/worker. The browser
-   receives an EventSource reconnect and a progression-correlated HTTP/HTMX
-   refresh without page navigation. This covers physical process death,
+   reconnects both EventSource streams and delivers progression-correlated
+   HTTP/HTMX refreshes to each unchanged page. This covers process death,
    not an entire machine, disk, or network partition."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -17,6 +17,23 @@
            [java.util.concurrent TimeUnit]))
 
 (def ^:private panel "v2109-browser-panel")
+
+(def ^:private capture-dom-js
+  "() => { window.__v2118={root:document.querySelector('[data-gesso-live-fragment]'),listener:document.querySelector('[data-gesso-live-invalidation]'),href:location.href}; return !!window.__v2118.root && !!window.__v2118.listener; }")
+
+(def ^:private stable-dom-js
+  "() => window.__v2118.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2118.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2118.href === location.href")
+
+(defn- wait-for-status! [page status]
+  (chromium/wait-for-js!
+   page (str "() => document.getElementById('" panel
+             "')?.getAttribute('data-authoritative-status') === '"
+             (name status) "'")))
+
+(defn- at-least-two-fragment-reads? [fragments status progression]
+  (<= 2 (count (filter (fn [{observed :status header :header}]
+                         (and (= status observed) (= progression header)))
+                       fragments))))
 
 (defn- eventual! [f timeout-ms]
   (let [deadline (+ (System/nanoTime) (* 1000000 timeout-ms))]
@@ -90,7 +107,7 @@
 
 (deftest browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test
   (let [root (Files/createTempDirectory
-              "gesso-v2117-browser-process-restart-"
+              "gesso-v2118-two-tab-process-restart-"
               (make-array java.nio.file.attribute.FileAttribute 0))
         port (random-loopback-port)
         base (str "http://127.0.0.1:" port)
@@ -104,39 +121,43 @@
             _ (reset! initial* first-child)
             first-status (http! client base "/control/status")
             harness (chromium/start! {:args ["--no-sandbox"
-                                              "--disable-dev-shm-usage"]})
+                                             "--disable-dev-shm-usage"]})
             _ (reset! harness* harness)
             ctx (chromium/new-context! harness)
             _ (reset! context* ctx)
-            page (chromium/new-page! ctx)]
+            ;; Separate physical tabs share the same authorized browser session,
+            ;; but each owns its own EventSource, HTMX root, and pending state.
+            tabs [(chromium/new-page! ctx) (chromium/new-page! ctx)]]
         (is (= :pending (:domain first-status)))
-        (chromium/navigate! page (str base "/"))
-        (chromium/wait-for-js!
-         page "() => window.__v2109 && window.__v2109.runtime === true && window.__v2109.opens >= 1")
-        (chromium/wait-for-js!
-         page "() => document.getElementById('v2109-browser-panel')?.getAttribute('data-authoritative-status') === 'pending'")
-        ;; Capture original DOM node identities and browser state before the
-        ;; host JVM is killed. A reload/recreated page cannot satisfy this.
-        (is (true? (chromium/evaluate
-                    page
-                    "() => { window.__v2117={root:document.querySelector('[data-gesso-live-fragment]'),listener:document.querySelector('[data-gesso-live-invalidation]'),href:location.href}; return !!window.__v2117.root && !!window.__v2117.listener; }")))
+        (doseq [page tabs]
+          (chromium/navigate! page (str base "/"))
+          (chromium/wait-for-js!
+           page "() => window.__v2109 && window.__v2109.runtime === true && window.__v2109.opens >= 1")
+          (wait-for-status! page :pending)
+          ;; Keep the precise original nodes and URL in each page. A reload
+          ;; or silently remounted root in either tab invalidates the evidence.
+          (is (true? (chromium/evaluate page capture-dom-js))))
+        (is (true?
+             (eventual!
+              #(= 2 (:active (http! client base "/control/status")))
+              10000))
+            "Both independent EventSource subscriptions must be active")
         (let [claim (http! client base "/control/claim")]
           (is (= :claimed (:status claim)))
           (is (string? (:expected-header claim)))
-          (chromium/wait-for-js!
-           page "() => document.getElementById('v2109-browser-panel')?.getAttribute('data-authoritative-status') === 'claimed'")
+          (doseq [page tabs] (wait-for-status! page :claimed))
           (is (true?
                (eventual!
-                #(some (fn [{:keys [status header]}]
-                         (and (= :claimed status)
-                              (= (:expected-header claim) header)))
-                       (:fragments (http! client base "/control/status")))
-                10000)))
+                #(at-least-two-fragment-reads?
+                  (:fragments (http! client base "/control/status"))
+                  :claimed (:expected-header claim))
+                10000))
+              "Both tabs must issue an exact-progression HTMX claim refresh")
           (let [old-pid (:pid first-status)
-                old-opens (long (chromium/evaluate page
-                                                  "() => window.__v2109.opens"))]
-            ;; Kill the ENTIRE child JVM. No Biff stop, Live close, normal
-            ;; XTDB close or HTTP shutdown runs. Chromium remains untouched.
+                old-opens (mapv #(long (chromium/evaluate
+                                        % "() => window.__v2109.opens")) tabs)]
+            ;; Kill the ENTIRE child JVM. No orderly Biff/Live/XTDB close.
+            ;; Both pages stay open in Chromium throughout the interruption.
             (.destroyForcibly ^Process (:process first-child))
             (is (.waitFor ^Process (:process first-child)
                           20 TimeUnit/SECONDS))
@@ -147,39 +168,37 @@
               (is (not= old-pid (:pid recovered)))
               (is (= :claimed (:domain recovered))
                   "The replacement JVM must reopen the persisted XTDB change")
-              (chromium/wait-for-js!
-               page (str "() => window.__v2109.opens > " old-opens))
+              (doseq [[page opens] (map vector tabs old-opens)]
+                (chromium/wait-for-js!
+                 page (str "() => window.__v2109.opens > " opens))
+                (is (true? (chromium/evaluate page stable-dom-js))))
               (is (true?
-                   (chromium/evaluate
-                    page
-                    "() => window.__v2117.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2117.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2117.href === location.href")))
-              (is (eventual! #(pos? (:connections (http! client base "/control/status")))
-                             10000))
-              ;; Diagnostics caused by the intentional forced disconnect
-              ;; are separately observable; clear only after the re-open.
+                   (eventual!
+                    #(= 2 (:active (http! client base "/control/status")))
+                    10000))
+                  "Both EventSource sessions must reconnect to the new JVM")
+              ;; Clear only diagnostics caused by the intentionally lost host,
+              ;; after BOTH independent EventSource connections are reopened.
               (chromium/clear-diagnostics! ctx)
-              (let [baseline (long (chromium/evaluate
-                                    page "() => window.__v2109.refreshes"))
+              (let [baselines (mapv #(long (chromium/evaluate
+                                           % "() => window.__v2109.refreshes")) tabs)
                     done (http! client base "/control/done")]
                 (is (= :done (:status done)))
                 (is (string? (:expected-header done)))
-                (chromium/wait-for-js!
-                 page "() => document.getElementById('v2109-browser-panel')?.getAttribute('data-authoritative-status') === 'done'")
-                (is (> (long (chromium/evaluate
-                              page "() => window.__v2109.refreshes"))
-                       baseline))
+                (doseq [[page baseline] (map vector tabs baselines)]
+                  (wait-for-status! page :done)
+                  (is (> (long (chromium/evaluate
+                                page "() => window.__v2109.refreshes"))
+                         baseline))
+                  (is (true? (chromium/evaluate page stable-dom-js))))
                 (is (true?
                      (eventual!
-                      #(some (fn [{:keys [status header]}]
-                               (and (= :done status)
-                                    (= (:expected-header done) header)))
-                             (:fragments (http! client base "/control/status")))
-                      10000)))
+                      #(at-least-two-fragment-reads?
+                        (:fragments (http! client base "/control/status"))
+                        :done (:expected-header done))
+                      10000))
+                    "Both tabs must request the exact new source progression")
                 (is (= :done (:domain (http! client base "/control/status"))))
-                (is (true?
-                     (chromium/evaluate
-                      page
-                      "() => window.__v2117.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2117.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2117.href === location.href")))
                 (is (true? (chromium/assert-clean! ctx))))))))
       (finally
         (when-let [ctx @context*] (chromium/close-context! ctx))
