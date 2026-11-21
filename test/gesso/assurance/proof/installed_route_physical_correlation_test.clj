@@ -301,6 +301,44 @@
         (is (= :not-established (:response-contract-correspondence report)))
         (is (= 1 @transactions))))))
 
+(deftest unclassified-response-headers-cannot-grant-physical-response-witness
+  ;; v2077: HTMX's known control headers are not the entire surface.
+  ;; Set-Cookie mutates browser state; Refresh navigates; Content-Disposition
+  ;; can initiate downloads; Link may initiate browser preloads. A diagnostic
+  ;; with no operation-owned response-effect declarations MUST fail closed
+  ;; for unclassified headers, rather than treating every unknown name as inert.
+  (doseq [headers [{"Set-Cookie" "session=changed; HttpOnly"}
+                   {"rEfReSh" "0; url=/other"}
+                   {"Content-Disposition" "attachment; filename=data.txt"}
+                   {"Link" "</next>; rel=preload"}
+                   {"X-Accel-Redirect" "/internal-private"}]]
+    (reset! (:response-headers *case*) headers)
+    (artificial-execution {}
+      (fn [{:keys [transactions]}]
+        (let [{:keys [execution report handle]} (observe (options))]
+          (is (= 200 (get-in execution [:result :status])))
+          (is (= :physical-commit-with-unqualified-ring-response
+                 (:status report)))
+          (is (= :unqualified-response-header-effect
+                 (:ring-response-class report)))
+          (is (nil? handle))
+          (is (= :not-established (:response-contract-correspondence report)))
+          (is (= 1 @transactions)))))))
+
+(deftest ambiguous-case-colliding-ring-headers-do-not-qualify
+  ;; A Ring map can contain two differently cased keys which become the same
+  ;; HTTP field after normalization, with order and semantics not established.
+  (reset! (:response-headers *case*)
+          {"Content-Type" "text/html" "content-type" "application/json"})
+  (artificial-execution {}
+    (fn [{:keys [transactions]}]
+      (let [{:keys [report handle]} (observe (options))]
+        (is (= :invalid-ring-response (:ring-response-class report)))
+        (is (= :physical-commit-with-unqualified-ring-response
+               (:status report)))
+        (is (nil? handle))
+        (is (= 1 @transactions))))))
+
 (deftest later-observations-are-distinct-and-rechecks-are-side-effect-free
   (let [opts (options)]
     (artificial-execution {}

@@ -12,8 +12,8 @@
    adapter arguments. A definitive execute-tx TransactionKey, a matching
    committed resolved-operation result, and a non-error Ring response from
    the SAME handler invocation are required for positive local correlation.
-   This checks response shape/status and excludes some known undeclared HTMX
-   response-control effects and redirects; it does NOT establish response
+   This checks response shape/status and conservatively withholds a positive
+   witness for unclassified response headers or redirects; it does NOT establish response
    effect admission, semantic response mapping, private disclosure or browser
    safety. No second transaction is performed.
 
@@ -183,6 +183,13 @@
     "hx-location" "hx-redirect" "hx-refresh" "hx-retarget"
     "hx-reswap" "hx-reselect" "hx-push-url" "hx-replace-url"})
 
+(def ^:private passive-response-headers
+  ;; Only a minimal set of ordinary response metadata is tolerated by this
+  ;; *diagnostic*. No operation-owned response-effect grant is available here.
+  ;; Content-Type's value and the HTML body are NOT proven correct/safe by
+  ;; permitting this name; response-contract correspondence remains open.
+  #{"content-type"})
+
 (defn- ring-header-name [k]
   (cond
     (string? k) (.toLowerCase ^String k Locale/ROOT)
@@ -198,17 +205,32 @@
     (let [response (:result capture)
           status (when (map? response) (:status response))
           headers (:headers response)
-          names (when (map? headers) (map ring-header-name (keys headers)))]
+          names (when (map? headers) (mapv ring-header-name (keys headers)))]
       (cond
         (not (and (integer? status) (<= 200 status 599)))
         :invalid-ring-response
         (and (some? headers) (not (map? headers)))
         :invalid-ring-response
         (some nil? names) :invalid-ring-response
+        ;; Ring maps can carry differently cased duplicate field names, but
+        ;; actual HTTP fields are case-insensitive. Such aliases must not
+        ;; produce an unambiguous diagnostic witness.
+        (not= (count names) (count (set names))) :invalid-ring-response
+        (and (map? headers)
+             (some (fn [[k v]]
+                     (and (= "content-type" (ring-header-name k))
+                          (not (string? v))))
+                   headers)) :invalid-ring-response
         (<= 300 status 399) :unqualified-redirect-response
         (<= 400 status 599) :http-error-response
         (some htmx-response-control-headers names)
         :unqualified-browser-effect-response
+        ;; A denylist of HTMX fields misses Set-Cookie, Refresh, Link,
+        ;; Content-Disposition and arbitrary extension headers. Without
+        ;; original-source response-effect admission, treat all unrecognized
+        ;; names as unqualified instead of silently granting browser effects.
+        (some #(not (contains? passive-response-headers %)) names)
+        :unqualified-response-header-effect
         :else :non-error-ring-response))))
 
 (defn- classify [selected events poisoned capture observed-request postcheck?]
