@@ -293,19 +293,92 @@
           {:xtdb/node :shared-node
            :biff.xtdb/node :shared-biff-node}))))
 
-(deftest consistency-from-precedence-test
-  (is (= {:snapshot-token "gesso"}
-         (xtdb-live/consistency-from
-          {:gesso.live/consistency {:snapshot-token "gesso"}
-           :gesso.live.xtdb/consistency {:snapshot-token "gesso-xtdb"}
-           :xtdb/consistency {:snapshot-token "xtdb"}
-           :consistency {:snapshot-token "plain"}})))
+(deftest consistency-context-aliases-preserve-all-read-obligations-test
+  ;; Request layers can supply the same read contract through distinct facade
+  ;; keys. Treat them as independently admitted constraints, not as an
+  ;; override chain that silently discards the lower-priority key's values.
+  (let [t (Instant/parse "2026-11-20T17:00:00Z")
+        ctx {:xtdb/node :node
+             :xtdb/read-connectable :read
+             :gesso.live/consistency {:snapshot-time t}
+             :xtdb/consistency {:await-token "write-2046"}}
+        seen (atom [])
+        query (fn [_ _ opts] (swap! seen conj opts) :queried)]
+    (is (= {:snapshot-time t :await-token "write-2046"}
+           (xtdb-live/consistency-from ctx)))
+    (with-redefs-fn {(xtdb-var '*q*) query
+                     (xtdb-var '*plan-q*) query}
+      (fn []
+        (is (= :queried (xtdb-live/q-consistent-from ctx sample-query)))
+        (is (= :queried (xtdb-live/plan-q-consistent-from ctx sample-query)))))
+    (is (= ["write-2046" "write-2046"]
+           (mapv :await-token @seen))
+        "Both physical read paths must carry the otherwise discarded wait")
+    (is (= [t t] (mapv :snapshot-time @seen)))))
 
-  (is (= {:snapshot-token "gesso-xtdb"}
+(deftest consistency-context-aliases-reject-contradictions-before-io-test
+  (let [t (Instant/parse "2026-11-20T17:00:00Z")
+        later (.plusSeconds t 60)
+        variants [{:gesso.live/consistency {:snapshot-time t}
+                   :xtdb/consistency {:snapshot-time later}}
+                  {:gesso.live/consistency {:await-token "a"}
+                   :consistency {:await-token "b"}}
+                  {:gesso.live.xtdb/consistency {:default-tz "UTC"}
+                   :xtdb/consistency {:default-tz "Asia/Tokyo"}}
+                  {:gesso.live/consistency {:snapshot-time t}
+                   :xtdb/consistency false}]
+        invoked (atom [])
+        io (fn [& args] (swap! invoked conj args) :unexpected)]
+    (with-redefs-fn {(xtdb-var '*q*) io
+                     (xtdb-var '*plan-q*) io
+                     (xtdb-var '*status*) io}
+      (fn []
+        (doseq [aliases variants]
+          (let [ctx (merge {:xtdb/node :authority-node
+                            :xtdb/read-connectable :read} aliases)
+                before (count @invoked)]
+            (doseq [invoke [#(xtdb-live/consistency-from ctx)
+                            #(xtdb-live/q-consistent-from ctx sample-query)
+                            #(xtdb-live/plan-q-consistent-from ctx sample-query)
+                            #(xtdb-live/bind-request-frontier ctx)]]
+              (is (thrown? clojure.lang.ExceptionInfo (invoke))
+                  (str "Contradictory consistency aliases must fail: "
+                       (pr-str aliases)))
+              (is (= before (count @invoked))
+                  "Contradictory consistency must fail before XTDB I/O"))))))
+    ;; Repeated identical coordinates are safe; nil is optional absence.
+    (is (= {:await-token "a"}
+           (xtdb-live/consistency-from
+            {:gesso.live/consistency {:await-token "a"}
+             :xtdb/consistency {:await-token "a"}})))
+    (is (= {:await-token "a"}
+           (xtdb-live/consistency-from
+            {:gesso.live/consistency nil
+             :xtdb/consistency {:await-token "a"}})))))
+
+(deftest consistency-from-rejects-conflicting-context-aliases-test
+  ;; Alias precedence is not a safe ordering for independently supplied read
+  ;; constraints. Repeated values compose; distinct non-overlapping fields
+  ;; remain available to the authoritative read and Biff request boundaries.
+  (doseq [ctx [{:gesso.live/consistency {:snapshot-token "gesso"}
+                :gesso.live.xtdb/consistency {:snapshot-token "gesso-xtdb"}
+                :xtdb/consistency {:snapshot-token "xtdb"}
+                :consistency {:snapshot-token "plain"}}
+               {:gesso.live.xtdb/consistency {:snapshot-token "gesso-xtdb"}
+                :xtdb/consistency {:snapshot-token "xtdb"}
+                :consistency {:snapshot-token "plain"}}]]
+    (let [failure (try (xtdb-live/consistency-from ctx)
+                       nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo failure))
+      (when failure
+        (is (= :conflicting-xtdb-consistency-aliases
+               (:reason (ex-data failure)))))))
+  (is (= {:await-token "wait" :default-tz "UTC"}
          (xtdb-live/consistency-from
-          {:gesso.live.xtdb/consistency {:snapshot-token "gesso-xtdb"}
-           :xtdb/consistency {:snapshot-token "xtdb"}
-           :consistency {:snapshot-token "plain"}}))))
+          {:gesso.live.xtdb/consistency {:await-token "wait"}
+           :xtdb/consistency {:default-tz "UTC"}
+           :consistency {:await-token "wait"}}))))
 
 (deftest query-consistency-drops-tx-metadata-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]

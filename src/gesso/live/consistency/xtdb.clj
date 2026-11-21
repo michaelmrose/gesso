@@ -1696,29 +1696,47 @@
   (select-compact consistency tx-consistency-keys))
 
 (defn consistency-from
-  "Return explicit consistency from a context map.
+  "Compose explicit XTDB consistency from all supported request/context aliases.
 
-   Context precedence:
+   Recognized aliases (canonical first):
 
      :gesso.live/consistency
      :gesso.live.xtdb/consistency
      :xtdb/consistency
      :consistency
 
-   This function intentionally does not inspect or mutate XTDB DataSource/node
-   state. A context without explicit consistency returns an empty map."
+   Each non-nil alias represents independently admitted read constraints.
+   Distinct fields compose; repeated identical values are harmless. Reject
+   conflicting values rather than using alias precedence to erase a required
+   await token, snapshot or temporal context. Even a malformed lower-priority
+   alias must fail closed instead of being masked by the canonical one.
+
+   Does not inspect or mutate XTDB DataSource/node state. Returns {} when
+   no context consistency is supplied."
   [x]
-  (normalize-consistency
-   (when (map? x)
-     ;; A present false value is invalid rather than missing. Truthiness-based
-     ;; precedence would silently replace it with a weaker legacy constraint.
-     (first
-      (filter some?
-              (map #(get x %)
-                   [:gesso.live/consistency
-                    :gesso.live.xtdb/consistency
-                    :xtdb/consistency
-                    :consistency]))))))
+  (if-not (map? x)
+    {}
+    (reduce
+     (fn [combined alias]
+       (if-some [supplied (get x alias)]
+         (let [normalized (normalize-consistency supplied)]
+           (doseq [[field value] normalized
+                   :when (and (contains? combined field)
+                              (not= (get combined field) value))]
+             (throw
+              (ex "XTDB context consistency aliases contain contradictory read obligations."
+                  {:reason :conflicting-xtdb-consistency-aliases
+                   :alias alias
+                   :field field
+                   :existing-value (get combined field)
+                   :incoming-value value})))
+           (merge combined normalized))
+         combined))
+     {}
+     [:gesso.live/consistency
+      :gesso.live.xtdb/consistency
+      :xtdb/consistency
+      :consistency])))
 
 (defn query-consistency
   "Return only consistency fields that XTDB2 query opts can use."
