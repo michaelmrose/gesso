@@ -47,7 +47,9 @@
    Non-GET requests to the SSE path receive 405. Managed EventSource routes
    require an HTTP 200 response status: another accepted transport status
    would register a Live interest but cannot establish EventSource delivery.
-   Reject this misconfiguration before invoking authorization or subscribing.
+   A fixed Content-Length is also forbidden: EventSource is an indefinite
+   streamed body, whose framing must be managed by the HTTP server itself.
+   Reject these misconfigurations before authorization or subscription.
    Invalid callback results and callback exceptions propagate before a
    subscription can be installed. Once closed, the managed GET route
    returns 503 without consulting authorization or registering interests;
@@ -97,6 +99,13 @@
   (let [validated-sse (sse/prepare-options! sse-options)
         _ (when (not= 200 (:status validated-sse))
             (reject! :invalid-sse-status {:status (:status validated-sse)}))
+        ;; A fixed HTTP length can truncate an indefinitely streamed body.
+        ;; The server/adapter, not an application override, owns framing.
+        _ (when-let [header (some (fn [^String field]
+                                    (when (.equalsIgnoreCase field "content-length")
+                                      field))
+                                  (keys (:headers validated-sse)))]
+            (reject! :invalid-sse-content-length {:header header}))
         base-handler (:biff.ring/handler started)
         live-system (:gesso.live/system started)
         state (atom {:closed? false :connections {}})

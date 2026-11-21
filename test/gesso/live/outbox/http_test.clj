@@ -203,6 +203,51 @@
              (is (eventually #(zero? (:subscription-count
                                      (source/stats source))))))))))))
 
+(deftest managed-route-rejects-fixed-content-length-before-admission-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           calls (atom 0)
+           base {:path "/live/events"
+                 :authorize-subscription (fn [_]
+                                           (swap! calls inc)
+                                           scope)}]
+       ;; EventSource consumes a live, indefinite body. Advertised fixed
+       ;; lengths, including zero, can truncate it at the HTTP boundary.
+       ;; Header field names are case-insensitive even in Ring maps.
+       (doseq [header ["content-length" "Content-Length" "CONTENT-LENGTH"]]
+         (let [result (try
+                        (http/wrap-authorized-sse
+                         started (assoc base :sse-options
+                                        {:headers {header "0"}}))
+                        (catch clojure.lang.ExceptionInfo e e))]
+           (try
+             (is (= :invalid-sse-content-length
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:reason (ex-data result))))
+                 (str "Reject a fixed length before exposing SSE route: " header))
+             (is (zero? @calls)
+                 "Invalid header must not invoke application authorization")
+             (is (zero? (:subscription-count (source/stats src)))
+                 "Invalid header must not allocate a Live subscription")
+             (finally
+               (when (map? result) ((:close! result)))))))
+       ;; Other safe custom headers must still be configurable.
+       (let [route (http/wrap-authorized-sse
+                    started (assoc base :sse-options
+                                   {:headers {"x-gesso-test" "allowed"}}))]
+         (try
+           (let [response ((:handler route)
+                           {:uri "/live/events" :request-method :get})]
+             (is (= 200 (:status response)))
+             (is (= "allowed" (get-in response [:headers "x-gesso-test"])))
+             (is (= 1 @calls))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (stream/close! (:body response))
+             (is (eventually #(zero? (:subscription-count
+                                     (source/stats src))))))
+           (finally ((:close! route)))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]
