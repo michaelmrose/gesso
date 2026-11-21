@@ -101,6 +101,11 @@
 ;; plan executor. It does not trace any database write or prove authority.
 (def ^:dynamic ^:private *issued-executor-observer* nil)
 
+;; v2078: The original issued handler's result->response! callback produces
+;; the response occurrence that a selected physical route must actually
+;; return. This is an observation, not response-effect or content admission.
+(def ^:dynamic ^:private *issued-response-observer* nil)
+
 ;; v1767: Narrower than the v1761 whole-handler observer. This hook runs
 ;; exclusively around the *original certified executor call*, after the
 ;; request->input! callback and before result->response!. Any trusted callback
@@ -164,7 +169,10 @@
                   ;; accepted by the scoped observer below.
                   (when-let [observe! *issued-executor-observer*]
                     (observe! certified-route-handler ctx))
-                  (result->response! ctx result)))]
+                  (let [response (result->response! ctx result)]
+                    (when-let [observe! *issued-response-observer*]
+                      (observe! certified-route-handler ctx response))
+                    response)))]
         (let [issued certified-route-handler
               entry {:executor executor
                      :original-source current-source
@@ -173,6 +181,44 @@
                      :result->response! result->response!}]
           (locking issued-handlers (.put issued-handlers issued entry))
           issued)))))
+
+(defn observe-issued-response-correlation!
+  "Run capture! once while observing the original issued handler's exact
+   response callback. capture! returns an observation with :outcome and
+   :result (the *final* actual Ring response). A positive same-occurrence
+   relation requires exactly one callback on the same thread, exact handler
+   and request object, and object identity of the callback's returned value
+   with the final Ring response. This is a bounded in-process observation:
+   it does not verify the contents, HTML, headers, browser effects, or the
+   callback's honesty, and does not authenticate a deployed server."
+  [handler request capture!]
+  (when-not (and (fn? capture!) (map? request)
+                 (registered-handler handler))
+    (fail! :invalid-issued-response-observation [:response] {}))
+  (when *issued-response-observer*
+    (fail! :nested-issued-response-observation [:response] {}))
+  (let [{:keys [executor original-source]} (registered-handler handler)
+        _ (require-current-binding! executor original-source)
+        calling-thread (Thread/currentThread)
+        events (volatile! [])
+        capture (binding [*issued-response-observer*
+                         (fn [actual-handler actual-request response]
+                           (vswap! events conj
+                                   {:right-handler? (identical? handler actual-handler)
+                                    :right-request? (identical? request actual-request)
+                                    :same-thread? (identical? calling-thread
+                                                              (Thread/currentThread))
+                                    :response response}))]
+                  (capture!))
+        event (first @events)]
+    {:capture capture
+     :same-issued-response?
+     (boolean (and (= 1 (count @events))
+                   (:right-handler? event)
+                   (:right-request? event)
+                   (:same-thread? event)
+                   (= :returned (:outcome capture))
+                   (identical? (:response event) (:result capture))))}))
 
 (defn observe-issued-executor-invocation!
   "Run invoke! synchronously, accepting exactly one callback from the exact

@@ -16,6 +16,7 @@
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.proof.checked-biff-host-adoption :as host]
             [gesso.assurance.proof.installed-route-physical-correlation :as correlation]
+            [gesso.live.application-preflight.certified-contract :as binding]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
             [gesso.live.application-preflight.fixture :as fixture]
@@ -174,6 +175,7 @@
     (is (= :bounded-installed-route-to-adapter-agreement (:status report)))
     (is (correlation/installed-physical-witness? handle))
     (is (= 1 (:handler-invocation-count report)))
+    (is (true? (:original-issued-response-returned-unchanged? report)))
     (is (true? (:actual-issued-executor-attempt-observed? report)))
     (is (true? (:one-adapter-call-observed? report)))
     (is (true? (:prepared-operations-agree? report)))
@@ -204,6 +206,24 @@
                  (correlation/require-current-installed-physical!
                   handle opts report)))
           (is (= 1 @transactions) "Witness recheck must never resubmit"))))))
+
+(deftest substituted-response-after-original-callback-is-not-correlated
+  ;; A second Ring middleware stage can replace an otherwise successful
+  ;; callback result. The observed issued callback's exact response object
+  ;; must reach the physical caller; an equivalent rebuilt map is not enough.
+  (let [issued (get-in (:source *case*) [:semantic-route-handlers operation])
+        req (request)]
+    (artificial-execution {}
+      (fn [{:keys [transactions]}]
+        (let [observed
+              (binding/observe-issued-response-correlation!
+               issued req
+               (fn []
+                 (let [response (issued req)]
+                   {:outcome :returned :result (into {} response)})))]
+          (is (false? (:same-issued-response? observed)))
+          (is (= 200 (get-in observed [:capture :result :status])))
+          (is (= 1 @transactions)))))))
 
 (deftest committed-adapter-with-error-http-response-is-not-qualified
   ;; A definitive adapter observation is only one edge. The same installed
