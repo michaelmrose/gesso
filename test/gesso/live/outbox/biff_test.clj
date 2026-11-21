@@ -191,7 +191,10 @@
                                 (:gesso.live.outbox/status
                                   (first (xt/q node
                                                ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id]))))))
-            (is (= 1 (:total-dispatch-accepted (lifecycle/status handle))))
+            ;; XTDB acknowledgement may become visible just before the
+            ;; worker publishes its in-memory completed-cycle counters.
+            (is (poll-until #(= 1 (:total-dispatch-accepted
+                                   (lifecycle/status handle)))))
             (finally (biff/stop started)))
           (is (= :stopped (:status (lifecycle/status handle)))))))))
 
@@ -610,3 +613,318 @@
     (is (= :drained (:rollback/status (ex-data error))))
     (is (= [:first-acquire :second-acquire :second-close :first-close]
            @events))))
+
+(deftest init-admission-rejects-unclassified-functions-before-biff-runs-test
+  (let [calls (atom 0)
+        provider {:biff.core/id :fixture/unadmitted
+                  :biff.core/init (fn [_] (swap! calls inc) {})
+                  :biff.core/start (fn [s] (swap! calls inc) s)}
+        error (thrown-startup #(start-checked-fixture! [provider]))]
+    (is (= :unadmitted-init (:reason (ex-data error))))
+    (is (zero? @calls))
+    (is (= :tracked-init-must-be-callable
+           (invalid-reason
+            #(start-checked-fixture!
+              [(assoc provider :biff.core/init {}
+                               managed/init-policy-key :tracked)]))))
+    (is (zero? @calls))))
+
+(deftest explicit-declared-pure-init-stays-compatible-with-biff-merge-test
+  (let [events (atom [])
+        module {:biff.core/id :fixture/pure
+                managed/init-policy-key :declared-pure
+                :biff.core/init
+                (fn [_]
+                  (swap! events conj :init)
+                  {:fixture/pure-setting 42})
+                :biff.core/start
+                (fn [system]
+                  (is (= 42 (:fixture/pure-setting system)))
+                  (swap! events conj :start)
+                  (assoc system :xtdb/connectable :fake
+                                :gesso.live/system
+                                {:source :fake :closed? (atom false)}))
+                :biff.core/stop (fn [_] (swap! events conj :stop))}]
+    (with-redefs [lifecycle/start! (fn [& _] :worker-handle)
+                  lifecycle/stop! (fn [& _] {:outcome :drained})]
+      (let [running (start-checked-fixture! [module])]
+        (is (= 42 (:fixture/pure-setting running)))
+        (is (= [:init :start] @events))
+        (biff/stop running)
+        (is (= [:init :start :stop] @events))))))
+
+(deftest pure-init-cannot-use-owned-resource-helper-test
+  (let [calls (atom 0)
+        module {:biff.core/id :fixture/pure
+                managed/init-policy-key :declared-pure
+                :biff.core/init
+                (fn [_]
+                  (managed/acquire-init-resource!
+                   :fixture/forbidden
+                   (fn [] (swap! calls inc) :resource)
+                   (fn [_] (swap! calls inc)))
+                  {})
+                :biff.core/start identity}
+        error (thrown-startup #(start-checked-fixture! [module]))]
+    (is (= :gesso.live.outbox/checked-startup-failed
+           (:error/type (ex-data error))))
+    (is (= :no-active-startup-ownership
+           (:reason (ex-data (.getCause error)))))
+    (is (= :drained (:rollback/status (ex-data error))))
+    (is (zero? @calls))))
+
+(deftest tracked-init-partial-resource-rollback-precedes-module-start-test
+  (let [events (atom [])
+        init {:biff.core/id :fixture/init
+              managed/init-policy-key :tracked
+              :biff.core/init (fn [_]
+                                (managed/acquire-init-resource!
+                                 :fixture/one
+                                 (fn [] (swap! events conj :acquire-one) :one)
+                                 (fn [_] (swap! events conj :close-one)))
+                                (managed/acquire-init-resource!
+                                 :fixture/two
+                                 (fn [] (swap! events conj :acquire-two) :two)
+                                 (fn [_] (swap! events conj :close-two)))
+                                (throw (ex-info "init exploded" {:fixture/error true})))
+              :biff.core/start (fn [s] (swap! events conj :should-not-start) s)}
+        failure (thrown-startup #(start-checked-fixture! [init]))]
+    (is (= :drained (:rollback/status (ex-data failure))))
+    (is (true? (:fixture/error (ex-data (.getCause failure)))))
+    (is (= [:acquire-one :acquire-two :close-two :close-one] @events))))
+
+(deftest tracked-init-allocated-real-xtdb-is-closed-on-later-init-failure-test
+  (let [node-ref (atom nil)
+        closed (atom false)
+        module {:biff.core/id :fixture/init-xtdb
+                managed/init-policy-key :tracked
+                :biff.core/init
+                (fn [_]
+                  (managed/acquire-init-resource!
+                   :fixture/xtdb
+                   (fn [] (let [node (xtn/start-node {})]
+                            (reset! node-ref node)
+                            node))
+                   (fn [node]
+                     (.close ^java.lang.AutoCloseable node)
+                     (reset! closed true)))
+                  (throw (ex-info "init failed with node allocated" {})))
+                :biff.core/start identity}
+        failure (thrown-startup #(start-checked-fixture! [module]))]
+    (is (= :drained (:rollback/status (ex-data failure))))
+    (is (some? @node-ref))
+    (is (true? @closed))))
+
+(deftest init-resource-rolls-back-after-completed-started-module-test
+  (let [events (atom [])
+        initialized {:biff.core/id :fixture/init
+                     managed/init-policy-key :tracked
+                     :biff.core/init (fn [_]
+                                       (managed/acquire-init-resource!
+                                        :fixture/init-resource
+                                        (fn [] (swap! events conj :init-acquire) :resource)
+                                        (fn [_] (swap! events conj :init-close)))
+                                       {:fixture/initialized true})
+                     :biff.core/start (fn [s] (swap! events conj :init-start) s)
+                     :biff.core/stop (fn [_] (swap! events conj :init-stop))}
+        started {:biff.core/id :fixture/started
+                 :biff.core/start (fn [s] (swap! events conj :started-start) s)
+                 :biff.core/stop (fn [_] (swap! events conj :started-stop))}
+        doomed {:biff.core/id :fixture/doomed
+                :biff.core/start (fn [_] (throw (ex-info "start exploded" {})))}
+        failure (thrown-startup #(start-checked-fixture!
+                                  [initialized started doomed]))]
+    (is (= :drained (:rollback/status (ex-data failure))))
+    (is (= [:init-acquire :init-start :started-start
+            :started-stop :init-stop :init-close]
+           @events))))
+
+(deftest init-resources-close-after-all-native-module-stops-test
+  (let [events (atom [])
+        init {:biff.core/id :fixture/init
+              managed/init-policy-key :tracked
+              :biff.core/init
+              (fn [_]
+                (managed/acquire-init-resource!
+                 :fixture/one
+                 (fn [] (swap! events conj :init-one) :one)
+                 (fn [_] (swap! events conj :close-one)))
+                (managed/acquire-init-resource!
+                 :fixture/two
+                 (fn [] (swap! events conj :init-two) :two)
+                 (fn [_] (swap! events conj :close-two)))
+                {:fixture/init-available true})
+              :biff.core/start (fn [s] (swap! events conj :start-init) s)
+              :biff.core/stop (fn [_] (swap! events conj :stop-init))}
+        provider {:biff.core/id :fixture/provider
+                  :biff.core/start (fn [s]
+                                     (is (true? (:fixture/init-available s)))
+                                     (swap! events conj :start-provider)
+                                     (assoc s :xtdb/connectable :fake
+                                              :gesso.live/system
+                                              {:source :fake :closed? (atom false)}))
+                  :biff.core/stop (fn [_] (swap! events conj :stop-provider))}]
+    (with-redefs [lifecycle/start! (fn [& _] :worker)
+                  lifecycle/stop! (fn [& _]
+                                    (swap! events conj :stop-worker)
+                                    {:outcome :drained})]
+      (let [running (start-checked-fixture! [init provider])]
+        (is (= [:init-one :init-two :start-init :start-provider] @events))
+        (biff/stop running)
+        (is (= [:init-one :init-two :start-init :start-provider
+                :stop-worker :stop-provider :stop-init :close-two :close-one]
+               @events))
+        (biff/stop running)
+        (is (= 9 (count @events)))))))
+
+(deftest blocked-init-rollback-is-retryable-and-fences-previous-init-resources-test
+  (let [events (atom [])
+        attempts (atom 0)
+        init {:biff.core/id :fixture/init
+              managed/init-policy-key :tracked
+              :biff.core/init (fn [_]
+                                (managed/acquire-init-resource!
+                                 :fixture/first
+                                 (fn [] (swap! events conj :acquire-first) :first)
+                                 (fn [_] (swap! events conj :close-first)))
+                                (managed/acquire-init-resource!
+                                 :fixture/second
+                                 (fn [] (swap! events conj :acquire-second) :second)
+                                 (fn [_]
+                                   (swap! events conj :close-second)
+                                   (when (= 1 (swap! attempts inc))
+                                     (throw (ex-info "initial cleanup refused" {})))))
+                                (throw (ex-info "init error" {})))
+              :biff.core/start identity}
+        error (thrown-startup #(start-checked-fixture! [init]))
+        data (ex-data error)
+        handle (:cleanup/handle data)]
+    (is (= :blocked (:rollback/status data)))
+    (is (= :fixture/init (:rollback/blocked-module-id data)))
+    (is (= :fixture/second (:rollback/blocked-resource-id data)))
+    (is (some? handle))
+    (is (= [:acquire-first :acquire-second :close-second] @events))
+    (is (= :drained (:status (managed/retry-startup-cleanup! handle))))
+    (is (= [:acquire-first :acquire-second :close-second
+            :close-second :close-first] @events))
+    (is (= :drained (:status (managed/retry-startup-cleanup! handle))))))
+
+(deftest blocked-normal-init-cleanup-can-retry-stop-without-double-stopping-providers-test
+  (let [events (atom [])
+        attempts (atom 0)
+        init {:biff.core/id :fixture/init
+              managed/init-policy-key :tracked
+              :biff.core/init (fn [_]
+                                (managed/acquire-init-resource!
+                                 :fixture/one
+                                 (fn [] (swap! events conj :init-acquire) :one)
+                                 (fn [_]
+                                   (swap! events conj :init-close)
+                                   (when (= 1 (swap! attempts inc))
+                                     (throw (ex-info "cleanup unavailable" {})))))
+                                {})
+              :biff.core/start identity}
+        provider {:biff.core/id :fixture/provider
+                  :biff.core/start (fn [s]
+                                     (swap! events conj :start-provider)
+                                     (assoc s :xtdb/connectable :fake
+                                              :gesso.live/system
+                                              {:source :fake :closed? (atom false)}))
+                  :biff.core/stop (fn [_] (swap! events conj :stop-provider))}]
+    (with-redefs [lifecycle/start! (fn [& _] :worker)
+                  lifecycle/stop! (fn [& _]
+                                    (swap! events conj :stop-worker)
+                                    {:outcome :drained})]
+      (let [running (start-checked-fixture! [init provider])
+            first-try (thrown-startup #(biff/stop running))]
+        (is (= :gesso.live.outbox/init-cleanup-blocked
+               (:error/type (ex-data first-try))))
+        (is (= :fixture/one (:blocked-resource-id (ex-data first-try))))
+        (is (= [:init-acquire :start-provider :stop-worker
+                :stop-provider :init-close] @events))
+        (biff/stop running)
+        (is (= [:init-acquire :start-provider :stop-worker
+                :stop-provider :init-close :init-close] @events))
+        (is (= 2 @attempts))
+        (biff/stop running)
+        (is (= 6 (count @events)))))))
+
+(deftest native-provider-stop-failure-does-not-close-init-resource-test
+  (let [events (atom [])
+        attempts (atom 0)
+        init {:biff.core/id :fixture/init
+              managed/init-policy-key :tracked
+              :biff.core/init (fn [_]
+                                (managed/acquire-init-resource!
+                                 :fixture/resource
+                                 (fn [] (swap! events conj :init-acquire) :x)
+                                 (fn [_] (swap! events conj :init-close)))
+                                {})
+              :biff.core/start identity}
+        provider {:biff.core/id :fixture/provider
+                  :biff.core/start (fn [s]
+                                     (assoc s :xtdb/connectable :fake
+                                              :gesso.live/system
+                                              {:source :fake :closed? (atom false)}))
+                  :biff.core/stop (fn [_]
+                                    (swap! events conj :stop-provider)
+                                    (when (= 1 (swap! attempts inc))
+                                      (throw (ex-info "provider busy" {}))))}]
+    (with-redefs [lifecycle/start! (fn [& _] :worker)
+                  lifecycle/stop! (fn [& _] {:outcome :drained})]
+      (let [running (start-checked-fixture! [init provider])]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"provider busy"
+                              (biff/stop running)))
+        (is (= [:init-acquire :stop-provider] @events))
+        (biff/stop running)
+        (is (= [:init-acquire :stop-provider :stop-provider :init-close]
+               @events))))))
+
+(deftest duplicate-biff-init-result-keys-unwind-tracked-resources-test
+  ;; Biff evaluates every init callback before it detects conflicting keys.
+  ;; A failed safe-merge is not a failed :start; no start-module callback runs.
+  (let [events (atom [])
+        a {:biff.core/id :fixture/init-a
+           managed/init-policy-key :tracked
+           :biff.core/init (fn [_]
+                             (managed/acquire-init-resource!
+                              :fixture/a
+                              (fn [] (swap! events conj :init-a) :a)
+                              (fn [_] (swap! events conj :close-a)))
+                             {:fixture/shared 1})
+           :biff.core/start (fn [s] (swap! events conj :should-not-start-a) s)}
+        b {:biff.core/id :fixture/init-b
+           managed/init-policy-key :tracked
+           :biff.core/init (fn [_]
+                             (managed/acquire-init-resource!
+                              :fixture/b
+                              (fn [] (swap! events conj :init-b) :b)
+                              (fn [_] (swap! events conj :close-b)))
+                             {:fixture/shared 2})
+           :biff.core/start (fn [s] (swap! events conj :should-not-start-b) s)}
+        failure (thrown-startup #(start-checked-fixture! [a b]))]
+    (is (= :gesso.live.outbox/checked-startup-failed
+           (:error/type (ex-data failure))))
+    (is (= :drained (:rollback/status (ex-data failure))))
+    (is (instance? AssertionError (.getCause failure)))
+    (is (= [:init-a :init-b :close-b :close-a] @events))))
+
+(deftest unadmitted-later-init-is-rejected-before-earlier-init-executes-test
+  (let [events (atom [])
+        first-module {:biff.core/id :fixture/earlier-init
+                      managed/init-policy-key :tracked
+                      :biff.core/init
+                      (fn [_]
+                        (swap! events conj :init-executed)
+                        {:fixture/value 1})
+                      :biff.core/start identity}
+        second-module {:biff.core/id :fixture/unadmitted-later
+                       :biff.core/init (fn [_]
+                                         (swap! events conj :unsafe-init-executed)
+                                         {})
+                       :biff.core/start identity}
+        failure (thrown-startup #(start-checked-fixture!
+                                  [first-module second-module]))]
+    (is (= :unadmitted-init (:reason (ex-data failure))))
+    (is (= :fixture/unadmitted-later (:module-id (ex-data failure))))
+    (is (empty? @events))))

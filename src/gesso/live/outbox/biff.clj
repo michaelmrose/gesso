@@ -32,6 +32,7 @@
 (def options-key :gesso.live.outbox/worker-options)
 (def context-key :gesso.live.outbox/rules-context)
 (def stop-timeout-key :gesso.live.outbox/stop-timeout-ms)
+(def init-policy-key :gesso.live.outbox/init-policy)
 
 (def ^:private default-stop-timeout-ms 10000)
 
@@ -138,29 +139,12 @@
 
 (def ^:dynamic *startup-ownership* nil)
 
-(defn acquire-startup-resource!
-  "Acquire a resource during an opted-in Biff module's checked :start.
-
-   The caller provides a qualified resource ID, zero-arg acquisition function
-   and one-arg compensating close function. Once acquisition returns, its
-   cleanup is journaled IMMEDIATELY, before subsequent initialization steps.
-   If that same :start later throws, rollback closes these partial resources
-   in reverse acquisition order, before earlier completed Biff modules.
-
-   A successful :start TRANSFERS their ownership to the module's ordinary
-   :biff.core/stop callback. Such modules MUST supply a real :stop which
-   closes the resources they acquired; the startup helper cannot verify that
-   callback's implementation. If journaling itself fails, the newly acquired
-   resource is compensated immediately and the failure propagates.
-
-   Only a monitored module inside start-biff-application! has this scope.
-   Unchecked biff/start and arbitrary module callbacks have no implicit
-   acquisition owner. Allocation that throws before returning, and resources
-   allocated without this helper, remain the allocating module's obligation."
-  [resource-id acquire! close!]
-  (let [{:keys [cleanup token module-id]} *startup-ownership*]
-    (when-not (and (instance? StartupCleanup cleanup) (some? token))
-      (reject! :no-active-startup-ownership {}))
+(defn- register-owned-resource!
+  [expected-phase resource-id acquire! close!]
+  (let [{:keys [cleanup token module-id phase]} *startup-ownership*]
+    (when-not (and (= expected-phase phase)
+                   (instance? StartupCleanup cleanup) (some? token))
+      (reject! :no-active-startup-ownership {:phase expected-phase}))
     (when-not (qualified-keyword? resource-id)
       (reject! :invalid-owned-resource-id {:resource-id resource-id}))
     (when-not (and (fn? acquire!) (fn? close!))
@@ -181,19 +165,48 @@
                          {:module-id module-id
                           :resource-id resource-id
                           :scope-token token
-                          :ownership :partial
+                          :ownership (if (= phase :init) :init :partial)
                           :stop (fn [_] (close! resource))
                           :system nil})))
         resource
         (catch Throwable registration-error
-          ;; An acquisition that succeeded must never be abandoned merely
-          ;; because registration failed. Keep the original cause, with any
-          ;; compensating-close error exposed as suppressed evidence.
           (try
             (close! resource)
             (catch Throwable close-error
               (.addSuppressed ^Throwable registration-error close-error)))
           (throw registration-error))))))
+
+(defn acquire-init-resource!
+  "Acquire one init-phase resource inside an explicitly :tracked Biff init.
+   The resource is recorded before the remaining init callback executes.
+   On startup failure, rollback closes it after all started modules; on
+   success, Biff stop closes it AFTER all module stop callbacks. A blocked
+   cleanup retains a retryable handle. This helper does not trace arbitrary
+   side effects or a constructor that throws before returning."
+  [resource-id acquire! close!]
+  (register-owned-resource! :init resource-id acquire! close!))
+
+(defn acquire-startup-resource!
+  "Acquire a resource during an opted-in Biff module's checked :start.
+
+   The caller provides a qualified resource ID, zero-arg acquisition function
+   and one-arg compensating close function. Once acquisition returns, its
+   cleanup is journaled IMMEDIATELY, before subsequent initialization steps.
+   If that same :start later throws, rollback closes these partial resources
+   in reverse acquisition order, before earlier completed Biff modules.
+
+   A successful :start TRANSFERS their ownership to the module's ordinary
+   :biff.core/stop callback. Such modules MUST supply a real :stop which
+   closes the resources they acquired; the startup helper cannot verify that
+   callback's implementation. If journaling itself fails, the newly acquired
+   resource is compensated immediately and the failure propagates.
+
+   Only a monitored module inside start-biff-application! has this scope.
+   Unchecked biff/start and arbitrary module callbacks have no implicit
+   acquisition owner. Allocation that throws before returning, and resources
+   allocated without this helper, remain the allocating module's obligation."
+  [resource-id acquire! close!]
+  (register-owned-resource! :start resource-id acquire! close!))
 
 (defn- record-started!
   [^StartupCleanup cleanup module system token]
@@ -243,7 +256,7 @@
                   (swap! (.-state cleanup) assoc :status :blocked)
                   {:status :blocked
                    :blocked-module-id module-id
-                   :blocked-resource-id (when (= :partial ownership) resource-id)
+                   :blocked-resource-id (when (#{:partial :init} ownership) resource-id)
                    :remaining-module-ids (mapv :module-id remaining)
                    :cause failure})
                 (do
@@ -259,14 +272,27 @@
    exception. Repeated calls after :drained are no-ops. If the failing stop
    still cannot complete, returns :blocked and retains its dependent modules.
 
-   The host MUST retain this handle and keep the resources it references
-   alive until cleanup drains. Neither this call nor the checked start can
-   recover unregistered resources allocated without acquire-startup-resource!,
-   an acquisition callback that never returned, or Biff :init side effects."
+   The host MUST retain this handle and keep its resources alive until cleanup
+   drains. Only declared init resources acquired via acquire-init-resource!
+   are tracked. Arbitrary init effects, unregistered resources and constructors
+   that throw before returning remain outside the guarantee."
   [handle]
   (when-not (instance? StartupCleanup handle)
     (reject! :invalid-startup-cleanup-handle {}))
   (cleanup-started! handle))
+
+(defn- admit-init-modules!
+  "Admission is a declared host policy, not a proof that any callback is pure."
+  [modules-var]
+  (doseq [m @modules-var :when (contains? m :biff.core/init)]
+    (let [policy (get m init-policy-key)
+          init (:biff.core/init m)]
+      (when-not (#{:declared-pure :tracked} policy)
+        (reject! :unadmitted-init {:module-id (:biff.core/id m)}))
+      (when (and (= :tracked policy) (not (fn? init)))
+        (reject! :tracked-init-must-be-callable
+                 {:module-id (:biff.core/id m)}))))
+  modules-var)
 
 (defn- monitored-modules-var
   [modules-var ^StartupCleanup cleanup]
@@ -279,30 +305,91 @@
   (clojure.lang.Var/create
    (mapv
     (fn [module]
-      (if (and (map? module)
-               (fn? (:biff.core/start module))
-               (not= application/application-handler-module-id
-                     (:biff.core/id module)))
-        (let [start (:biff.core/start module)]
-          (assoc module :biff.core/start
-                 (fn [system]
-                   (let [token (Object.)]
-                     (swap! (.-state cleanup) update :open-scopes conj token)
-                     (binding [*startup-ownership*
-                               {:cleanup cleanup :token token
-                                :module-id (:biff.core/id module)}]
-                       (try
-                         (let [next-system (start system)]
-                           (record-started! cleanup module next-system token)
-                           next-system)
-                         (catch Throwable error
-                           ;; Freeze scope on error; partial records remain
-                           ;; in the journal for ordered compensation.
-                           (swap! (.-state cleanup)
-                                  update :open-scopes disj token)
-                           (throw error))))))))
-        module))
+      (let [id (:biff.core/id module)
+            init (:biff.core/init module)
+            start (:biff.core/start module)
+            policy (get module init-policy-key)
+            watched-init
+            (when (and (fn? init) (= :tracked policy))
+              (fn [modules-var]
+                (let [token (Object.)]
+                  (swap! (.-state cleanup) update :open-scopes conj token)
+                  (binding [*startup-ownership* {:cleanup cleanup
+                                                 :token token
+                                                 :module-id id
+                                                 :phase :init}]
+                    (try
+                      (let [result (init modules-var)]
+                        (swap! (.-state cleanup) update :open-scopes disj token)
+                        result)
+                      (catch Throwable error
+                        (swap! (.-state cleanup) update :open-scopes disj token)
+                        (throw error)))))))
+            watched-start
+            (when (and (fn? start)
+                       (not= application/application-handler-module-id id))
+              (fn [system]
+                (let [token (Object.)]
+                  (swap! (.-state cleanup) update :open-scopes conj token)
+                  (binding [*startup-ownership* {:cleanup cleanup
+                                                 :token token
+                                                 :module-id id
+                                                 :phase :start}]
+                    (try
+                      (let [next-system (start system)]
+                        (record-started! cleanup module next-system token)
+                        next-system)
+                      (catch Throwable error
+                        (swap! (.-state cleanup) update :open-scopes disj token)
+                        (throw error)))))))]
+        (cond-> module
+          watched-init (assoc :biff.core/init watched-init)
+          watched-start (assoc :biff.core/start watched-start))))
     @modules-var)))
+
+(defn- retain-init-on-success!
+  [^StartupCleanup cleanup system]
+  ;; Successful startup owns module resources via native Biff stop callbacks.
+  ;; The journal retains ONLY :init acquisitions, which precede all :start
+  ;; resources and therefore must close AFTER all module stop callbacks.
+  (if-not (map? system)
+    (do
+      ;; Keep compatibility with non-Biff mock start results that contain no
+      ;; tracked init resources, but never let real acquired resources vanish.
+      (when (seq (filter #(= :init (:ownership %))
+                         (:remaining @(.-state cleanup))))
+        (reject! :invalid-startup-result {}))
+      system)
+    (let [native-stop (:biff.core/stop-system system)]
+      (when-not (ifn? native-stop)
+        (reject! :missing-native-stop-chain {}))
+      (swap! (.-state cleanup)
+             (fn [s]
+               (when (seq (:open-scopes s))
+                 (reject! :unfinished-ownership-scopes {}))
+               (assoc s :status :started
+                      :remaining (filterv #(= :init (:ownership %))
+                                          (:remaining s)))))
+      (let [native-stopped? (atom false)]
+        (assoc system :biff.core/stop-system
+               (fn []
+                 (locking cleanup
+                   (when-not @native-stopped?
+                     ;; Keep initialized resources alive if a provider's
+                     ;; stop refuses to drain. Retrying Biff stop remains the
+                     ;; host's responsibility under the native Biff contract.
+                     (native-stop)
+                     (reset! native-stopped? true))
+                   (let [{:keys [status blocked-module-id blocked-resource-id
+                                 cause]} (cleanup-started! cleanup)]
+                     (when (= :blocked status)
+                       (throw (ex-info
+                               "Biff stopped its modules, but init cleanup is blocked."
+                               {:error/type :gesso.live.outbox/init-cleanup-blocked
+                                :blocked-module-id blocked-module-id
+                                :blocked-resource-id blocked-resource-id
+                                :cleanup/handle cleanup}
+                               cause)))))))))))
 
 (defn start-biff-application!
   "Checked opt-in canonical Biff startup with the managed outbox module LAST.
@@ -327,19 +414,26 @@
    and :cleanup/handle for retry-startup-cleanup!. Earlier providers remain
    open until the failed stop drains. Module-local partial allocation BEFORE
    :start returns are now covered ONLY when that provider uses
-   acquire-startup-resource!. Unregistered partial allocation and effects
-   from :biff.core/init still require the owning module's own cleanup. The tracked modules Var is
-   fixed at startup; dynamic module hot reload is outside this profile."
+   acquire-startup-resource!. Initialization functions must declare either
+   :declared-pure or :tracked under init-policy-key. Only explicitly registered
+   init resources have guaranteed rollback and post-stop teardown; an arbitrary
+   callback declaring itself pure is a trusted assertion, not a purity proof.
+   The tracked modules Var is fixed at startup; dynamic hot reload is outside
+   this profile."
   [assembly initial-system modules-var start-order]
   (validate-config! initial-system)
   (require-canonical-module-and-order! modules-var start-order)
+  ;; Reject unadmitted init callbacks BEFORE Biff can run any of them.
+  (admit-init-modules! modules-var)
   (let [cleanup (->StartupCleanup
                  (atom {:status :starting :remaining []
                         :stopped-module-ids [] :open-scopes #{}}))
         tracked-modules (monitored-modules-var modules-var cleanup)]
     (try
-      (application/start-biff-application!
-       assembly initial-system tracked-modules start-order)
+      (retain-init-on-success!
+       cleanup
+       (application/start-biff-application!
+        assembly initial-system tracked-modules start-order))
       (catch Throwable startup-cause
         (let [{:keys [status blocked-module-id blocked-resource-id
                       remaining-module-ids cause]}
