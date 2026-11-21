@@ -4253,6 +4253,48 @@
                   (first (progression/required-bases
                           (:progression literal)))))))))))
 
+(deftest submit-tx-return-cannot-promote-submission-to-committed-basis-test
+  ;; submit-tx returns an acceptance receipt, never a confirmed commit.
+  ;; A nonstandard/extended returned map or a TransactionKey-like adapter
+  ;; result must not let :system-time manufacture authoritative progression.
+  ;; Preserve the original raw receipt only as diagnostic data.
+  (let [time (Instant/parse "2026-11-20T23:00:00Z")
+        receipts [{:tx-id 2062 :system-time time}
+                  {:tx-id 2062 :system-time time :snapshot-time time}
+                  (tx-key 2062 time)]]
+    (doseq [receipt receipts]
+      (let [calls (atom [])
+            debug-events (atom [])]
+        (with-xtdb-stub
+          '*submit-tx*
+          (fn [& args]
+            (swap! calls conj args)
+            receipt)
+          (fn []
+            (let [result (xtdb-live/submit-tx!
+                          :conn sample-tx
+                          {:debug-fn #(swap! debug-events conj %)})
+                  succeeded (last @debug-events)]
+              (is (identical? receipt (:tx-result result))
+                  "Raw returned receipt remains available for reconciliation")
+              (is (= {:tx-id 2062} (:consistency result))
+                  "Submission metadata must not imply a committed snapshot")
+              (is (nil? (:progression result))
+                  "Only execute/observed status can establish progression")
+              (is (nil? (xtdb-live/consistency->basis (:consistency result)))
+                  "Submitted-only consistency cannot establish read authority")
+              (is (= 1 (count @calls)))
+              (is (= [:gesso.live.xtdb/submit-tx-started
+                      :gesso.live.xtdb/submit-tx-succeeded]
+                     (mapv :event @debug-events)))
+              (is (= {:tx-id 2062} (:consistency succeeded)))
+              (is (not (contains? succeeded :progression))
+                  "Success diagnostics must not misrepresent submission as commit"))))))
+    ;; The generic result-to-progression utility is intentionally unchanged:
+    ;; it can interpret a complete execute-tx receipt, but submission must
+    ;; not use it as proof of commitment.
+    (is (some? (xtdb-live/tx-result-progression (tx-key 2062 time))))))
+
 (deftest submit-tx-calls-xtdb-submit-tx-and-filters-opts-test
   (let [calls (atom [])
         debug-events (atom [])]

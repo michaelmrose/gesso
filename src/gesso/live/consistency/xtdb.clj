@@ -2483,14 +2483,20 @@
        (let [tx-result (invoke-xtdb-api! :submit-tx *submit-tx*
                                          connectable' tx-ops tx-options)
              _ (require-returned-tx-id! :submit-tx tx-result)
+             ;; The submit API proves acceptance by tx-id, never an indexed
+             ;; transaction time. Even if a nonstandard returned result carries
+             ;; :system-time, it is not evidence of commit and must not yield
+             ;; an authoritative read basis or progression. Retain the raw
+             ;; result separately for diagnostics/reconciliation.
+             submitted-receipt {:tx-id (:tx-id (tx-result-map tx-result))}
              ;; A usable returned receipt establishes submission, not commit. Any
              ;; subsequent metadata failure must preserve that distinction
              ;; instead of looking like the API rejected the transaction.
              {:keys [consistency progression-value]}
              (try
-               {:consistency (tx-consistency tx-result)
+               {:consistency (tx-consistency submitted-receipt)
                 :progression-value
-                (tx-result-progression tx-result (:database tx-options))}
+                (tx-result-progression submitted-receipt (:database tx-options))}
                (catch Throwable cause
                  (throw (post-submit-result-error cause tx-result))))]
          (debug!
