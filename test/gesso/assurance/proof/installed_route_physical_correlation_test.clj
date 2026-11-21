@@ -144,9 +144,10 @@
    (let [api-calls (atom [])
          transactions (atom 0)
          {:keys [change-ops tx-options tx-mode result status extra-call?
-                 post-submit-error receipt-mode]
+                 post-submit-error receipt-mode consistency-mode]
           :or {change-ops identity tx-mode :execute-tx
-               result (fake-key) status :committed receipt-mode :matching}} settings]
+               result (fake-key) status :committed receipt-mode :matching
+               consistency-mode :matching}} settings]
      (with-redefs-fn
        {#'tx/transact!
         (fn [ctx p]
@@ -173,7 +174,16 @@
                 (assoc :tx-result
                        (if (= :different receipt-mode)
                          (fake-key 999)
-                         (:tx-result api-response)))))))
+                         (:tx-result api-response)))
+                (not= :missing consistency-mode)
+                (assoc :consistency
+                       (case consistency-mode
+                         :matching (:consistency api-response)
+                         :wrong-tx-id (assoc (:consistency api-response)
+                                             :tx-id 9999)
+                         :wrong-snapshot (assoc (:consistency api-response)
+                                                :snapshot-time
+                                                (Instant/parse "2020-01-01T00:00:00Z"))))))))
         (ns-resolve 'gesso.live.consistency.xtdb '*execute-tx*)
         (fn [connectable ops opts]
           (swap! api-calls conj [:execute-tx connectable ops opts])
@@ -203,6 +213,7 @@
     (is (true? (:prepared-options-agree? report)))
     (is (true? (:definitive-execute-key-observed? report)))
     (is (true? (:model-commit-receipt-identical-to-adapter? report)))
+    (is (true? (:model-consistency-agrees-with-xtdb-receipt? report)))
     (is (= :bounded-conditional-process-local-observation-only
            (:proof-status report)))
     (is (= :not-established (:actual-server-deployment report)))
@@ -260,6 +271,25 @@
         (is (correlation/installed-physical-witness? handle))
         (is (= 1 @transactions))
         (is (= 1 (count @api-calls)))))))
+
+(deftest committed-model-consistency-must-match-actual-xtdb-receipt
+  ;; A captured committed receipt may reach the model unchanged while its
+  ;; read-your-writes consistency coordinates are omitted or substituted.
+  ;; HTTP 200 and exact receipt identity alone must NOT qualify basis metadata.
+  (doseq [consistency-mode [:missing :wrong-tx-id :wrong-snapshot]]
+    (artificial-execution {:consistency-mode consistency-mode}
+      (fn [{:keys [transactions api-calls]}]
+        (let [{:keys [report handle execution]} (observe (options))]
+          (is (= :returned (:outcome execution)))
+          (is (= 200 (get-in execution [:result :status])))
+          (is (true? (:model-commit-receipt-identical-to-adapter? report)))
+          (is (= :incorporated (:issued-resolution-class report)))
+          (is (= :model-consistency-basis-diverges-from-receipt
+                 (:status report)))
+          (is (false? (:model-consistency-agrees-with-xtdb-receipt? report)))
+          (is (nil? handle))
+          (is (= 1 @transactions))
+          (is (= 1 (count @api-calls))))))))
 
 (deftest physically-committed-but-unresolved-operation-cannot-qualify-http-success
   ;; A post-commit Live failure leaves the physical write committed, but

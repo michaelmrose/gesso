@@ -15,6 +15,10 @@
    This also requires the original model transaction observer to carry the
    IDENTICAL definitive execute-tx receipt captured at the XTDB adapter,
    not merely a claimed committed outcome with no link to that API result.
+   It also compares the model transaction's original read-your-writes
+   consistency coordinates against those derived from the same adapter
+   receipt. Neither metadata agreement nor receipt identity authenticates
+   an actual XTDB server or proves externally durable incorporation.
    It requires the original issued executor to have returned an
    incorporated resolution for a positive same-attempt physical/HTTP witness;
    a committed adapter call with a :unresolved application return is not
@@ -59,6 +63,7 @@
 (def ^:private original-contract-check contracts/check-certified-contracts!)
 (def ^:private original-operation-summary app/operation-summary)
 (def ^:private original-capture adapter/capture-tx-api-calls!)
+(def ^:private original-tx-result-consistency adapter/tx-result-consistency)
 (def ^:private original-prepare tx/prepare)
 
 (def ^:private open-obligations
@@ -93,6 +98,8 @@
                              (var-get #'app/operation-summary))
                  (identical? original-capture
                              (var-get #'adapter/capture-tx-api-calls!))
+                 (identical? original-tx-result-consistency
+                             (var-get #'adapter/tx-result-consistency))
                  (identical? original-prepare
                              (var-get #'tx/prepare)))
     (reject! :substituted-correlation-boundary)))
@@ -275,9 +282,20 @@
                                  ;; privately; compare, never publish it.
                                  (identical? (:physical/receipt outcome)
                                              (:tx-result end))))
+        consistency-agrees? (boolean
+                             (and receipt-identical?
+                                  ;; This is the actual transaction wrapper's
+                                  ;; private basis, not a value reconstructed
+                                  ;; from the opaque HTTP response body.
+                                  (map? (:physical/consistency outcome))
+                                  (try
+                                    (= (original-tx-result-consistency
+                                        (:tx-result end))
+                                       (:physical/consistency outcome))
+                                    (catch Throwable _ false))))
         complete? (and (not poisoned) postcheck? pair adapter-events
                        operations-agree? options-agree? definitive?
-                       receipt-identical?
+                       receipt-identical? consistency-agrees?
                        (= :committed (:physical/status outcome))
                        (= :incorporated issued-resolution-class)
                        original-response?
@@ -306,6 +324,8 @@
                  :physical-commit-with-unconfirmed-operation-result
                  (not receipt-identical?)
                  :model-receipt-not-identical-to-adapter
+                 (not consistency-agrees?)
+                 :model-consistency-basis-diverges-from-receipt
                  (not complete?) :unconfirmed-or-uncertain-outcome
                  :else :bounded-installed-route-to-adapter-agreement)]
     {:type report-type
@@ -322,6 +342,7 @@
      :prepared-options-agree? (boolean options-agree?)
      :definitive-execute-key-observed? (boolean definitive?)
      :model-commit-receipt-identical-to-adapter? receipt-identical?
+     :model-consistency-agrees-with-xtdb-receipt? consistency-agrees?
      :post-execution-source-rechecked? (boolean postcheck?)
      :handler-invocation-count 1
      :ring-response-class ring-class

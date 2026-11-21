@@ -416,9 +416,14 @@
 (defn- physical-result [transaction error]
   (cond
     (and (nil? error) (= :committed (:commit/status transaction)))
-    {:physical/status :committed
-     :physical/source :gesso-model-transaction-ack
-     :physical/receipt (:tx-result transaction)}
+    ;; Keep the original model transaction consistency private in the
+    ;; attempt observer. Receipt identity alone does not establish that the
+    ;; model received the adapter-derived read-your-writes basis unchanged.
+    (cond-> {:physical/status :committed
+             :physical/source :gesso-model-transaction-ack
+             :physical/receipt (:tx-result transaction)}
+      (contains? transaction :consistency)
+      (assoc :physical/consistency (:consistency transaction)))
 
     (and error (live/post-commit-delivery-failure? error))
     {:physical/status :committed

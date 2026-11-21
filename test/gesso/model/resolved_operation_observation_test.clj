@@ -130,6 +130,27 @@
       (is (= {:tx-id 17} (:physical/receipt (terminal captured))))
       (is (= 1 (:construct @(:counts e)))))))
 
+(deftest acknowledged-model-basis-is-observed-privately-without-invention-test
+  ;; The original transaction's read-your-writes consistency is observable
+  ;; for same-attempt correlation only if that returned map actually had it.
+  (let [e (fake-environment)
+        captured (atom [])
+        basis {:tx-id 19 :system-time (java.time.Instant/parse "2026-01-01T00:00:00Z")
+               :snapshot-time (java.time.Instant/parse "2026-01-01T00:00:00Z")}
+        acknowledged {:commit/status :committed :tx-result {:tx-id 19}
+                      :consistency basis}]
+    (with-redefs [tx/transact! (fn [_ctx _plan] acknowledged)]
+      (is (= :incorporated (:status (invoke e :submit (events captured))))))
+    (paired-events! captured e)
+    (is (= basis (:physical/consistency (terminal captured))))
+    (is (= {:tx-id 19} (:physical/receipt (terminal captured)))))
+  (let [e (fake-environment)
+        captured (atom [])]
+    (with-redefs [tx/transact! (fn [_ctx _plan]
+                                 {:commit/status :committed :tx-result {:tx-id 20}})]
+      (is (= :incorporated (:status (invoke e :submit (events captured))))))
+    (is (not (contains? (terminal captured) :physical/consistency)))))
+
 (deftest no-observer-keeps-existing-execution-contract-test
   (let [e (fake-environment)
         submissions (atom 0)]
