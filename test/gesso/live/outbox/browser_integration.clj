@@ -25,6 +25,7 @@
             [gesso.live.outbox.http :as http]
             [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.progression.http :as progression.http]
+            [gesso.live.progression :as progression]
             [gesso.live.source :as source]
             [gesso.live.ui :as ui]
             [manifold.stream :as stream]
@@ -33,6 +34,7 @@
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
            [java.net InetSocketAddress URI]
            [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
+           [java.io BufferedReader InputStreamReader]
            [java.nio.charset StandardCharsets]
            [java.util.concurrent Executors]))
 
@@ -225,6 +227,7 @@
               node (:xtdb/connectable started)
               sys (:gesso.live/system started)
               requests (atom [])
+              correlated-source (source/subscribe (:source sys) scope)
               route (http/wrap-authorized-sse
                      started {:path "/live/events"
                               :authorize-subscription
@@ -277,6 +280,7 @@
               (is (eventually #(pos? (count @requests))))
               (let [baseline (long (chromium/evaluate
                                     page "() => window.__v2109.refreshes"))
+                    baseline-requests (count @requests)
                     intent (random-uuid)
                     plan (outbox/prepare!
                           {:intent-ids [intent] :source-id source-id
@@ -291,8 +295,12 @@
                          (:gesso.live.outbox/status
                           (first (stable-q node
                                        ["SELECT * FROM gesso_live_outbox WHERE _id = ?" intent]))))))
-                (chromium/wait-for-js! page
-                                       "() => window.__v2109.messages >= 1")
+                (let [source-event (deref (stream/take! correlated-source)
+                                          5000 ::no-source-event)]
+                  (is (= subject (:id source-event)))
+                  (is (some? (:progression source-event)))
+                  (chromium/wait-for-js! page
+                                         "() => window.__v2109.messages >= 1")
                 (chromium/wait-for-js! page
                                        "() => document.getElementById('v2109-browser-panel') && document.getElementById('v2109-browser-panel').getAttribute('data-authoritative-status') === 'claimed'")
                 (is (> (long (chromium/evaluate page
@@ -303,17 +311,25 @@
                                           "() => document.getElementById('v2109-browser-panel').textContent")))
                 (is (= :claimed (:status (first
                                          (stable-q node ["SELECT * FROM requests WHERE _id = ?" subject])))))
-                (is (some (fn [req]
-                            (some-> (get-in req [:headers
-                                                 progression.http/request-header-name])
-                                    progression.http/decode-request-progression))
-                          @requests)
-                    "The browser's refresh must carry an authoritative progression requirement")
+                  ;; Only requests issued AFTER this write's baseline count,
+                  ;; carrying the EXACT requirement accepted from this source
+                  ;; event, establish correspondence. An unrelated header or
+                  ;; the initial advisory refresh must not satisfy the test.
+                  (is (some (fn [req]
+                              (when-let [header (get-in
+                                                 req [:headers
+                                                      progression.http/request-header-name])]
+                                (= (:progression source-event)
+                                   (progression.http/decode-request-progression
+                                    header))))
+                            (drop baseline-requests @requests))
+                      "The post-invalidation browser GET must carry the exact source progression")
                 (is (= [] (chromium/evaluate page "() => window.__v2109.errors")))
-                (is (true? (chromium/assert-clean! context)))))
+                (is (true? (chromium/assert-clean! context))))))
             (finally
               (when-let [ctx @context*] (chromium/close-context! ctx))
               (when-let [br @harness*] (chromium/stop! br))
+              (stream/close! correlated-source)
               ((:close! route))
               ((:close! server))
               (host/stop! started))))))))
@@ -474,6 +490,132 @@
               ((:close! server))
               (host/stop! started))))))))
 
+(defn- sse-frame-from-http!
+  "Read one complete physical SSE frame without abandoning a pending stream
+   read. Caller retains and closes the HTTP InputStream after observation."
+  [input]
+  (let [reader (BufferedReader.
+                (InputStreamReader. input StandardCharsets/UTF_8))
+        task (future
+               (loop [lines []]
+                 (let [line (.readLine reader)]
+                   (cond
+                     (nil? line) lines
+                     (empty? line) (if (seq lines) lines (recur []))
+                     :else (recur (conj lines line))))))
+        observed (deref task 10000 ::sse-timeout)]
+    (when (= ::sse-timeout observed)
+      (future-cancel task))
+    observed))
+
+(deftest physical-sse-frame-progresses-exact-authoritative-fragment-http-test
+  ;; This is an HTTP-only contract, not a browser-observed convergence proof.
+  ;; Unlike a direct source tap it verifies the SAME progression wire made it
+  ;; through Ring SSE and came back on the real client's HTTP fragment GET.
+  (let [ops (standard-operations)
+        render (render-context ops)]
+    (with-surfaced-application
+      {:request-board [:main (rendered-operation-button
+                              render :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [handler (fn [_] (g/html-response
+                              [:main (rendered-operation-button
+                                      render :request/claim
+                                      "/operations/request/claim")]))
+              started (host/start! assembly handler (config))
+              node (:xtdb/connectable started)
+              seen-requests (atom [])
+              route (http/wrap-authorized-sse
+                     started {:path "/live/events"
+                              :authorize-subscription
+                              (fn [req]
+                                (when (= "Bearer accepted"
+                                         (get-in req [:headers "authorization"]))
+                                  scope))})
+              server (start-loopback!
+                      (fn [request]
+                        (cond
+                          (= "/live/events" (:uri request))
+                          ((:handler route) request)
+                          (= "/fragment" (:uri request))
+                          (do (swap! seen-requests conj request)
+                              (fragment-response node request))
+                          :else {:status 404 :headers {} :body "Not found"})))
+              client (HttpClient/newHttpClient)]
+          (try
+            (xt/execute-tx node [[:put-docs :requests
+                                  {:xt/id subject :status :pending}]])
+            (let [req (.build (.header
+                               (.GET (HttpRequest/newBuilder
+                                      (URI/create (str (:url server) "/live/events"))))
+                               "authorization" "Bearer accepted"))
+                  response-future (future
+                                    (.send client req
+                                           (HttpResponse$BodyHandlers/ofInputStream)))]
+              ;; HttpServer/JDK streaming responses can defer client headers
+              ;; until the first body bytes. Establish server-side interest
+              ;; and publish before awaiting the HTTP response on the client.
+              (is (eventually #(= 1 ((:active-count route)))))
+              (let [id (random-uuid)
+                      plan (outbox/prepare!
+                            {:intent-ids [id] :source-id source-id
+                             :operation :request/claim
+                             :purpose :gesso.live/refresh}
+                            [{:topic :request :id subject
+                              :change/kind :updated}])]
+                  (xt/execute-tx node
+                                 (into (vec (:guard-ops plan))
+                                       [[:put-docs :requests
+                                         {:xt/id subject :status :claimed}]
+                                        (:tx-op plan)]))
+                  (let [response (deref response-future 10000 ::response-timeout)
+                        _ (is (not= ::response-timeout response))
+                        _ (when (not= ::response-timeout response)
+                            (is (= 200 (.statusCode response))))
+                        lines (when (not= ::response-timeout response)
+                                (with-open [body (.body response)]
+                                  (sse-frame-from-http! body)))
+                        event (first (filter #(str/starts-with? % "event: ") lines))
+                        data (first (filter #(str/starts-with? % "data: ") lines))
+                        payload (when data (clojure.edn/read-string (subs data 6)))
+                        requirement (some-> payload :progression
+                                             progression/wire->requirement)
+                        header (when requirement
+                                 (progression.http/encode-request-progression
+                                  requirement))]
+                    (is (not= ::sse-timeout lines))
+                    (is (= "event: live-update" event))
+                    (is (= subject (get-in payload [:invalidation :id])))
+                    (is (= :request (get-in payload [:invalidation :topic])))
+                    (is (some? requirement))
+                    (is (= requirement
+                           (progression/wire->requirement
+                            (get-in payload [:invalidation :progression]))))
+                    (is (string? header))
+                    (when header
+                      (let [fragment (get-body!
+                                      client (:url server) "/fragment"
+                                      {progression.http/request-header-name
+                                       header})]
+                        (is (= 200 (:status fragment)))
+                        (is (str/includes?
+                             (:body fragment)
+                             "data-authoritative-status=\"claimed\""))
+                        (is (= header
+                               (get-in (last @seen-requests)
+                                       [:headers
+                                        progression.http/request-header-name]))))))))
+            ;; JDK HttpServer may not observe a peer-side InputStream close
+            ;; until another write. Explicit adapter shutdown must always
+            ;; retire the interest, regardless of disconnect detection.
+            (is (= :closed ((:close! route))))
+            (is (eventually #(zero? ((:active-count route)))))
+            (finally
+              ((:close! route))
+              ((:close! server))
+              (.shutdownNow ^HttpClient client)
+              (host/stop! started))))))))
+
 (defn -main [& args]
   ;; The readiness selection can run where managed Chromium policies deny
   ;; loopback URLs. The default browser gate never silently downgrades to it.
@@ -486,9 +628,10 @@
                            (ref test/*initial-report-counters*)]
                    (test/test-vars
                     [#'canonical-browser-page-and-authoritative-fragment-over-loopback-test
-                     #'actual-http-fragment-read-honors-source-progression-test])
+                     #'actual-http-fragment-read-honors-source-progression-test
+                     #'physical-sse-frame-progresses-exact-authoritative-fragment-http-test])
                    @test/*report-counters*)
                  (run-tests 'gesso.live.outbox.browser-integration))]
-    (println "V2109 RESULTS" result)
+    (println "V2111 RESULTS" result)
     (shutdown-agents)
     (System/exit (if (and (zero? (:fail result)) (zero? (:error result))) 0 1))))
