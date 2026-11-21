@@ -384,6 +384,54 @@
              ((:close! denied))
              ((:close! malformed)))))))))
 
+(deftest shutdown-preempts-late-authorization-exception-test
+  (setup-host
+   (fn [started]
+     (let [source (:source (:gesso.live/system started))
+           request {:uri "/live/events" :request-method :get}
+           failure (ex-info "Application provider failed during teardown"
+                            {:failure :provider-stopped})
+           entered (promise)
+           release (promise)
+           calls (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription
+                           (fn [_]
+                             (swap! calls inc)
+                             (deliver entered true)
+                             @release
+                             (throw failure))})
+           pending (future ((:handler route) request))]
+       (try
+         (is (= true (deref entered 5000 ::timeout))
+             "The callback must begin while the route is still open")
+         ((:close! route))
+         (deliver release true)
+         (is (= {:status 503 :headers {} :body "Live shutting down"}
+                (deref pending 5000 ::timeout))
+             "A late ordinary callback exception cannot replace shutdown")
+         (is (= 1 @calls))
+         (is (true? ((:closed? route))))
+         (is (zero? ((:active-count route))))
+         (is (zero? (:subscription-count (source/stats source))))
+         (finally
+           (deliver release true)
+           (future-cancel pending)
+           ((:close! route))))
+       ;; The very same exception must escape unchanged while the route is
+       ;; open, rather than silently becoming a denial or success response.
+       (let [open-route (http/wrap-authorized-sse
+                         started {:path "/live/events"
+                                  :authorize-subscription (fn [_] (throw failure))})]
+         (try
+           (is (identical? failure
+                           (try ((:handler open-route) request)
+                                (catch Exception e e))))
+           (is (zero? ((:active-count open-route))))
+           (is (zero? (:subscription-count (source/stats source))))
+           (finally ((:close! open-route)))))))))
+
 (deftest route-shutdown-cancels-active-sessions-and-rejects-new-get-test
   (setup-host
    (fn [started]

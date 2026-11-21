@@ -53,8 +53,9 @@
    returns 503 without consulting authorization or registering interests;
    the inner locked check still prevents admission when shutdown races an
    authorization already in progress. Shutdown also takes precedence over
-   a late denial or malformed scope result; both return 503 without exposing
-   an authorization result after the route has closed.
+   a late denial, malformed scope, or ordinary callback exception: all yield
+   503 once closed, without revealing provider failure during teardown.
+   Exceptions while the route is open retain their original identity.
 
    Call :close! and stop the owning HTTP listener before host/stop!. If a
    client disconnects, the SSE Manifold stream should close at the Ring
@@ -110,25 +111,33 @@
               {:status 503 :headers {} :body "Live shutting down"}
 
               :else
-              (let [subscription (authorize-subscription request)]
-                ;; Authorization may finish after :close! has retired this
-                ;; route. Interpret its result inside the same lock as SSE
-                ;; admission, so a closed route always wins over nil or an
-                ;; invalid scope; a still-open route retains its ordinary
-                ;; 403 and typed rejection behavior.
+              (let [[outcome value]
+                    (try
+                      [:authorized (authorize-subscription request)]
+                      ;; Do not suppress thread interruption or VM-level
+                      ;; errors during shutdown. Only ordinary callback
+                      ;; failures may be superseded by the route's 503.
+                      (catch InterruptedException e (throw e))
+                      (catch Exception e [:failed e]))]
+                ;; Authorization runs outside the lock to avoid blocking
+                ;; shutdown. Interpret both success and ordinary failure
+                ;; inside the admission lock, where closure has precedence.
                 (locking state
                   (cond
                     (:closed? @state)
                     {:status 503 :headers {} :body "Live shutting down"}
 
-                    (nil? subscription)
+                    (= :failed outcome)
+                    (throw value)
+
+                    (nil? value)
                     {:status 403 :headers {} :body "Forbidden"}
 
-                    (not (valid-scope? subscription))
+                    (not (valid-scope? value))
                     (reject! :invalid-authorized-subscription {})
 
                     :else
-                    (let [session (live/start-sse! live-system subscription
+                    (let [session (live/start-sse! live-system value
                                                    {:sse-options validated-sse})
                           key (random-uuid)]
                       (swap! state assoc-in [:connections key] session)
