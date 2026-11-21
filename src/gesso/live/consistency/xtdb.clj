@@ -1659,6 +1659,25 @@
               :claimed-transaction claimed})))))
   consistency)
 
+(defn- apply-existing-biff-wrapper!
+  "Require an existing Biff middleware wrapper to RETURN a handler function.
+
+   An outer wrapper may itself be a function while returning an IFn data value
+   (map, vector, set, keyword) or nil. Merely validating its input and the
+   supplied guarded body would let Biff install that non-handler and silently
+   bypass the protected request. Reject the result at middleware composition,
+   before any request executes."
+  [outer-wrapper guarded-body]
+  (if-some [outer-wrapper outer-wrapper]
+    (let [result (outer-wrapper guarded-body)]
+      (when-not (fn? result)
+        (throw
+         (ex "Existing Biff snapshot wrapper must return a handler function."
+             {:reason :invalid-biff-wrapper-result
+              :wrapper-result result})))
+      result)
+    guarded-body))
+
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper database-name snapshot-token frontier admitted-requirement
    admitted-consistency bound-node]
@@ -1714,9 +1733,7 @@
                                    :gesso.live/progression combined-requirement)
                       (seq combined-consistency)
                       (assoc :gesso.live/consistency combined-consistency))))))]
-        (if-some [outer-wrapper existing-wrapper]
-          (outer-wrapper fixed-body)
-          fixed-body)))))
+        (apply-existing-biff-wrapper! existing-wrapper fixed-body)))))
 
 (defn- compose-empty-biff-snapshot!
   "Compose foreign snapshot bases across an empty selected database boundary.
@@ -1828,9 +1845,7 @@
                          (assoc :gesso.live/progression combined-requirement)
                          (seq combined-consistency)
                          (assoc :gesso.live/consistency combined-consistency))))))]
-        (if-some [outer-wrapper existing-wrapper]
-          (outer-wrapper guarded-body)
-          guarded-body)))))
+        (apply-existing-biff-wrapper! existing-wrapper guarded-body)))))
 
 (defn- frontier-xtdb-required-bases
   "Validate every basis that explicitly claims XTDB authority.

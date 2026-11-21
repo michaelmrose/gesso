@@ -3280,6 +3280,58 @@
             (when (instance? clojure.lang.ExceptionInfo result)
               (is (= token (:snapshot-token (ex-data result)))))))))))
 
+(deftest biff-snapshot-wrappers-reject-nonfunction-wrapper-results-test
+  ;; v2061 checks that a configured wrapper and supplied body are functions.
+  ;; A configured wrapper can itself return a Clojure map/keyword/collection
+  ;; (all IFn) or nil instead of a handler. Installing that return would let
+  ;; Biff silently skip the protected body and its read obligations.
+  (let [time (Instant/parse "2026-11-20T23:00:00Z")
+        invalid-results [nil false {} {:handler :noop} #{:noop}
+                         [:noop] :noop]
+        body-calls (atom 0)]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub
+        '*status*
+        (fn [_]
+          {:latest-completed-txs
+           {"xtdb" (if populated?
+                     [{:tx-id 2063 :system-time time}]
+                     [])}})
+        (fn []
+          (doseq [returned invalid-results]
+            (let [bound (xtdb-live/bind-request-frontier
+                         {:xtdb/node :authority-node
+                          :biff.core/wrap-db-snapshot
+                          (fn [_] returned)})
+                  failure (try
+                            ((:biff.core/wrap-db-snapshot bound)
+                             (fn [_] (swap! body-calls inc) :ok))
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Outer Biff wrapper returned no handler: "
+                       (pr-str returned)))
+              (when (instance? clojure.lang.ExceptionInfo failure)
+                (is (= :invalid-biff-wrapper-result
+                       (:reason (ex-data failure))))
+                (is (= returned (:wrapper-result (ex-data failure)))))))
+          ;; A real function-returning middleware retains its ability to wrap
+          ;; the guarded handler without losing the selected XTDB frontier.
+          (let [outer-calls (atom 0)
+                bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node :authority-node
+                        :biff.core/wrap-db-snapshot
+                        (fn [f]
+                          (swap! outer-calls inc)
+                          (fn [ctx] (f ctx)))})
+                handler ((:biff.core/wrap-db-snapshot bound)
+                         (fn [_] (swap! body-calls inc) :ok))]
+            (is (fn? handler))
+            (is (= 1 @outer-calls))
+            (is (= :ok (handler {})))))))
+    (is (= 2 @body-calls)
+        "Only the valid middleware results may run a handler")))
+
 (deftest biff-snapshot-wrappers-reject-invokable-data-test
   ;; Clojure collections and keywords implement IFn so `ifn?` alone does not
   ;; establish that a configured Biff middleware wrapper is an actual fn.
