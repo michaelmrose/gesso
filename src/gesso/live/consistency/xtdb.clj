@@ -913,6 +913,30 @@
         (assoc options :snapshot-time receipt-time)))
     options))
 
+(declare compose-independent-snapshot-tokens!)
+
+(defn- merge-complete-receipt-query-opts
+  "Preserve independent query snapshot obligations for a complete receipt.
+
+   Under generic progression, enforce-progression-query-opts already composes
+   both sources and advances the selected database to its required frontier.
+   Without that authority, normal caller-option precedence is preserved for
+   convenience-only consistency, but a complete tx/time receipt cannot permit
+   the caller's token to erase independently admitted database snapshots.
+   Validate both canonical tokens and reject conflicting overlapping bases."
+  [consistency consistency-options caller-options]
+  (let [merged (merge consistency-options caller-options)]
+    (if (and (consistency->basis consistency (:database merged))
+             (contains? consistency-options :snapshot-token)
+             (contains? caller-options :snapshot-token))
+      (assoc merged :snapshot-token
+             (compose-independent-snapshot-tokens!
+              (:snapshot-token consistency-options)
+              (:snapshot-token caller-options)
+              :complete-transaction-receipt-query
+              :conflicting-receipt-query-snapshot-bases))
+      merged)))
+
 (defn read-query-opts
   "Build query opts from explicit consistency, optional authoritative progression,
    and caller opts. Progression and complete transaction-receipt minimums
@@ -925,7 +949,12 @@
      (require-complete-receipt-read-minimum!
       consistency
       (enforce-progression-query-opts
-       (merge consistency-options caller-options)
+       (if (strongest-required-basis progression-value)
+         ;; Authoritative progression composes all tokens separately and may
+         ;; legitimately advance older selected-database coordinates.
+         (merge consistency-options caller-options)
+         (merge-complete-receipt-query-opts
+          consistency consistency-options caller-options))
        progression-value
        consistency-options
        caller-options)))))
@@ -2091,9 +2120,8 @@
   ([consistency opts]
    (require-complete-receipt-read-minimum!
     consistency
-    (merge
-     (query-consistency consistency)
-     (query-opts opts)))))
+    (merge-complete-receipt-query-opts
+     consistency (query-consistency consistency) (query-opts opts)))))
 
 (defn tx-opts
   "Return only options intended for XTDB2 submit-tx/execute-tx.

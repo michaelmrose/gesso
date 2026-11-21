@@ -777,6 +777,87 @@
                   (xtdb-live/read-query-opts {:tx-id 2057} nil
                                              {:snapshot-time older}))))))
 
+(deftest complete-receipts-compose-caller-query-snapshot-tokens-test
+  ;; With a complete tx/time receipt, query consistency describes an admitted
+  ;; minimum. Caller opts must not silently discard an independent database's
+  ;; snapshot token while preserving only the transaction's selected minimum.
+  ;; No generic progression is required to expose this loss of read evidence.
+  (let [t (Instant/parse "2026-11-20T21:00:00Z")
+        earlier (.minusSeconds t 60)
+        older (.minusSeconds t 120)
+        analytics (xt.basis/->time-basis-str {"analytics" [earlier]})
+        reports (xt.basis/->time-basis-str {"reports" [older]})
+        duplicate (xt.basis/->time-basis-str {"analytics" [earlier]
+                                                   "reports" [older]})
+        conflict (xt.basis/->time-basis-str {"analytics" [older]})
+        expected {"analytics" [earlier] "reports" [older]}
+        consistency {:tx-id 2058 :system-time t :snapshot-token analytics}
+        ctx {:xtdb/read-connectable :read
+             :gesso.live/consistency consistency}
+        seen (atom [])
+        query (fn [& args] (swap! seen conj args) :queried)]
+    ;; Both option constructors must retain disjoint or equal-overlap bases.
+    (doseq [caller [reports duplicate]]
+      (is (= expected
+             (-> (xtdb-live/consistent-query-opts
+                  consistency {:snapshot-token caller})
+                 :snapshot-token xt.basis/<-time-basis-str)))
+      (is (= expected
+             (-> (xtdb-live/read-query-opts
+                  consistency nil {:snapshot-token caller})
+                 :snapshot-token xt.basis/<-time-basis-str))))
+    (with-redefs-fn {(xtdb-var '*q*) query
+                     (xtdb-var '*plan-q*) query}
+      (fn []
+        (is (= :queried (xtdb-live/q-consistent
+                         :read sample-query consistency
+                         {:snapshot-token reports})))
+        (is (= :queried (xtdb-live/plan-q-consistent
+                         :read sample-query consistency
+                         {:snapshot-token reports})))
+        (is (= :queried (xtdb-live/q-consistent-from
+                         ctx sample-query {:snapshot-token reports})))
+        (is (= :queried (xtdb-live/plan-q-consistent-from
+                         ctx sample-query {:snapshot-token reports})))
+        (is (= [expected expected expected expected]
+               (mapv (comp xt.basis/<-time-basis-str
+                           :snapshot-token last) @seen)))
+        (let [before (count @seen)]
+          ;; Conflicting overlap and malformed admitted tokens must fail
+          ;; before either physical XTDB query entry point is called.
+          (doseq [[bad-consistency caller reason]
+                  [[consistency conflict :conflicting-receipt-query-snapshot-bases]
+                   [(assoc consistency :snapshot-token "malformed-token")
+                    reports :invalid-snapshot-token]]
+                  invoke [#(xtdb-live/consistent-query-opts
+                            bad-consistency {:snapshot-token caller})
+                          #(xtdb-live/read-query-opts
+                            bad-consistency nil {:snapshot-token caller})
+                          #(xtdb-live/q-consistent
+                            :read sample-query bad-consistency
+                            {:snapshot-token caller})
+                          #(xtdb-live/plan-q-consistent-from
+                            (assoc ctx :gesso.live/consistency bad-consistency)
+                            sample-query {:snapshot-token caller})]]
+            (let [failure (try (invoke)
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure))
+              (when failure
+                (is (= reason (:reason (ex-data failure)))))))
+          (is (= before (count @seen))
+              "Rejected query snapshot overrides cannot reach XTDB"))))
+    ;; No complete transaction receipt means normal caller option precedence
+    ;; is still available for this convenience-only consistency API.
+    (is (= reports
+           (:snapshot-token
+            (xtdb-live/consistent-query-opts
+             {:snapshot-token analytics} {:snapshot-token reports}))))
+    (is (= reports
+           (:snapshot-token
+            (xtdb-live/read-query-opts
+             {:snapshot-token analytics} nil {:snapshot-token reports}))))))
+
 (deftest query-consistency-drops-tx-metadata-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]
     (is (= {:snapshot-time t
