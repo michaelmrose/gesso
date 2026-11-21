@@ -56,6 +56,9 @@
    a late denial, malformed scope, or ordinary callback exception: all yield
    503 once closed, without revealing provider failure during teardown.
    Exceptions while the route is open retain their original identity.
+   If the owning Live provider has already closed, return the same 503
+   before application authorization or subscription admission. The provider
+   check cannot replace the host's required ordered listener teardown.
 
    Call :close! and stop the owning HTTP listener before host/stop!. If a
    client disconnects, the SSE Manifold stream should close at the Ring
@@ -107,7 +110,7 @@
               ;; Closing this route must stop authorization-side work as
               ;; well as source admission. In particular, callbacks may use
               ;; providers which the owning host is about to shut down.
-              (:closed? @state)
+              (or (:closed? @state) (live/closed? live-system))
               {:status 503 :headers {} :body "Live shutting down"}
 
               :else
@@ -124,7 +127,7 @@
                 ;; inside the admission lock, where closure has precedence.
                 (locking state
                   (cond
-                    (:closed? @state)
+                    (or (:closed? @state) (live/closed? live-system))
                     {:status 503 :headers {} :body "Live shutting down"}
 
                     (= :failed outcome)

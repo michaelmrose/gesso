@@ -432,6 +432,48 @@
            (is (zero? (:subscription-count (source/stats source))))
            (finally ((:close! open-route)))))))))
 
+(deftest closed-live-provider-rejects-sse-before-and-after-authorization-test
+  (setup-host
+   (fn [started]
+     (let [system (:gesso.live/system started)
+           src (:source system)
+           request {:uri "/live/events" :request-method :get}
+           entered (promise)
+           release (promise)
+           calls (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription
+                           (fn [_]
+                             (swap! calls inc)
+                             (deliver entered true)
+                             @release
+                             scope)})
+           pending (future ((:handler route) request))]
+       (try
+         ;; Although the HTTP route was created while Live was active,
+         ;; its in-flight callback must not admit a new subscription after
+         ;; the owning provider is closed independently of route shutdown.
+         (is (= true (deref entered 5000 ::timeout)))
+         (live/close! system)
+         (is (true? (live/closed? system)))
+         (deliver release true)
+         (is (= {:status 503 :headers {} :body "Live shutting down"}
+                (deref pending 5000 ::timeout)))
+         (is (= 1 @calls))
+         ;; A later GET must not even consult the callback (whose providers
+         ;; could have disappeared). The route itself was not closed yet.
+         (is (false? ((:closed? route))))
+         (is (= {:status 503 :headers {} :body "Live shutting down"}
+                ((:handler route) request)))
+         (is (= 1 @calls))
+         (is (zero? ((:active-count route))))
+         (is (zero? (:subscription-count (source/stats src))))
+         (finally
+           (deliver release true)
+           (future-cancel pending)
+           ((:close! route))))))))
+
 (deftest route-shutdown-cancels-active-sessions-and-rejects-new-get-test
   (setup-host
    (fn [started]
