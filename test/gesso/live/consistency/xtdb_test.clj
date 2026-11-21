@@ -1448,12 +1448,12 @@
                (when requested {:snapshot-time requested})
                requirement)))))))
 
-(deftest progression-from-prefers-canonical-context-key-test
+(deftest progression-from-composes-canonical-and-convenience-context-test
   (let [t1 (Instant/parse "2026-01-01T00:00:00Z")
         t2 (Instant/parse "2026-01-02T00:00:00Z")
         canonical (progression/requirement (xtdb-live/basis 70 t1))
         convenience (progression/requirement (xtdb-live/basis 71 t2))]
-    (is (= canonical
+    (is (= (progression/compose canonical convenience)
            (xtdb-live/progression-from
             {:gesso.live/progression canonical
              :progression convenience})))
@@ -1462,6 +1462,65 @@
             {:progression convenience})))
     (is (nil? (xtdb-live/progression-from :not-a-context)))))
 
+
+(deftest progression-from-preserves-both-context-requirements-test
+  ;; Both keys are valid separately, and either can be introduced by a
+  ;; different request wrapper. Dropping the legacy minimum when the
+  ;; canonical minimum is present can permit a stale read or Biff binding.
+  (let [earlier (Instant/parse "2026-11-20T18:00:00Z")
+        later (.plusSeconds earlier 60)
+        canonical (progression/requirement
+                   (xtdb-live/basis :xtdb 2044 earlier))
+        legacy (progression/requirement
+                (xtdb-live/basis :xtdb 2045 later))
+        ctx {:xtdb/node :authority-node
+             :xtdb/read-connectable :read
+             :gesso.live/progression canonical
+             :progression legacy}
+        expected (progression/compose canonical legacy)
+        latest-token (xtdb-live/basis-snapshot-token
+                      (xtdb-live/basis :xtdb 2045 later))
+        observed (atom [])
+        record-call (fn [_ _ opts]
+                      (swap! observed conj opts)
+                      :queried)]
+    (is (= expected (xtdb-live/progression-from ctx))
+        "Independent context requirements must never be discarded")
+    (with-redefs-fn {(xtdb-var '*q*) record-call
+                     (xtdb-var '*plan-q*) record-call}
+      (fn []
+        (is (= :queried (xtdb-live/q-consistent-from ctx sample-query)))
+        (is (= :queried (xtdb-live/plan-q-consistent-from ctx sample-query)))))
+    (is (= [latest-token latest-token]
+           (mapv :snapshot-token @observed))
+        "Both physical query entry points must honor the stronger minimum")
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs
+               {"xtdb" [{:tx-id 2044 :system-time earlier}]}})
+      (fn []
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (xtdb-live/bind-request-frontier ctx))
+            "An observed older frontier cannot satisfy the discarded requirement")))
+    ;; An invalid secondary requirement must not be masked by a valid first.
+    (let [bad (assoc ctx :progression false)
+          before (count @observed)]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (xtdb-live/progression-from bad)))
+      (with-redefs-fn {(xtdb-var '*q*) record-call}
+        (fn []
+          (is (thrown? clojure.lang.ExceptionInfo
+                       (xtdb-live/q-consistent-from bad sample-query))
+              "Malformed secondary requirement must fail before XTDB I/O")))
+      (is (= before (count @observed))
+          "Malformed deferred constraint may not reach XTDB I/O"))
+    (is (= canonical
+           (xtdb-live/progression-from
+            {:gesso.live/progression canonical :progression nil})))
+    (is (= legacy
+           (xtdb-live/progression-from {:progression legacy})))
+    (is (= canonical
+           (xtdb-live/progression-from
+            {:gesso.live/progression canonical :progression canonical})))))
 
 (deftest progression-from-rejects-false-canonical-requirement-test
   ;; Only nil denotes an absent progression requirement. A false canonical

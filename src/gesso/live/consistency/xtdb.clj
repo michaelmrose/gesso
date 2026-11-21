@@ -841,19 +841,24 @@
     opts))
 
 (defn progression-from
-  "Return optional generic progression from a request/context map.
+  "Return the combined generic progression from a request/context map.
 
-   :gesso.live/progression is canonical. :progression is accepted as a narrow
-   request-local convenience while the public Live facade is migrated."
+   :gesso.live/progression is canonical. :progression is a legacy convenience
+   during facade migration, but when both are supplied they are independent
+   read obligations. Compose instead of selecting one: canonical precedence
+   must not discard a stronger requirement or mask an invalid legacy value.
+   Identical requirements collapse under the generic orderless composition."
   [x]
   (when (map? x)
-    ;; A supplied false value is malformed, not an absent requirement. Using
-    ;; `or` would silently erase it (or replace it with a legacy value), so
-    ;; use nil-only fallback before enforcing the canonical requirement shape.
-    (progression/normalize-requirement
-     (if-some [canonical (:gesso.live/progression x)]
-       canonical
-       (:progression x)))))
+    ;; Only nil denotes absence. Validate each alias separately. Do not invoke
+    ;; composition for an absent or single requirement: the original request
+    ;; path needs no reconciliation, and callers can observe that distinction.
+    (let [canonical (progression/normalize-requirement
+                     (:gesso.live/progression x))
+          legacy (progression/normalize-requirement (:progression x))]
+      (if (and canonical legacy)
+        (progression/compose canonical legacy)
+        (or canonical legacy)))))
 
 (defn read-query-opts
   "Build query opts from explicit consistency, optional authoritative progression,
