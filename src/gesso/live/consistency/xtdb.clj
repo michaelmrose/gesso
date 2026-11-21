@@ -759,6 +759,23 @@
           observed-time (basis-system-time required)
           explicit-db (when (contains? opts :database)
                         (normalize-database-name (:database opts)))]
+      ;; Both sources may independently pin the read's temporal context.
+      ;; Unlike progression's transaction frontier, :current-time and
+      ;; :default-tz do not have a trusted stronger/weaker ordering. A caller
+      ;; option must not silently replace an admitted value once a query has
+      ;; authoritative progression; reject the conflict before XTDB I/O.
+      ;; Without progression, normal explicit query-option precedence remains.
+      (doseq [field [:current-time :default-tz]
+              :when (and (contains? consistency-options field)
+                         (contains? caller-options field)
+                         (not= (get consistency-options field)
+                               (get caller-options field)))]
+        (throw
+         (ex "XTDB consistency and caller temporal read context conflict under authoritative progression."
+             {:field field
+              :consistency-value (get consistency-options field)
+              :caller-value (get caller-options field)
+              :reason :conflicting-temporal-read-context})))
       ;; Await tokens are also independently supplied read obligations. We
       ;; cannot infer which of two different opaque tokens is stronger here.
       ;; Ordinary map precedence would erase the consistency await-token,

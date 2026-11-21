@@ -1170,6 +1170,63 @@
            (:await-token (xtdb-live/read-query-opts
                           consistency nil caller))))))
 
+(deftest progression-read-rejects-conflicting-temporal-context-test
+  ;; Under an authoritative progression requirement, a query's current-time
+  ;; and default-tz are part of the admitted temporal read context. Different
+  ;; caller values have no reliable stronger/weaker ordering and cannot
+  ;; silently replace already admitted values in the actual XTDB query.
+  (let [frontier (Instant/parse "2026-11-20T18:00:00Z")
+        current (Instant/parse "2026-11-20T17:00:00Z")
+        later (.plusSeconds current 60)
+        required (progression/requirement
+                  (xtdb-live/basis :xtdb 2044 frontier))
+        conflicts [[{:current-time current} {:current-time later}
+                    :current-time]
+                   [{:default-tz "UTC"} {:default-tz "Asia/Tokyo"}
+                    :default-tz]]
+        calls (atom [])
+        actual-query (fn [& args] (swap! calls conj args) :unexpected)]
+    (doseq [[admitted caller field] conflicts]
+      (let [failure (try (xtdb-live/read-query-opts admitted required caller)
+                         nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo failure)
+            (str "Conflicting temporal read context should fail: " field))
+        (when failure
+          (is (= :conflicting-temporal-read-context
+                 (:reason (ex-data failure))))
+          (is (= field (:field (ex-data failure))))))
+      (with-redefs-fn {(xtdb-var '*q*) actual-query
+                       (xtdb-var '*plan-q*) actual-query}
+        (fn []
+          (let [ctx {:xtdb/read-connectable :read
+                     :gesso.live/progression required
+                     :gesso.live/consistency admitted}]
+            (doseq [invoke [#(xtdb-live/q-consistent-from ctx sample-query caller)
+                            #(xtdb-live/plan-q-consistent-from ctx sample-query caller)]]
+              (is (thrown? clojure.lang.ExceptionInfo (invoke)))
+              (is (empty? @calls)
+                  "Conflicting temporal context must fail before XTDB I/O"))))))
+    ;; Equal values and independent option fields are not conflicts.
+    (is (= current
+           (:current-time (xtdb-live/read-query-opts
+                           {:current-time current} required
+                           {:current-time current}))))
+    (is (= {:current-time current :default-tz "UTC"}
+           (select-keys (xtdb-live/read-query-opts
+                         {:current-time current} required
+                         {:default-tz "UTC"})
+                        [:current-time :default-tz])))
+    ;; Ordinary calls without progression retain documented opts precedence.
+    (is (= later
+           (:current-time (xtdb-live/read-query-opts
+                           {:current-time current} nil
+                           {:current-time later}))))
+    (is (= "Asia/Tokyo"
+           (:default-tz (xtdb-live/read-query-opts
+                         {:default-tz "UTC"} nil
+                         {:default-tz "Asia/Tokyo"}))))))
+
 (deftest progression-read-opts-preserve-both-consistency-and-caller-constraints-test
   ;; A plain query allows caller opts to override convenience consistency.
   ;; Under authoritative progression, that merge must not discard an
