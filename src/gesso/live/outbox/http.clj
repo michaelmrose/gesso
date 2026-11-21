@@ -64,7 +64,9 @@
    client disconnects, the SSE Manifold stream should close at the Ring
    adapter boundary; the source subscription is then released. The explicit
    :close! provides bounded, idempotent server-side cleanup even if the
-   transport fails to observe a disconnected peer."
+   transport fails to observe a disconnected peer. Cancellation failures
+   are reported after attempting all sessions; failed entries remain tracked
+   so a repeated :close! can retry them."
   [started {:keys [path authorize-subscription sse-options] :as options}]
   (when-not (and (map? options)
                  (= (set (keys options))
@@ -94,11 +96,32 @@
         state (atom {:closed? false :connections {}})
         close! (fn []
                  (locking state
-                   (let [{:keys [connections]} @state]
-                     (swap! state assoc :closed? true :connections {})
-                     (doseq [session (vals connections)]
-                       (live/cancel-sse! session)))
-                   :closed))
+                   ;; Mark closed before cancellation so no request can admit
+                   ;; another session. Retain failures in :connections: a
+                   ;; later close! must be able to retry them, even if one
+                   ;; cancellation aborts before its stream is closed.
+                   (swap! state assoc :closed? true)
+                   (let [failures
+                         (reduce-kv
+                          (fn [failures key session]
+                            (try
+                              (live/cancel-sse! session)
+                              (swap! state update :connections dissoc key)
+                              failures
+                              (catch Throwable e
+                                (conj failures e))))
+                          []
+                          (:connections @state))]
+                     ;; Never abandon later sessions because an earlier
+                     ;; cancellation failed. Preserve the original error
+                     ;; identity and report additional failures as suppressed.
+                     (when-let [failure (first failures)]
+                       (doseq [additional (rest failures)]
+                         (when-not (identical? failure additional)
+                           (.addSuppressed ^Throwable failure
+                                           ^Throwable additional)))
+                       (throw failure))
+                     :closed)))
         handler
         (fn [request]
           (if (not= path (:uri request))

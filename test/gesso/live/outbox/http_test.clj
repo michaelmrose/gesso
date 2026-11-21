@@ -474,6 +474,54 @@
            (future-cancel pending)
            ((:close! route))))))))
 
+(deftest route-shutdown-retries-failed-cancellation-test
+  (setup-host
+   (fn [started]
+     (let [source (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (fn [_] scope)})
+           request {:uri "/live/events" :request-method :get}
+           failure (ex-info "Injected session cancellation failure"
+                            {:test :v2128})
+           cancellation-attempts (atom 0)
+           original-cancel live/cancel-sse!]
+       (try
+         (let [a ((:handler route) request)
+               b ((:handler route) request)]
+           (is (= 200 (:status a)))
+           (is (= 200 (:status b)))
+           (is (= 2 ((:active-count route))))
+           (is (= 2 (:subscription-count (source/stats source))))
+           ;; The first cancellation fails *before* closing its stream.
+           ;; The remaining connection must still be canceled. A later
+           ;; close! must find and retry the failed connection.
+           (let [caught (try
+                          (with-redefs [live/cancel-sse!
+                                        (fn [session]
+                                          (if (= 1 (swap! cancellation-attempts inc))
+                                            (throw failure)
+                                            (original-cancel session)))]
+                            ((:close! route)))
+                          (catch Throwable e e))]
+             (is (identical? failure caught))
+             (is (= 2 @cancellation-attempts)))
+           (is (true? ((:closed? route))))
+           (is (= 1 ((:active-count route)))
+               "Failed cancellation must stay registered for retry")
+           (is (eventually #(= 1 (:subscription-count (source/stats source)))))
+           (is (= 503 (:status ((:handler route) request)))
+               "Even partly failed shutdown must reject new SSE GETs")
+           (is (= :closed ((:close! route)))
+               "Retry must successfully cancel the retained session")
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats source)))))
+           (is (stream/closed? (:body a)))
+           (is (stream/closed? (:body b)))
+           (is (= :closed ((:close! route)))
+               "Completed shutdown remains idempotent"))
+         (finally ((:close! route))))))))
+
 (deftest route-shutdown-cancels-active-sessions-and-rejects-new-get-test
   (setup-host
    (fn [started]
