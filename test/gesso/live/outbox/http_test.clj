@@ -248,6 +248,68 @@
                                      (source/stats src))))))
            (finally ((:close! route)))))))))
 
+(deftest managed-route-rejects-server-owned-sse-headers-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           calls (atom 0)
+           base {:path "/live/events"
+                 :authorize-subscription (fn [_]
+                                           (swap! calls inc)
+                                           scope)}]
+       ;; Header names are case-insensitive over HTTP even if Ring preserves
+       ;; distinct string keys. No application override may weaken the SSE
+       ;; caching, buffering or framing contract.
+       (doseq [[header value]
+               [["cache-control" "public, max-age=86400"]
+                ["Cache-Control" "public, max-age=86400"]
+                ["x-accel-buffering" "yes"]
+                ["X-Accel-Buffering" "yes"]
+                ["transfer-encoding" "chunked"]
+                ["Transfer-Encoding" "chunked"]
+                ["connection" "close"]
+                ["CONNECTION" "close"]
+                ["keep-alive" "timeout=1"]
+                ["proxy-connection" "close"]
+                ["te" "trailers"]
+                ["trailer" "x-trace"]
+                ["upgrade" "websocket"]]]
+         (let [result (try
+                        (http/wrap-authorized-sse
+                         started (assoc base :sse-options
+                                        {:headers {header value}}))
+                        (catch clojure.lang.ExceptionInfo e e))]
+           (try
+             (is (= :invalid-sse-reserved-header
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:reason (ex-data result))))
+                 (str "Reject server-owned response header " header))
+             (is (zero? @calls)
+                 "Invalid response framing must not invoke authorization")
+             (is (zero? (:subscription-count (source/stats src)))
+                 "Invalid response framing must not create an interest")
+             (finally
+               (when (map? result) ((:close! result)))))))
+       ;; An ordinary custom header is allowed; framework-owned defaults
+       ;; must still be present and active session cleanup must work.
+       (let [route (http/wrap-authorized-sse
+                    started (assoc base :sse-options
+                                   {:headers {"x-gesso-trace" "safe"}}))]
+         (try
+           (let [response ((:handler route)
+                           {:uri "/live/events" :request-method :get})]
+             (is (= 200 (:status response)))
+             (is (= "safe" (get-in response [:headers "x-gesso-trace"])))
+             (is (= "no-cache, no-transform"
+                    (get-in response [:headers "cache-control"])))
+             (is (= "no" (get-in response [:headers "x-accel-buffering"])))
+             (is (= 1 @calls))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (stream/close! (:body response))
+             (is (eventually #(zero? (:subscription-count
+                                     (source/stats src))))))
+           (finally ((:close! route)))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]

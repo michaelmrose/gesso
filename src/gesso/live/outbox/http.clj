@@ -25,6 +25,12 @@
                   (assoc data :error/type :gesso.live.outbox/invalid-http-route
                          :reason reason))))
 
+(def ^:private reserved-sse-response-headers
+  ;; The managed route owns stream framing, cache safety and proxy buffering.
+  ;; User-supplied case variants must not override or duplicate defaults.
+  #{"cache-control" "connection" "keep-alive" "proxy-connection"
+    "te" "trailer" "transfer-encoding" "upgrade" "x-accel-buffering"})
+
 (defn- valid-scope? [subscription]
   (and (map? subscription)
        (= #{:topic :id} (set (keys subscription)))
@@ -49,6 +55,8 @@
    would register a Live interest but cannot establish EventSource delivery.
    A fixed Content-Length is also forbidden: EventSource is an indefinite
    streamed body, whose framing must be managed by the HTTP server itself.
+   Other server-owned framing headers and managed cache/proxy-buffering
+   headers cannot be overridden by the application, including case variants.
    Reject these misconfigurations before authorization or subscription.
    Invalid callback results and callback exceptions propagate before a
    subscription can be installed. Once closed, the managed GET route
@@ -106,6 +114,15 @@
                                       field))
                                   (keys (:headers validated-sse)))]
             (reject! :invalid-sse-content-length {:header header}))
+        ;; User overrides must not defeat no-cache/no-transform or proxy
+        ;; buffering protection. Nor may Ring applications set hop-by-hop
+        ;; framing fields: these belong to the HTTP server, not EventSource.
+        _ (when-let [header (some (fn [^String field]
+                                    (when (contains? reserved-sse-response-headers
+                                                     (str/lower-case field))
+                                      field))
+                                  (keys (:headers validated-sse)))]
+            (reject! :invalid-sse-reserved-header {:header header}))
         base-handler (:biff.ring/handler started)
         live-system (:gesso.live/system started)
         state (atom {:closed? false :connections {}})
