@@ -493,6 +493,14 @@
                wrapped-system)))
          :biff.core/stop
          (fn [_]
+           ;; A trusted application callback can request stop from INSIDE
+           ;; the same synchronous Ring invocation (or its verification
+           ;; callback). ReentrantReadWriteLock cannot upgrade its own read
+           ;; lease to a write lease: attempting to do so deadlocks both the
+           ;; callback and physical teardown. Reject before changing state;
+           ;; another thread can retire the issued probe once this call exits.
+           (when (pos? (.getReadHoldCount business-dispatch-lock))
+             (reject! :probe-retirement-from-admitted-dispatch))
            ;; Close admission BEFORE waiting on existing dispatches. Read
            ;; leases are held through the entire original Ring invocation,
            ;; including its transactional effects; no business dispatch can

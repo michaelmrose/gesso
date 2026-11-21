@@ -125,6 +125,9 @@
   ([mode start-order typed-config f]
   (let [env ((earlier-helper 'case-env))
         contract (:contract env)
+        ;; Some regressions need the real fixture's current source identity
+        ;; before constructing a selected, principal-gated trial.
+        typed-config (if (fn? typed-config) (typed-config env) typed-config)
         adopted (host/issue-checked-biff-host-module! contract)
         probe-issued (probe/issue-http-consumption-probe-module!
                       (:handle adopted) contract typed-config)
@@ -159,6 +162,61 @@
                     (.build))
         client (HttpClient/newHttpClient)]
     (.statusCode (.send client request (HttpResponse$BodyHandlers/ofString)))))
+
+(deftest self-initiated-probe-stop-fails-fast-without-losing-admission
+  ;; A real app-owned principal callback executes under the business read
+  ;; lease. Calling Biff's probe stop on that SAME HTTP thread would attempt
+  ;; to upgrade the read lease to the exclusive write lease, deadlocking the
+  ;; original request and managed shutdown. Reject the self-retirement before
+  ;; changing state, so the rejected request remains nonmutating and another
+  ;; thread can still retire the probe after this callback returns.
+  (let [probe-module (atom nil)
+        started-system (atom nil)
+        stop-attempt (promise)
+        config (fn [env]
+                 {:catalog-source (:catalog-source env)
+                  :operation :request/claim
+                  :inputs {:input/owner "helper-a"}
+                  :principal-policy
+                  {:policy-id :request/claim-authority
+                   :acquire-principal!
+                   (fn [_]
+                     (try
+                       ((:biff.core/stop @probe-module) @started-system)
+                       (deliver stop-attempt :unexpected-success)
+                       (catch clojure.lang.ExceptionInfo e
+                         (deliver stop-attempt (:reason (ex-data e)))))
+                     {:status :anonymous})
+                   :verify-request-intent! (fn [_ _ _] true)}
+                  :authorization-source
+                  {:policy-id :request/claim-authority
+                   :catalog-id (get-in env [:catalog-source :catalog :id])
+                   :operation-id :request/claim
+                   :owner-input :input/owner
+                   :owner-state-field :doc/owner
+                   :principal-owners {:user/helper-a "helper-a"}
+                   :grants {:user/helper-a #{:request/claim}}}})]
+    (with-adapter! :honest nil config
+      (fn [{:keys [env probe system base]}]
+        (let [{:keys [request binding]} (:data env)]
+          (seed! [:requests request])
+          (reset! probe-module (:module probe))
+          (reset! started-system system)
+          (is (= :one-final-checked-wrapper-http-challenge-returned
+                 (:status ((:verify-once! probe) system base))))
+          (let [business (future (post! base))]
+            (is (= :probe-retirement-from-admitted-dispatch
+                   (deref stop-attempt 4000 :timed-out))
+                "A checked handler cannot deadlock by stopping its own probe")
+            (is (= 401 (deref business 8000 :timed-out)))
+            (is (= request (read-request (:xt/id request))))
+            (is (nil? (read-command (resolution/record-id binding))))
+            (is (zero? @(get-in env [:environment :constructs]))))
+          ;; Once the same request has exited its lease, a separate manager
+          ;; thread may stop and retire the exact issued module normally.
+          ((:biff.core/stop (:module probe)) system)
+          (is (= :stopped (:module-state ((:summary! probe)))))
+          (is (= 503 (post! base))))))))
 
 (deftest unchecked-http-wrapper-fences-business-before-activation
   ;; Biff's real socket starts before the local loopback challenge completes.
