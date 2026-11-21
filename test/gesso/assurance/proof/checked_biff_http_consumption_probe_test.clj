@@ -154,6 +154,39 @@
         client (HttpClient/newHttpClient)]
     (.statusCode (.send client request (HttpResponse$BodyHandlers/ofString)))))
 
+(deftest unchecked-http-wrapper-fences-business-before-activation
+  ;; Biff's real socket starts before the local loopback challenge completes.
+  ;; A retained unqualified handler must not mutate durable state during
+  ;; that installation gap, even when the typed trial was not selected.
+  (with-adapter! :honest nil
+    (fn [{:keys [env probe system base]}]
+      (let [{:keys [request binding]} (:data env)]
+        (seed! [:requests request])
+        (is (= :not-attempted (:status ((:summary! probe)))))
+        (is (= 503 (post! base)))
+        (is (= request (read-request (:xt/id request))))
+        (is (nil? (read-command (resolution/record-id binding))))
+        (is (zero? @(get-in env [:environment :constructs])))))))
+
+(deftest stopped-http-wrapper-cannot-execute-retained-business-handler
+  ;; Physical listener cleanup can lag the probe module's retirement.
+  ;; A listener still holding the issued handler must not get another
+  ;; protected write after its probe generation has been stopped.
+  (with-adapter! :honest nil
+    (fn [{:keys [env probe system base]}]
+      (let [{:keys [request binding]} (:data env)]
+        (seed! [:requests request])
+        (is (= :one-final-checked-wrapper-http-challenge-returned
+               (:status ((:verify-once! probe) system base))))
+        ;; Stop ONLY the probe, deliberately leaving the actual HTTP
+        ;; listener alive to exercise the retained issued Ring wrapper.
+        ((:biff.core/stop (:module probe)) system)
+        (is (= :stopped (:module-state ((:summary! probe)))))
+        (is (= 503 (post! base)))
+        (is (= request (read-request (:xt/id request))))
+        (is (nil? (read-command (resolution/record-id binding))))
+        (is (zero? @(get-in env [:environment :constructs])))))))
+
 (deftest independent-server-consumes-the-final-biff-handler-over-real-http
   (with-adapter! :honest nil
     (fn [{:keys [env probe system base]}]

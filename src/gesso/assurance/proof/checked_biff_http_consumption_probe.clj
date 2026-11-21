@@ -399,6 +399,18 @@
                                       :headers {"content-type" "text/plain"}
                                       :body secret-response})
                                  {:status 404 :body "Not found"})
+                               ;; A socket may already be listening during
+                               ;; private installation, and a listener can
+                               ;; retain this Ring closure after Biff stops
+                               ;; the probe generation. Read-only challenges
+                               ;; above are the only preactivation exception;
+                               ;; no ordinary handler may dispatch until the
+                               ;; original local HTTP verification succeeds,
+                               ;; or after the probe has been retired.
+                               (not (and (map? @state)
+                                         (= :one-final-checked-wrapper-http-challenge-returned
+                                            @result)))
+                               {:status 503 :body "Checked HTTP activation not current"}
                                :else (if (and selected
                                         (contains? (:route-keys selected)
                                                    [(:request-method request)
