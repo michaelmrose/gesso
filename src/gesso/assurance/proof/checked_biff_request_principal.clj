@@ -7,15 +7,17 @@
    the selected operation to the principal and bind it to the exact typed
    :input/owner. Denials never invoke the original certified handler.
 
-   An optional request-intent callback can deny even an otherwise granted
-   request, using the SAME Ring request and resolved principal/operation.
+   A mandatory application-owned request-intent callback must separately
+   confirm the SAME Ring request's intended command before an otherwise
+   granted principal can execute the selected typed operation. Its result is
+   trusted host evidence, not independent proof of request authenticity.
    Before issuing a grant, require the SAME checked original Claim catalog
    used by the typed trial to declare its input/owner -> document/owner
    relationship. This is source-relative ownership CORRESPONDENCE, not
    independent proof of principal authentication or business authorization.
    v1789 binds the one-operation grant to a closed, APPLICATION-DECLARED
    authorization source. The host callback supplies principal acquisition
-   and optional request integrity, but cannot supply an independent grant
+   and required request integrity, but cannot supply an independent grant
    map. This is a source-relative declaration, not independently authenticated
    policy provenance. This module does not authenticate cookies, credentials
    or Ring adapters, audit callback purity, or certify CSRF protection.
@@ -143,20 +145,20 @@
    Exactly one subject is supported here to avoid suggesting that the static
    trial can represent multiple distinct command owners. The trusted callback
    itself is NOT independently verified. Return a private invoke! gate, not a
-   principal capability or a proof certificate. An optional
+   principal capability or a proof certificate. A mandatory
    :verify-request-intent! callback must return an exact boolean; false
    denies with 403, and an exception or malformed answer fails closed.
    The original catalog, current certified application assembly and
    application-owned authorization declaration are mandatory; the host
-   cannot introduce additional grants."
+   cannot introduce additional grants. Without that callback an otherwise
+   valid principal/owner match would silently execute an operation whose
+   selected inputs need not match the actual HTTP request."
   [policy operation inputs catalog-source authorization-source contract-source]
   (check-declared-owner-source! catalog-source operation)
   (check-original-authorization-assembly! contract-source catalog-source operation)
-  (when-not (and (or (closed-map? policy #{:policy-id :acquire-principal!})
-                     (closed-map? policy #{:policy-id :acquire-principal!
-                                          :verify-request-intent!}))
-                 (or (not (contains? policy :verify-request-intent!))
-                     (fn? (:verify-request-intent! policy)))
+  (when-not (and (closed-map? policy #{:policy-id :acquire-principal!
+                                       :verify-request-intent!})
+                 (fn? (:verify-request-intent! policy))
                  (qualified-keyword? (:policy-id policy))
                  (fn? (:acquire-principal! policy))
                  (qualified-keyword? operation))
@@ -219,11 +221,9 @@
                        ;; Grant/owner matching cannot be manufactured by the
                        ;; intent callback. It can only DENY a previously
                        ;; granted request, using that exact Ring request.
-                       (let [intent-ok? (if original-verify-intent
-                                          (original-verify-intent
-                                           request (:principal-id acquired)
-                                           operation)
-                                          true)]
+                       (let [intent-ok? (original-verify-intent
+                                         request (:principal-id acquired)
+                                         operation)]
                          (cond
                            (true? intent-ok?)
                            {:type report-type :version report-version

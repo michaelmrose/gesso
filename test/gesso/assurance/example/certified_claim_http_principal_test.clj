@@ -59,9 +59,21 @@
                                              (get-in request [:headers "cookie"]))]
                           {:status :authenticated :principal-id person}
                           {:status :anonymous})))
+         ;; A deliberately trusted fixture verifier links the exact Ring
+         ;; request to the original selected typed owner. The header is a
+         ;; submitted intent, NOT an authenticated or CSRF-safe identity.
+         owner (get-in env [:source :inputs :input/owner])
          policy (or override-policy
                     {:policy-id :request/claim-authority
-                     :acquire-principal! acquire!})
+                     :acquire-principal! acquire!
+                     :verify-request-intent!
+                     (fn [ring-request person operation]
+                       (and (= :post (:request-method ring-request))
+                            (= "/operations/request/claim" (:uri ring-request))
+                            (= :user/helper-a person)
+                            (= :request/claim operation)
+                            (= owner (get-in ring-request
+                                             [:headers "x-request-owner"]))))})
          declared {:policy-id :request/claim-authority
                    :catalog-id (get-in env [:source :catalog-source :catalog :id])
                    :operation-id :request/claim
@@ -80,7 +92,8 @@
                                       "/operations/request/claim")))
                     (.timeout (Duration/ofSeconds 6)))
         _ (when cookie (.header builder "cookie" cookie))
-        _ (doseq [[name value] extra-headers]
+        _ (doseq [[name value] (merge {"x-request-owner" "helper-a"}
+                                     (into {} extra-headers))]
             (.header builder name value))
         request (.POST builder (HttpRequest$BodyPublishers/noBody))
         response (.send ^HttpClient *client* (.build request)
@@ -252,6 +265,37 @@
            (:principal-authorization-check ((:summary! issued)))))
     (is (= :not-established
            (:principal-authentication ((:summary! issued)))))))
+
+(deftest selected-principal-requires-explicit-request-intent-policy
+  ;; Authorizing a principal to execute a preselected Claim is not evidence
+  ;; that this physical request intends the same command. Omitting the host's
+  ;; request-intent check must reject at original source issuance.
+  (let [{:keys [source server-state]} (with-source)
+        ungated (update source :principal-policy
+                        dissoc :verify-request-intent!)]
+    (is (= :invalid-or-unbound-principal-owner-grant
+           (reason #(boot/issue-claim-http-boot! ungated))))
+    (is (nil? @server-state))))
+
+(deftest authenticated-claim-request-with-wrong-owner-cannot-consume-trial
+  ;; The original app-provided verifier must match actual request intent to
+  ;; the immutable selected :input/owner. A rejected request does not consume
+  ;; the one-use XTDB trial; a subsequent matching request can succeed.
+  (let [{:keys [source session-id data env] :as e} (with-source)
+        {:keys [request binding]} data
+        issued (boot/issue-claim-http-boot! source)]
+    (seed! [:requests request])
+    (try
+      ((:boot! issued))
+      (is (= 403 (send! e session-id [["x-request-owner" "intruder"]])))
+      (is (= request (read-request (:xt/id request))))
+      (is (nil? (read-command (resolution/record-id binding))))
+      (is (zero? @(get-in env [:environment :constructs])))
+      (is (= 200 (send! e session-id)))
+      (is (= ((model 'next-version) request {:owner "helper-a"})
+             (read-request (:xt/id request))))
+      (is (= 1 @(get-in env [:environment :constructs])))
+      (finally (cleanup! e issued)))))
 
 (deftest request-intent-gate-uses-same-ring-request-and-cannot-grant
   (let [{:keys [source session-id data env] :as e} (with-source)
