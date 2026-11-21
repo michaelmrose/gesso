@@ -52,7 +52,9 @@
    subscription can be installed. Once closed, the managed GET route
    returns 503 without consulting authorization or registering interests;
    the inner locked check still prevents admission when shutdown races an
-   authorization already in progress.
+   authorization already in progress. Shutdown also takes precedence over
+   a late denial or malformed scope result; both return 503 without exposing
+   an authorization result after the route has closed.
 
    Call :close! and stop the owning HTTP listener before host/stop!. If a
    client disconnects, the SSE Manifold stream should close at the Ring
@@ -109,25 +111,31 @@
 
               :else
               (let [subscription (authorize-subscription request)]
-                (cond
-                  (nil? subscription)
-                  {:status 403 :headers {} :body "Forbidden"}
+                ;; Authorization may finish after :close! has retired this
+                ;; route. Interpret its result inside the same lock as SSE
+                ;; admission, so a closed route always wins over nil or an
+                ;; invalid scope; a still-open route retains its ordinary
+                ;; 403 and typed rejection behavior.
+                (locking state
+                  (cond
+                    (:closed? @state)
+                    {:status 503 :headers {} :body "Live shutting down"}
 
-                  (not (valid-scope? subscription))
-                  (reject! :invalid-authorized-subscription {})
+                    (nil? subscription)
+                    {:status 403 :headers {} :body "Forbidden"}
 
-                  :else
-                  (locking state
-                    (if (:closed? @state)
-                      {:status 503 :headers {} :body "Live shutting down"}
-                      (let [session (live/start-sse! live-system subscription
-                                                     {:sse-options validated-sse})
-                            key (random-uuid)]
-                        (swap! state assoc-in [:connections key] session)
-                        (stream/on-closed
-                         (:stream session)
-                         #(swap! state update :connections dissoc key))
-                        (:response session)))))))))]
+                    (not (valid-scope? subscription))
+                    (reject! :invalid-authorized-subscription {})
+
+                    :else
+                    (let [session (live/start-sse! live-system subscription
+                                                   {:sse-options validated-sse})
+                          key (random-uuid)]
+                      (swap! state assoc-in [:connections key] session)
+                      (stream/on-closed
+                       (:stream session)
+                       #(swap! state update :connections dissoc key))
+                      (:response session))))))))]
     {:handler handler
      :close! close!
      :active-count (fn [] (count (:connections @state)))

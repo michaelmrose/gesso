@@ -327,6 +327,63 @@
            (future-cancel pending)
            ((:close! route))))))))
 
+(deftest shutdown-preempts-late-authorization-results-test
+  (setup-host
+   (fn [started]
+     (let [source (:source (:gesso.live/system started))
+           request {:uri "/live/events" :request-method :get}]
+       ;; Both outcomes are legitimate callback results until the route
+       ;; closes. In-flight callbacks cannot reopen a closed route, nor may
+       ;; their late denial/invalid scope replace the shutdown response.
+       (doseq [[label outcome] [[:denied nil]
+                                [:invalid {:topic :request :id nil}]]]
+         (let [entered (promise)
+               release (promise)
+               calls (atom 0)
+               route (http/wrap-authorized-sse
+                      started {:path "/live/events"
+                               :authorize-subscription
+                               (fn [_]
+                                 (swap! calls inc)
+                                 (deliver entered true)
+                                 @release
+                                 outcome)})
+               pending (future ((:handler route) request))]
+           (try
+             (is (= true (deref entered 5000 ::timeout))
+                 (str label " callback must enter before shutdown"))
+             ((:close! route))
+             (deliver release true)
+             (is (= {:status 503 :headers {} :body "Live shutting down"}
+                    (deref pending 5000 ::timeout))
+                 (str label " must not override the shutdown response"))
+             (is (= 1 @calls))
+             (is (true? ((:closed? route))))
+             (is (zero? ((:active-count route))))
+             (is (zero? (:subscription-count (source/stats source))))
+             (finally
+               (deliver release true)
+               (future-cancel pending)
+               ((:close! route))))))
+       ;; The same callback results retain their original semantics while
+       ;; admission is open: denied requests are 403, malformed scopes fail
+       ;; with the typed rejection, and neither acquires a source interest.
+       (let [denied (http/wrap-authorized-sse
+                     started {:path "/live/events"
+                              :authorize-subscription (constantly nil)})
+             malformed (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :authorize-subscription
+                                 (constantly {:topic :request :id nil})})]
+         (try
+           (is (= 403 (:status ((:handler denied) request))))
+           (is (= :invalid-authorized-subscription
+                  (exception-reason #((:handler malformed) request))))
+           (is (zero? (:subscription-count (source/stats source))))
+           (finally
+             ((:close! denied))
+             ((:close! malformed)))))))))
+
 (deftest route-shutdown-cancels-active-sessions-and-rejects-new-get-test
   (setup-host
    (fn [started]
