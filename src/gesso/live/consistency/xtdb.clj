@@ -1136,6 +1136,31 @@
                                :reason :contradictory-completed-transaction-frontier
                                :selected selected
                                :contradictory trailing})))))
+                   ;; The selected entry need not be contradicted directly
+                   ;; for the status observation to be inconsistent. Two
+                   ;; historical keys may identify the same tx with different
+                   ;; times, or invert tx-id and system-time ordering, while
+                   ;; each separately remains behind the selected frontier.
+                   ;; Compare neighboring ids in sorted order so a status
+                   ;; collection is not required to arrive in history order.
+                   (doseq [[older newer]
+                           (partition 2 1
+                                      (sort-by basis-tx-id trailing-bases))]
+                     (let [older-id (basis-tx-id older)
+                           newer-id (basis-tx-id newer)
+                           older-time (basis-system-time older)
+                           newer-time (basis-system-time newer)]
+                       (when (or (and (= older-id newer-id)
+                                      (not= older-time newer-time))
+                                 (and (< older-id newer-id)
+                                      (.isAfter ^Instant older-time newer-time)))
+                         (throw
+                          (ex "XTDB latest-completed status contains contradictory historical transaction evidence."
+                              {:database database-name
+                               :status status
+                               :reason :contradictory-completed-transaction-history
+                               :older older
+                               :newer newer})))))
                    selected))))))))))
 
 (defn- decode-canonical-biff-snapshot!

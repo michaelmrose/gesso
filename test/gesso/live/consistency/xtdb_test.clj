@@ -1664,6 +1664,58 @@
         (is (= (xtdb-live/basis :xtdb 2041 observed)
                (xtdb-live/latest-completed-basis ctx)))))))
 
+(deftest latest-completed-basis-rejects-contradictory-historical-keys-test
+  ;; v2042 compares each historical key with the selected latest frontier.
+  ;; That alone cannot establish that two earlier keys agree with each other:
+  ;; a repeated tx-id with two times, or a higher older tx-id with a smaller
+  ;; time, is not one coherent selected-database status observation.
+  (let [observed (Instant/parse "2026-11-20T23:58:00Z")
+        latest {:tx-id 2043 :system-time observed}
+        tx41 {:tx-id 2041 :system-time (.minusSeconds observed 4)}
+        tx42 {:tx-id 2042 :system-time (.minusSeconds observed 2)}
+        conflicting-duplicate {:tx-id 2041
+                               :system-time (.minusSeconds observed 3)}
+        inverted-tx42 {:tx-id 2042
+                       :system-time (.minusSeconds observed 6)}
+        contradictory-tails [[tx41 conflicting-duplicate]
+                             [conflicting-duplicate tx41]
+                             [tx41 inverted-tx42]
+                             [inverted-tx42 tx41]]
+        ctx {:xtdb/node :authority-node}
+        calls (atom 0)]
+    (doseq [tail contradictory-tails]
+      (with-xtdb-stub '*status*
+        (fn [_]
+          (swap! calls inc)
+          {:latest-completed-txs {"xtdb" (into [latest] tail)}})
+        (fn []
+          (doseq [invoke [#(xtdb-live/latest-completed-basis ctx)
+                          #(xtdb-live/bind-request-frontier ctx)]]
+            (let [failure (try (invoke)
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Conflicting historical evidence must fail: "
+                       (pr-str tail)))
+              (when failure
+                (is (= :contradictory-completed-transaction-history
+                       (:reason (ex-data failure))))))))))
+    (is (= (* 2 (count contradictory-tails)) @calls))
+    ;; Historical keys need not arrive sorted, and an exact duplicate is
+    ;; valid. Neither should be mistaken for contradictory evidence.
+    (with-xtdb-stub '*status*
+      (fn [_]
+        {:latest-completed-txs
+         {"xtdb" [latest tx42 tx41 tx42]}})
+      (fn []
+        (is (= (xtdb-live/basis :xtdb 2043 observed)
+               (xtdb-live/latest-completed-basis ctx)))
+        (is (= (xtdb-live/basis :xtdb 2043 observed)
+               (-> (xtdb-live/bind-request-frontier ctx)
+                   :gesso.live/progression
+                   progression/required-bases
+                   first)))))))
+
 (deftest latest-completed-basis-rejects-unobservable-status-shapes-test
   ;; A successful XTDB status observation is not interchangeable with an
   ;; absent or malformed status payload. In particular, nil for a selected
