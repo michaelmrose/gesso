@@ -692,6 +692,91 @@
             (is (zero? @calls)
                 "A conflicting deferred time must not reach the handler")))))))
 
+(deftest complete-tx-receipts-pin-unprogressed-consistent-reads-test
+  ;; A complete transaction receipt is a minimum read obligation even when
+  ;; the caller has not installed a separate generic progression carrier.
+  ;; The XTDB query path must not silently ignore its system-time or allow an
+  ;; explicit earlier snapshot-time to override it.
+  (let [t (Instant/parse "2026-11-20T21:00:00Z")
+        older (.minusSeconds t 60)
+        later (.plusSeconds t 60)
+        receipt {:tx-id 2057 :system-time t}
+        with-as-of {:tx-id 2057 :system-time t :snapshot-time t}
+        ctx {:xtdb/read-connectable :read
+             :gesso.live/consistency receipt}
+        calls (atom [])
+        observed (fn [& args]
+                   (swap! calls conj args)
+                   :queried)]
+    (is (= t (:snapshot-time
+              (xtdb-live/consistent-query-opts receipt))))
+    (is (= t (:snapshot-time
+              (xtdb-live/read-query-opts receipt nil))))
+    (with-redefs-fn {(xtdb-var '*q*) observed
+                     (xtdb-var '*plan-q*) observed}
+      (fn []
+        (is (= :queried (xtdb-live/q-consistent :read sample-query receipt)))
+        (is (= :queried (xtdb-live/plan-q-consistent :read sample-query receipt)))
+        (is (= :queried (xtdb-live/q-consistent-from ctx sample-query)))
+        (is (= :queried (xtdb-live/plan-q-consistent-from ctx sample-query)))
+        (is (= [t t t t] (mapv (comp :snapshot-time last) @calls))
+            "All four physical query paths must retain the complete receipt")
+        (let [before (count @calls)]
+          (doseq [consistency [receipt with-as-of]
+                  invoke [#(xtdb-live/consistent-query-opts consistency
+                                                             {:snapshot-time older})
+                          #(xtdb-live/read-query-opts consistency nil
+                                                      {:snapshot-time older})
+                          #(xtdb-live/q-consistent :read sample-query consistency
+                                                   {:snapshot-time older})
+                          #(xtdb-live/q-consistent-from
+                            (assoc ctx :gesso.live/consistency consistency)
+                            sample-query {:snapshot-time older})]]
+            (let [failure (try (invoke) nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  "An earlier caller snapshot cannot satisfy a complete receipt")
+              (when failure
+                (is (= :query-snapshot-behind-transaction-receipt
+                       (:reason (ex-data failure)))))))
+          (is (= before (count @calls))
+              "No rejected query may reach XTDB"))))
+    ;; A canonical selected-db snapshot token also has to cover the receipt;
+    ;; a foreign-db token cannot replace the selected database's minimum.
+    (let [old-selected (xt.basis/->time-basis-str {"xtdb" [older]})
+          matching (xt.basis/->time-basis-str {"xtdb" [t]})
+          foreign (xt.basis/->time-basis-str {"analytics" [older]})]
+      (doseq [opts [{:snapshot-token old-selected}
+                    {:snapshot-token "malformed-token"}]]
+        (let [failure (try (xtdb-live/consistent-query-opts receipt opts)
+                           nil
+                           (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo failure))
+          (when failure
+            (is (contains? #{:invalid-snapshot-token
+                             :query-snapshot-behind-transaction-receipt}
+                           (:reason (ex-data failure)))))))
+      (is (= matching (:snapshot-token
+                       (xtdb-live/consistent-query-opts
+                        receipt {:snapshot-token matching}))))
+      (is (nil? (:snapshot-time
+                 (xtdb-live/consistent-query-opts
+                  receipt {:snapshot-token matching}))))
+      (is (= t (:snapshot-time
+                (xtdb-live/consistent-query-opts
+                 receipt {:snapshot-token foreign}))))
+      (is (= foreign (:snapshot-token
+                      (xtdb-live/consistent-query-opts
+                       receipt {:snapshot-token foreign})))))
+    ;; A later caller snapshot still includes the complete transaction.
+    (is (= later (:snapshot-time
+                  (xtdb-live/consistent-query-opts receipt
+                                                   {:snapshot-time later}))))
+    ;; Incomplete metadata is not a receipt and retains ordinary precedence.
+    (is (= older (:snapshot-time
+                  (xtdb-live/read-query-opts {:tx-id 2057} nil
+                                             {:snapshot-time older}))))))
+
 (deftest query-consistency-drops-tx-metadata-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]
     (is (= {:snapshot-time t

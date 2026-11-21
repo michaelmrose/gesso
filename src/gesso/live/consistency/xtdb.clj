@@ -866,20 +866,69 @@
         (progression/compose canonical legacy)
         (or canonical legacy)))))
 
+(defn- require-complete-receipt-read-minimum!
+  "Keep a complete transaction receipt visible to physical XTDB queries.
+
+   Query consistency may carry :tx-id with :system-time but no explicit
+   :snapshot-time. With or without a generic progression carrier, the query
+   must honor the receipt's minimum rather than silently discarding its only
+   time coordinate or accepting an older caller-selected snapshot. A selected
+   canonical snapshot token can establish the minimum directly; foreign
+   database tokens do not establish this transaction's selected database."
+  [consistency options]
+  (if-some [receipt (consistency->basis consistency (:database options))]
+    (let [database-name (basis-database receipt)
+          receipt-time (basis-system-time receipt)
+          token-bases (if-some [token (:snapshot-token options)]
+                        (decode-canonical-biff-snapshot! database-name token)
+                        {})
+          selected-bases (get token-bases database-name)
+          requested-time (:snapshot-time options)
+          instant (cond
+                    (instance? Instant requested-time)
+                    requested-time
+
+                    (instance? ZonedDateTime requested-time)
+                    (.toInstant ^ZonedDateTime requested-time)
+
+                    (nil? requested-time)
+                    nil
+
+                    :else
+                    (throw
+                     (ex "XTDB complete transaction receipt requires a valid query snapshot-time."
+                         {:reason :invalid-receipt-query-snapshot-time
+                          :snapshot-time requested-time
+                          :receipt receipt})))]
+      (when (or (and instant (.isBefore ^Instant instant receipt-time))
+                (some #(.isBefore ^Instant % receipt-time) selected-bases))
+        (throw
+         (ex "XTDB query snapshot is behind the admitted transaction receipt."
+             {:reason :query-snapshot-behind-transaction-receipt
+              :receipt receipt
+              :snapshot-time requested-time
+              :snapshot-token (:snapshot-token options)})))
+      (if (or instant selected-bases)
+        options
+        (assoc options :snapshot-time receipt-time)))
+    options))
+
 (defn read-query-opts
   "Build query opts from explicit consistency, optional authoritative progression,
-   and caller opts. Progression constraints are applied last and cannot be
-   weakened by caller query options."
+   and caller opts. Progression and complete transaction-receipt minimums
+   are applied after caller options and cannot be weakened by them."
   ([consistency progression-value]
    (read-query-opts consistency progression-value nil))
   ([consistency progression-value opts]
    (let [consistency-options (query-consistency consistency)
          caller-options (query-opts opts)]
-     (enforce-progression-query-opts
-      (merge consistency-options caller-options)
-      progression-value
-      consistency-options
-      caller-options))))
+     (require-complete-receipt-read-minimum!
+      consistency
+      (enforce-progression-query-opts
+       (merge consistency-options caller-options)
+       progression-value
+       consistency-options
+       caller-options)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Context helpers
@@ -2032,16 +2081,19 @@
 (defn consistent-query-opts
   "Build XTDB2 query opts from consistency plus explicit opts.
 
-   Consistency-derived values are applied first. Explicit opts win.
+   Consistency-derived values are applied first. Explicit opts normally win,
+   but a complete tx-id/time receipt requires an as-of snapshot at least as
+   recent as that transaction. Earlier caller snapshots fail closed.
 
-   This is the only place this namespace applies read consistency. It is
-   per-query data, not mutation on a shared XTDB object."
+   Consistency is per-query data, not mutation on a shared XTDB object."
   ([consistency]
    (consistent-query-opts consistency nil))
   ([consistency opts]
-   (merge
-    (query-consistency consistency)
-    (query-opts opts))))
+   (require-complete-receipt-read-minimum!
+    consistency
+    (merge
+     (query-consistency consistency)
+     (query-opts opts)))))
 
 (defn tx-opts
   "Return only options intended for XTDB2 submit-tx/execute-tx.
