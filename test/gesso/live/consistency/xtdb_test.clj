@@ -1580,6 +1580,46 @@
                (xtdb-live/latest-completed-basis
                 {:biff.xtdb/node :authority-node})))))))
 
+(deftest latest-completed-basis-rejects-malformed-status-tail-test
+  ;; Only the first completed entry is selected as the node-observed basis,
+  ;; but the remainder is still part of that same trusted status response.
+  ;; Malformed trailing entries must not be ignored while claiming that the
+  ;; observation establishes an authoritative request frontier.
+  (let [observed (Instant/parse "2026-11-20T23:58:00Z")
+        completed {:tx-id 2041 :system-time observed}
+        malformed [nil false {}
+                   {:tx-id 2040 :system-time nil}
+                   {:tx-id nil :system-time observed}
+                   {:tx-id "2040" :system-time observed}
+                   {:tx-id 2040 :system-time "not-an-instant"}]
+        status-calls (atom 0)
+        ctx {:xtdb/node :authority-node}]
+    (doseq [trailing malformed]
+      (let [status {:latest-completed-txs {"xtdb" [completed trailing]}}]
+        (with-xtdb-stub '*status*
+          (fn [_] (swap! status-calls inc) status)
+          (fn []
+            (doseq [invoke [#(xtdb-live/latest-completed-basis ctx)
+                            #(xtdb-live/bind-request-frontier ctx)]]
+              (let [failure (try (invoke)
+                                 nil
+                                 (catch clojure.lang.ExceptionInfo e e))]
+                (is (instance? clojure.lang.ExceptionInfo failure)
+                    (str "Malformed completed transaction tail must fail: "
+                         (pr-str trailing)))
+                (when failure
+                  (is (= :malformed-completed-transaction-tail
+                         (:reason (ex-data failure)))))))))))
+    (is (= (* 2 (count malformed)) @status-calls))
+    ;; Multiple individually valid entries are not prohibited by this check.
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs
+               {"xtdb" [completed
+                        {:tx-id 2040 :system-time (.minusSeconds observed 1)}]}})
+      (fn []
+        (is (= (xtdb-live/basis :xtdb 2041 observed)
+               (xtdb-live/latest-completed-basis ctx)))))))
+
 (deftest latest-completed-basis-rejects-unobservable-status-shapes-test
   ;; A successful XTDB status observation is not interchangeable with an
   ;; absent or malformed status payload. In particular, nil for a selected

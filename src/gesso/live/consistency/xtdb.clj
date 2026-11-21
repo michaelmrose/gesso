@@ -1060,6 +1060,28 @@
             (ex "XTDB latest-completed status contains malformed transaction entries."
                 {:database database-name
                  :status status})))
+         ;; Status is a single trusted observation, not just its first
+         ;; element. A malformed trailing transaction must not be ignored
+         ;; while its first element is promoted to an authoritative frontier.
+         ;; Keep multiple valid completed keys acceptable, but validate each
+         ;; remaining coordinate using the same portable basis rules.
+         (doseq [trailing (rest entries)]
+           (try
+             (when-not (map? trailing)
+               (throw
+                (ex "Trailing XTDB transaction must be map-like."
+                    {:entry trailing})))
+             (basis database-name
+                    (:tx-id trailing)
+                    (status-system-time->instant (:system-time trailing)))
+             (catch Throwable cause
+               (throw
+                (ex "XTDB latest-completed status contains malformed trailing transaction evidence."
+                    {:database database-name
+                     :status status
+                     :reason :malformed-completed-transaction-tail
+                     :entry trailing}
+                    cause)))))
          (when-some [completed (first entries)]
            (let [tx-id (:tx-id completed)
                  system-time (:system-time completed)]
