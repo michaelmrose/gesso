@@ -1510,6 +1510,36 @@
               :snapshot-token (:snapshot-token consistency)})))))
   consistency)
 
+(defn- require-observed-frontier-satisfies-tx-metadata!
+  "Reject a claimed transaction receipt beyond the observed XTDB frontier.
+
+   Complete query-consistency metadata is a proposed minimum read receipt,
+   not an authenticated commit. On a populated database the authoritative
+   node status must nevertheless cover both its transaction id and its time
+   before an ordinary Biff snapshot is installed or a deferred handler runs.
+   Equal transaction ids must refer to the same time. An incomplete receipt
+   does not establish a portable transaction basis. Empty startup remains
+   governed by its existing, separately documented boundary."
+  [frontier consistency origin]
+  (when (complete-xtdb-tx-metadata? consistency)
+    (let [claimed (consistency->basis
+                   consistency (basis-database frontier))
+          claimed-id (basis-tx-id claimed)
+          claimed-time (basis-system-time claimed)
+          observed-id (basis-tx-id frontier)
+          observed-time (basis-system-time frontier)]
+      (when (or (> claimed-id observed-id)
+                (.isAfter ^Instant claimed-time observed-time)
+                (and (= claimed-id observed-id)
+                     (not= claimed-time observed-time)))
+        (throw
+         (ex "XTDB node frontier cannot satisfy claimed complete transaction metadata."
+             {:reason :unobserved-transaction-metadata-frontier
+              :origin origin
+              :frontier frontier
+              :claimed-transaction claimed})))))
+  consistency)
+
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper database-name snapshot-token frontier admitted-requirement
    admitted-consistency bound-node]
@@ -1540,6 +1570,8 @@
                      admitted-consistency ctx)
                     _ (require-tx-snapshot-minimum!
                        database-name combined-consistency :deferred-biff-request)
+                    _ (require-observed-frontier-satisfies-tx-metadata!
+                       frontier combined-consistency :deferred-biff-request)
                     combined-requirement
                     (compose-wrapped-biff-progression!
                      database-name frontier admitted-requirement ctx)
@@ -1768,6 +1800,8 @@
        (let [_ (require-frontier-satisfies-existing-xtdb!
                 basis-value
                 xtdb-required-bases)
+             _ (require-observed-frontier-satisfies-tx-metadata!
+                basis-value admitted-consistency :admission)
              ;; Preserve time bases for unrelated databases in the existing
              ;; Biff snapshot token, while replacing only this database with
              ;; the node-observed authoritative frontier. A malformed token

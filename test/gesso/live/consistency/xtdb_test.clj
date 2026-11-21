@@ -2581,6 +2581,77 @@
                               {:snapshot-token disjoint}}))))
             (is (= (+ 2 before) @calls))))))))
 
+(deftest biff-frontier-rejects-unobserved-complete-tx-metadata-test
+  ;; A complete tx/time pair is a request's claimed transaction minimum.
+  ;; Without an observed node frontier at least as recent in BOTH coordinates,
+  ;; fixing Biff reads to the observed snapshot silently drops that claim.
+  ;; Query snapshot-time validation alone does not cover :system-time metadata.
+  (let [observed (Instant/parse "2026-11-20T18:00:00Z")
+        older (.minusSeconds observed 60)
+        newer (.plusSeconds observed 60)
+        invalid [{:tx-id 2055 :system-time older}
+                 {:tx-id 2054 :system-time older}
+                 {:tx-id 2053 :system-time newer}
+                 {:tx-id 2054 :system-time newer}
+                 {:tx-id 2055 :snapshot-time older}]
+        valid [{:tx-id 2053 :system-time older}
+               {:tx-id 2054 :system-time observed}
+               {:tx-id 2053 :snapshot-time older}
+               {:tx-id 2055}]
+        called (atom 0)
+        status {:latest-completed-txs
+                {"xtdb" [{:tx-id 2054 :system-time observed}]}}]
+    (with-xtdb-stub '*status*
+      (fn [_] status)
+      (fn []
+        (doseq [receipt invalid]
+          (let [failure (try
+                          (xtdb-live/bind-request-frontier
+                           {:xtdb/node :authority-node
+                            :xtdb/consistency receipt})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                (str "Unobserved complete transaction must fail at admission: "
+                     (pr-str receipt)))
+            (when failure
+              (is (= :unobserved-transaction-metadata-frontier
+                     (:reason (ex-data failure)))))))
+        (let [bound (xtdb-live/bind-request-frontier
+                     {:xtdb/node :authority-node})
+              handler ((:biff.core/wrap-db-snapshot bound)
+                       (fn [_] (swap! called inc) :unexpected))]
+          (doseq [receipt invalid]
+            (let [failure (try
+                            (handler {:gesso.live/consistency receipt})
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Unobserved deferred receipt must not enter Biff: "
+                       (pr-str receipt)))
+              (when failure
+                (is (= :unobserved-transaction-metadata-frontier
+                       (:reason (ex-data failure)))))))
+          (is (zero? @called))
+          (doseq [receipt valid]
+            (is (ifn? (:biff.core/wrap-db-snapshot
+                       (xtdb-live/bind-request-frontier
+                        {:xtdb/node :authority-node
+                         :gesso.live/consistency receipt}))))
+            (is (= :unexpected
+                   (handler {:xtdb/consistency receipt}))))
+          (is (= (count valid) @called)))))
+    ;; An empty selected database has no complete observed frontier. Keep
+    ;; existing startup treatment of supplied metadata unchanged here.
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (is (ifn? (:biff.core/wrap-db-snapshot
+                   (xtdb-live/bind-request-frontier
+                    {:xtdb/node :authority-node
+                     :xtdb/consistency
+                     {:tx-id 2055 :system-time newer}}))))))))
+
 (deftest biff-frontier-rejects-snapshot-token-behind-admitted-transaction-test
   ;; Transaction metadata is not itself authenticated. Nevertheless, if a
   ;; request claims a complete tx/time receipt it cannot simultaneously pin
