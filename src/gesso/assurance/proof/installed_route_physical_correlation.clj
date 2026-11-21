@@ -12,7 +12,10 @@
    adapter arguments. A definitive execute-tx TransactionKey, a matching
    committed resolved-operation result, and a non-error Ring response from
    the SAME handler invocation are required for positive local correlation.
-   This also requires the original issued executor to have returned an
+   This also requires the original model transaction observer to carry the
+   IDENTICAL definitive execute-tx receipt captured at the XTDB adapter,
+   not merely a claimed committed outcome with no link to that API result.
+   It requires the original issued executor to have returned an
    incorporated resolution for a positive same-attempt physical/HTTP witness;
    a committed adapter call with a :unresolved application return is not
    reported as a fully resolved success. Response shape/status is checked,
@@ -262,8 +265,19 @@
                                (:tx-options begin)))
         definitive? (and adapter-events
                          (definitive-execute-key? begin end))
+        receipt-identical? (boolean
+                            (and definitive? pair
+                                 (= :committed (:physical/status outcome))
+                                 ;; An app-owned :commit/status alone does NOT
+                                 ;; prove the adapter's TransactionKey reached
+                                 ;; the actual model transaction result. The
+                                 ;; model observer records its original receipt
+                                 ;; privately; compare, never publish it.
+                                 (identical? (:physical/receipt outcome)
+                                             (:tx-result end))))
         complete? (and (not poisoned) postcheck? pair adapter-events
                        operations-agree? options-agree? definitive?
+                       receipt-identical?
                        (= :committed (:physical/status outcome))
                        (= :incorporated issued-resolution-class)
                        original-response?
@@ -290,6 +304,8 @@
                  :physical-commit-with-unresolved-operation-result
                  (not= :incorporated issued-resolution-class)
                  :physical-commit-with-unconfirmed-operation-result
+                 (not receipt-identical?)
+                 :model-receipt-not-identical-to-adapter
                  (not complete?) :unconfirmed-or-uncertain-outcome
                  :else :bounded-installed-route-to-adapter-agreement)]
     {:type report-type
@@ -305,6 +321,7 @@
      :prepared-operations-agree? (boolean operations-agree?)
      :prepared-options-agree? (boolean options-agree?)
      :definitive-execute-key-observed? (boolean definitive?)
+     :model-commit-receipt-identical-to-adapter? receipt-identical?
      :post-execution-source-rechecked? (boolean postcheck?)
      :handler-invocation-count 1
      :ring-response-class ring-class

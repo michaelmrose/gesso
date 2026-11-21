@@ -144,9 +144,9 @@
    (let [api-calls (atom [])
          transactions (atom 0)
          {:keys [change-ops tx-options tx-mode result status extra-call?
-                 post-submit-error]
+                 post-submit-error receipt-mode]
           :or {change-ops identity tx-mode :execute-tx
-               result (fake-key) status :committed}} settings]
+               result (fake-key) status :committed receipt-mode :matching}} settings]
      (with-redefs-fn
        {#'tx/transact!
         (fn [ctx p]
@@ -158,13 +158,22 @@
                            :submit-tx (adapter/submit-tx! :test-node ops tx-options)
                            :skip nil))]
             (when extra-call? (invoke))
-            (invoke)
-            ;; The adapter can have returned a definitive transaction key,
-            ;; then the model transaction may throw AFTER commit when Live
-            ;; delivery fails. The original resolved operation reconciles
-            ;; rather than claiming the command was incorporated.
-            (when post-submit-error (throw post-submit-error))
-            {:commit/status status}))
+            (let [api-response (invoke)]
+              ;; The matching fixture retains the EXACT adapter result,
+              ;; like the real Gesso Live -> tx/transact! return path. Two
+              ;; fault-injection modes model a stripped or substituted
+              ;; receipt without changing the adapter's own recorded call.
+              ;; The adapter can have returned a definitive transaction key,
+              ;; then the model transaction may throw AFTER commit when Live
+              ;; delivery fails. The original resolved operation reconciles
+              ;; rather than claiming the command was incorporated.
+              (when post-submit-error (throw post-submit-error))
+              (cond-> {:commit/status status}
+                (not= :missing receipt-mode)
+                (assoc :tx-result
+                       (if (= :different receipt-mode)
+                         (fake-key 999)
+                         (:tx-result api-response)))))))
         (ns-resolve 'gesso.live.consistency.xtdb '*execute-tx*)
         (fn [connectable ops opts]
           (swap! api-calls conj [:execute-tx connectable ops opts])
@@ -193,6 +202,7 @@
     (is (true? (:prepared-operations-agree? report)))
     (is (true? (:prepared-options-agree? report)))
     (is (true? (:definitive-execute-key-observed? report)))
+    (is (true? (:model-commit-receipt-identical-to-adapter? report)))
     (is (= :bounded-conditional-process-local-observation-only
            (:proof-status report)))
     (is (= :not-established (:actual-server-deployment report)))
@@ -218,6 +228,38 @@
                  (correlation/require-current-installed-physical!
                   handle opts report)))
           (is (= 1 @transactions) "Witness recheck must never resubmit"))))))
+
+(deftest model-transaction-receipt-must-be-same-xtdb-api-result
+  ;; A definitive execute-tx receipt observed at the adapter is NOT evidence
+  ;; that the Gesso model's claimed committed result carries that same receipt.
+  ;; Missing, or a different otherwise valid TransactionKey, is a distinct
+  ;; correlation failure even when the original handler returns 200 and the
+  ;; original resolved operation returned :incorporated.
+  (doseq [receipt-mode [:missing :different]]
+    (artificial-execution {:receipt-mode receipt-mode}
+      (fn [{:keys [api-calls transactions]}]
+        (let [{:keys [report handle execution]} (observe (options))]
+          (is (= :returned (:outcome execution)))
+          (is (= 200 (get-in execution [:result :status])))
+          (is (= :incorporated (:issued-resolution-class report)))
+          (is (true? (:definitive-execute-key-observed? report)))
+          (is (= :model-receipt-not-identical-to-adapter
+                 (:status report)))
+          (is (false? (:model-commit-receipt-identical-to-adapter? report)))
+          (is (nil? handle))
+          (is (= 1 @transactions))
+          (is (= 1 (count @api-calls))))))))
+
+(deftest model-transaction-receipt-identity-preserves-positive-correlation
+  (artificial-execution {:receipt-mode :matching}
+    (fn [{:keys [api-calls transactions]}]
+      (let [{:keys [report handle]} (observe (options))]
+        (is (= :bounded-installed-route-to-adapter-agreement
+               (:status report)))
+        (is (true? (:model-commit-receipt-identical-to-adapter? report)))
+        (is (correlation/installed-physical-witness? handle))
+        (is (= 1 @transactions))
+        (is (= 1 (count @api-calls)))))))
 
 (deftest physically-committed-but-unresolved-operation-cannot-qualify-http-success
   ;; A post-commit Live failure leaves the physical write committed, but
