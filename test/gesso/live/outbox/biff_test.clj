@@ -428,3 +428,185 @@
           (is (= [:start-provider] @events))
           (biff/stop started)
           (is (= [:start-provider :stop-worker :stop-provider] @events)))))))
+
+(defn- start-checked-fixture!
+  "Run real native Biff startup with the tracked modules Var. Only the
+   canonical application-assembly admission is replaced by a test fixture."
+  [modules]
+  (binding [*modules* (vec (concat [application/application-handler-module]
+                                  modules [managed/module]))]
+    (with-redefs [application/start-biff-application!
+                  (fn [_ initial modules-var order]
+                    (biff/start initial
+                                (clojure.lang.Var/create (vec (rest @modules-var)))
+                                (vec (rest order))))]
+      (managed/start-biff-application!
+       ::fixture (config) #'*modules*
+       (vec (concat [application/application-handler-module-id]
+                    (map :biff.core/id modules)
+                    [managed/module-id]))))))
+
+(deftest resource-acquisition-requires-live-checked-startup-scope-test
+  (let [calls (atom 0)]
+    (is (= :no-active-startup-ownership
+           (invalid-reason
+            #(managed/acquire-startup-resource!
+              :fixture/resource
+              (fn [] (swap! calls inc) :resource)
+              (fn [_] (swap! calls inc))))))
+    (is (zero? @calls))))
+
+(deftest partial-startup-owned-resources-rollback-before-dependencies-test
+  (let [events (atom [])
+        provider {:biff.core/id :fixture/dependency
+                  :biff.core/start (fn [s]
+                                     (swap! events conj :start-dependency)
+                                     (assoc s :fixture/dependency :open))
+                  :biff.core/stop (fn [_] (swap! events conj :stop-dependency))}
+        fault {:biff.core/id :fixture/partially-started
+               :biff.core/start
+               (fn [_]
+                 (let [a (managed/acquire-startup-resource!
+                          :fixture/a
+                          (fn [] (swap! events conj :acquire-a) :a)
+                          (fn [_] (swap! events conj :close-a)))
+                       b (managed/acquire-startup-resource!
+                          :fixture/b
+                          (fn [] (swap! events conj :acquire-b) :b)
+                          (fn [_] (swap! events conj :close-b)))]
+                   (is (= [:a :b] [a b]))
+                   (throw (ex-info "failure after acquisition" {:test :partial}))))
+               :biff.core/stop (fn [_] (swap! events conj :should-not-stop-module))}
+        error (thrown-startup #(start-checked-fixture! [provider fault]))]
+    (is (= :gesso.live.outbox/checked-startup-failed
+           (:error/type (ex-data error))))
+    (is (= :drained (:rollback/status (ex-data error))))
+    (is (= :partial (:test (ex-data (.getCause error)))))
+    (is (= [:start-dependency :acquire-a :acquire-b
+            :close-b :close-a :stop-dependency]
+           @events))))
+
+(deftest partial-physical-xtdb-allocation-is-closed-on-start-error-test
+  (let [events (atom [])
+        node-atom (atom nil)
+        provider {:biff.core/id :fixture/physical-node
+                  :biff.core/start
+                  (fn [_]
+                    (managed/acquire-startup-resource!
+                     :fixture/xtdb
+                     (fn [] (let [node (xtn/start-node {})]
+                              (reset! node-atom node)
+                              (swap! events conj :node-open)
+                              node))
+                     (fn [node]
+                       (.close ^java.lang.AutoCloseable node)
+                       (swap! events conj :node-closed)))
+                    (throw (ex-info "physical start failed" {})))
+                  :biff.core/stop
+                  (fn [_] (swap! events conj :should-not-stop-module))}
+        error (thrown-startup #(start-checked-fixture! [provider]))]
+    (is (= :drained (:rollback/status (ex-data error))))
+    (is (some? @node-atom))
+    (is (= [:node-open :node-closed] @events))))
+
+(deftest blocked-partial-resource-drain-fences-earlier-dependency-test
+  (let [events (atom [])
+        stop-attempts (atom 0)
+        dependency {:biff.core/id :fixture/dependency
+                    :biff.core/start (fn [s]
+                                       (swap! events conj :dependency-start)
+                                       s)
+                    :biff.core/stop (fn [_] (swap! events conj :dependency-stop))}
+        fault {:biff.core/id :fixture/fault
+               :biff.core/start
+               (fn [_]
+                 (managed/acquire-startup-resource!
+                  :fixture/first
+                  (fn [] (swap! events conj :first-start) :first)
+                  (fn [_] (swap! events conj :first-stop)))
+                 (managed/acquire-startup-resource!
+                  :fixture/second
+                  (fn [] (swap! events conj :second-start) :second)
+                  (fn [_]
+                    (swap! events conj :second-stop)
+                    (when (= 1 (swap! stop-attempts inc))
+                      (throw (ex-info "resource still busy" {})))))
+                 (throw (ex-info "module failed" {})))
+               :biff.core/stop (fn [_] (swap! events conj :should-not-stop))}
+        error (thrown-startup #(start-checked-fixture! [dependency fault]))
+        data (ex-data error)
+        handle (:cleanup/handle data)]
+    (is (= :blocked (:rollback/status data)))
+    (is (= :fixture/fault (:rollback/blocked-module-id data)))
+    (is (= :fixture/second (:rollback/blocked-resource-id data)))
+    (is (some? handle))
+    (is (= [:dependency-start :first-start :second-start :second-stop]
+           @events))
+    (is (= :drained (:status (managed/retry-startup-cleanup! handle))))
+    (is (= [:dependency-start :first-start :second-start :second-stop
+            :second-stop :first-stop :dependency-stop]
+           @events))
+    (is (= :drained (:status (managed/retry-startup-cleanup! handle))))
+    (is (= 2 @stop-attempts))))
+
+(deftest returned-module-transfers-partial-ownership-to-native-biff-stop-test
+  (let [events (atom [])
+        provider {:biff.core/id :fixture/owned-provider
+                  :biff.core/start
+                  (fn [s]
+                    (let [resource (managed/acquire-startup-resource!
+                                    :fixture/resource
+                                    (fn [] (swap! events conj :acquire) :resource)
+                                    (fn [_] (swap! events conj :partial-rollback)))]
+                      (assoc s :fixture/owned-resource resource
+                               :xtdb/connectable :fake
+                               :gesso.live/system {:source :fake
+                                                   :closed? (atom false)})))
+                  :biff.core/stop
+                  (fn [s]
+                    (is (= :resource (:fixture/owned-resource s)))
+                    (swap! events conj :normal-stop))}]
+    (with-redefs [lifecycle/start! (fn [& _] :worker-handle)
+                  lifecycle/stop! (fn [& _] {:outcome :drained})]
+      (let [started (start-checked-fixture! [provider])]
+        (is (= :resource (:fixture/owned-resource started)))
+        (is (= [:acquire] @events))
+        (biff/stop started)
+        (is (= [:acquire :normal-stop] @events))))))
+
+(deftest module-with-owned-resource-must-have-stop-before-ownership-transfer-test
+  (let [events (atom [])
+        module {:biff.core/id :fixture/no-stop
+                :biff.core/start
+                (fn [s]
+                  (managed/acquire-startup-resource!
+                   :fixture/resource
+                   (fn [] (swap! events conj :acquire) :resource)
+                   (fn [_] (swap! events conj :partial-rollback)))
+                  s)}
+        error (thrown-startup #(start-checked-fixture! [module]))]
+    (is (= :drained (:rollback/status (ex-data error))))
+    (is (= :missing-owned-module-stop
+           (:reason (ex-data (.getCause error)))))
+    (is (= [:acquire :partial-rollback] @events))))
+
+(deftest duplicate-resource-registration-compensates-new-acquisition-test
+  (let [events (atom [])
+        module {:biff.core/id :fixture/duplicate
+                :biff.core/start
+                (fn [_]
+                  (managed/acquire-startup-resource!
+                   :fixture/resource
+                   (fn [] (swap! events conj :first-acquire) :first)
+                   (fn [_] (swap! events conj :first-close)))
+                  (managed/acquire-startup-resource!
+                   :fixture/resource
+                   (fn [] (swap! events conj :second-acquire) :second)
+                   (fn [_] (swap! events conj :second-close))))
+                :biff.core/stop (fn [_] (swap! events conj :unexpected-stop))}
+        error (thrown-startup #(start-checked-fixture! [module]))]
+    (is (= :duplicate-owned-resource
+           (:reason (ex-data (.getCause error)))))
+    (is (= :drained (:rollback/status (ex-data error))))
+    (is (= [:first-acquire :second-acquire :second-close :first-close]
+           @events))))
