@@ -2849,6 +2849,95 @@
           (is (= (progression/requirement required)
                  (:gesso.live/progression bound))))))))
 
+(deftest empty-frontier-rejects-admitted-selected-query-snapshot-tokens-test
+  ;; A fixed snapshot for a selected database with no completed transaction
+  ;; cannot be admitted merely by putting it in query consistency instead of
+  ;; the Biff snapshot key (which already rejects the identical claim).
+  (let [t (Instant/parse "2026-11-20T19:00:00Z")
+        selected (xtdb-live/basis :xtdb 2050 t)
+        foreign (xtdb-live/basis :analytics 13 t)
+        selected-token (xtdb-live/basis-snapshot-token selected)
+        foreign-token (xtdb-live/basis-snapshot-token foreign)
+        combined-token (xt.basis/->time-basis-str {"xtdb" [t]
+                                                   "analytics" [t]})
+        cases [[selected-token :unobserved-selected-database]
+               [combined-token :unobserved-selected-database]
+               ["not-a-token" :invalid-snapshot-token]
+               [false :invalid-snapshot-token]]
+        status-calls (atom 0)]
+    (with-xtdb-stub '*status*
+      (fn [_]
+        (swap! status-calls inc)
+        {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (doseq [[token expected-reason] cases]
+          (let [failure (try
+                          (xtdb-live/bind-request-frontier
+                           {:xtdb/node :authority-node
+                            :gesso.live/consistency {:snapshot-token token}})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                (str "Empty node cannot establish admitted selected snapshot "
+                     (pr-str token)))
+            (when failure
+              (is (= expected-reason (:reason (ex-data failure)))))))
+        ;; Foreign snapshots and waits remain possible; an as-of time is
+        ;; not a fixed Biff snapshot receipt and retains its prior handling.
+        (let [admitted {:snapshot-token foreign-token
+                        :await-token "eventual-tx"}
+              bound (xtdb-live/bind-request-frontier
+                     {:xtdb/node :authority-node
+                      :xtdb/consistency admitted})]
+          (is (= admitted (xtdb-live/consistency-from bound)))
+          (is (nil? (:biff.xtdb/snapshot-token bound)))
+          (is (ifn? (:biff.core/wrap-db-snapshot bound))))
+        (is (ifn? (:biff.core/wrap-db-snapshot
+                   (xtdb-live/bind-request-frontier
+                    {:xtdb/node :authority-node
+                     :gesso.live/consistency {:snapshot-time t}}))))
+        (is (= (+ 2 (count cases)) @status-calls))))))
+
+(deftest empty-frontier-rejects-deferred-selected-query-snapshot-tokens-test
+  ;; A Biff wrapper may see a fresh Ring context, so it must reject the same
+  ;; selected-db token before running a handler even if it was not present
+  ;; when the authoritative empty frontier was observed.
+  (let [t (Instant/parse "2026-11-20T19:00:00Z")
+        selected-token (xtdb-live/basis-snapshot-token
+                        (xtdb-live/basis :xtdb 2050 t))
+        foreign-token (xtdb-live/basis-snapshot-token
+                       (xtdb-live/basis :analytics 13 t))
+        cases [[selected-token :unobserved-selected-database]
+               ["not-a-token" :invalid-snapshot-token]
+               [false :invalid-snapshot-token]]
+        calls (atom 0)]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (let [bound (xtdb-live/bind-request-frontier
+                     {:xtdb/node :authority-node
+                      :gesso.live/consistency {:await-token "eventual-tx"}})
+              handler ((:biff.core/wrap-db-snapshot bound)
+                       (fn [ctx]
+                         (swap! calls inc)
+                         (xtdb-live/consistency-from ctx)))]
+          (doseq [[token expected-reason] cases]
+            (let [failure (try
+                            (handler {:xtdb/consistency
+                                      {:snapshot-token token}})
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Deferred selected-db token must fail: " (pr-str token)))
+              (when failure
+                (is (= expected-reason (:reason (ex-data failure))))))
+            (is (zero? @calls) "Failure must precede the Biff body"))
+          (is (= {:snapshot-token foreign-token
+                  :await-token "eventual-tx"}
+                 (handler {:xtdb/consistency
+                           {:snapshot-token foreign-token}})))
+          (is (= 1 @calls)))))))
+
 (deftest empty-frontier-rejects-unverified-preexisting-biff-snapshot-test
   ;; No completed XTDB transaction means Gesso cannot establish a current
   ;; authoritative Biff snapshot. Returning ctx unchanged must not retain a

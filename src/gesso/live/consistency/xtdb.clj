@@ -1494,6 +1494,27 @@
       (when (seq combined)
         (xt.basis/->time-basis-str combined)))))
 
+(defn- require-empty-selected-db-consistency!
+  "Reject query snapshot tokens for an unobserved selected database.
+
+   A selected-db token claims one physically pinned time basis. Without a
+   completed transaction, Gesso cannot admit that fixed snapshot through
+   query consistency any more than through :biff.xtdb/snapshot-token.
+   Other databases' canonical tokens are independent. Explicit as-of times
+   and transaction metadata are not physical snapshot tokens, and retain
+   their existing empty-startup handling."
+  [database-name consistency]
+  (when-some [token (:snapshot-token consistency)]
+    (when (contains? (decode-canonical-biff-snapshot!
+                      database-name token)
+                     database-name)
+      (throw
+       (ex "XTDB has no completed transaction and cannot admit a selected-database query snapshot token."
+           {:database database-name
+            :snapshot-token token
+            :reason :unobserved-selected-database}))))
+  consistency)
+
 (defn- guarded-empty-biff-snapshot-wrapper
   "Preserve admitted foreign snapshots while guarding deferred Biff execution.
 
@@ -1529,6 +1550,8 @@
               (let [combined-consistency
                     (compose-wrapped-xtdb-consistency!
                      admitted-consistency wrapped-ctx)
+                    _ (require-empty-selected-db-consistency!
+                       database-name combined-consistency)
                     combined-requirement
                     (compose-wrapped-biff-progression!
                      database-name nil admitted-requirement wrapped-ctx)
@@ -1691,7 +1714,9 @@
                               (when (= database-name
                                        (basis-database candidate))
                                 candidate))
-                            xtdb-required-bases)]
+                            xtdb-required-bases)
+             _ (require-empty-selected-db-consistency!
+                database-name admitted-consistency)]
          (when required
            (throw
             (ex "XTDB has no completed transaction and cannot satisfy an existing authoritative progression requirement."
