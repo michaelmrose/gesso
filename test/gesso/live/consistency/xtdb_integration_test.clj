@@ -296,6 +296,51 @@
 ;; Query option behavior against real XTDB
 ;; -----------------------------------------------------------------------------
 
+(deftest real-xtdb-selected-snapshot-token-overrides-later-as-of-time-test
+  ;; Verify the actual physical behavior behind the Gesso validation rule:
+  ;; XTDB 2.2 can read at the token's older snapshot despite a later
+  ;; :snapshot-time. Without a guard, complete receipts could select old data.
+  (let [id (unique-id "receipt-snapshot-pair")
+        first (xtdb-live/execute-tx! (node) (put-user-op id "Before"))
+        second (xtdb-live/execute-tx! (node) (put-user-op id "After"))
+        first-basis (xtdb-live/tx-result-basis (:tx-result first))
+        first-token (xtdb-live/basis-snapshot-token first-basis)
+        second-time (get-in second [:consistency :system-time])
+        receipt {:tx-id (get-in first [:consistency :tx-id])
+                 :system-time (get-in first [:consistency :system-time])
+                 :snapshot-token first-token}
+        options {:snapshot-time second-time}]
+    (is (= "Before" (:name (only-row
+                            (q-user id {:snapshot-token first-token
+                                        :snapshot-time second-time}))))
+        "Physical XTDB can use an older token despite a later as-of time")
+    (let [failure (try
+                    (xtdb-live/q-consistent
+                     (node) (select-user-sql id) receipt options)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo failure))
+      (when (instance? clojure.lang.ExceptionInfo failure)
+        (is (= :conflicting-receipt-snapshot-selectors
+               (:reason (ex-data failure))))))
+    ;; A caller that really wants the later snapshot can omit the older token.
+    (is (= "After" (:name (only-row
+                           (xtdb-live/q-consistent
+                            (node) (select-user-sql id)
+                            {:tx-id (:tx-id receipt)
+                             :system-time (:system-time receipt)}
+                            options)))))
+    ;; The first receipt's own snapshot-time is only a minimum. A new token
+    ;; for the later committed transaction can legitimately advance the read.
+    (is (= "After" (:name (only-row
+                           (xtdb-live/q-consistent
+                            (node) (select-user-sql id)
+                            (:consistency first)
+                            {:snapshot-token
+                             (xtdb-live/basis-snapshot-token
+                              (xtdb-live/tx-result-basis
+                               (:tx-result second)))})))))))
+
 (deftest q-consistent-accepts-snapshot-time-from-execute-tx-test
   (testing "The :snapshot-time derived from execute-tx is accepted by real XTDB q."
     (let [id          (unique-id "snapshot-time")

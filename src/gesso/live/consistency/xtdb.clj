@@ -875,7 +875,7 @@
    time coordinate or accepting an older caller-selected snapshot. A selected
    canonical snapshot token can establish the minimum directly; foreign
    database tokens do not establish this transaction's selected database."
-  [consistency options]
+  [consistency options caller-options]
   (if-some [receipt (consistency->basis consistency (:database options))]
     (let [database-name (basis-database receipt)
           receipt-time (basis-system-time receipt)
@@ -900,6 +900,23 @@
                          {:reason :invalid-receipt-query-snapshot-time
                           :snapshot-time requested-time
                           :receipt receipt})))]
+      ;; XTDB 2.2 can execute at the earlier snapshot when both a selected-db
+      ;; token and a different as-of time are supplied. An EXPLICIT as-of
+      ;; request must not be silently ignored, even if both coordinates are
+      ;; individually newer than the admitted transaction receipt. A
+      ;; snapshot-time derived from consistency itself is merely a minimum;
+      ;; a newer selected token legitimately satisfies that older receipt.
+      (when (and (contains? caller-options :snapshot-time)
+                 instant
+                 (some #(not= instant %) selected-bases))
+        (throw
+         (ex "Selected XTDB query token conflicts with explicit snapshot-time."
+             {:reason :conflicting-receipt-snapshot-selectors
+              :database database-name
+              :snapshot-time requested-time
+              :snapshot-token (:snapshot-token options)
+              :token-times selected-bases
+              :receipt receipt})))
       (when (or (and instant (.isBefore ^Instant instant receipt-time))
                 (some #(.isBefore ^Instant % receipt-time) selected-bases))
         (throw
@@ -908,8 +925,21 @@
               :receipt receipt
               :snapshot-time requested-time
               :snapshot-token (:snapshot-token options)})))
-      (if (or instant selected-bases)
+      (cond
+        ;; XTDB may choose an older historical snapshot when BOTH selectors
+        ;; are present. The time inherited from a complete receipt is only a
+        ;; minimum: if a canonical selected-db token already satisfies it,
+        ;; remove the receipt-derived as-of constraint so a later token can
+        ;; actually advance the physical read. Explicit caller times have
+        ;; already been reconciled above and are not discarded.
+        (and (seq selected-bases)
+             (not (contains? caller-options :snapshot-time)))
+        (dissoc options :snapshot-time)
+
+        (or instant selected-bases)
         options
+
+        :else
         (assoc options :snapshot-time receipt-time)))
     options))
 
@@ -987,7 +1017,8 @@
           consistency consistency-options caller-options))
        progression-value
        consistency-options
-       caller-options)))))
+       caller-options)
+      caller-options))))
 
 ;; -----------------------------------------------------------------------------
 ;; Context helpers
@@ -2169,10 +2200,12 @@
   ([consistency]
    (consistent-query-opts consistency nil))
   ([consistency opts]
-   (require-complete-receipt-read-minimum!
-    consistency
-    (merge-complete-receipt-query-opts
-     consistency (query-consistency consistency) (query-opts opts)))))
+   (let [caller-options (query-opts opts)]
+     (require-complete-receipt-read-minimum!
+      consistency
+      (merge-complete-receipt-query-opts
+       consistency (query-consistency consistency) caller-options)
+      caller-options))))
 
 (defn tx-opts
   "Return only options intended for XTDB2 submit-tx/execute-tx.

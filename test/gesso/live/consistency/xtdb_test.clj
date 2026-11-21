@@ -777,6 +777,72 @@
                   (xtdb-live/read-query-opts {:tx-id 2057} nil
                                              {:snapshot-time older}))))))
 
+(deftest complete-receipt-rejects-conflicting-selected-snapshot-selectors-test
+  ;; Real XTDB 2.2 can select an older snapshot when two selectors differ.
+  ;; Both selectors can separately satisfy the tx receipt while the physical
+  ;; query silently uses an older snapshot than explicitly requested.
+  ;; Do not admit a contradictory pair for the selected database.
+  (let [at (Instant/parse "2026-11-20T21:00:00Z")
+        later (.plusSeconds at 60)
+        selected-at (xt.basis/->time-basis-str {"xtdb" [at]})
+        selected-later (xt.basis/->time-basis-str {"xtdb" [later]})
+        foreign (xt.basis/->time-basis-str {"analytics" [at]})
+        receipt {:tx-id 2065 :system-time at}
+        ctx {:xtdb/read-connectable :read
+             :gesso.live/consistency receipt}
+        observed (atom [])
+        query (fn [& args] (swap! observed conj args) :queried)]
+    (with-redefs-fn {(xtdb-var '*q*) query
+                     (xtdb-var '*plan-q*) query}
+      (fn []
+        (doseq [[token requested] [[selected-at later]
+                                   [selected-later at]]
+                :let [options {:snapshot-time requested
+                               :snapshot-token token}]
+                invoke [#(xtdb-live/consistent-query-opts receipt options)
+                        #(xtdb-live/read-query-opts receipt nil options)
+                        #(xtdb-live/q-consistent
+                          :read sample-query receipt options)
+                        #(xtdb-live/plan-q-consistent
+                          :read sample-query receipt options)
+                        #(xtdb-live/q-consistent-from
+                          ctx sample-query options)
+                        #(xtdb-live/plan-q-consistent-from
+                          ctx sample-query options)]]
+          (let [failure (try (invoke) nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                "Incompatible selected-db time and token may not be admitted")
+            (when (instance? clojure.lang.ExceptionInfo failure)
+              (is (= :conflicting-receipt-snapshot-selectors
+                     (:reason (ex-data failure)))))))
+        (is (empty? @observed)
+            "A contradictory pair must fail before XTDB query execution")
+        ;; Equality is consistent; a token for a different database does not
+        ;; constrain the selected database and must remain independently valid.
+        (doseq [options [{:snapshot-token selected-at :snapshot-time at}
+                         {:snapshot-token foreign :snapshot-time later}]]
+          (is (= :queried
+                 (xtdb-live/q-consistent :read sample-query receipt options)))
+          (is (= options
+                 (select-keys (last (last @observed))
+                              [:snapshot-token :snapshot-time]))))
+        (is (= 2 (count @observed)))
+        ;; A snapshot-time carried by the receipt is a MINIMUM, not a caller
+        ;; request for an exact as-of time. A newer token can satisfy it.
+        (let [with-time (assoc receipt :snapshot-time at)
+              accepted (xtdb-live/consistent-query-opts
+                        with-time {:snapshot-token selected-later})]
+          (is (= selected-later (:snapshot-token accepted)))
+          (is (nil? (:snapshot-time accepted))
+              "Receipt minimum must not pin a newer selected token to older as-of time"))))
+    ;; An unprogressed query without a complete receipt retains the existing
+    ;; ordinary caller-option contract and need not interpret token/time.
+    (is (= {:snapshot-time later :snapshot-token selected-at}
+           (xtdb-live/consistent-query-opts
+            {:tx-id 2065} {:snapshot-time later
+                            :snapshot-token selected-at})))))
+
 (deftest complete-receipts-compose-caller-query-snapshot-tokens-test
   ;; With a complete tx/time receipt, query consistency describes an admitted
   ;; minimum. Caller opts must not silently discard an independent database's
