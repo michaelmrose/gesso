@@ -930,6 +930,22 @@
   (let [merged (merge consistency-options caller-options)
         complete-receipt? (boolean
                            (consistency->basis consistency (:database merged)))]
+    ;; A complete tx/time receipt makes admitted temporal interpretation part
+    ;; of the read contract even without a separate progression carrier.
+    ;; A different current-time or default timezone changes the query's
+    ;; temporal meaning; caller-map precedence must not silently replace it.
+    (doseq [field [:current-time :default-tz]
+            :when (and complete-receipt?
+                       (contains? consistency-options field)
+                       (contains? caller-options field)
+                       (not= (get consistency-options field)
+                             (get caller-options field)))]
+      (throw
+       (ex "Complete XTDB transaction receipt has conflicting temporal query context."
+           {:reason :conflicting-receipt-temporal-read-context
+            :field field
+            :consistency-value (get consistency-options field)
+            :caller-value (get caller-options field)})))
     (when (and complete-receipt?
                (contains? consistency-options :await-token)
                (contains? caller-options :await-token)

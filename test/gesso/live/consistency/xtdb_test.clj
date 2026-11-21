@@ -934,6 +934,75 @@
             (xtdb-live/read-query-opts
              {:tx-id 2059 :await-token "admitted-wait"} nil alternate))))))
 
+(deftest complete-receipts-preserve-admitted-temporal-query-context-test
+  ;; Temporal query options affect the meaning of an admitted read. As with
+  ;; authoritative progression, a complete tx/time receipt cannot let caller
+  ;; opts silently replace the originally admitted current-time or timezone.
+  ;; This does not impose new precedence on convenience-only consistency.
+  (let [tx-time (Instant/parse "2026-11-20T18:00:00Z")
+        current-time (Instant/parse "2026-11-20T20:00:00Z")
+        later-time (.plusSeconds current-time 60)
+        base {:tx-id 2060 :system-time tx-time}
+        conflicts [[{:current-time current-time}
+                    {:current-time later-time} :current-time]
+                   [{:default-tz "UTC"}
+                    {:default-tz "Asia/Tokyo"} :default-tz]]
+        invoked (atom [])
+        query (fn [& args]
+                (swap! invoked conj args)
+                :unexpected)]
+    (with-redefs-fn {(xtdb-var '*q*) query
+                     (xtdb-var '*plan-q*) query}
+      (fn []
+        (doseq [[admitted caller field] conflicts
+                :let [consistency (merge base admitted)
+                      ctx {:xtdb/read-connectable :read
+                           :gesso.live/consistency consistency}]
+                invoke [#(xtdb-live/consistent-query-opts consistency caller)
+                        #(xtdb-live/read-query-opts consistency nil caller)
+                        #(xtdb-live/q-consistent :read sample-query
+                                                 consistency caller)
+                        #(xtdb-live/plan-q-consistent :read sample-query
+                                                      consistency caller)
+                        #(xtdb-live/q-consistent-from ctx sample-query caller)
+                        #(xtdb-live/plan-q-consistent-from ctx sample-query caller)]]
+          (let [failure (try (invoke)
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                (str "Admitted temporal context overridden: " field))
+            (when (instance? clojure.lang.ExceptionInfo failure)
+              (is (= :conflicting-receipt-temporal-read-context
+                     (:reason (ex-data failure))))
+              (is (= field (:field (ex-data failure)))))))
+        (is (empty? @invoked)
+            "Rejected temporal context conflicts must fail before XTDB I/O")
+        ;; Identical or independent temporal fields are compatible, and the
+        ;; complete receipt still establishes its transaction-time minimum.
+        (let [same (xtdb-live/consistent-query-opts
+                    (merge base {:current-time current-time})
+                    {:current-time current-time :default-tz "UTC"})
+              separate (xtdb-live/read-query-opts
+                        (merge base {:current-time current-time}) nil
+                        {:default-tz "Asia/Tokyo"})]
+          (is (= current-time (:current-time same)))
+          (is (= "UTC" (:default-tz same)))
+          (is (= tx-time (:snapshot-time same)))
+          (is (= current-time (:current-time separate)))
+          (is (= "Asia/Tokyo" (:default-tz separate))))))
+    ;; Existing caller override behavior remains documented for no complete
+    ;; receipt, even when one partial metadata field is present.
+    (is (= later-time
+           (:current-time
+            (xtdb-live/consistent-query-opts
+             {:tx-id 2060 :current-time current-time}
+             {:current-time later-time}))))
+    (is (= "Asia/Tokyo"
+           (:default-tz
+            (xtdb-live/read-query-opts
+             {:system-time tx-time :default-tz "UTC"} nil
+             {:default-tz "Asia/Tokyo"}))))))
+
 (deftest query-consistency-drops-tx-metadata-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]
     (is (= {:snapshot-time t
