@@ -5,7 +5,10 @@
    intent, and submits one transaction containing a provider-system-time
    compare-and-swap ASSERT followed by a replacement document with a lease.
    A stale claimant cannot overwrite an already leased or otherwise changed
-   record through this path. The lease remains durable after a process crash.
+   record through this path. Initial acquisition also checks the proposed
+   deadline against XTDB transaction time: already-expired or over-five-minute
+   leases fail before any lease row is written. The lease remains durable
+   after a process crash.
 
    Expired leases can be reclaimed with an XTDB transaction-time clock guard,
    an observed system-time CAS, and a NEW lease token. A separate fence
@@ -16,7 +19,8 @@
    external side effects, authenticate the caller, or prove arbitrary writer
    closure. A new claimant may duplicate an external send performed before the
    old claimant crashed. :now and worker identity are trusted host inputs,
-   while expiry eligibility is additionally checked against XTDB's clock."
+   while initial and recovery lease deadlines, and recovery expiry
+   eligibility, are additionally checked against XTDB's clock."
   (:require [clojure.string :as str]
             [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox :as outbox]
@@ -100,6 +104,10 @@
                            :gesso.live.outbox/lease-owner worker-id
                            :gesso.live.outbox/lease-until lease-until))]
     [[guard-system-from-sql intent-id original-system-from]
+     ;; Host-relative duration validation is insufficient: the host clock
+     ;; could be stale or fast. Check both bounds in the actual XTDB tx.
+     [guard-new-deadline-sql lease-until]
+     [guard-max-new-deadline-sql lease-until]
      [:put-docs outbox/intent-table claimed]]))
 
 (defn acquire-pending!
@@ -107,14 +115,17 @@
 
    :intent-id and :lease-id are UUIDs, :worker-id is nonblank, and :now and
    :lease-until are java.time.Instant values. Lease duration must be 1ms to
-   5min. Inputs must be supplied by a trusted single-node worker, not a
-   request parameter. Neither a lease nor a pre-commit query authorizes
+   5min relative to the supplied :now, AND the deadline must be within
+   (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + 5min] in the XTDB transaction.
+   Inputs must be supplied by a trusted single-node worker, not a request
+   parameter. Neither a lease nor a pre-commit query authorizes
    publication independently of the installed worker and source checks.
 
    Returns {:status :acquired, :tx-result ..., :consistency ...} on the actual
    XTDB commit; {:status :unavailable, :reason :missing | :not-pending} for
    observations not eligible for acquisition; and {:status :contended} only
-   when XTDB rejects the guarded transaction with :xtdb/assert-failed.
+   when XTDB rejects the guarded transaction with :xtdb/assert-failed,
+   including stale or excessive deadlines relative to the provider clock.
 
    Other failures, including any indeterminate post-commit result, propagate;
    they MUST NOT be reclassified as a safe rejection or permission to retry

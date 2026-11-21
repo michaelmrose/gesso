@@ -1,5 +1,5 @@
 (ns gesso.live.outbox.acquisition-test
-  "v2090: physical pending-intent acquisition and stale-claim regressions."
+  "v2090-v2092: physical pending-intent acquisition and provider-time guards."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
@@ -7,13 +7,11 @@
             [xtdb.node :as xtn])
   (:import [java.time Instant]))
 
-(defn- inst [offset-seconds]
-  (.plusSeconds (Instant/parse "2026-11-21T00:00:00Z") offset-seconds))
-
 (defn- claim
   [intent-id worker]
-  {:intent-id intent-id :worker-id worker :lease-id (random-uuid)
-   :now (inst 0) :lease-until (inst 60)})
+  (let [now (Instant/ofEpochMilli (System/currentTimeMillis))]
+    {:intent-id intent-id :worker-id worker :lease-id (random-uuid)
+     :now now :lease-until (.plusSeconds now 60)}))
 
 (defn- pending! [node id]
   (let [plan (outbox/prepare!
@@ -34,8 +32,9 @@
              [#(assoc % :worker-id " ") :invalid-worker-id]
              [#(assoc % :lease-id "x") :invalid-lease-id]
              [#(assoc % :now "not-an-instant") :invalid-clock]
-             [#(assoc % :lease-until (inst 0)) :invalid-lease-duration]
-             [#(assoc % :lease-until (inst 301)) :invalid-lease-duration]
+             [#(assoc % :lease-until (:now %)) :invalid-lease-duration]
+             [#(assoc % :lease-until (.plusSeconds ^Instant (:now %) 301))
+              :invalid-lease-duration]
              [#(assoc % :extra :unsafe) :unknown-fields]]]
       (let [e (try (acquisition/acquire-pending! :unconnected (mutation valid))
                    nil
@@ -100,3 +99,24 @@
                    nil
                    (catch clojure.lang.ExceptionInfo e e))]
         (is (= :invalid-physical-intent (:reason (ex-data e))))))))
+
+(deftest physical-initial-acquire-rejects-host-clock-skew-test
+  ;; Both claims have a valid host-relative 60s duration. But one already
+  ;; expired in provider time and the other lasts far beyond five minutes.
+  ;; The XTDB transaction must reject either one without modifying the row.
+  (with-open [node (xtn/start-node {})]
+    (doseq [[label offset] [[:already-expired -180]
+                            [:excessive-future 900]]]
+      (let [id (random-uuid)
+            _ (pending! node id)
+            before (read-intent node id)
+            proposed-now (.plusSeconds ^Instant (:now (claim id "probe")) offset)
+            proposed {:intent-id id :worker-id "skewed-worker"
+                      :lease-id (random-uuid)
+                      :now proposed-now
+                      :lease-until (.plusSeconds ^Instant proposed-now 60)}
+            result (acquisition/acquire-pending! node proposed)]
+        (is (= :contended (:status result)) (name label))
+        (is (= before (read-intent node id)) (name label))
+        (is (= :pending (:gesso.live.outbox/status (read-intent node id)))
+            (name label))))))
