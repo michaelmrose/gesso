@@ -271,7 +271,15 @@
                                      (set (keys (:typed-trial config))))
                           (plain-map? (get-in config [:typed-trial :catalog-source]))
                           (plain-map? (get-in config [:typed-trial :inputs]))
-                          (qualified-keyword? (get-in config [:typed-trial :operation])))))
+                          (qualified-keyword? (get-in config [:typed-trial :operation]))
+                          ;; The optional pair, once declared, cannot be
+                          ;; disabled to bypass the original principal gate.
+                          (or (not (contains? (:typed-trial config)
+                                              :principal-policy))
+                              (and (plain-map? (get-in config [:typed-trial
+                                                              :principal-policy]))
+                                   (plain-map? (get-in config [:typed-trial
+                                                              :authorization-source])))))))
     (reject! :invalid-application-owned-http-configuration))
   config)
 

@@ -3,6 +3,7 @@
    checked before the v1785 boot's ONE catalog-bound typed XTDB write."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.example.certified-claim-http-boot :as boot]
+            [gesso.assurance.example.certified-claim-http-boot-test]
             [gesso.assurance.proof.checked-biff-request-principal :as gate]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test
              :as previous]
@@ -372,6 +373,23 @@
     (is (= :invalid-claim-example-boot-source
            (reason #(boot/issue-claim-http-boot!
                      (dissoc source :principal-policy)))))
+    (is (nil? @server-state))))
+
+(deftest declared-principal-gate-cannot-be-disabled-by-falsey-policy
+  ;; Declaring the authorization source means an actual host policy is
+  ;; mandatory. An absent :principal-policy may be a separately unqualified
+  ;; boot, but an explicit falsey policy must never erase the declaration.
+  (let [{:keys [source server-state]} (with-source)]
+    (is (= :trusted-host-principal-must-match-declared-typed-owner-grant
+           (:principal-authorization-check
+            ((:summary! (boot/issue-claim-http-boot! source)))))
+        "A valid declared principal gate must remain enabled")
+    (doseq [disabled [nil false]]
+      (is (= :invalid-claim-example-boot-source
+             (reason #(boot/issue-claim-http-boot!
+                       (assoc source :principal-policy disabled))))
+          (str "Must reject an explicitly disabled principal gate: "
+               (pr-str disabled))))
     (is (nil? @server-state))))
 
 (deftest independently-supplied-host-grant-cannot-override-declaration

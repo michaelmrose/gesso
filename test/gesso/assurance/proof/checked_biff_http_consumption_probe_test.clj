@@ -43,6 +43,25 @@
 (defn- error-reason [f]
   (try (f) :no-error
        (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+(deftest direct-http-probe-refuses-disabled-declared-principal-gate
+  ;; The lower-level consumption probe is separately public. It cannot trust
+  ;; the configured-start entry point to have validated an optional policy.
+  (let [contract (:contract ((earlier-helper 'case-env)))
+        host (host/issue-checked-biff-host-module! contract)]
+    (is (map? (:module (probe/issue-http-consumption-probe-module!
+                       (:handle host) contract nil)))
+        "A deliberately absent typed trial remains supported")
+    (doseq [disabled [nil false]]
+      (is (= :invalid-typed-adapter-trial-source
+             (error-reason
+              #(probe/issue-http-consumption-probe-module!
+                (:handle host) contract
+                {:catalog-source {:catalog {}}
+                 :operation :request/claim
+                 :inputs {}
+                 :principal-policy disabled
+                 :authorization-source {}})))))))
+
 (defn- data [] ((model 'fixture-data)))
 (defn- seed! [& xs] (apply (model 'seed!) xs))
 (defn- read-request [id] ((model 'read-request) id))

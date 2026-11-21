@@ -243,7 +243,12 @@
                      (map? (:catalog-source typed-config))
                      (map? (:catalog (:catalog-source typed-config)))
                      (qualified-keyword? (:operation typed-config))
-                     (map? (:inputs typed-config))))
+                     (map? (:inputs typed-config))
+                     ;; Direct users of this module must obey the same
+                     ;; declared principal gate as configured HTTP startup.
+                     (or (not (contains? typed-config :principal-policy))
+                         (and (map? (:principal-policy typed-config))
+                              (map? (:authorization-source typed-config))))))
     (reject! :invalid-typed-adapter-trial-source))
   (when-not (and (host/checked-biff-host-adoption? host-handle)
                  (map? contract-source))
@@ -299,9 +304,10 @@
              ;; ORIGINAL host-system, before any adapter captures the wrapper.
              (let [selected (when typed-config
                               (try
-                                {:principal (when-let [policy (:principal-policy typed-config)]
+                                {:principal (when (contains? typed-config :principal-policy)
                                               (original-principal-issuer
-                                               policy (:operation typed-config)
+                                               (:principal-policy typed-config)
+                                               (:operation typed-config)
                                                (:inputs typed-config)
                                                (:catalog-source typed-config)
                                                (:authorization-source typed-config)

@@ -69,13 +69,18 @@
                  (plain-map? (get-in source [:catalog-source :catalog]))
                  (plain-map? (get-in source [:catalog-source :physical-field-map]))
                  (plain-map? (:inputs source))
-                 (fn? (:base-url! source)))
+                 (fn? (:base-url! source))
+                 ;; A declared principal/authorization pair is never an
+                 ;; opt-out switch: nil/false must not bypass the gate.
+                 (or (not (contains? source :principal-policy))
+                     (and (plain-map? (:principal-policy source))
+                          (plain-map? (:authorization-source source)))))
     (reject! :invalid-claim-example-boot-source))
-  (when-let [policy (:principal-policy source)]
+  (when (contains? source :principal-policy)
     ;; Original application boot source declares grants independently of the
     ;; host callback. Both must correspond to the exact typed owner write.
     (principal/issue-request-principal-gate!
-     policy operation-id (:inputs source) (:catalog-source source)
+     (:principal-policy source) operation-id (:inputs source) (:catalog-source source)
      (:authorization-source source) (:contract-source source)))
   (let [contract (:contract-source source)
         catalog-source (get-in source [:catalog-source :catalog])
@@ -157,15 +162,17 @@
                 {:contract-source (:contract-source source)
                  :adapter-module (:adapter-module source)
                  :base-url! (:base-url! source)
-                 :typed-trial {:catalog-source (:catalog-source source)
-                               :operation operation-id
-                               :inputs (:inputs source)
-                               ;; Only the separately selected opt-in claim
-                               ;; boot supplies this policy to v1781's actual
-                               ;; request wrapper. Never manufacture an auth
-                               ;; conclusion from an absent policy.
-                               :principal-policy (:principal-policy source)
-                               :authorization-source (:authorization-source source)}})
+                 :typed-trial
+                 (cond-> {:catalog-source (:catalog-source source)
+                          :operation operation-id
+                          :inputs (:inputs source)}
+                   ;; Preserve the semantic difference between an ABSENT
+                   ;; principal policy (explicitly unqualified legacy trial)
+                   ;; and a DECLARED policy (which must be checked). Never
+                   ;; insert nil policy/declaration keys on the former path.
+                   (contains? source :principal-policy)
+                   (assoc :principal-policy (:principal-policy source)
+                          :authorization-source (:authorization-source source)))})
         summary! (fn []
                    (pinned!)
                    (report (:status ((:summary! issued)))

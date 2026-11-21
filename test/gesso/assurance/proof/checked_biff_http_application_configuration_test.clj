@@ -178,6 +178,25 @@
                              :submit! (fn [] :forged)})))))
     (is (nil? @(:server-state s)))))
 
+(deftest declared-authorization-cannot-be-erased-by-disabled-principal-policy
+  ;; The configured entry point is public independently of the Claim example.
+  ;; Supplying the policy/declaration pair with a falsey policy must not
+  ;; silently fall back to a policy-free certified operation.
+  (let [s (scenario :honest)
+        original (original-source s true)]
+    (is (= :issued (:status ((:summary!
+                             (config/issue-configured-checked-http-application!
+                              original)))))
+        "A typed trial without declared authorization remains explicit")
+    (doseq [disabled [nil false]]
+      (is (= :invalid-application-owned-http-configuration
+             (reason #(config/issue-configured-checked-http-application!
+                       (-> original
+                           (assoc-in [:typed-trial :principal-policy] disabled)
+                           (assoc-in [:typed-trial :authorization-source]
+                                     {:policy-id :request/claim-authority})))))))
+    (is (nil? @(:server-state s)))))
+
 (deftest unexpected-preinstalled-biff-handler-rejected-before-server-start
   (let [s (scenario :honest)
         issued (config/issue-configured-checked-http-application!
