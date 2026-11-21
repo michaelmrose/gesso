@@ -1,12 +1,13 @@
 (ns gesso.live.outbox.browser-restart-test
-  "v2119: Observe the exact HTMX progression sent by each surviving tab.
+  "v2120: Correlate each tab's HTMX progression with its HTTP response.
 
    The replacement host binds the SAME port, reopens the SAME local XTDB
    log/storage, and provides a newly owned Live source/worker. The browser
    reconnects both EventSource streams and delivers progression-correlated
    HTTP/HTMX refreshes to each unchanged page. The per-tab configRequest
-   observer checks the outgoing headers separately, while the child server
-   retains aggregate physical readback. This covers process death,
+   observer checks outgoing headers separately and associates each header
+   with an actual successful HTTP response and authoritative HTML. The child
+   server still retains aggregate physical readback. This covers process death,
    not an entire machine, disk, or network partition."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -22,30 +23,48 @@
 (def ^:private panel "v2109-browser-panel")
 
 (def ^:private capture-dom-js
-  ;; Gesso registers the document configRequest handler during page startup.
-  ;; This later observer reads the resulting header without modifying it.
-  ;; Per-page capture rules out two correct server reads from one tab being
-  ;; mistaken for evidence about both tabs.
-  (str "() => { window.__v2119={"
+  (str "() => { window.__v2120={"
        "root:document.querySelector('[data-gesso-live-fragment]'),"
        "listener:document.querySelector('[data-gesso-live-invalidation]'),"
-       "href:location.href,headers:[]};"
+       "href:location.href,headers:[],responses:[]};"
        "document.addEventListener('htmx:configRequest',function(event){"
        "const detail=event.detail;"
        "if(detail && detail.elt && "
        "detail.elt.hasAttribute('data-gesso-live-fragment')){"
-       "window.__v2119.headers.push(detail.headers && detail.headers["
+       "window.__v2120.headers.push(detail.headers && detail.headers["
        (pr-str progression.http/request-header-name)
        "]);}});"
-       "return !!window.__v2119.root && !!window.__v2119.listener; }"))
+       "document.addEventListener('htmx:afterRequest',function(event){"
+       "const detail=event.detail;"
+       "if(detail && detail.elt && "
+       "detail.elt.hasAttribute('data-gesso-live-fragment')){"
+       "window.__v2120.responses.push({"
+       "header:detail.requestConfig && detail.requestConfig.headers && "
+       "detail.requestConfig.headers["
+       (pr-str progression.http/request-header-name)
+       "],status:detail.xhr && detail.xhr.status,"
+       "successful:detail.successful === true,"
+       "body:detail.xhr && detail.xhr.responseText"
+       "});}});"
+       "return !!window.__v2120.root && !!window.__v2120.listener; }"))
 
 (def ^:private stable-dom-js
-  "() => window.__v2119.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2119.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2119.href === location.href")
+  "() => window.__v2120.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2120.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2120.href === location.href")
 
 (defn- wait-for-page-header! [page expected from-index]
   (chromium/wait-for-js!
-   page (str "() => window.__v2119.headers.slice(" from-index
+   page (str "() => window.__v2120.headers.slice(" from-index
              ").includes(" (pr-str expected) ")")))
+
+(defn- wait-for-page-response! [page expected status from-index]
+  (chromium/wait-for-js!
+   page (str "() => window.__v2120.responses.slice(" from-index
+             ").some(response => response.header === " (pr-str expected)
+             " && response.status === 200 && response.successful"
+             " && typeof response.body === 'string'"
+             " && response.body.includes("
+             (pr-str (str "data-authoritative-status=\"" (name status) "\""))
+             "))")))
 
 (defn- wait-for-status! [page status]
   (chromium/wait-for-js!
@@ -130,7 +149,7 @@
 
 (deftest browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test
   (let [root (Files/createTempDirectory
-              "gesso-v2119-two-tab-headers-restart-"
+              "gesso-v2120-two-tab-responses-restart-"
               (make-array java.nio.file.attribute.FileAttribute 0))
         port (random-loopback-port)
         base (str "http://127.0.0.1:" port)
@@ -170,7 +189,8 @@
           (is (string? (:expected-header claim)))
           (doseq [page tabs]
             (wait-for-status! page :claimed)
-            (wait-for-page-header! page (:expected-header claim) 0))
+            (wait-for-page-header! page (:expected-header claim) 0)
+            (wait-for-page-response! page (:expected-header claim) :claimed 0))
           (is (true?
                (eventual!
                 #(at-least-two-fragment-reads?
@@ -208,17 +228,22 @@
               (let [baselines (mapv #(long (chromium/evaluate
                                            % "() => window.__v2109.refreshes")) tabs)
                     header-baselines (mapv #(long (chromium/evaluate
-                                                  % "() => window.__v2119.headers.length")) tabs)
+                                                  % "() => window.__v2120.headers.length")) tabs)
+                    response-baselines (mapv #(long (chromium/evaluate
+                                                    % "() => window.__v2120.responses.length")) tabs)
                     done (http! client base "/control/done")]
                 (is (= :done (:status done)))
                 (is (string? (:expected-header done)))
                 (is (not= (:expected-header claim) (:expected-header done))
                     "The post-restart write must advance the source requirement")
-                (doseq [[page baseline header-baseline]
-                        (map vector tabs baselines header-baselines)]
+                (doseq [[page baseline header-baseline response-baseline]
+                        (map vector tabs baselines header-baselines
+                             response-baselines)]
                   (wait-for-status! page :done)
                   (wait-for-page-header! page (:expected-header done)
                                          header-baseline)
+                  (wait-for-page-response! page (:expected-header done)
+                                           :done response-baseline)
                   (is (> (long (chromium/evaluate
                                 page "() => window.__v2109.refreshes"))
                          baseline))
