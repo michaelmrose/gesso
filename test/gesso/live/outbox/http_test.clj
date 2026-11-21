@@ -642,6 +642,53 @@
          (is (zero? (:subscription-count (source/stats src))))
          (finally ((:close! route))))))))
 
+(deftest already-terminal-sse-stream-rejected-before-http-handoff-test
+  (setup-host
+   (fn [started]
+     (let [sys (:gesso.live/system started)
+           src (:source sys)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}
+           original-start live/start-sse!]
+       (try
+         ;; A real SSE session can terminate synchronously without the Live
+         ;; provider closing, e.g. an early transport cancellation/failure.
+         ;; Ring must not advertise its already-closed body as HTTP 200.
+         (doseq [termination [:cancel-session :close-output]]
+           (let [started-session (atom nil)
+                 response (with-redefs
+                            [live/start-sse!
+                             (fn [system subscription options]
+                               (let [session
+                                     (original-start system subscription options)]
+                                 (reset! started-session session)
+                                 (case termination
+                                   :cancel-session (live/cancel-sse! session)
+                                   :close-output (stream/close! (:stream session)))
+                                 session))]
+                            ((:handler route) request))]
+             (is (= {:status 503 :headers {} :body "Live stream unavailable"}
+                    response)
+                 (str termination " must not return HTTP 200 with closed body"))
+             (is (some? @started-session))
+             (is (stream/closed? (:stream @started-session)))
+             (is (false? (live/closed? sys)))
+             (is (eventually #(zero? ((:active-count route)))))
+             (is (eventually #(zero? (:subscription-count (source/stats src)))))))
+         ;; Live is still healthy: a subsequent ordinary SSE admission must
+         ;; return an active 200 stream, not poison the entire route.
+         (let [response ((:handler route) request)]
+           (is (= 200 (:status response)))
+           (is (false? (stream/closed? (:body response))))
+           (is (= 1 ((:active-count route))))
+           (is (= 1 (:subscription-count (source/stats src))))
+           (stream/close! (:body response))
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src))))))
+         (finally ((:close! route))))))))
+
 (deftest route-shutdown-cancels-active-sessions-and-rejects-new-get-test
   (setup-host
    (fn [started]

@@ -70,7 +70,9 @@
    callback after SSE startup also triggers immediate session rollback; failed
    rollback stays tracked for the same retry path. If Live shuts down
    during session creation, the route returns 503 instead of surfacing a
-   source-closed error or returning an already-dead EventSource stream."
+   source-closed error or returning an already-dead EventSource stream.
+   A synchronously terminated SSE stream is likewise rejected before HTTP
+   handoff, even if the owning Live provider remains open."
   [started {:keys [path authorize-subscription sse-options] :as options}]
   (when-not (and (map? options)
                  (= (set (keys options))
@@ -186,15 +188,21 @@
                             (stream/on-closed
                              (:stream session)
                              #(swap! state update :connections dissoc key))
-                            ;; Live may have closed between the initial guard
-                            ;; and the moment the transport returns a stream.
-                            ;; Never expose a 200 for a dead EventSource.
-                            (if (live/closed? live-system)
-                              (do
-                                (live/cancel-sse! session)
-                                (swap! state update :connections dissoc key)
-                                {:status 503 :headers {} :body "Live shutting down"})
-                              (:response session))
+                            ;; Either the provider or the SSE transport can
+                            ;; terminate during startup. A synchronously
+                            ;; closed body is not an admissible HTTP 200
+                            ;; EventSource response even when Live is healthy.
+                            (let [provider-closed? (live/closed? live-system)]
+                              (if (or provider-closed?
+                                      (stream/closed? (:stream session)))
+                                (do
+                                  (live/cancel-sse! session)
+                                  (swap! state update :connections dissoc key)
+                                  {:status 503 :headers {}
+                                   :body (if provider-closed?
+                                           "Live shutting down"
+                                           "Live stream unavailable")})
+                                (:response session)))
                             (catch Throwable admission-error
                               ;; A failed HTTP hook or rollback cannot orphan
                               ;; a source interest. Failed cancellation stays
