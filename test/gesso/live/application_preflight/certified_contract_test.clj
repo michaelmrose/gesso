@@ -136,6 +136,68 @@
     (is (= ctx (second (second @calls))))
     (is (= (:body response) (nth (second @calls) 2)))))
 
+(deftest application-operation-response-status-must-match-every-issued-route
+  ;; A handler may declare its own status, but the checked application table
+  ;; must independently pin that allowance for EACH selected operation route.
+  (let [{:keys [base issue-source calls]} (environment)
+        issue-with-status (assoc issue-source :response-status-contract
+                                 {:status 200})
+        issued (binding/issue-certified-handler! issue-with-status)
+        original-source (assoc-in base [:certified-operations claim
+                                        :response-status-contract]
+                                  {:status 200})
+        accepted (assoc original-source :semantic-route-handlers
+                        (assoc (:semantic-route-handlers base)
+                               route-1 issued route-2 issued))]
+    (with-summary summary
+      (fn []
+        (let [report (check accepted)]
+          (is (= :matched-issued-source
+                 (get-in report [:certified-operations claim
+                                 :response-status-binding])))
+          (is (empty? @calls)))
+        (let [error (reject-binding!
+                     :issued-response-status-contract-mismatch
+                     #(check (assoc-in accepted
+                                       [:semantic-route-handlers route-2]
+                                       (get-in base
+                                               [:semantic-route-handlers route-2]))))]
+          (is (= [:semantic-route-handlers route-2] (:at error))))
+        (reject-binding! :issued-response-status-contract-mismatch
+                         #(check (assoc-in accepted
+                                           [:certified-operations claim
+                                            :response-status-contract]
+                                           {:status 201})))
+        (reject-binding! :issued-response-status-contract-mismatch
+                         #(check (update-in accepted
+                                            [:certified-operations claim]
+                                            dissoc :response-status-contract)))
+        (is (empty? @calls))))))
+
+(deftest issued-response-allowance-cannot-be-self-declared-outside-app-table
+  (let [{:keys [base issue-source calls]} (environment)
+        handler (binding/issue-certified-handler!
+                 (assoc issue-source :response-status-contract {:status 200}))]
+    (with-summary summary
+      (fn []
+        (reject-binding! :issued-response-status-contract-mismatch
+                         #(check (assoc-in base
+                                           [:semantic-route-handlers route-1]
+                                           handler)))
+        (is (empty? @calls))))))
+
+(deftest malformed-application-response-status-allowance-fails-closed
+  (let [{:keys [base]} (environment)]
+    (with-summary summary
+      (fn []
+        (doseq [invalid [nil false {:status nil} {:status 503}
+                         {:status 200 :other true}]]
+          (reject-binding! :invalid-response-status-contract
+                           #(check (assoc-in base
+                                             [:certified-operations claim
+                                              :response-status-contract]
+                                             invalid))))))))
+
 (deftest one-operation-may-have-two-declared-issued-routes
   (let [{:keys [base handler]} (environment)]
     (with-summary summary

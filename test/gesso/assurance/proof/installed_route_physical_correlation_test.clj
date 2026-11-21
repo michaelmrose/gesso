@@ -100,7 +100,8 @@
                         :semantic-route-handlers {operation handler}
                         :certified-operations
                         {operation {:executor executor
-                                    :current-source plan-source}}}
+                                    :current-source plan-source
+                                    :response-status-contract {:status 200}}}}
                 issued (host/issue-checked-biff-host-module! source)
                 modules [application/application-handler-module (:module issued)]
                 system (binding [*biff-test-modules* modules]

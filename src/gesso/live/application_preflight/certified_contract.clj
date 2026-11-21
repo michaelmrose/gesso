@@ -53,6 +53,8 @@
 (def ^:private check-keys
   #{:application-assembly :semantic-route-handlers :certified-operations})
 (def ^:private binding-keys #{:executor :current-source})
+(def ^:private binding-with-status-keys
+  (conj binding-keys :response-status-contract))
 (def ^:private open-assumptions
   #{:installed-route-table-is-current-and-complete
     :actual-deployment-uses-this-checked-route-table
@@ -63,7 +65,10 @@
     :atomic-xtdb-state-guard-and-commit-enforcement
     :application-invariant-preservation
     :source-to-production-execution-correspondence
-    :canonical-html-response-preflight-adoption})
+    :canonical-html-response-preflight-adoption
+    ;; This is an application-owned assembly/handler agreement, not yet an
+    ;; allowance independently derived from canonical operation semantics.
+    :response-status-allowance-not-derived-from-original-operation})
 
 ;; No report/map/function metadata can substitute for the exact issued callable.
 ;; Weak references do not retain a handler solely because of registration.
@@ -90,6 +95,15 @@
              {:missing (set/difference wanted got)
               :unexpected (set/difference got wanted)})))
   x)
+
+(defn- require-response-status-contract! [declaration at]
+  (let [status (when (map? declaration) (:status declaration))]
+    (when-not (and (plain-map? declaration)
+                   (nil? (meta declaration))
+                   (= #{:status} (set (keys declaration)))
+                   (integer? status) (<= 200 status 299))
+      (fail! :invalid-response-status-contract at {}))
+    declaration))
 
 (defn- qualified-id? [x]
   (and (keyword? x) (some? (namespace x))))
@@ -166,12 +180,8 @@
   ;; The original result->response! callback must not choose its allowance
   ;; dynamically from its own result or the received request.
   (when (contains? source :response-status-contract)
-    (let [declared (:response-status-contract source)
-          status (when (map? declared) (:status declared))]
-      (when-not (and (plain-map? declared) (nil? (meta declared))
-                     (= #{:status} (set (keys declared)))
-                     (integer? status) (<= 200 status 299))
-        (fail! :invalid-response-status-contract [:response-status-contract] {}))))
+    (require-response-status-contract! (:response-status-contract source)
+                                       [:response-status-contract]))
   (let [{:keys [executor current-source request->input! result->response!]} source]
     (when-not (and (fn? request->input!) (fn? result->response!))
       (fail! :invalid-handler-callbacks [:callbacks] {}))
@@ -396,7 +406,12 @@
    Every semantic route in the existing ApplicationAssembly must be present in
    :semantic-route-handlers, and every operation that is to be called certified
    must use a v1253-issued handler invoking its exact v1251 plan executor at
-   ALL of its declared routes. Other operations remain explicitly uncertified.
+   ALL of its declared routes. If the application-owned certified-operation
+   binding declares an HTTP response status, every issued handler for that
+   operation must carry precisely the same issuance-pinned allowance. Neither
+   declaration alone can authenticate or override the other. This is NOT yet
+   a canonical operation-derived response contract. Other operations remain
+   explicitly uncertified.
 
    Success means conditional binding correspondence within the supplied table;
    only the actual host can establish that this is the active installed table."
@@ -434,8 +449,16 @@
             (into (sorted-map)
                   (for [[operation binding] certified-operations]
                     (do
-                      (exact-map! binding binding-keys
+                      (exact-map! binding
+                                  (if (and (map? binding)
+                                           (contains? binding :response-status-contract))
+                                    binding-with-status-keys
+                                    binding-keys)
                                   [:certified-operations operation])
+                      (when (contains? binding :response-status-contract)
+                        (require-response-status-contract!
+                         (:response-status-contract binding)
+                         [:certified-operations operation :response-status-contract]))
                       (let [{:keys [executor current-source]} binding
                             proof-description
                             (require-current-binding! executor current-source)
@@ -453,10 +476,20 @@
                             (fail! :missing-certified-operation-route
                                    [:certified-operations operation] {}))
                           (doseq [route-id operation-routes]
-                            (require-issued-handler!
-                             (get semantic-route-handlers route-id)
-                             executor operation current-source
-                             [:semantic-route-handlers route-id]))
+                            (let [issued (require-issued-handler!
+                                          (get semantic-route-handlers route-id)
+                                          executor operation current-source
+                                          [:semantic-route-handlers route-id])]
+                              ;; The operation table and each installed route
+                              ;; must independently bind the exact allowance.
+                              ;; Checking select-keys preserves the semantic
+                              ;; difference between absence and declared nil.
+                              (when-not (= (select-keys binding
+                                                        [:response-status-contract])
+                                           (select-keys issued
+                                                        [:response-status-contract]))
+                                (fail! :issued-response-status-contract-mismatch
+                                       [:semantic-route-handlers route-id] {}))))
                           [operation
                            {:operation operation
                             :route-ids operation-routes
@@ -471,7 +504,11 @@
                             (:transition-fingerprint proof-description)
                             :open-premises (:open-premises proof-description)
                             :open-obligations (:open-obligations proof-description)
-                            :binding :issued-handler-to-current-plan-executor}])))))]
+                            :binding :issued-handler-to-current-plan-executor
+                            :response-status-binding
+                            (if (contains? binding :response-status-contract)
+                              :matched-issued-source
+                              :not-declared)}])))))]
         {:type report-type
          :version adapter-version
          :checking :current-source-relative-semantic-route-bindings
@@ -485,7 +522,8 @@
                     :declared-semantic-routes-enumerated
                     :supplied-semantic-route-table-closed
                     :original-plan-and-proof-source-rechecked
-                    :exact-issued-handler-to-executor-identities}
+                    :exact-issued-handler-to-executor-identities
+                    :operation-table-to-issued-response-status-agreement}
          :open-assumptions open-assumptions
          :open-premises
          (into #{} (mapcat :open-premises (vals certified-descriptions)))
