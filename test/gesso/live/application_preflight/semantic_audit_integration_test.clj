@@ -28,6 +28,7 @@
    :routes
    :execution-capabilities
    :settlement-contract
+   :response-status-contract
    :published-change-topics
    :affected-scopes
    :affected-fragments
@@ -69,6 +70,28 @@
               (is (= :opaque-host-implementation
                      (:model-policy-inspection card)))
               (is (= model-premise (:model-policy-premise card))))))))))
+
+(deftest public-explanation-does-not-invent-absent-response-allowances
+  ;; Exercise the actual current-assembly explanation path, rather than only
+  ;; a synthetic already-checked semantic-audit report. The legacy fixture
+  ;; has no original operation response-status declaration: audit absence
+  ;; must remain explicit, without implying that any response is safe.
+  (with-closed-application
+    (fn [{:keys [assembly report]}]
+      (let [audit (:semantic-audit (application/explain assembly))]
+        (doseq [[operation summary] (get-in report [:analysis :operations])]
+          (is (not (contains? summary :response-status-contract)))
+          (is (not (contains? (get-in audit [:operation-cards operation :contract])
+                              :response-status-contract)))
+          (is (= :not-reported
+                 (get-in audit [:operation-cards operation
+                                :response-status-provenance :status])))
+          (is (= :not-established
+                 (get-in audit [:operation-cards operation
+                                :response-status-provenance
+                                :installed-response-correspondence]))))
+        (is (contains? (get-in audit [:inspection-scope :not-inspected])
+                       :browser-response-effect-admission))))))
 
 (deftest model-conformance-is-explicitly-trusted-per-operation
   (with-closed-application

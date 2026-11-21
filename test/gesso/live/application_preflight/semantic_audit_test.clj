@@ -26,6 +26,7 @@
    :routes
    :execution-capabilities
    :settlement-contract
+   :response-status-contract
    :published-change-topics
    :affected-scopes
    :affected-fragments
@@ -44,6 +45,7 @@
    :routes [{:method :post :path "/requests/:id/claim"}]
    :execution-capabilities #{:execute/claim}
    :settlement-contract {:success :committed :failure :rejected}
+   :response-status-contract {:status 200}
    :published-change-topics #{:request/change}
    :affected-scopes #{[:request :id]}
    :affected-fragments #{:request-card}
@@ -131,6 +133,30 @@
     (is (not (contains? (:contract card) :settlement-contract)))
     (is (= [] (get-in card [:contract :rendered-affordances])))))
 
+(deftest checked-operation-response-status-is-visible-with-honest-scope
+  ;; A freshly checked report now includes the trusted operation's optional
+  ;; status contract. The semantic audit must neither lose that declaration
+  ;; nor promote report presence into an HTTP or business-model certificate.
+  (let [result (audit {:request/claim claim-summary
+                       :request/cancel cancel-summary})
+        claim (get-in result [:operation-cards :request/claim])
+        cancel (get-in result [:operation-cards :request/cancel])
+        declaration (:response-status-provenance claim)]
+    (is (= {:status 200} (get-in claim [:contract :response-status-contract])))
+    (is (= :reported-from-checked-operation-summary (:status declaration)))
+    (is (= [:analysis :operations :request/claim :response-status-contract]
+           (:derived-from declaration)))
+    (is (= :trusted-operation-declaration
+           (:reported-construction-origin declaration)))
+    (is (= :not-established (:canonical-model-status-conformance declaration)))
+    (is (= :not-established (:installed-response-correspondence declaration)))
+    (is (= :not-established (:browser-response-effect-admission declaration)))
+    (is (not (contains? (:contract cancel) :response-status-contract)))
+    (is (= :not-reported
+           (get-in cancel [:response-status-provenance :status])))
+    (is (not-any? #{:proved :certified}
+                  (map :class (:assurance-coverage result))))))
+
 (deftest operation-cards-remain-operation-local
   (let [result (audit {:request/claim claim-summary
                        :request/cancel cancel-summary})]
@@ -216,6 +242,7 @@
              :operation-runtime-backbone-closure
              :trusted-operation-names
              :declared-routes
+             :reported-trusted-operation-response-status-declarations
              :settlement-and-authoritative-acquisition-relations}
            (:inspected scope)))
     (is (= #{:arbitrary-clojure-model-bodies
@@ -223,6 +250,9 @@
              :business-rule-meaning-and-exceptions
              :transaction-guard-implementation
              :cross-operation-domain-invariants
+             :canonical-model-response-status-conformance
+             :installed-ring-response-correspondence
+             :browser-response-effect-admission
              :complete-application-render-enumeration}
            (:not-inspected scope)))
     (is (empty? (set/intersection (:inspected scope)

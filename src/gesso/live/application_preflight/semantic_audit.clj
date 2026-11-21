@@ -39,6 +39,7 @@
    :routes
    :execution-capabilities
    :settlement-contract
+   :response-status-contract
    :published-change-topics
    :affected-scopes
    :affected-fragments
@@ -392,11 +393,34 @@
               :domain-invariants :not-established
               :application-execution-correspondence :not-established}))))
 
+(defn- response-status-provenance
+  [operation summary]
+  ;; The CURRENT report's operation summary has already projected this field
+  ;; from the prepared trusted semantic operation (v2081). This audit must not
+  ;; silently drop a new declaration or promote the reported field to a model
+  ;; theorem, installed response guarantee or browser effect authorization.
+  ;; Absence is meaningful: no source-owned HTTP status was reported, not
+  ;; evidence that the actual response may take any status safely.
+  (let [reported? (contains? summary :response-status-contract)]
+    (cond-> {:status (if reported?
+                       :reported-from-checked-operation-summary
+                       :not-reported)
+             :reported-construction-origin
+             (if reported? :trusted-operation-declaration :not-reported)
+             :canonical-model-status-conformance :not-established
+             :installed-response-correspondence :not-established
+             :browser-response-effect-admission :not-established}
+      reported?
+      (assoc :derived-from
+             [:analysis :operations operation :response-status-contract]))))
+
 (defn- operation-card
   [report [operation summary] ordered-operation-summaries]
   {:operation operation
    :derived-from [:analysis :operations operation]
    :contract (select-keys summary operation-card-fields)
+   :response-status-provenance
+   (response-status-provenance operation summary)
    :declared-live-overlaps
    (declared-live-overlaps operation summary ordered-operation-summaries)
    :reported-live-declaration-coverage
@@ -447,9 +471,14 @@
    identify shared declared publication topics, affected scopes and fragments;
    those relationships do not imply shared authoritative state, actual model
    emission, a domain rule dependency, or the absence of other effects.
-   Reported-set coverage distinguishes a typed empty set from missing, nil, or
-   malformed report values; it does not assert that the original app explicitly
-   declared these sets or that missing real-world effects have been ruled out.
+   Optional HTTP response status declarations, derived by the checked
+   operation summary from trusted semantic operation registration, are
+   retained along with explicit gaps for model, actual Ring, and browser
+   correspondence. Merely inspecting a successful report does not establish
+   any of those guarantees. Reported-set coverage distinguishes a typed empty
+   set from missing, nil, or malformed report values; it does not assert
+   that the original app explicitly declared these sets or that missing
+   real-world effects have been ruled out.
    Live-impact provenance separately identifies which reported values originate
    in trusted operation metadata and which are derived from the Live graph and
    acquisition obligations. It requires a current report and does not prove
@@ -476,6 +505,7 @@
         :operation-runtime-backbone-closure
         :trusted-operation-names
         :declared-routes
+        :reported-trusted-operation-response-status-declarations
         :settlement-and-authoritative-acquisition-relations}
       :not-inspected
       #{:arbitrary-clojure-model-bodies
@@ -483,6 +513,9 @@
         :business-rule-meaning-and-exceptions
         :transaction-guard-implementation
         :cross-operation-domain-invariants
+        :canonical-model-response-status-conformance
+        :installed-ring-response-correspondence
+        :browser-response-effect-admission
         :complete-application-render-enumeration}
       :complete-business-policy-inventory? false
       :zero-undetected-policy-escapes-established? false}
