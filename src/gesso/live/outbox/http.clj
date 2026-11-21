@@ -66,7 +66,9 @@
    :close! provides bounded, idempotent server-side cleanup even if the
    transport fails to observe a disconnected peer. Cancellation failures
    are reported after attempting all sessions; failed entries remain tracked
-   so a repeated :close! can retry them."
+   so a repeated :close! can retry them. A failure to install a disconnect
+   callback after SSE startup also triggers immediate session rollback; failed
+   rollback stays tracked for the same retry path."
   [started {:keys [path authorize-subscription sse-options] :as options}]
   (when-not (and (map? options)
                  (= (set (keys options))
@@ -167,10 +169,25 @@
                                                    {:sse-options validated-sse})
                           key (random-uuid)]
                       (swap! state assoc-in [:connections key] session)
-                      (stream/on-closed
-                       (:stream session)
-                       #(swap! state update :connections dissoc key))
-                      (:response session))))))))]
+                      (try
+                        (stream/on-closed
+                         (:stream session)
+                         #(swap! state update :connections dissoc key))
+                        (:response session)
+                        (catch Throwable admission-error
+                          ;; Starting the source interest precedes registering
+                          ;; the HTTP disconnect hook. If that registration
+                          ;; fails, do not strand a stream the client never
+                          ;; received. Keep it tracked if rollback also fails,
+                          ;; so close! can retry the cancellation later.
+                          (try
+                            (live/cancel-sse! session)
+                            (swap! state update :connections dissoc key)
+                            (catch Throwable cancel-error
+                              (when-not (identical? admission-error cancel-error)
+                                (.addSuppressed ^Throwable admission-error
+                                                ^Throwable cancel-error))))
+                          (throw admission-error))))))))))]
     {:handler handler
      :close! close!
      :active-count (fn [] (count (:connections @state)))

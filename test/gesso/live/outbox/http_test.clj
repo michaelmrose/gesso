@@ -522,6 +522,63 @@
                "Completed shutdown remains idempotent"))
          (finally ((:close! route))))))))
 
+(deftest failed-disconnect-hook-registration-rolls-back-sse-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}
+           original-start live/start-sse!
+           original-cancel live/cancel-sse!
+           acquired (atom nil)
+           ;; Preserve the real session's cancellation handle but replace only
+           ;; its exposed stream with one that cannot accept on-closed hooks.
+           ;; This fails exactly after Live has allocated a real subscription.
+           start-with-broken-hook
+           (fn [& args]
+             (let [session (apply original-start args)]
+               (reset! acquired session)
+               (assoc session :stream (Object.))))]
+       (try
+         (let [error (try
+                       (with-redefs [live/start-sse! start-with-broken-hook]
+                         ((:handler route) request))
+                       (catch Throwable e e))]
+           (is (instance? Throwable error)
+               "Disconnect hook registration must fail")
+           (is (some? @acquired) "A real SSE session was already started")
+           (is (eventually #(zero? (:subscription-count (source/stats src))))
+               "Failed hook registration must release its Live interest")
+           (is (eventually #(zero? ((:active-count route))))
+               "Failed admission must leave no registered connection")
+           (is (stream/closed? (:stream @acquired))))
+         ;; A cancellation failure while rolling back must not erase the
+         ;; session. Retain it for a later explicit route close! retry and
+         ;; report the failed cancellation as suppressed on the hook error.
+         (let [cancel-failure (ex-info "Injected rollback cancel failure"
+                                       {:test :v2129})
+               error (try
+                       (with-redefs [live/start-sse! start-with-broken-hook
+                                     live/cancel-sse! (fn [_] (throw cancel-failure))]
+                         ((:handler route) request))
+                       (catch Throwable e e))]
+           (is (instance? Throwable error))
+           (is (some #(identical? cancel-failure %)
+                     (.getSuppressed ^Throwable error))
+               "Preserve the rollback failure on the original hook error")
+           (is (= 1 ((:active-count route)))
+               "Failed cancellation remains registered for retry")
+           (is (= 1 (:subscription-count (source/stats src))))
+           (is (false? ((:closed? route)))
+               "Failed admission does not forcibly close the entire route")
+           (is (= :closed ((:close! route))))
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src)))))
+           (is (stream/closed? (:stream @acquired))))
+         (finally ((:close! route))))))))
+
 (deftest route-shutdown-cancels-active-sessions-and-rejects-new-get-test
   (setup-host
    (fn [started]
