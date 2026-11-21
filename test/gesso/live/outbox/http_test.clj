@@ -275,6 +275,58 @@
            ((:close! server))
            (.close ^HttpClient client)))))))
 
+(deftest closed-route-skips-authorization-and-inflight-admission-test
+  (setup-host
+   (fn [started]
+     (let [source (:source (:gesso.live/system started))
+           calls (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription
+                           (fn [_]
+                             (swap! calls inc)
+                             (throw (ex-info "Cannot authorize after shutdown"
+                                             {:unexpected true})))})
+           request {:uri "/live/events" :request-method :get}]
+       (try
+         ((:close! route))
+         ;; The closed response is unconditional: no application callback,
+         ;; even one that throws or would return nil, may preempt HTTP 503.
+         (is (= {:status 503 :headers {} :body "Live shutting down"}
+                ((:handler route) request)))
+         (is (zero? @calls))
+         (is (zero? ((:active-count route))))
+         (is (zero? (:subscription-count (source/stats source))))
+         (finally ((:close! route)))))
+     ;; An authorization already in progress can finish after shutdown, but
+     ;; the locked post-authorization admission check must still reject it.
+     (let [source (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           calls (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription
+                           (fn [_]
+                             (swap! calls inc)
+                             (deliver entered true)
+                             @release
+                             scope)})
+           request {:uri "/live/events" :request-method :get}
+           pending (future ((:handler route) request))]
+       (try
+         (is (= true (deref entered 5000 ::timeout)))
+         ((:close! route))
+         (deliver release true)
+         (is (= 503 (:status (deref pending 5000 ::timeout))))
+         (is (= 1 @calls))
+         (is (zero? ((:active-count route))))
+         (is (zero? (:subscription-count (source/stats source))))
+         (finally
+           (deliver release true)
+           (future-cancel pending)
+           ((:close! route))))))))
+
 (deftest route-shutdown-cancels-active-sessions-and-rejects-new-get-test
   (setup-host
    (fn [started]

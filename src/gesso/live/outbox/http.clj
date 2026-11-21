@@ -49,7 +49,10 @@
    would register a Live interest but cannot establish EventSource delivery.
    Reject this misconfiguration before invoking authorization or subscribing.
    Invalid callback results and callback exceptions propagate before a
-   subscription can be installed.
+   subscription can be installed. Once closed, the managed GET route
+   returns 503 without consulting authorization or registering interests;
+   the inner locked check still prevents admission when shutdown races an
+   authorization already in progress.
 
    Call :close! and stop the owning HTTP listener before host/stop!. If a
    client disconnects, the SSE Manifold stream should close at the Ring
@@ -97,6 +100,12 @@
             (cond
               (not= :get (:request-method request))
               {:status 405 :headers {"allow" "GET"} :body "Method Not Allowed"}
+
+              ;; Closing this route must stop authorization-side work as
+              ;; well as source admission. In particular, callbacks may use
+              ;; providers which the owning host is about to shut down.
+              (:closed? @state)
+              {:status 503 :headers {} :body "Live shutting down"}
 
               :else
               (let [subscription (authorize-subscription request)]
