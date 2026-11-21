@@ -1597,10 +1597,11 @@
 (defn- require-tx-snapshot-minimum!
   "Validate a complete tx receipt and its selected-db query snapshot minimum.
 
-   A complete tx-id/time pair must have portable XTDB coordinates even when
-   the selected database has not completed its first transaction, or when
-   there is no accompanying query snapshot token. Otherwise empty-startup
-   request admission can pass malformed metadata to a deferred Biff handler.
+   A transaction id, including a submitted-only id without a time, must be
+   a nonnegative signed 64-bit XTDB id. A complete tx-id/time pair must also
+   have portable XTDB time coordinates even when the selected database has
+   not completed its first transaction, or when there is no accompanying
+   query snapshot token. Otherwise malformed metadata can reach Biff handlers.
    This structural validation does NOT claim that the database observed the
    receipt; populated nodes separately compare it with their real frontier.
 
@@ -1608,6 +1609,11 @@
    receipt. Independent databases and incomplete metadata do not establish
    this transaction minimum and retain their existing handling."
   [database-name consistency origin]
+  ;; An incomplete receipt is not committed evidence, but it is still a
+  ;; transaction identity. Validate the id independently from system-time so
+  ;; malformed submitted-only metadata cannot pass the request boundary.
+  (when (contains? consistency :tx-id)
+    (tx-id->wire (:tx-id consistency)))
   (when (complete-xtdb-tx-metadata? consistency)
     ;; Always validate the pair. Previously this happened only if an explicit
     ;; snapshot token accompanied it, leaving invalid complete receipts

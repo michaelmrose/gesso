@@ -2921,6 +2921,67 @@
                               {:snapshot-token disjoint}}))))
             (is (= (+ 2 before) @calls))))))))
 
+(deftest biff-request-validates-partial-transaction-identifiers-test
+  ;; A tx-id-only receipt denotes submission metadata, not a committed basis.
+  ;; It is intentionally permitted at empty and populated frontiers. However,
+  ;; it must still be a legal XTDB transaction identity: malformed or
+  ;; out-of-range values cannot become accepted request evidence merely
+  ;; because a system-time is not supplied alongside the id.
+  (let [time (Instant/parse "2026-11-20T23:00:00Z")
+        invalid-ids [-1 -2 "2064" :invalid false
+                     (inc (bigint Long/MAX_VALUE))]
+        accepted [0 2064 (bigint Long/MAX_VALUE)]
+        entered (atom 0)]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub
+        '*status*
+        (fn [_]
+          {:latest-completed-txs
+           {"xtdb" (if populated?
+                     [{:tx-id 2064 :system-time time}]
+                     [])}})
+        (fn []
+          (let [before @entered
+                baseline (xtdb-live/bind-request-frontier
+                          {:xtdb/node :authority-node})
+                handler ((:biff.core/wrap-db-snapshot baseline)
+                         (fn [_] (swap! entered inc) :reached))]
+            (doseq [id invalid-ids]
+              (let [consistency {:tx-id id}
+                    admission (try
+                                (xtdb-live/bind-request-frontier
+                                 {:xtdb/node :authority-node
+                                  :xtdb/consistency consistency})
+                                nil
+                                (catch clojure.lang.ExceptionInfo e e))
+                    deferred (try
+                               (handler {:xtdb/consistency consistency})
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+                (is (instance? clojure.lang.ExceptionInfo admission)
+                    (str "Invalid partial tx id admitted: " (pr-str id)))
+                (is (instance? clojure.lang.ExceptionInfo deferred)
+                    (str "Invalid deferred partial tx id entered handler: "
+                         (pr-str id)))
+                (when (instance? clojure.lang.ExceptionInfo admission)
+                  (is (= :invalid-xtdb-transaction-id-range
+                         (:reason (ex-data admission)))))
+                (when (instance? clojure.lang.ExceptionInfo deferred)
+                  (is (= :invalid-xtdb-transaction-id-range
+                         (:reason (ex-data deferred)))))))
+            (is (= before @entered)
+                "Malformed partial ids must fail before Biff execution")
+            ;; A valid tx-id alone must not be mistaken for a committed basis,
+            ;; but it may remain as admissible submission metadata.
+            (doseq [id accepted]
+              (is (ifn? (:biff.core/wrap-db-snapshot
+                         (xtdb-live/bind-request-frontier
+                          {:xtdb/node :authority-node
+                           :gesso.live/consistency {:tx-id id}}))))
+              (is (= :reached
+                     (handler {:gesso.live/consistency {:tx-id id}}))))))))
+    (is (= (* 2 (count accepted)) @entered))))
+
 (deftest empty-frontier-validates-complete-tx-receipt-shapes-test
   ;; Empty selected databases cannot compare a proposed transaction receipt
   ;; with an observed frontier. That is not license to accept a structurally
