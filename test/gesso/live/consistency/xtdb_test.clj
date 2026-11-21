@@ -2394,6 +2394,83 @@
                 (is (= :invalid-snapshot-token (:reason (ex-data outcome))))
                 (is (= token (:snapshot-token (ex-data outcome))))))))))))
 
+(deftest bind-request-frontier-rejects-unsatisfied-admitted-query-consistency-test
+  ;; Admitted consistency is an independent read obligation. Merely fixing
+  ;; Biff's snapshot to the observed status is not sufficient if an admitted
+  ;; snapshot-time or token demands a newer selected-database snapshot.
+  ;; Otherwise ordinary Biff reads can proceed at a known insufficient time.
+  (let [observed (Instant/parse "2026-11-20T18:00:00Z")
+        future (.plusSeconds observed 60)
+        earlier (.minusSeconds observed 60)
+        status {:latest-completed-txs
+                {"xtdb" [{:tx-id 2049 :system-time observed}]}}
+        token (fn [t]
+                (xt.basis/->time-basis-str {"xtdb" [t]}))
+        forbidden [[{:snapshot-time future}
+                    :explicit-snapshot-ahead-of-progression]
+                   [{:snapshot-token (token future)}
+                    :explicit-snapshot-token-ahead-of-progression]
+                   [{:snapshot-token "malformed-token"}
+                    :invalid-snapshot-token]]
+        base {:xtdb/node :authority-node}]
+    (with-xtdb-stub '*status*
+      (fn [_] status)
+      (fn []
+        (doseq [[consistency reason] forbidden]
+          (let [outcome (try
+                          (xtdb-live/bind-request-frontier
+                           (assoc base :gesso.live/consistency consistency))
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo outcome)
+                (str "Admitted snapshot demand must not be forgotten: "
+                     (pr-str consistency)))
+            (when outcome
+              (is (= reason (:reason (ex-data outcome)))))))
+        ;; Earlier snapshots are satisfied by the server-observed frontier.
+        (let [bound (xtdb-live/bind-request-frontier
+                     (assoc base :xtdb/consistency
+                            {:snapshot-time earlier}))]
+          (is (= (xtdb-live/basis-snapshot-token
+                  (xtdb-live/basis 2049 observed))
+                 (:biff.xtdb/snapshot-token bound))))))))
+
+(deftest deferred-biff-rejects-unsatisfied-query-consistency-test
+  ;; A fresh Ring request or an outer Biff wrapper can add consistency after
+  ;; frontier admission. A newer selected-database read requirement cannot be
+  ;; silently retained while the installed Biff snapshot stays older.
+  (let [observed (Instant/parse "2026-11-20T18:00:00Z")
+        future (.plusSeconds observed 60)
+        status {:latest-completed-txs
+                {"xtdb" [{:tx-id 2049 :system-time observed}]}}
+        token (xt.basis/->time-basis-str {"xtdb" [future]})
+        candidates [[{:snapshot-time future}
+                     :explicit-snapshot-ahead-of-progression]
+                    [{:snapshot-token token}
+                     :explicit-snapshot-token-ahead-of-progression]
+                    [{:snapshot-token "malformed-token"}
+                     :invalid-snapshot-token]]
+        calls (atom 0)]
+    (with-xtdb-stub '*status*
+      (fn [_] status)
+      (fn []
+        (let [bound (xtdb-live/bind-request-frontier
+                     {:xtdb/node :authority-node})
+              wrapped ((:biff.core/wrap-db-snapshot bound)
+                       (fn [_] (swap! calls inc) :unexpected))]
+          (doseq [[consistency reason] candidates]
+            (let [failure (try
+                            (wrapped {:gesso.live/consistency consistency})
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Deferred request may not weaken Biff frontier: "
+                       (pr-str consistency)))
+              (when failure
+                (is (= reason (:reason (ex-data failure)))))))
+          (is (zero? @calls)
+              "An unsatisfied read constraint must fail before the handler"))))))
+
 (deftest bind-request-frontier-rejects-selected-snapshot-ahead-of-observed-frontier-test
   ;; The selected database's existing Biff token may have established a
   ;; later snapshot than this node currently reports. Replacing it with the

@@ -1441,6 +1441,12 @@
                     combined-requirement
                     (compose-wrapped-biff-progression!
                      database-name frontier admitted-requirement ctx)
+                    ;; Ordinary Biff reads use the fixed status snapshot. Do
+                    ;; not let a deferred query constraint demand a newer
+                    ;; selected-db snapshot while the handler still receives
+                    ;; that older Biff token. Validate before invoking it.
+                    _ (read-query-opts combined-consistency
+                                       (progression/requirement frontier))
                     composed-token
                     (compose-fixed-biff-snapshot!
                      database-name fixed-bases
@@ -1657,7 +1663,12 @@
              combined-requirement
              (progression/compose
               existing-requirement
-              current-requirement)]
+              current-requirement)
+             ;; An admitted snapshot demand belongs to this request, not
+             ;; merely to whichever later Gesso-aware query happens to read
+             ;; it. Reject an impossible/malformed selected-db constraint
+             ;; before fixing ordinary Biff reads to the observed frontier.
+             _ (read-query-opts admitted-consistency current-requirement)]
          (assoc ctx
                 :biff.xtdb/snapshot-token snapshot-token
                 :gesso.live/progression combined-requirement
