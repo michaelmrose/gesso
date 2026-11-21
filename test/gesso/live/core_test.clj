@@ -936,6 +936,89 @@
               (is (zero? @notification-count)
                   "Rejected requests cannot publish invalidations"))))))))
 
+(deftest transact-and-notify-rejects-lossy-async-dispatch-before-commit-test
+  ;; Live invalidations carry the authoritative XTDB progression requirement.
+  ;; :drop can silently discard them; :coalesce replaces a pending job, losing
+  ;; earlier requirements (including cross-database progression). A successful
+  ;; transaction must not be admitted into either lossy queue policy.
+  (doseq [policy [:drop :coalesce]
+          changes [[request-change]
+                   [request-change other-request-change]]]
+    (let [writes (atom 0)
+          submissions (atom 0)
+          system (live/create {:dispatch-options {:threads 1
+                                                  :queue-size 2
+                                                  :on-overflow policy}})]
+      (try
+        (with-redefs [live/submit-expanded!
+                      (fn [& _]
+                        (swap! submissions inc)
+                        {:status :submitted})]
+          (with-xtdb-stub
+            'execute-tx-from!
+            (fn [& _]
+              (swap! writes inc)
+              {:tx-result {:tx-id 42}
+               :consistency sample-consistency
+               :progression sample-commit-progression})
+            (fn []
+              (let [error (try
+                            (live/transact-and-notify!
+                             system
+                             {:xtdb/connectable :write-node}
+                             {:tx-ops sample-tx
+                              :changes changes
+                              :emit :async
+                              :entry {:coalesce-key [:request "req-1"]}})
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+                (is (instance? clojure.lang.ExceptionInfo error))
+                (is (= :gesso.live.core/lossy-async-dispatch-policy
+                       (:error/type (ex-data error))))
+                (is (= policy (:on-overflow (ex-data error))))
+                (is (zero? @writes)
+                    "A lossy queue must fail before a physical mutation")
+                (is (zero? @submissions)
+                    "No published work may escape the rejected batch")))))
+        (finally (live/close! system))))))
+
+(deftest transact-and-notify-allows-nonlossy-and-explicit-no-delivery-modes-test
+  ;; Deliberately notification-free writes and synchronous delivery must not
+  ;; depend on the configured asynchronous queue. Async :throw/:block are
+  ;; nonlossy policies and retain existing semantics.
+  (doseq [[policy emit-mode] [[:drop false] [:coalesce :sync]
+                             [:throw :async] [:block :async]]]
+    (let [writes (atom 0)
+          delivered (atom 0)
+          system (live/create {:dispatch-options {:threads 1
+                                                  :queue-size 2
+                                                  :on-overflow policy}})]
+      (try
+        (with-redefs [live/submit-expanded! (fn [& _]
+                                               (swap! delivered inc)
+                                               {:status :submitted})
+                      live/emit-expanded! (fn [& _]
+                                             (swap! delivered inc)
+                                             {:status :emitted})]
+          (with-xtdb-stub
+            'execute-tx-from!
+            (fn [& _]
+              (swap! writes inc)
+              {:tx-result {:tx-id 42}
+               :consistency sample-consistency
+               :progression sample-commit-progression})
+            (fn []
+              (let [result (live/transact-and-notify!
+                            system {:xtdb/connectable :write-node}
+                            {:tx-ops sample-tx :change request-change
+                             :emit emit-mode})]
+                (is (= 1 @writes))
+                (is (= emit-mode (:emit result)))
+                (is (= (if (= false emit-mode) 0 1) @delivered))
+                (is (= sample-commit-progression
+                       (get-in result [:changes 0 :progression])))))))
+        (finally (live/close! system))))))
+
 (deftest transact-and-notify-requires-tx-ops-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo

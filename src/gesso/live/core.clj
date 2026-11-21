@@ -225,14 +225,23 @@
     emit'))
 
 (defn- require-async-dispatch-options!
-  "Validate job metadata that will be used for async delivery before commit.
+  "Validate job metadata and dispatch lossiness before authoritative commit.
 
-   The actual entry-fn result depends on the authoritative transaction's
-   attached change and can only be checked after commit. But an invalid
-   entry map or non-callable entry-fn is known before XTDB execution; neither
-   should be allowed to fail only after the mutation becomes authoritative."
-  [emit-mode changes {:keys [entry entry-fn]}]
+   The actual entry-fn result depends on the transaction's attached change,
+   but a configured :drop or :coalesce dispatcher is already known to discard
+   committed change work. :coalesce replaces queued jobs and does NOT compose
+   the authoritative progression requirements of displaced transactions.
+   Reject both policies while admission can still prevent the XTDB write.
+   A caller explicitly choosing :emit false, synchronous delivery, or an
+   empty change batch does not use that async queue and remains supported."
+  [system emit-mode changes {:keys [entry entry-fn]}]
   (when (and (= :async emit-mode) (seq changes))
+    (let [policy (get-in system [:dispatcher :on-overflow])]
+      (when (#{:drop :coalesce} policy)
+        (throw
+         (ex "Lossy async dispatcher cannot carry authoritative Live invalidations."
+             {:error/type :gesso.live.core/lossy-async-dispatch-policy
+              :on-overflow policy}))))
     (when-not (or (nil? entry) (map? entry))
       (throw
        (ex "gesso.live async :entry must be a map or nil."
@@ -1267,7 +1276,7 @@
   (let [debug-fn (get-in system [:options :debug-fn])
         emit-mode (normalize-emit-mode emit)
         changes (normalize-changes options)
-        _ (require-async-dispatch-options! emit-mode changes options)
+        _ (require-async-dispatch-options! system emit-mode changes options)
         ;; Request progression is fully available before execution. Reject a
         ;; malformed refresh requirement at admission; otherwise an XTDB write
         ;; can commit before post-commit context composition discovers it.
