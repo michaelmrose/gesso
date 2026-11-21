@@ -430,6 +430,58 @@
                                      (source/stats src))))))
            (finally ((:close! route)))))))))
 
+(deftest managed-route-rejects-duplicate-case-insensitive-headers-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           calls (atom 0)
+           base {:path "/live/events"
+                 :authorize-subscription (fn [_] (swap! calls inc) scope)}]
+       ;; Ring maps can carry both spellings, but HTTP interprets each pair
+       ;; as one field. Reject even if their values agree: duplicate field
+       ;; ownership can be ambiguous after serialization/proxy handling.
+       (doseq [[fields canonical]
+               [[{"Vary" "Origin" "vary" "Accept-Encoding"} "vary"]
+                [{"X-Gesso-Trace" "a" "x-gesso-trace" "a"} "x-gesso-trace"]
+                [{"Set-Cookie" "a=1" "set-cookie" "b=2"} "set-cookie"]]]
+         (let [result (try
+                        (http/wrap-authorized-sse
+                         started (assoc base :sse-options {:headers fields}))
+                        (catch clojure.lang.ExceptionInfo e e))]
+           (try
+             (is (= :duplicate-sse-header
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:reason (ex-data result))))
+                 (str "Reject duplicate case-insensitive HTTP field " canonical))
+             (is (= canonical
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:header (ex-data result)))))
+             (is (zero? @calls)
+                 "Duplicate headers cannot reach authorization")
+             (is (zero? (:subscription-count (source/stats src)))
+                 "Duplicate headers cannot allocate a source interest")
+             (finally (when (map? result) ((:close! result)))))))
+       ;; Legitimate multiple values under one HTTP field remain supported.
+       ;; One active subscription still cleans up after its body closes.
+       (let [route (http/wrap-authorized-sse
+                    started (assoc base :sse-options
+                                   {:headers {"vary" ["Origin" "Accept-Encoding"]
+                                              "x-gesso-trace" "allowed"}}))]
+         (try
+           (let [response ((:handler route)
+                           {:uri "/live/events" :request-method :get})]
+             (is (= 200 (:status response)))
+             (is (= ["Origin" "Accept-Encoding"]
+                    (get-in response [:headers "vary"])))
+             (is (= "allowed" (get-in response [:headers "x-gesso-trace"])))
+             (is (= 1 @calls))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (is (false? (stream/closed? (:body response))))
+             (stream/close! (:body response))
+             (is (eventually #(zero? (:subscription-count
+                                     (source/stats src))))))
+           (finally ((:close! route)))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]

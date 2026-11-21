@@ -90,7 +90,9 @@
    A synchronously terminated SSE stream is likewise rejected before HTTP
    handoff, even if the owning Live provider remains open. SSE options with
    unrecognized keys or invalid shapes fail typed preflight instead of
-   silently ignoring a misspelled operational setting."
+   silently ignoring a misspelled operational setting. Duplicate HTTP header
+   names that differ only by case also fail preflight; Ring maps distinguish
+   them, but HTTP does not."
   [started {:keys [path authorize-subscription sse-options] :as options}]
   (when-not (and (map? options)
                  (= (set (keys options))
@@ -140,6 +142,17 @@
                                       field))
                                   (keys (:headers validated-sse)))]
             (reject! :invalid-sse-reserved-header {:header header}))
+        ;; Ring maps retain differently cased keys, but HTTP header field
+        ;; names are case-insensitive. Two overrides for the same field could
+        ;; produce contradictory Vary/CORS/cookie metadata after serialization.
+        ;; A sequence of values under ONE key remains valid (e.g. Set-Cookie).
+        _ (when-let [field (->> (keys (:headers validated-sse))
+                                (group-by str/lower-case)
+                                (keep (fn [[name variants]]
+                                        (when (< 1 (count variants)) name)))
+                                sort
+                                first)]
+            (reject! :duplicate-sse-header {:header field}))
         base-handler (:biff.ring/handler started)
         live-system (:gesso.live/system started)
         state (atom {:closed? false :connections {}})
