@@ -916,6 +916,19 @@
               (.shutdownNow ^HttpClient client)
               (host/stop! started))))))))
 
+;; Shared real-browser fixture contract for child-JVM recovery tests. These
+;; helpers are test-only: there is no production browser/HTTP API here.
+(defn restart-fixture-page [render]
+  (page-html render))
+
+(defn restart-fixture-assets []
+  {"/assets/htmx.js" (asset! htmx-assets)
+   "/assets/sse.js" (asset! sse-assets)
+   "/assets/gesso-live.js" (runtime!)})
+
+(defn restart-fixture-fragment [node request]
+  (fragment-response node request))
+
 (defn -main [& args]
   ;; The readiness selection can run where managed Chromium policies deny
   ;; loopback URLs. The default browser gate never silently downgrades to it.

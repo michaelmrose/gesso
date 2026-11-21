@@ -19,7 +19,8 @@
   (:require [clojure.string :as str]
             [clojure.test :as test]
             [gesso.live.browser.chromium :as chromium]
-            [gesso.live.outbox.browser-integration :as integration])
+            [gesso.live.outbox.browser-integration :as integration]
+            [gesso.live.outbox.browser-restart-test :as restart])
   (:import [com.sun.net.httpserver HttpHandler HttpServer]
            [java.net InetSocketAddress]
            [java.nio.charset StandardCharsets]))
@@ -143,7 +144,8 @@
   "The STRICT real-browser scenario, not the HTTP-only readiness selection."
   []
   (test-selection!
-   [#'integration/concrete-host-eventsource-htmx-converges-to-authoritative-xtdb-test]))
+   [#'integration/concrete-host-eventsource-htmx-converges-to-authoritative-xtdb-test
+    #'restart/browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test]))
 
 (defn execute!
   "Run a selected gate. The default browser gate requires preflight AND
