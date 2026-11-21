@@ -278,6 +278,13 @@
               (chromium/wait-for-js! page
                                      "() => document.getElementById('v2109-browser-panel') && document.getElementById('v2109-browser-panel').textContent === 'pending'")
               (is (eventually #(pos? (count @requests))))
+              ;; Capture actual node identities before any outerHTML refresh.
+              ;; Mere marker presence after a refresh would also pass if HTMX
+              ;; replaced the SSE-owning root and silently lost its listener.
+              (is (true?
+                   (chromium/evaluate
+                    page
+                    "() => { window.__v2109.root = document.querySelector('[data-gesso-live-fragment]'); window.__v2109.listener = document.querySelector('[data-gesso-live-invalidation]'); return !!window.__v2109.root && !!window.__v2109.listener; }")))
               (let [baseline (long (chromium/evaluate
                                     page "() => window.__v2109.refreshes"))
                     baseline-requests (count @requests)
@@ -324,6 +331,61 @@
                                     header))))
                             (drop baseline-requests @requests))
                       "The post-invalidation browser GET must carry the exact source progression")
+                  ;; The first HTMX outerHTML swap must NOT remove the
+                  ;; stable SSE connection or the fragment refresh owner.
+                  ;; A second independent write must generate a second
+                  ;; source-correlated refresh on the SAME root/connection.
+                  (is (true?
+                       (chromium/evaluate
+                        page
+                        "() => window.__v2109.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2109.listener === document.querySelector('[data-gesso-live-invalidation]')")))
+                  (let [second-baseline (count @requests)
+                        second-refreshes (long (chromium/evaluate
+                                                page "() => window.__v2109.refreshes"))
+                        second-intent (random-uuid)
+                        second-plan (outbox/prepare!
+                                     {:intent-ids [second-intent] :source-id source-id
+                                      :operation :request/done
+                                      :purpose :gesso.live/refresh}
+                                     [{:topic :request :id subject
+                                       :change/kind :updated}])]
+                    (xt/execute-tx node
+                                   (into (vec (:guard-ops second-plan))
+                                         [[:put-docs :requests
+                                           {:xt/id subject :status :done}]
+                                          (:tx-op second-plan)]))
+                    (is (eventually
+                         #(= :dispatch-accepted
+                             (:gesso.live.outbox/status
+                              (first (stable-q node
+                                               ["SELECT * FROM gesso_live_outbox WHERE _id = ?"
+                                                second-intent]))))))
+                    (let [second-event (deref (stream/take! correlated-source)
+                                              5000 ::no-second-source-event)]
+                      (is (= subject (:id second-event)))
+                      (is (some? (:progression second-event)))
+                      (is (not= (:progression source-event)
+                                (:progression second-event)))
+                      (chromium/wait-for-js!
+                       page "() => window.__v2109.messages >= 2")
+                      (chromium/wait-for-js!
+                       page
+                       "() => document.getElementById('v2109-browser-panel') && document.getElementById('v2109-browser-panel').getAttribute('data-authoritative-status') === 'done'")
+                      (is (> (long (chromium/evaluate
+                                    page "() => window.__v2109.refreshes"))
+                             second-refreshes))
+                      (is (some (fn [req]
+                                  (when-let [h (get-in req
+                                                        [:headers
+                                                         progression.http/request-header-name])]
+                                    (= (:progression second-event)
+                                       (progression.http/decode-request-progression h))))
+                                (drop second-baseline @requests))
+                          "Second browser refresh must carry second source progression")
+                      (is (true?
+                           (chromium/evaluate
+                            page
+                            "() => window.__v2109.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2109.listener === document.querySelector('[data-gesso-live-invalidation]')")))))
                 (is (= [] (chromium/evaluate page "() => window.__v2109.errors")))
                 (is (true? (chromium/assert-clean! context))))))
             (finally
@@ -616,6 +678,140 @@
               (.shutdownNow ^HttpClient client)
               (host/stop! started))))))))
 
+
+(defn- next-http-sse-frame! [^BufferedReader reader]
+  ;; Maintain the SAME reader over successive SSE events. Do not abandon a
+  ;; pending read on timeout, and never treat an empty keepalive as a frame.
+  (let [task (future
+               (loop [lines []]
+                 (let [line (.readLine reader)]
+                   (cond
+                     (nil? line) lines
+                     (empty? line) (if (seq lines) lines (recur []))
+                     :else (recur (conj lines line))))))
+        value (deref task 10000 ::sse-timeout)]
+    (when (= ::sse-timeout value)
+      (future-cancel task))
+    value))
+
+(deftest two-source-events-refresh-one-http-sse-connection-test
+  ;; A single HTTP/SSE connection must remain usable after the first
+  ;; progression-bearing refresh. This HTTP-only gate establishes server
+  ;; framing and repeated authoritative reads; it does NOT establish that
+  ;; an EventSource and HTMX survived a browser's outerHTML swap.
+  (let [ops (standard-operations)
+        render (render-context ops)]
+    (with-surfaced-application
+      {:request-board [:main (rendered-operation-button
+                              render :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [handler (fn [_] (g/html-response
+                              [:main (rendered-operation-button
+                                      render :request/claim
+                                      "/operations/request/claim")]))
+              started (host/start! assembly handler (config))
+              node (:xtdb/connectable started)
+              seen-requests (atom [])
+              route (http/wrap-authorized-sse
+                     started {:path "/live/events"
+                              :authorize-subscription (fn [request]
+                                                        (when (= "Bearer allowed"
+                                                                 (get-in request
+                                                                         [:headers "authorization"]))
+                                                          scope))})
+              server (start-loopback!
+                      (fn [request]
+                        (cond
+                          (= "/live/events" (:uri request))
+                          ((:handler route) request)
+                          (= "/fragment" (:uri request))
+                          (do (swap! seen-requests conj request)
+                              (fragment-response node request))
+                          :else {:status 404 :headers {} :body "Not found"})))
+              client (HttpClient/newHttpClient)
+              body* (atom nil)
+              reader* (atom nil)
+              read-future* (atom nil)]
+          (try
+            (xt/execute-tx node [[:put-docs :requests
+                                  {:xt/id subject :status :pending}]])
+            (let [req (-> (HttpRequest/newBuilder
+                           (URI/create (str (:url server) "/live/events")))
+                          (.header "authorization" "Bearer allowed")
+                          .GET .build)
+                  incoming (future (.send client req
+                                          (HttpResponse$BodyHandlers/ofInputStream)))]
+              (reset! read-future* incoming)
+              ;; The bridge may defer SSE HTTP headers until first event.
+              (is (eventually #(= 1 ((:active-count route)))))
+              (let [requirements (atom [])]
+                (doseq [status [:claimed :done]]
+                  (let [id (random-uuid)
+                        plan (outbox/prepare!
+                              {:intent-ids [id] :source-id source-id
+                               :operation :request/claim
+                               :purpose :gesso.live/refresh}
+                              [{:topic :request :id subject
+                                :change/kind :updated}])]
+                    (xt/execute-tx node
+                                   (into (vec (:guard-ops plan))
+                                         [[:put-docs :requests
+                                           {:xt/id subject :status status}]
+                                          (:tx-op plan)]))
+                    (let [response (deref incoming 10000 ::response-timeout)]
+                      (is (not= ::response-timeout response))
+                      (when (and (not= ::response-timeout response)
+                                 (nil? @body*))
+                        (reset! body* (.body response)))
+                      (when (not= ::response-timeout response)
+                        (is (= 200 (.statusCode response))))
+                      (when (and @body* (nil? @reader*))
+                        (reset! reader* (BufferedReader.
+                                         (InputStreamReader. @body* StandardCharsets/UTF_8))))
+                      (let [reader @reader*]
+                        (when reader
+                          (let [frame (next-http-sse-frame! reader)
+                                event (first (filter #(str/starts-with? % "event: ") frame))
+                                data (first (filter #(str/starts-with? % "data: ") frame))
+                                payload (when data (clojure.edn/read-string (subs data 6)))
+                                requirement (some-> payload :progression
+                                                     progression/wire->requirement)
+                                header (when requirement
+                                         (progression.http/encode-request-progression
+                                          requirement))]
+                            (is (not= ::sse-timeout frame))
+                            (is (= "event: live-update" event))
+                            (is (= subject (get-in payload [:invalidation :id])))
+                            (is (some? requirement))
+                            (when requirement (swap! requirements conj requirement))
+                            (when header
+                              (let [fragment (get-body! client (:url server) "/fragment"
+                                                        {progression.http/request-header-name header})]
+                                (is (= 200 (:status fragment)))
+                                (is (str/includes? (:body fragment)
+                                                   (str "data-authoritative-status=\""
+                                                        (name status) "\"")))
+                                (is (= header
+                                       (get-in (last @seen-requests)
+                                               [:headers progression.http/request-header-name])))))))))
+                    (is (eventually
+                         #(= :dispatch-accepted
+                             (:gesso.live.outbox/status
+                              (first (stable-q node
+                                               ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id]))))))))
+                (is (= 2 (count @requirements)))
+                (is (apply not= @requirements))
+                (is (= 1 ((:active-count route))))
+                (is (= 2 (count @seen-requests)))))
+            (finally
+              ((:close! route))
+              (when-let [reader @reader*] (.close reader))
+              (when-let [body @body*] (.close body))
+              (when-let [pending @read-future*] (future-cancel pending))
+              ((:close! server))
+              (.shutdownNow ^HttpClient client)
+              (host/stop! started))))))))
+
 (defn -main [& args]
   ;; The readiness selection can run where managed Chromium policies deny
   ;; loopback URLs. The default browser gate never silently downgrades to it.
@@ -629,9 +825,10 @@
                    (test/test-vars
                     [#'canonical-browser-page-and-authoritative-fragment-over-loopback-test
                      #'actual-http-fragment-read-honors-source-progression-test
-                     #'physical-sse-frame-progresses-exact-authoritative-fragment-http-test])
+                     #'physical-sse-frame-progresses-exact-authoritative-fragment-http-test
+                     #'two-source-events-refresh-one-http-sse-connection-test])
                    @test/*report-counters*)
                  (run-tests 'gesso.live.outbox.browser-integration))]
-    (println "V2111 RESULTS" result)
+    (println "V2112 RESULTS" result)
     (shutdown-agents)
     (System/exit (if (and (zero? (:fail result)) (zero? (:error result))) 0 1))))
