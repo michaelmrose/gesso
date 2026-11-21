@@ -7,10 +7,16 @@
    A stale claimant cannot overwrite an already leased or otherwise changed
    record through this path. The lease remains durable after a process crash.
 
-   This does NOT scan for pending work, reclaim expired leases, deliver notices,
-   acknowledge delivery, fence external effects, authenticate the caller, or
-   prove closure of arbitrary XTDB writers. The supplied clock and worker
-   identity are trusted host inputs. No post-commit delivery is implied."
+   Expired leases can be reclaimed with an XTDB transaction-time clock guard,
+   an observed system-time CAS, and a NEW lease token. A separate fence
+   constructor lets a future acknowledgment transaction demand that its
+   original lease still owns the physical row at the time of its write.
+
+   This does NOT scan for work, deliver notices, acknowledge delivery, fence
+   external side effects, authenticate the caller, or prove arbitrary writer
+   closure. A new claimant may duplicate an external send performed before the
+   old claimant crashed. :now and worker identity are trusted host inputs,
+   while expiry eligibility is additionally checked against XTDB's clock."
   (:require [clojure.string :as str]
             [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox :as outbox]
@@ -24,6 +30,17 @@
   "SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?")
 (def ^:private guard-system-from-sql
   "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)")
+(def ^:private guard-expired-system-from-sql
+  (str "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox "
+       "WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP >= ?)"))
+(def ^:private guard-active-system-from-sql
+  (str "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox "
+       "WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)"))
+(def ^:private guard-new-deadline-sql
+  "ASSERT CURRENT_TIMESTAMP < ?")
+(def ^:private guard-max-new-deadline-sql
+  "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?")
+(def ^:private lease-fence-keys #{:intent-id :lease-id :worker-id})
 
 (defn- reject!
   [reason data]
@@ -127,3 +144,121 @@
                 (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data cause)))
                   {:status :contended :intent-id intent-id}
                   (throw cause))))))))))
+
+
+(defn- require-leased!
+  "Reject malformed physical lease metadata rather than reclaiming unknown
+   state or silently treating it as a new pending intent."
+  [intent intent-id]
+  (when-not (and (uuid? (:gesso.live.outbox/lease-id intent))
+                 (string? (:gesso.live.outbox/lease-owner intent))
+                 (not (str/blank? (:gesso.live.outbox/lease-owner intent)))
+                 (instance? ZonedDateTime (:gesso.live.outbox/lease-until intent)))
+    (reject! :invalid-physical-lease {:intent-id intent-id}))
+  intent)
+
+(defn- require-fence!
+  [fence]
+  (when-not (map? fence)
+    (reject! :invalid-fence {:fence fence}))
+  (when-let [extra (seq (remove lease-fence-keys (keys fence)))]
+    (reject! :unknown-fence-fields {:fields (vec extra)}))
+  (when-not (uuid? (:intent-id fence))
+    (reject! :invalid-intent-id {:intent-id (:intent-id fence)}))
+  (when-not (uuid? (:lease-id fence))
+    (reject! :invalid-lease-id {:lease-id (:lease-id fence)}))
+  (when-not (and (string? (:worker-id fence))
+                 (not (str/blank? (:worker-id fence))))
+    (reject! :invalid-worker-id {:worker-id (:worker-id fence)}))
+  fence)
+
+(defn active-lease-guard-ops
+  "Construct physical lease fencing for inclusion in a LATER XTDB transaction.
+
+   The caller provides a trusted {:intent-id UUID :lease-id UUID :worker-id
+   string}. An authoritative current read must match all three identifiers,
+   the required publication intent, and :leased state. The returned single
+   ASSERT verifies the same XTDB _system_from and a still-live deadline at
+   the *actual transaction*, so an expired or replaced lease cannot change
+   the outbox via a transaction that includes this guard before its writes.
+
+   This is a GUARD CONSTRUCTOR, NOT an endorsement of external side effects.
+   Do not execute its ASSERT separately before publishing to SSE: another
+   claimant might acquire the intent after that check and before the send.
+   Include this guard and any future acknowledgment DML in ONE transaction.
+   Actual delivery, acknowledgment semantics, and external-effect fencing
+   remain outside this revision."
+  [node fence]
+  (require-fence! fence)
+  (let [{:keys [intent-id lease-id worker-id]} fence
+        row (current-intent! node intent-id)]
+    (when-not row
+      (reject! :missing-lease {:intent-id intent-id}))
+    (let [intent (require-intent! row intent-id)]
+      (when-not (= :leased (:gesso.live.outbox/status intent))
+        (reject! :not-leased {:intent-id intent-id}))
+      (require-leased! intent intent-id)
+      (when-not (and (= lease-id (:gesso.live.outbox/lease-id intent))
+                     (= worker-id (:gesso.live.outbox/lease-owner intent)))
+        (reject! :stale-lease {:intent-id intent-id}))
+      [[guard-active-system-from-sql
+        intent-id (:xt/system-from intent)
+        (:gesso.live.outbox/lease-until intent)]])))
+
+(defn reclaim-expired!
+  "Reacquire a formerly leased intent only after its old lease has expired.
+
+   Uses the same validated claim format as acquire-pending!, and requires a
+   *different* UUID lease token from the old owner. With the row in :leased
+   state, its version-1 metadata is validated and a single XTDB transaction
+   atomically checks: (1) the originally read _system_from is still current,
+   (2) the ORIGINAL deadline has passed according to XTDB CURRENT_TIMESTAMP,
+   (3) the new deadline is in the future according to XTDB, and (4) it is no
+   more than five minutes into XTDB's future. Then the row is replaced with
+   the new worker, lease token, and deadline, retaining its publication data.
+
+   Returns :reclaimed on actual commit, :unavailable for missing/not-leased,
+   or :contended for an XTDB ASSERT rejection (including not-yet-expired or
+   stale/preempted reads). Unknown and post-commit errors propagate. There is
+   no implicit send or acknowledgment, and recovery can cause duplicate sends.
+   A worker must apply active-lease-guard-ops in its later STATE transition;
+   even that does not fence an external side effect such as an SSE send."
+  [node claim]
+  (validate-claim! claim)
+  (let [{:keys [intent-id lease-id worker-id lease-until]} claim
+        row (current-intent! node intent-id)]
+    (cond
+      (nil? row)
+      {:status :unavailable :reason :missing :intent-id intent-id}
+
+      :else
+      (let [intent (require-intent! row intent-id)]
+        (if (not= :leased (:gesso.live.outbox/status intent))
+          {:status :unavailable :reason :not-leased :intent-id intent-id}
+          (do
+            (require-leased! intent intent-id)
+            (when (= lease-id (:gesso.live.outbox/lease-id intent))
+              (reject! :reused-lease-id {:intent-id intent-id}))
+            (let [new-intent (-> intent
+                                 (dissoc :xt/system-from)
+                                 (assoc :gesso.live.outbox/status :leased
+                                        :gesso.live.outbox/lease-id lease-id
+                                        :gesso.live.outbox/lease-owner worker-id
+                                        :gesso.live.outbox/lease-until lease-until))
+                  ops [[guard-expired-system-from-sql
+                        intent-id (:xt/system-from intent)
+                        (:gesso.live.outbox/lease-until intent)]
+                       [guard-new-deadline-sql lease-until]
+                       [guard-max-new-deadline-sql lease-until]
+                       [:put-docs outbox/intent-table new-intent]]]
+              (try
+                (merge (live.xtdb/execute-tx! node ops)
+                       {:status :reclaimed
+                        :intent-id intent-id
+                        :lease-id lease-id
+                        :worker-id worker-id
+                        :lease-until lease-until})
+                (catch Throwable cause
+                  (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data cause)))
+                    {:status :contended :intent-id intent-id}
+                    (throw cause)))))))))))
