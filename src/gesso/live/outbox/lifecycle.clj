@@ -36,7 +36,13 @@
                   (assoc data :error/type :gesso.live.outbox/invalid-lifecycle
                          :reason reason))))
 
-(defn- validate! [system ctx expected-source-id opts]
+(defn validate-worker-options!
+  "Validate trusted worker scheduling settings without creating resources.
+
+   Biff startup can invoke this before starting any provider modules, so an
+   invalid worker option cannot leak an already-started XTDB/Live dependency
+   merely because Biff does not unwind modules when a later start throws."
+  [opts]
   (when-not (map? opts)
     (reject! :invalid-options {:options opts}))
   (when-let [other (seq (remove allowed-options (keys opts)))]
@@ -44,13 +50,6 @@
   (when-not (and (string? (:worker-id opts))
                  (not (str/blank? (:worker-id opts))))
     (reject! :invalid-worker-id {:worker-id (:worker-id opts)}))
-  (when-not (and (string? expected-source-id)
-                 (not (str/blank? expected-source-id)))
-    (reject! :invalid-source-id {:source-id expected-source-id}))
-  (when-not (and (map? system) (some? (:source system)))
-    (reject! :invalid-system {}))
-  (when-not (map? ctx)
-    (reject! :invalid-context {}))
   (let [lease (get opts :lease-millis default-lease-millis)
         max-items (get opts :max-items default-max-items)
         poll (get opts :poll-ms default-poll-ms)]
@@ -60,6 +59,17 @@
       (reject! :invalid-max-items {:max-items max-items}))
     (when-not (and (integer? poll) (<= 10 poll 60000))
       (reject! :invalid-poll-ms {:poll-ms poll})))
+  opts)
+
+(defn- validate! [system ctx expected-source-id opts]
+  (validate-worker-options! opts)
+  (when-not (and (string? expected-source-id)
+                 (not (str/blank? expected-source-id)))
+    (reject! :invalid-source-id {:source-id expected-source-id}))
+  (when-not (and (map? system) (some? (:source system)))
+    (reject! :invalid-system {}))
+  (when-not (map? ctx)
+    (reject! :invalid-context {}))
   opts)
 
 (defn- require-handle! [handle]
