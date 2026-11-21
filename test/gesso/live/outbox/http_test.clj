@@ -167,6 +167,42 @@
                      (finally ((:close! route)))))))
        (is (zero? (:subscription-count (source/stats (:source (:gesso.live/system started))))))))))
 
+(deftest managed-route-rejects-non-200-sse-before-authorization-test
+  (setup-host
+   (fn [started]
+     (let [source (:source (:gesso.live/system started))
+           authorized (atom 0)
+           base {:path "/live/events"
+                 :authorize-subscription (fn [_]
+                                           (swap! authorized inc)
+                                           scope)}]
+       ;; The generic SSE transport permits valid HTTP statuses other than
+       ;; 200. The managed Ring route must not create a subscription that a
+       ;; browser's EventSource will reject at the response boundary.
+       (doseq [status [101 201 204 302 403 503]]
+         (is (= :invalid-sse-status
+                (exception-reason
+                 #(http/wrap-authorized-sse
+                   started (assoc base :sse-options {:status status}))))
+             (str "Reject non-200 EventSource status " status))
+         (is (zero? @authorized)
+             "Route preflight must not invoke the authorization callback")
+         (is (zero? (:subscription-count (source/stats source)))
+             "Route preflight must not install a Live interest"))
+       ;; An explicit 200 is fine and continues to use the existing source.
+       (let [route (http/wrap-authorized-sse
+                    started (assoc base :sse-options {:status 200}))]
+         (try
+           (let [response ((:handler route)
+                           {:uri "/live/events" :request-method :get})]
+             (is (= 200 (:status response)))
+             (is (= 1 @authorized))
+             (is (= 1 (:subscription-count (source/stats source)))))
+           (finally
+             ((:close! route))
+             (is (eventually #(zero? (:subscription-count
+                                     (source/stats source))))))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]

@@ -44,8 +44,12 @@
    is responsible for authenticating the Ring request and deciding whether
    this requester may subscribe to the returned exact scope. Nil denies with
    403. Unknown paths are passed to the existing canonical Ring handler.
-   Non-GET requests to the SSE path receive 405. Invalid callback results and
-   callback exceptions propagate before a subscription can be installed.
+   Non-GET requests to the SSE path receive 405. Managed EventSource routes
+   require an HTTP 200 response status: another accepted transport status
+   would register a Live interest but cannot establish EventSource delivery.
+   Reject this misconfiguration before invoking authorization or subscribing.
+   Invalid callback results and callback exceptions propagate before a
+   subscription can be installed.
 
    Call :close! and stop the owning HTTP listener before host/stop!. If a
    client disconnects, the SSE Manifold stream should close at the Ring
@@ -70,8 +74,12 @@
                  (map? (:gesso.live/system started))
                  (not (live/closed? (:gesso.live/system started))))
     (reject! :missing-or-closed-host {}))
-  ;; Validate headers/encoder before registering an interest or handler.
+  ;; Validate the EventSource HTTP response contract before registering any
+  ;; interest or exposing a route. The lower-level SSE transport intentionally
+  ;; permits arbitrary valid HTTP statuses, but browser EventSource does not.
   (let [validated-sse (sse/prepare-options! sse-options)
+        _ (when (not= 200 (:status validated-sse))
+            (reject! :invalid-sse-status {:status (:status validated-sse)}))
         base-handler (:biff.ring/handler started)
         live-system (:gesso.live/system started)
         state (atom {:closed? false :connections {}})
