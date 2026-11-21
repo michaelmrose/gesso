@@ -1,5 +1,5 @@
 (ns gesso.live.outbox.restart-test
-  "v2100: actual JVM process termination and XTDB local-storage restart.
+  "v2100-v2101: actual JVM process termination and XTDB restart.
 
    Phase 1 runs a separate JVM which commits an authoritative mutation and
    outbox records, acquires one lease, then calls Runtime.halt WITHOUT closing
@@ -90,4 +90,59 @@
                 (is (= [:dispatch-accepted :dispatch-accepted :pending]
                        (get-in verification [:report :statuses])))
                 (is (zero? (get-in verification [:report :resends] -1))))))))
+      (finally (clean! root)))))
+
+
+(deftest crash-after-source-acceptance-before-ack-replays-after-restart-test
+  ;; First JVM confirms actual Live source acceptance then HALTS in the
+  ;; acknowledgment boundary, leaving a durable leased intent. Second JVM
+  ;; must re-emit after expiry and physically record acceptance; third JVM
+  ;; must observe a terminal record without re-emission. Thus the same
+  ;; logical invalidation was accepted twice, NOT delivered exactly once.
+  (let [root (Files/createTempDirectory
+              "gesso-live-v2101-"
+              (make-array java.nio.file.attribute.FileAttribute 0))]
+    (try
+      (let [crash (child! root "post-dispatch-crash")]
+        (is (= 0 (:exit crash)) (:log crash))
+        (is (true? (get-in crash [:report :source-accepted-before-crash?]))
+            (pr-str crash))
+        (is (= :leased (get-in crash [:report :pre-ack-status])))
+        (is (nil? (get-in crash [:report :receipt-before-crash])))
+        (is (true? (get-in crash [:report :progression-present?])))
+        (is (uuid? (get-in crash [:report :lease-id])))
+        (when (and (= 0 (:exit crash)) (:report crash))
+          (let [recovery (child! root "post-dispatch-recover")]
+            (is (= 0 (:exit recovery)) (:log recovery))
+            (is (true?
+                 (get-in recovery [:report :recovered-after-source-acceptance?]))
+                (pr-str recovery))
+            (is (= :leased (get-in recovery [:report :before-status])))
+            (is (= :dispatch-accepted
+                   (get-in recovery [:report :after-status])))
+            (is (= 1 (get-in recovery [:report :reclaimed-count])))
+            (is (= 1 (get-in recovery [:report :accepted-count])))
+            (is (true? (get-in recovery [:report :new-lease-token?])))
+            (is (true? (get-in recovery [:report :receipt-recorded?])))
+            (is (true? (get-in recovery [:report :progression-present?])))
+            ;; Same logical refresh has been accepted by TWO distinct JVMs.
+            ;; This is safe because invalidations demand authoritative refetch,
+            ;; not execution of a second domain mutation.
+            (is (= (get-in crash [:report :event])
+                   (get-in recovery [:report :event])))
+            (is (not= (get-in crash [:report :pid])
+                      (get-in recovery [:report :pid])))
+            (when (and (= 0 (:exit recovery)) (:report recovery))
+              (let [verification (child! root "post-dispatch-verify")]
+                (is (= 0 (:exit verification)) (:log verification))
+                (is (true? (get-in verification
+                                   [:report :terminal-state-survived?]))
+                    (pr-str verification))
+                (is (= :dispatch-accepted
+                       (get-in verification [:report :status])))
+                (is (zero? (get-in verification [:report :resends] -1)))
+                (is (= 3
+                       (count
+                        (set (map #(get-in % [:report :pid])
+                                  [crash recovery verification]))))))))))
       (finally (clean! root)))))
