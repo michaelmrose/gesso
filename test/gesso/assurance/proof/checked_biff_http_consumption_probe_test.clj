@@ -281,6 +281,48 @@
                 (deliver release :continue)
                 (deref verifying 12000 :timed-out)))))))))
 
+(deftest probe-retirement-drains-fresh-http-liveness
+  ;; Unlike the one-shot activation verifier, fresh liveness checks could
+  ;; outlive probe retirement. Pause the real loopback response at the HTTP
+  ;; adapter and require stop to drain that original inspection too.
+  (let [entered (promise)
+        release (promise)]
+    (binding [*after-http-handler!*
+              (fn [headers response]
+                (when (contains? headers "x-gesso-local-liveness-probe")
+                  (deliver entered (= 200 (:status response)))
+                  (deref release 15000 :timed-out)))]
+      (with-adapter! :honest nil
+        (fn [{:keys [env probe system base]}]
+          (let [contract (:contract env)]
+            (is (= :one-final-checked-wrapper-http-challenge-returned
+                   (:status ((:verify-once! probe) system base))))
+            (let [checking (future
+                             (error-reason
+                              #(probe/require-fresh-local-http-liveness!
+                                probe contract system base)))]
+              (try
+                (is (true? (deref entered 12000 false))
+                    "Fresh loopback liveness response must be pending")
+                (let [stop-started (promise)
+                      stopping (future
+                                 (deliver stop-started true)
+                                 ((:biff.core/stop (:module probe)) system)
+                                 :retired)]
+                  (is (true? (deref stop-started 5000 false)))
+                  (is (= :in-flight (deref stopping 350 :in-flight))
+                      "Retirement must drain an admitted liveness inspection")
+                  (deliver release :continue)
+                  (is (= :local-checked-http-liveness-not-observed
+                         (deref checking 12000 :timed-out))
+                      "The retired probe cannot publish fresh liveness")
+                  (is (= :retired (deref stopping 12000 :timed-out)))
+                  (is (= :stopped (:module-state ((:summary! probe)))))
+                  (is (= 503 (post! base))))
+                (finally
+                  (deliver release :continue)
+                  (deref checking 12000 :timed-out))))))))))
+
 (deftest independent-server-consumes-the-final-biff-handler-over-real-http
   (with-adapter! :honest nil
     (fn [{:keys [env probe system base]}]

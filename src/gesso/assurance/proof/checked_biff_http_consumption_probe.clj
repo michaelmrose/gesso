@@ -523,7 +523,7 @@
                            (set (map :route-id
                                      (filter #(not= (:template %) (:path %))
                                              @catalog-targets)))))
-        verify-liveness! (fn [final-system base-url]
+        verify-liveness-within-lease! (fn [final-system base-url]
                            ;; Each invocation owns a fresh one-use secret and
                            ;; response unrelated to startup or business routes.
                            (locking liveness-monitor
@@ -573,6 +573,18 @@
                                      (reject! :local-checked-http-liveness-not-observed))
                                    (finally
                                      (reset! liveness-pending nil)))))))
+        verify-liveness! (fn [final-system base-url]
+                           ;; A fresh original HTTP liveness inspection is
+                           ;; an admitted probe activity, not a detached
+                           ;; background task. Stop must drain it before
+                           ;; returning, just as it drains business dispatch
+                           ;; and the one-shot activation challenge.
+                           (let [lease (.readLock business-dispatch-lock)]
+                             (.lock lease)
+                             (try
+                               (verify-liveness-within-lease!
+                                final-system base-url)
+                               (finally (.unlock lease)))))
         verify-within-lease! (fn [final-system base-url]
                   (when-not (.compareAndSet claimed false true)
                     (reject! :http-consumption-probe-already-attempted))
