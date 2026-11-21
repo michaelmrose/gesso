@@ -1,5 +1,5 @@
 (ns gesso.live.outbox.browser-restart-child
-  "v2117 physical child-JVM application server for real Chromium restart proof.
+  "v2121 physical child-JVM server records per-tab HTMX read attribution.
 
    Owns canonical Gesso/Biff app, local persistent XTDB, Live source, worker,
    and an actual loopback HTTP/SSE listener. The controlling test runs in a
@@ -207,7 +207,11 @@
                                   (swap! history conj
                                          {:status (domain-state node)
                                           :header (get-in request
-                                                          [:headers progression.http/request-header-name])})
+                                                          [:headers progression.http/request-header-name])
+                                          ;; Test-only provenance marker, never an
+                                          ;; application identity or auth credential.
+                                          :tab (get-in request
+                                                       [:headers "x-gesso-test-tab"])})
                                   response)
 
                                 (= uri "/control/status")

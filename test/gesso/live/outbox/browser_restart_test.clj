@@ -1,5 +1,5 @@
 (ns gesso.live.outbox.browser-restart-test
-  "v2120: Correlate each tab's HTMX progression with its HTTP response.
+  "v2121: Correlate independent tabs with physical server-side fragment reads.
 
    The replacement host binds the SAME port, reopens the SAME local XTDB
    log/storage, and provides a newly owned Live source/worker. The browser
@@ -7,7 +7,8 @@
    HTTP/HTMX refreshes to each unchanged page. The per-tab configRequest
    observer checks outgoing headers separately and associates each header
    with an actual successful HTTP response and authoritative HTML. The child
-   server still retains aggregate physical readback. This covers process death,
+   server independently logs the test-only tab marker and exact received
+   progression for every fragment read. This covers process death,
    not an entire machine, disk, or network partition."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -22,8 +23,9 @@
 
 (def ^:private panel "v2109-browser-panel")
 
-(def ^:private capture-dom-js
-  (str "() => { window.__v2120={"
+(defn- capture-dom-js [tab-id]
+  (str "() => { window.__v2121={"
+       "tab:" (pr-str tab-id) ","
        "root:document.querySelector('[data-gesso-live-fragment]'),"
        "listener:document.querySelector('[data-gesso-live-invalidation]'),"
        "href:location.href,headers:[],responses:[]};"
@@ -31,35 +33,39 @@
        "const detail=event.detail;"
        "if(detail && detail.elt && "
        "detail.elt.hasAttribute('data-gesso-live-fragment')){"
-       "window.__v2120.headers.push(detail.headers && detail.headers["
+       "detail.headers['X-Gesso-Test-Tab']=window.__v2121.tab;"
+       "window.__v2121.headers.push(detail.headers && detail.headers["
        (pr-str progression.http/request-header-name)
        "]);}});"
        "document.addEventListener('htmx:afterRequest',function(event){"
        "const detail=event.detail;"
        "if(detail && detail.elt && "
        "detail.elt.hasAttribute('data-gesso-live-fragment')){"
-       "window.__v2120.responses.push({"
+       "window.__v2121.responses.push({"
        "header:detail.requestConfig && detail.requestConfig.headers && "
        "detail.requestConfig.headers["
        (pr-str progression.http/request-header-name)
-       "],status:detail.xhr && detail.xhr.status,"
+       "],tab:detail.requestConfig && detail.requestConfig.headers && "
+       "detail.requestConfig.headers['X-Gesso-Test-Tab'],"
+       "status:detail.xhr && detail.xhr.status,"
        "successful:detail.successful === true,"
        "body:detail.xhr && detail.xhr.responseText"
        "});}});"
-       "return !!window.__v2120.root && !!window.__v2120.listener; }"))
+       "return !!window.__v2121.root && !!window.__v2121.listener; }"))
 
 (def ^:private stable-dom-js
-  "() => window.__v2120.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2120.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2120.href === location.href")
+  "() => window.__v2121.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2121.listener === document.querySelector('[data-gesso-live-invalidation]') && window.__v2121.href === location.href")
 
 (defn- wait-for-page-header! [page expected from-index]
   (chromium/wait-for-js!
-   page (str "() => window.__v2120.headers.slice(" from-index
+   page (str "() => window.__v2121.headers.slice(" from-index
              ").includes(" (pr-str expected) ")")))
 
 (defn- wait-for-page-response! [page expected status from-index]
   (chromium/wait-for-js!
-   page (str "() => window.__v2120.responses.slice(" from-index
+   page (str "() => window.__v2121.responses.slice(" from-index
              ").some(response => response.header === " (pr-str expected)
+             " && response.tab === window.__v2121.tab"
              " && response.status === 200 && response.successful"
              " && typeof response.body === 'string'"
              " && response.body.includes("
@@ -72,10 +78,14 @@
              "')?.getAttribute('data-authoritative-status') === '"
              (name status) "'")))
 
-(defn- at-least-two-fragment-reads? [fragments status progression]
-  (<= 2 (count (filter (fn [{observed :status header :header}]
-                         (and (= status observed) (= progression header)))
-                       fragments))))
+(defn- independent-tab-fragment-reads? [fragments status progression tab-ids]
+  (every? (fn [tab]
+            (some (fn [{observed :status header :header received :tab}]
+                    (and (= status observed)
+                         (= progression header)
+                         (= tab received)))
+                  fragments))
+          tab-ids))
 
 (defn- eventual! [f timeout-ms]
   (let [deadline (+ (System/nanoTime) (* 1000000 timeout-ms))]
@@ -149,7 +159,7 @@
 
 (deftest browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test
   (let [root (Files/createTempDirectory
-              "gesso-v2120-two-tab-responses-restart-"
+              "gesso-v2121-attributed-two-tab-restart-"
               (make-array java.nio.file.attribute.FileAttribute 0))
         port (random-loopback-port)
         base (str "http://127.0.0.1:" port)
@@ -169,16 +179,18 @@
             _ (reset! context* ctx)
             ;; Separate physical tabs share the same authorized browser session,
             ;; but each owns its own EventSource, HTMX root, and pending state.
-            tabs [(chromium/new-page! ctx) (chromium/new-page! ctx)]]
+            tabs [(chromium/new-page! ctx) (chromium/new-page! ctx)]
+            tab-ids (mapv (fn [_] (str (random-uuid))) tabs)]
         (is (= :pending (:domain first-status)))
-        (doseq [page tabs]
+        (is (= 2 (count (set tab-ids))))
+        (doseq [[page tab-id] (map vector tabs tab-ids)]
           (chromium/navigate! page (str base "/"))
           (chromium/wait-for-js!
            page "() => window.__v2109 && window.__v2109.runtime === true && window.__v2109.opens >= 1")
           (wait-for-status! page :pending)
           ;; Keep the precise original nodes and URL in each page. A reload
           ;; or silently remounted root in either tab invalidates the evidence.
-          (is (true? (chromium/evaluate page capture-dom-js))))
+          (is (true? (chromium/evaluate page (capture-dom-js tab-id)))))
         (is (true?
              (eventual!
               #(= 2 (:active (http! client base "/control/status")))
@@ -193,11 +205,11 @@
             (wait-for-page-response! page (:expected-header claim) :claimed 0))
           (is (true?
                (eventual!
-                #(at-least-two-fragment-reads?
+                #(independent-tab-fragment-reads?
                   (:fragments (http! client base "/control/status"))
-                  :claimed (:expected-header claim))
+                  :claimed (:expected-header claim) tab-ids)
                 10000))
-              "Both tabs must issue an exact-progression HTMX claim refresh")
+              "Both distinct tab IDs must be received with exact claim progression")
           (let [old-pid (:pid first-status)
                 old-opens (mapv #(long (chromium/evaluate
                                         % "() => window.__v2109.opens")) tabs)]
@@ -228,9 +240,9 @@
               (let [baselines (mapv #(long (chromium/evaluate
                                            % "() => window.__v2109.refreshes")) tabs)
                     header-baselines (mapv #(long (chromium/evaluate
-                                                  % "() => window.__v2120.headers.length")) tabs)
+                                                  % "() => window.__v2121.headers.length")) tabs)
                     response-baselines (mapv #(long (chromium/evaluate
-                                                    % "() => window.__v2120.responses.length")) tabs)
+                                                    % "() => window.__v2121.responses.length")) tabs)
                     done (http! client base "/control/done")]
                 (is (= :done (:status done)))
                 (is (string? (:expected-header done)))
@@ -250,11 +262,11 @@
                   (is (true? (chromium/evaluate page stable-dom-js))))
                 (is (true?
                      (eventual!
-                      #(at-least-two-fragment-reads?
+                      #(independent-tab-fragment-reads?
                         (:fragments (http! client base "/control/status"))
-                        :done (:expected-header done))
+                        :done (:expected-header done) tab-ids)
                       10000))
-                    "Both tabs must request the exact new source progression")
+                    "Both distinct tab IDs must be received with new source progression")
                 (is (= :done (:domain (http! client base "/control/status"))))
                 (is (true? (chromium/assert-clean! ctx))))))))
       (finally
