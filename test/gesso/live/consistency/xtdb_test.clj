@@ -2581,6 +2581,73 @@
                               {:snapshot-token disjoint}}))))
             (is (= (+ 2 before) @calls))))))))
 
+(deftest biff-frontier-rejects-snapshot-token-behind-admitted-transaction-test
+  ;; Transaction metadata is not itself authenticated. Nevertheless, if a
+  ;; request claims a complete tx/time receipt it cannot simultaneously pin
+  ;; the selected database to an earlier token and call that same request's
+  ;; read obligations satisfied. A foreign database is not that transaction.
+  (let [committed (Instant/parse "2026-11-20T18:00:00Z")
+        old (.minusSeconds committed 30)
+        observed (.plusSeconds committed 60)
+        old-selected (xt.basis/->time-basis-str {"xtdb" [old]})
+        same-selected (xt.basis/->time-basis-str {"xtdb" [committed]})
+        old-foreign (xt.basis/->time-basis-str {"analytics" [old]})
+        completed [{:tx-id 2053 :system-time observed}]
+        calls (atom 0)]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" completed}})
+      (fn []
+        (doseq [receipt [{:tx-id 2052 :system-time committed}
+                         {:tx-id 2052 :snapshot-time committed}]]
+          (let [full (assoc receipt :snapshot-token old-selected)
+                failure (try
+                          (xtdb-live/bind-request-frontier
+                           {:xtdb/node :authority-node
+                            :gesso.live/consistency full})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                "An admitted stale selected token cannot satisfy the tx")
+            (when failure
+              (is (= :snapshot-token-behind-transaction-metadata
+                     (:reason (ex-data failure))))))
+          ;; Deferred Ring contexts may add a token after the admission-time
+          ;; receipt was preserved, and must be checked before the handler.
+          (let [bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node :authority-node
+                        :gesso.live/consistency receipt})
+                handler ((:biff.core/wrap-db-snapshot bound)
+                         (fn [ctx]
+                           (swap! calls inc)
+                           (xtdb-live/consistency-from ctx)))
+                failure (try
+                          (handler {:xtdb/consistency
+                                    {:snapshot-token old-selected}})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                "Deferred stale selected token must fail before Biff body")
+            (when failure
+              (is (= :snapshot-token-behind-transaction-metadata
+                     (:reason (ex-data failure))))))
+          (is (zero? @calls)))
+      ;; A token at the receipt time is compatible; an independent foreign
+      ;; database's earlier time does not conflict with this transaction.
+      (doseq [token [same-selected old-foreign]]
+        (is (ifn? (:biff.core/wrap-db-snapshot
+                   (xtdb-live/bind-request-frontier
+                    {:xtdb/node :authority-node
+                     :gesso.live/consistency
+                     {:tx-id 2052 :system-time committed
+                      :snapshot-token token}})))))
+      ;; A tx-id without a system/snapshot time is only partial metadata;
+      ;; it does not establish the transaction minimum used by this check.
+      (is (ifn? (:biff.core/wrap-db-snapshot
+                 (xtdb-live/bind-request-frontier
+                  {:xtdb/node :authority-node
+                   :gesso.live/consistency
+                   {:tx-id 2052 :snapshot-token old-selected}}))))))))
+
 (deftest bind-request-frontier-rejects-unsatisfied-admitted-query-consistency-test
   ;; Admitted consistency is an independent read obligation. Merely fixing
   ;; Biff's snapshot to the observed status is not sufficient if an admitted

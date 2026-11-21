@@ -1480,6 +1480,36 @@
               :query-times times})))))
   consistency)
 
+(defn- require-tx-snapshot-minimum!
+  "Keep a complete tx receipt consistent with the selected-db query token.
+
+   Transaction metadata does not authenticate a committed write. However, a
+   single admitted request cannot claim one complete transaction/time pair
+   while its query token pins that same database to an earlier time. Check
+   before ordinary Biff reads or a deferred handler can consume the mixed
+   constraints. Independent databases and incomplete metadata are not an
+   observation of the selected transaction and do not participate."
+  [database-name consistency origin]
+  (when (and (some? (:tx-id consistency))
+             (or (some? (:system-time consistency))
+                 (some? (:snapshot-time consistency)))
+             (some? (:snapshot-token consistency)))
+    (let [receipt (consistency->basis consistency database-name)
+          token-bases (decode-canonical-biff-snapshot!
+                       database-name (:snapshot-token consistency))
+          receipt-time (basis-system-time receipt)]
+      (when (some #(.isBefore ^Instant % receipt-time)
+                  (get token-bases database-name))
+        (throw
+         (ex "XTDB query snapshot token predates complete transaction metadata."
+             {:reason :snapshot-token-behind-transaction-metadata
+              :origin origin
+              :database database-name
+              :tx-id (:tx-id consistency)
+              :transaction-system-time receipt-time
+              :snapshot-token (:snapshot-token consistency)})))))
+  consistency)
+
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper database-name snapshot-token frontier admitted-requirement
    admitted-consistency bound-node]
@@ -1508,6 +1538,8 @@
               (let [combined-consistency
                     (compose-wrapped-xtdb-consistency!
                      admitted-consistency ctx)
+                    _ (require-tx-snapshot-minimum!
+                       database-name combined-consistency :deferred-biff-request)
                     combined-requirement
                     (compose-wrapped-biff-progression!
                      database-name frontier admitted-requirement ctx)
@@ -1623,6 +1655,8 @@
               (let [combined-consistency
                     (compose-wrapped-xtdb-consistency!
                      admitted-consistency wrapped-ctx)
+                    _ (require-tx-snapshot-minimum!
+                       database-name combined-consistency :deferred-biff-request)
                     _ (require-empty-selected-db-consistency!
                        database-name combined-consistency)
                     combined-requirement
@@ -1725,6 +1759,9 @@
           {:ctx ctx})))
    (let [bound-node (node-from ctx)
          admitted-consistency (consistency-from ctx)
+         _ (require-tx-snapshot-minimum!
+            (normalize-database-name database)
+            admitted-consistency :admission)
          existing-requirement (progression-from ctx)
          xtdb-required-bases (frontier-xtdb-required-bases existing-requirement)]
      (if-some [basis-value (latest-completed-basis ctx database)]
