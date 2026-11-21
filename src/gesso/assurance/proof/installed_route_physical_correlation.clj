@@ -63,6 +63,7 @@
     :observer-and-adapter-hook-integrity-not-authenticated
     :http-response-contract-correspondence-not-established
     :response-callback-honesty-and-effect-safety-not-established
+    :issued-response-allowance-not-derived-from-operation-semantics
     :browser-response-effect-admission-not-established
     :actual-xtdb-api-and-transaction-receipt-not-authenticated
     :atomic-transaction-internal-prestate-and-guards
@@ -235,7 +236,7 @@
         :else :non-error-ring-response))))
 
 (defn- classify [selected events poisoned capture observed-request postcheck?
-                  original-response?]
+                  original-response? issued-status-declaration]
   (let [ring-class (ring-response-class capture)
         pair (when-not poisoned
                (resolved-pair events (:operation selected)))
@@ -260,6 +261,7 @@
                        operations-agree? options-agree? definitive?
                        (= :committed (:physical/status outcome))
                        original-response?
+                       (not= :mismatched issued-status-declaration)
                        (= :non-error-ring-response ring-class))
         status (cond
                  poisoned :observer-poisoned
@@ -276,6 +278,8 @@
                  :physical-commit-with-unqualified-ring-response
                  (not original-response?)
                  :installed-ring-response-not-original-issued-response
+                 (= :mismatched issued-status-declaration)
+                 :issued-response-status-declaration-mismatch
                  (not complete?) :unconfirmed-or-uncertain-outcome
                  :else :bounded-installed-route-to-adapter-agreement)]
     {:type report-type
@@ -295,6 +299,7 @@
      :handler-invocation-count 1
      :ring-response-class ring-class
      :original-issued-response-returned-unchanged? (boolean original-response?)
+     :issued-response-status-declaration issued-status-declaration
      :response-contract-correspondence :not-established
      :actual-server-deployment :not-established
      :xtdb-receipt-authenticated? false
@@ -349,7 +354,8 @@
                         true
                         (catch Throwable _ false))
         report (classify selected @events @poisoned captured observed-request
-                         postcheck? (:same-issued-response? observed-response))
+                         postcheck? (:same-issued-response? observed-response)
+                         (:issued-response-status-declaration observed-response))
         positive? (= :bounded-installed-route-to-adapter-agreement
                      (:status report))
         handle (when positive? (InstalledPhysicalHandle.))]

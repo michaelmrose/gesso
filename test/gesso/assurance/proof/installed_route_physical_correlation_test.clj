@@ -89,7 +89,8 @@
                       (swap! calls conj :response)
                       (cond-> {:status @response-status :body result}
                         (seq @response-headers)
-                        (assoc :headers @response-headers)))})]
+                        (assoc :headers @response-headers)))
+                    :response-status-contract {:status 200}})]
       (fixture/with-closed-application
         {:operations
          {operation (fixture/trusted-operation
@@ -176,6 +177,7 @@
     (is (correlation/installed-physical-witness? handle))
     (is (= 1 (:handler-invocation-count report)))
     (is (true? (:original-issued-response-returned-unchanged? report)))
+    (is (= :matched (:issued-response-status-declaration report)))
     (is (true? (:actual-issued-executor-attempt-observed? report)))
     (is (true? (:one-adapter-call-observed? report)))
     (is (true? (:prepared-operations-agree? report)))
@@ -224,6 +226,63 @@
           (is (false? (:same-issued-response? observed)))
           (is (= 200 (get-in observed [:capture :result :status])))
           (is (= 1 @transactions)))))))
+
+(deftest malformed-issued-response-declaration-is-rejected-before-issuance
+  (let [{:keys [executor current-source]}
+        (get-in (:source *case*) [:certified-operations operation])
+        source {:executor executor
+                :current-source current-source
+                :request->input! (fn [_] nil)
+                :result->response! (fn [_ _] {:status 200})}]
+    (doseq [invalid [nil false {:status nil} {:status 503}
+                     {:status 200 :extra true}]]
+      (is (= :invalid-response-status-contract
+             (try
+               (certified/issue-certified-handler!
+                (assoc source :response-status-contract invalid))
+               :not-rejected
+               (catch clojure.lang.ExceptionInfo e
+                 (:reason (ex-data e)))))
+          (str "Must reject malformed issuance policy: " (pr-str invalid))))))
+
+(deftest declared-issued-response-status-must-match-the-actual-callback
+  ;; A statically issued status declaration is separate from the opaque
+  ;; result->response! callback. Even the exact original callback response
+  ;; must not count as declaration-matched when it returns the wrong status.
+  (let [{:keys [executor current-source]}
+        (get-in (:source *case*) [:certified-operations operation])
+        issued (certified/issue-certified-handler!
+                {:executor executor
+                 :current-source current-source
+                 :request->input! (fn [_] ((plan-fixture 'invocation) :submit))
+                 :result->response! (fn [_ result] {:status 201 :body result})
+                 :response-status-contract {:status 200}})
+        req (request)]
+    (artificial-execution {}
+      (fn [{:keys [transactions]}]
+        (let [observation
+              (binding/observe-issued-response-correlation!
+               issued req
+               (fn [] {:outcome :returned :result (issued req)}))]
+          (is (true? (:same-issued-response? observation)))
+          (is (= :mismatched (:issued-response-status-declaration observation)))
+          (is (= 201 (get-in observation [:capture :result :status])))
+          (is (= 1 @transactions)))))))
+
+(deftest selected-issued-route-must-match-its-declared-response-status
+  ;; This is the exact installed handler and same-invocation XTDB adapter,
+  ;; not a second response simulation. The original response callback can
+  ;; change its status while the physical write still occurs.
+  (reset! (:response-status *case*) 201)
+  (artificial-execution {}
+    (fn [{:keys [transactions]}]
+      (let [{:keys [report handle execution]} (observe (options))]
+        (is (= :returned (:outcome execution)))
+        (is (= 201 (get-in execution [:result :status])))
+        (is (= :issued-response-status-declaration-mismatch (:status report)))
+        (is (= :mismatched (:issued-response-status-declaration report)))
+        (is (nil? handle))
+        (is (= 1 @transactions))))))
 
 (deftest committed-adapter-with-error-http-response-is-not-qualified
   ;; A definitive adapter observation is only one edge. The same installed

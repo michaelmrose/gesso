@@ -48,6 +48,8 @@
 
 (def ^:private issue-keys
   #{:executor :current-source :request->input! :result->response!})
+(def ^:private issue-with-status-keys
+  (conj issue-keys :response-status-contract))
 (def ^:private check-keys
   #{:application-assembly :semantic-route-handlers :certified-operations})
 (def ^:private binding-keys #{:executor :current-source})
@@ -148,9 +150,28 @@
 (defn issue-certified-handler!
   "Issue a Ring-compatible handler which actually delegates to the exact
    current certified-plan executor. Trusted conversion callbacks are opaque.
-   The returned function must be inserted into the real router by the app."
+   The returned function must be inserted into the real router by the app.
+   Optional :response-status-contract {:status 200} is a closed, static
+   2xx status allowance pinned at issuance. This does not bind browser
+   effects, response bodies or operation-owned semantic outcome contracts."
   [source]
-  (exact-map! source issue-keys [])
+  (exact-map! source
+              (if (and (map? source) (contains? source :response-status-contract))
+                issue-with-status-keys
+                issue-keys)
+              [])
+  ;; An optional immutable, issuance-pinned allowance for ONE HTTP status.
+  ;; This is application-owned input to the issued handler, not evidence
+  ;; that the canonical operation independently declared response semantics.
+  ;; The original result->response! callback must not choose its allowance
+  ;; dynamically from its own result or the received request.
+  (when (contains? source :response-status-contract)
+    (let [declared (:response-status-contract source)
+          status (when (map? declared) (:status declared))]
+      (when-not (and (plain-map? declared) (nil? (meta declared))
+                     (= #{:status} (set (keys declared)))
+                     (integer? status) (<= 200 status 299))
+        (fail! :invalid-response-status-contract [:response-status-contract] {}))))
   (let [{:keys [executor current-source request->input! result->response!]} source]
     (when-not (and (fn? request->input!) (fn? result->response!))
       (fail! :invalid-handler-callbacks [:callbacks] {}))
@@ -174,11 +195,14 @@
                       (observe! certified-route-handler ctx response))
                     response)))]
         (let [issued certified-route-handler
-              entry {:executor executor
-                     :original-source current-source
-                     :operation (:operation proof-description)
-                     :request->input! request->input!
-                     :result->response! result->response!}]
+              entry (cond-> {:executor executor
+                             :original-source current-source
+                             :operation (:operation proof-description)
+                             :request->input! request->input!
+                             :result->response! result->response!}
+                      (contains? source :response-status-contract)
+                      (assoc :response-status-contract
+                             (:response-status-contract source)))]
           (locking issued-handlers (.put issued-handlers issued entry))
           issued)))))
 
@@ -190,14 +214,19 @@
    and request object, and object identity of the callback's returned value
    with the final Ring response. This is a bounded in-process observation:
    it does not verify the contents, HTML, headers, browser effects, or the
-   callback's honesty, and does not authenticate a deployed server."
+   callback's honesty, and does not authenticate a deployed server. When
+   the handler carries a static issuance-bound :response-status-contract,
+   its actual returned status is checked independently of the callback's
+   chosen result. Such a match is only issued-source-relative, NOT a
+   canonical operation response proof."
   [handler request capture!]
   (when-not (and (fn? capture!) (map? request)
                  (registered-handler handler))
     (fail! :invalid-issued-response-observation [:response] {}))
   (when *issued-response-observer*
     (fail! :nested-issued-response-observation [:response] {}))
-  (let [{:keys [executor original-source]} (registered-handler handler)
+  (let [{:keys [executor original-source] :as issued}
+        (registered-handler handler)
         _ (require-current-binding! executor original-source)
         calling-thread (Thread/currentThread)
         events (volatile! [])
@@ -210,15 +239,26 @@
                                                               (Thread/currentThread))
                                     :response response}))]
                   (capture!))
-        event (first @events)]
+        event (first @events)
+        same-response?
+        (boolean (and (= 1 (count @events))
+                      (:right-handler? event)
+                      (:right-request? event)
+                      (:same-thread? event)
+                      (= :returned (:outcome capture))
+                      (identical? (:response event) (:result capture))))
+        declared-status
+        (cond
+          (not (contains? issued :response-status-contract)) :not-declared
+          (not same-response?) :unconfirmed
+          (= (get-in issued [:response-status-contract :status])
+             (get-in capture [:result :status])) :matched
+          :else :mismatched)]
     {:capture capture
-     :same-issued-response?
-     (boolean (and (= 1 (count @events))
-                   (:right-handler? event)
-                   (:right-request? event)
-                   (:same-thread? event)
-                   (= :returned (:outcome capture))
-                   (identical? (:response event) (:result capture))))}))
+     :same-issued-response? same-response?
+     ;; A redacted, source-relative result: never expose callback response
+     ;; or claimed expected status in this copyable diagnostic evidence.
+     :issued-response-status-declaration declared-status}))
 
 (defn observe-issued-executor-invocation!
   "Run invoke! synchronously, accepting exactly one callback from the exact
