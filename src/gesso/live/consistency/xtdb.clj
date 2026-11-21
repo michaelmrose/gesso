@@ -1666,14 +1666,14 @@
   ;; particular, an explicitly supplied false must not be treated like nil
   ;; and silently bypass the wrapper whose behavior the caller relies on.
   (when (and (some? existing-wrapper)
-             (not (ifn? existing-wrapper)))
+             (not (fn? existing-wrapper)))
     (throw
      (ex "Existing Biff request snapshot wrapper must be callable."
          {:wrapper existing-wrapper})))
   (let [fixed-bases (decode-canonical-biff-snapshot!
                      database-name snapshot-token)]
     (fn [f]
-      (when-not (ifn? f)
+      (when-not (fn? f)
         (throw
          (ex "Biff request snapshot wrapper requires a callable body."
              {:body f})))
@@ -1784,7 +1784,7 @@
   ;; has no preexisting wrapper. Install the same execution-time guard for
   ;; those obligations instead of letting a fresh handler request erase them.
   (when (and (some? existing-wrapper)
-             (not (ifn? existing-wrapper)))
+             (not (fn? existing-wrapper)))
     (throw
      (ex "Existing Biff request snapshot wrapper must be callable."
          {:wrapper existing-wrapper})))
@@ -1792,7 +1792,7 @@
                          (decode-canonical-biff-snapshot! database-name token)
                          {})]
     (fn [body]
-      (when-not (ifn? body)
+      (when-not (fn? body)
         (throw
          (ex "Biff request snapshot wrapper requires a callable body."
              {:body body})))

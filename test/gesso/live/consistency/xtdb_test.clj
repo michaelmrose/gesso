@@ -3280,6 +3280,51 @@
             (when (instance? clojure.lang.ExceptionInfo result)
               (is (= token (:snapshot-token (ex-data result)))))))))))
 
+(deftest biff-snapshot-wrappers-reject-invokable-data-test
+  ;; Clojure collections and keywords implement IFn so `ifn?` alone does not
+  ;; establish that a configured Biff middleware wrapper is an actual fn.
+  ;; Invoking a map or keyword with the handler as its key simply returns nil,
+  ;; silently bypassing the request and all of its read obligations.
+  (let [time (Instant/parse "2026-11-20T22:00:00Z")
+        invalid-wrappers [{} #{:handler} [:handler] :handler]
+        invalid-bodies [{} #{:request} [:request] :request]
+        body-calls (atom 0)]
+    (doseq [populated? [true false]]
+      (with-xtdb-stub '*status*
+        (fn [_] {:latest-completed-txs
+                 {"xtdb" (if populated?
+                           [{:tx-id 2061 :system-time time}]
+                           [])}})
+        (fn []
+          (doseq [wrapper invalid-wrappers]
+            (let [failure (try
+                            (xtdb-live/bind-request-frontier
+                             {:xtdb/node :authority-node
+                              :biff.core/wrap-db-snapshot wrapper})
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo failure)
+                  (str "Invokable data cannot be a Biff wrapper: "
+                       (pr-str wrapper)))
+              (when (instance? clojure.lang.ExceptionInfo failure)
+                (is (= wrapper (:wrapper (ex-data failure)))))))
+          (let [bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node :authority-node})
+                wrap (:biff.core/wrap-db-snapshot bound)]
+            (doseq [body invalid-bodies]
+              (let [failure (try (wrap body)
+                                 nil
+                                 (catch clojure.lang.ExceptionInfo e e))]
+                (is (instance? clojure.lang.ExceptionInfo failure)
+                    (str "Invokable data cannot be a Biff handler: "
+                         (pr-str body)))
+                (when (instance? clojure.lang.ExceptionInfo failure)
+                  (is (= body (:body (ex-data failure)))))))
+            (is (ifn? (wrap (fn [_] (swap! body-calls inc) :ok)))
+                "Ordinary Biff middleware functions must remain supported")))))
+    (is (zero? @body-calls)
+        "Valid wrapped handlers have not yet been invoked")))
+
 (deftest populated-frontier-rejects-noncallable-outer-biff-wrapper-test
   ;; A populated XTDB database is not permission to erase a configured Biff
   ;; wrapper. In particular, false is present but non-callable: the former
