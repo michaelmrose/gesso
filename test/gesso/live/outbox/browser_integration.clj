@@ -23,6 +23,7 @@
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http :as http]
+            [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.progression.http :as progression.http]
             [gesso.live.source :as source]
             [gesso.live.ui :as ui]
@@ -76,25 +77,51 @@
                   :source-options {:coalesce-window-ms 0}
                   :dispatch-options {:threads 1 :queue-size 8 :on-overflow :throw}}})
 
-(defn- stable-q [node query]
+(defn- stable-q
   ;; XTDB 2.2.0-beta1 occasionally invalidates SELECT * plans when an outbox
   ;; row gains lease/ack fields. Retry ONLY that typed transient conflict.
-  (loop [remaining 8]
-    (let [attempt (try {:rows (xt/q node query)}
-                       (catch Throwable error {:error error}))]
-      (if-let [error (:error attempt)]
-        (if (and (pos? remaining)
-                 (= :prepared-query-out-of-date
-                    (:xtdb.error/code (ex-data error))))
-          (do (Thread/sleep 30) (recur (dec remaining)))
-          (throw error))
-        (:rows attempt)))))
+  ;; When a Ring request is supplied, bind the (untrusted) HTTP progression
+  ;; as a request-local minimum and perform XTDB's authority-aware read.
+  ([node query] (stable-q node query nil))
+  ([node query request]
+   (let [ctx (when request
+               (progression.http/bind-request-progression
+                (assoc request :xtdb/connectable node)))]
+     (loop [remaining 8]
+       (let [attempt (try {:rows (if ctx
+                                   (live.xtdb/q-consistent-from ctx query)
+                                   (xt/q node query))}
+                          (catch Throwable error {:error error}))]
+         (if-let [error (:error attempt)]
+           (if (and (pos? remaining)
+                    (= :prepared-query-out-of-date
+                       (:xtdb.error/code (ex-data error))))
+             (do (Thread/sleep 30) (recur (dec remaining)))
+             (throw error))
+           (:rows attempt)))))))
 
-(defn- fragment-markup [node]
-  (let [row (first (stable-q node ["SELECT * FROM requests WHERE _id = ?" subject]))
-        state (or (:status row) :pending)]
-    (str "<div id=\"" panel-id "\" data-authoritative-status=\""
-         (name state) "\">" (name state) "</div>")))
+(defn- fragment-markup
+  ([node] (fragment-markup node {}))
+  ([node request]
+   (let [row (first (stable-q node
+                              ["SELECT * FROM requests WHERE _id = ?" subject]
+                              request))
+         state (or (:status row) :pending)]
+     (str "<div id=\"" panel-id "\" data-authoritative-status=\""
+          (name state) "\">" (name state) "</div>"))))
+
+(defn- fragment-response
+  "Fixture's minimum-read boundary: invalid browser header fails BEFORE any
+   authoritative query, while valid requirements reach q-consistent-from.
+   This is test-only Ring code, NOT an application authentication policy."
+  [node request]
+  (try
+    {:status 200 :headers html-headers :body (fragment-markup node request)}
+    (catch clojure.lang.ExceptionInfo error
+      (if (= :gesso.live.progression.http/error
+             (:error/type (ex-data error)))
+        {:status 400 :headers html-headers :body "Invalid progression"}
+        (throw error)))))
 
 (def ^:private observer-js
   (str "window.__v2109={messages:0,opens:0,refreshes:0,headers:[],errors:[]};\n"
@@ -224,8 +251,7 @@
                          :body html}
                         (= "/fragment" (:uri request))
                         (do (swap! requests conj request)
-                            {:status 200 :headers html-headers
-                             :body (fragment-markup node)})
+                            (fragment-response node request))
                         :else ((:handler route) request)))
               server (start-loopback! serve)
               harness* (atom nil)
@@ -292,12 +318,16 @@
               ((:close! server))
               (host/stop! started))))))))
 
-(defn- get-body! [^HttpClient client base path]
-  (let [request (.build (.GET (HttpRequest/newBuilder
-                              (URI/create (str base path)))))
-        response (.send client request (HttpResponse$BodyHandlers/ofString))]
-    {:status (.statusCode response)
-     :body (.body response)}))
+(defn- get-body!
+  ([^HttpClient client base path] (get-body! client base path {}))
+  ([^HttpClient client base path headers]
+   (let [builder (.GET (HttpRequest/newBuilder (URI/create (str base path))))
+         builder (reduce-kv (fn [b name value] (.header b name value))
+                            builder headers)
+         response (.send client (.build builder)
+                         (HttpResponse$BodyHandlers/ofString))]
+     {:status (.statusCode response)
+      :body (.body response)})))
 
 (deftest canonical-browser-page-and-authoritative-fragment-over-loopback-test
   ;; Independent JVM/HTTP gate: does NOT claim a browser received the page.
@@ -324,8 +354,7 @@
                         (cond (= uri "/")
                               {:status 200 :headers html-headers :body page}
                               (= uri "/fragment")
-                              {:status 200 :headers html-headers
-                               :body (fragment-markup node)}
+                              (fragment-response node {:uri uri :headers {}})
                               (contains? js uri)
                               {:status 200 :headers js-headers
                                :body (get js uri)}
@@ -373,6 +402,78 @@
               ((:close! server))
               (host/stop! started))))))))
 
+
+(deftest actual-http-fragment-read-honors-source-progression-test
+  ;; This JVM/HTTP gate cannot replace real EventSource/HTMX, but it proves
+  ;; the server never ignores the header emitted by the browser adapter.
+  ;; The required basis comes from a REAL outbox source event, not an invented
+  ;; token; the physical request uses the same header spelling as HTMX.
+  (let [ops (standard-operations)
+        render (render-context ops)]
+    (with-surfaced-application
+      {:request-board [:main (rendered-operation-button
+                              render :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [handler (fn [_] (g/html-response
+                              [:main (rendered-operation-button
+                                      render :request/claim
+                                      "/operations/request/claim")]))
+              started (host/start! assembly handler (config))
+              node (:xtdb/connectable started)
+              tap (source/subscribe (:source (:gesso.live/system started))
+                                    {:topic :request :id subject})
+              seen-requests (atom [])
+              server (start-loopback!
+                      (fn [request]
+                        (if (= "/fragment" (:uri request))
+                          (do (swap! seen-requests conj request)
+                              (fragment-response node request))
+                          {:status 404 :headers {} :body "Not found"})))
+              client (HttpClient/newHttpClient)]
+          (try
+            (xt/execute-tx node [[:put-docs :requests
+                                  {:xt/id subject :status :pending}]])
+            (is (= 200 (:status (get-body! client (:url server) "/fragment"))))
+            ;; Even a malformed URI/EDN header must be rejected before query.
+            (let [bad (get-body! client (:url server) "/fragment"
+                                 {progression.http/request-header-name "%not-valid"})]
+              (is (= 400 (:status bad)))
+              (is (= "Invalid progression" (:body bad))))
+            (let [id (random-uuid)
+                  plan (outbox/prepare!
+                        {:intent-ids [id] :source-id source-id
+                         :operation :request/claim :purpose :gesso.live/refresh}
+                        [{:topic :request :id subject :change/kind :updated}])]
+              (xt/execute-tx node (into (vec (:guard-ops plan))
+                                        [[:put-docs :requests
+                                          {:xt/id subject :status :claimed}]
+                                         (:tx-op plan)]))
+              (is (eventually
+                   #(= :dispatch-accepted
+                       (:gesso.live.outbox/status
+                        (first (stable-q node
+                                 ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id]))))))
+              (let [event (deref (stream/take! tap) 5000 ::timeout)
+                    requirement (:progression event)
+                    header (progression.http/encode-request-progression requirement)
+                    reply (get-body! client (:url server) "/fragment"
+                                     {progression.http/request-header-name header})]
+                (is (= subject (:id event)))
+                (is (some? requirement))
+                (is (string? header))
+                (is (= requirement
+                       (progression.http/decode-request-progression header)))
+                (is (= 200 (:status reply)))
+                (is (str/includes? (:body reply)
+                                   "data-authoritative-status=\"claimed\""))
+                (is (= header
+                       (get-in (last @seen-requests)
+                               [:headers progression.http/request-header-name])))))
+            (finally
+              (stream/close! tap)
+              ((:close! server))
+              (host/stop! started))))))))
+
 (defn -main [& args]
   ;; The readiness selection can run where managed Chromium policies deny
   ;; loopback URLs. The default browser gate never silently downgrades to it.
@@ -384,7 +485,8 @@
                  (binding [test/*report-counters*
                            (ref test/*initial-report-counters*)]
                    (test/test-vars
-                    [#'canonical-browser-page-and-authoritative-fragment-over-loopback-test])
+                    [#'canonical-browser-page-and-authoritative-fragment-over-loopback-test
+                     #'actual-http-fragment-read-honors-source-progression-test])
                    @test/*report-counters*)
                  (run-tests 'gesso.live.outbox.browser-integration))]
     (println "V2109 RESULTS" result)
