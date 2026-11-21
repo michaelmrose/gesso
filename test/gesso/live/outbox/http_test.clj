@@ -310,6 +310,61 @@
                                      (source/stats src))))))
            (finally ((:close! route)))))))))
 
+(deftest managed-route-rejects-false-sse-representation-metadata-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           calls (atom 0)
+           base {:path "/live/events"
+                 :authorize-subscription (fn [_]
+                                           (swap! calls inc)
+                                           scope)}]
+       ;; This transport writes plain SSE text. An application cannot claim
+       ;; it encoded those bytes as gzip/br, nor advertise a partial range on
+       ;; a successful unbounded EventSource stream. HTTP fields ignore case.
+       (doseq [[header value] [["content-encoding" "gzip"]
+                               ["Content-Encoding" "br"]
+                               ["CONTENT-ENCODING" "identity"]
+                               ["content-range" "bytes 0-9/10"]
+                               ["Content-Range" "bytes 0-9/*"]]]
+         (let [result (try
+                        (http/wrap-authorized-sse
+                         started (assoc base :sse-options
+                                        {:headers {header value}}))
+                        (catch clojure.lang.ExceptionInfo e e))]
+           (try
+             (is (= :invalid-sse-reserved-header
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:reason (ex-data result))))
+                 (str "Reject false SSE body metadata: " header))
+             (is (zero? @calls)
+                 "Misleading response metadata must not invoke authorization")
+             (is (zero? (:subscription-count (source/stats src)))
+                 "Misleading response metadata must not create a Live interest")
+             (finally
+               (when (map? result) ((:close! result)))))))
+       ;; Vary is legitimate application-controlled response metadata, while
+       ;; neither content encoding nor a content range may be synthesized.
+       (let [route (http/wrap-authorized-sse
+                    started (assoc base :sse-options
+                                   {:headers {"vary" "Origin"
+                                              "x-gesso-trace" "allowed"}}))]
+         (try
+           (let [response ((:handler route)
+                           {:uri "/live/events" :request-method :get})]
+             (is (= 200 (:status response)))
+             (is (= "Origin" (get-in response [:headers "vary"])))
+             (is (= "allowed" (get-in response [:headers "x-gesso-trace"])))
+             (is (not (contains? (:headers response) "content-encoding")))
+             (is (not (contains? (:headers response) "content-range")))
+             (is (false? (stream/closed? (:body response))))
+             (is (= 1 @calls))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (stream/close! (:body response))
+             (is (eventually #(zero? (:subscription-count
+                                     (source/stats src))))))
+           (finally ((:close! route)))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]

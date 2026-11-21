@@ -26,10 +26,14 @@
                          :reason reason))))
 
 (def ^:private reserved-sse-response-headers
-  ;; The managed route owns stream framing, cache safety and proxy buffering.
-  ;; User-supplied case variants must not override or duplicate defaults.
-  #{"cache-control" "connection" "keep-alive" "proxy-connection"
-    "te" "trailer" "transfer-encoding" "upgrade" "x-accel-buffering"})
+  ;; The managed route owns stream framing, representation metadata, cache
+  ;; safety and proxy buffering. The transport emits uncompressed SSE text:
+  ;; a user-supplied Content-Encoding would misdescribe those bytes, while
+  ;; Content-Range would incorrectly describe a partial streamed response.
+  ;; Case variants must not bypass these restrictions.
+  #{"cache-control" "connection" "content-encoding" "content-range"
+    "keep-alive" "proxy-connection" "te" "trailer"
+    "transfer-encoding" "upgrade" "x-accel-buffering"})
 
 (defn- valid-scope? [subscription]
   (and (map? subscription)
@@ -55,8 +59,10 @@
    would register a Live interest but cannot establish EventSource delivery.
    A fixed Content-Length is also forbidden: EventSource is an indefinite
    streamed body, whose framing must be managed by the HTTP server itself.
-   Other server-owned framing headers and managed cache/proxy-buffering
-   headers cannot be overridden by the application, including case variants.
+   Other server-owned framing, body-encoding/range metadata and managed
+   cache/proxy-buffering headers cannot be overridden by the application,
+   including case variants. Managed SSE emits uncompressed full text frames;
+   any actual on-wire compression is the HTTP server's responsibility.
    Reject these misconfigurations before authorization or subscription.
    Invalid callback results and callback exceptions propagate before a
    subscription can be installed. Once closed, the managed GET route
@@ -114,9 +120,9 @@
                                       field))
                                   (keys (:headers validated-sse)))]
             (reject! :invalid-sse-content-length {:header header}))
-        ;; User overrides must not defeat no-cache/no-transform or proxy
-        ;; buffering protection. Nor may Ring applications set hop-by-hop
-        ;; framing fields: these belong to the HTTP server, not EventSource.
+        ;; User overrides must not defeat cache or proxy buffering protection,
+        ;; mislabel the actual uncompressed SSE bytes, claim a partial range,
+        ;; or set hop-by-hop framing fields owned by the HTTP server.
         _ (when-let [header (some (fn [^String field]
                                     (when (contains? reserved-sse-response-headers
                                                      (str/lower-case field))
