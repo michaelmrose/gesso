@@ -1147,6 +1147,106 @@
            (when @first-request (future-cancel @first-request))
            ((:close! route))))))))
 
+(deftest managed-http-shutdown-coordinator-serializes-success-test
+  ;; The v2148 one-shot helper requires external caller serialization.
+  ;; This coordinator must enforce at-most-once host stop itself, including
+  ;; while several callers overlap in the listener cleanup step.
+  (let [calls (atom [])
+        listener-entered (promise)
+        listener-release (promise)
+        route {:close! #(swap! calls conj :route)
+               :await-drained! (fn [_] (swap! calls conj :drain)
+                                  {:outcome :drained})}
+        coordinator
+        (http/prepare-managed-http-shutdown
+         {:route route :drain-timeout-ms 50
+          :stop-listener! (fn []
+                            (swap! calls conj :listener)
+                            (deliver listener-entered true)
+                            @listener-release
+                            {:outcome :drained})
+          :stop-host! (fn [] (swap! calls conj :host) :once)})
+        first-call (future ((:stop! coordinator)))
+        others (atom [])]
+    (try
+      (is (= true (deref listener-entered 2000 ::timeout)))
+      (is (= :running ((:status coordinator))))
+      (reset! others (vec (repeatedly 4 #(future ((:stop! coordinator))))))
+      (deliver listener-release true)
+      (is (= {:outcome :stopped :host-result :once}
+             (deref first-call 5000 ::timeout)))
+      (doseq [other @others]
+        (is (= {:outcome :stopped :host-result :once}
+               (deref other 5000 ::timeout))))
+      (is (= :stopped ((:status coordinator))))
+      (is (= {:outcome :stopped :host-result :once} ((:stop! coordinator))))
+      (is (= [:route :listener :drain :host] @calls)
+          "Concurrent and repeated shutdown must not repeat side effects")
+      (finally
+        (deliver listener-release true)
+        (future-cancel first-call)
+        (doseq [other @others] (future-cancel other))))))
+
+(deftest managed-http-shutdown-coordinator-retries-before-provider-stop-test
+  (let [calls (atom [])
+        drain-attempts (atom 0)
+        route {:close! #(swap! calls conj :route)
+               :await-drained!
+               (fn [_]
+                 (swap! calls conj :drain)
+                 (if (= 1 (swap! drain-attempts inc))
+                   {:outcome :timed-out}
+                   {:outcome :drained}))}
+        coordinator
+        (http/prepare-managed-http-shutdown
+         {:route route :drain-timeout-ms 20
+          :stop-listener! (fn [] (swap! calls conj :listener)
+                            {:outcome :drained})
+          :stop-host! (fn [] (swap! calls conj :host) :ok)})]
+    (is (= :ready ((:status coordinator))))
+    (is (= {:outcome :timed-out} ((:stop! coordinator))))
+    (is (= :ready ((:status coordinator)))
+        "A drain timeout may be retried once outstanding work finishes")
+    (is (= [:route :listener :drain] @calls))
+    (is (= {:outcome :stopped :host-result :ok} ((:stop! coordinator))))
+    (is (= :stopped ((:status coordinator))))
+    (is (= [:route :listener :drain :route :listener :drain :host] @calls))
+    (is (= {:outcome :stopped :host-result :ok} ((:stop! coordinator))))
+    (is (= 1 (count (filter #{:host} @calls)))))
+  ;; Invalid plans must fail before creating a coordinator, without effects.
+  (let [called (atom 0)
+        plan {:route {:close! #(swap! called inc)
+                      :await-drained! (fn [_] {:outcome :drained})}
+              :stop-listener! (fn [] (swap! called inc)
+                                {:outcome :drained})
+              :stop-host! #(swap! called inc)
+              :drain-timeout-ms 200001}]
+    (is (= :invalid-drain-timeout-ms
+           (exception-reason #(http/prepare-managed-http-shutdown plan))))
+    (is (zero? @called))))
+
+(deftest managed-http-shutdown-coordinator-fences-unknown-host-outcome-test
+  (let [calls (atom [])
+        failed-stop (ex-info "Host stop may have happened" {:test :v2149})
+        route {:close! #(swap! calls conj :route)
+               :await-drained! (fn [_] (swap! calls conj :drain)
+                                  {:outcome :drained})}
+        coordinator
+        (http/prepare-managed-http-shutdown
+         {:route route :drain-timeout-ms 50
+          :stop-listener! (fn [] (swap! calls conj :listener)
+                            {:outcome :drained})
+          :stop-host! (fn [] (swap! calls conj :host)
+                        (throw failed-stop))})]
+    (is (identical? failed-stop
+                    (try ((:stop! coordinator))
+                         (catch Throwable error error))))
+    (is (= :host-stop-unknown ((:status coordinator))))
+    (is (= :host-shutdown-outcome-unknown
+           (exception-reason #((:stop! coordinator)))))
+    (is (= [:route :listener :drain :host] @calls)
+        "Do not replay host teardown when the initial effect is ambiguous")))
+
 (deftest managed-http-owner-shutdown-orders-listener-drain-and-host-test
   (setup-host
    (fn [started]

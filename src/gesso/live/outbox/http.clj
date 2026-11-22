@@ -428,6 +428,22 @@
                          (true? (deref drained-signal timeout-ms false)))
                    :drained :timed-out)})}))
 
+(defn- validate-managed-http-shutdown-plan!
+  [{:keys [route stop-listener! stop-host! drain-timeout-ms] :as options}]
+  (when-not (and (map? options)
+                 (= #{:route :stop-listener! :stop-host! :drain-timeout-ms}
+                    (set (keys options)))
+                 (map? route)
+                 (fn? (:close! route))
+                 (fn? (:await-drained! route))
+                 (fn? stop-listener!)
+                 (fn? stop-host!))
+    (reject! :invalid-http-shutdown-plan {}))
+  (when-not (and (integer? drain-timeout-ms)
+                 (<= 0 drain-timeout-ms 120000))
+    (reject! :invalid-drain-timeout-ms {:timeout-ms drain-timeout-ms}))
+  options)
+
 (defn stop-managed-http-host!
   "Perform caller-owned HTTP shutdown before stopping a Gesso host.
 
@@ -447,8 +463,9 @@
    explicit caller-owned assertions, not independently proven facts.
 
    The caller may retry once in-flight work finishes, provided its
-   listener-stop callback is idempotent. The owner must serialize shutdown
-   invocations so that a successful host stop cannot be invoked twice.
+   listener-stop callback is idempotent. This is a single-attempt primitive;
+   use prepare-managed-http-shutdown for serialized, once-only retries.
+   Otherwise, the owner must serialize invocations and prevent duplicates.
    A route-close failure does not suppress listener cleanup, but neither
    failure can authorize host stop. Invalid plans fail before effects.
 
@@ -456,18 +473,7 @@
    callbacks, listener drain, or provider shutdown. This helper never
    creates, owns, or implicitly drains the HTTP listener."
   [{:keys [route stop-listener! stop-host! drain-timeout-ms] :as options}]
-  (when-not (and (map? options)
-                 (= #{:route :stop-listener! :stop-host! :drain-timeout-ms}
-                    (set (keys options)))
-                 (map? route)
-                 (fn? (:close! route))
-                 (fn? (:await-drained! route))
-                 (fn? stop-listener!)
-                 (fn? stop-host!))
-    (reject! :invalid-http-shutdown-plan {}))
-  (when-not (and (integer? drain-timeout-ms)
-                 (<= 0 drain-timeout-ms 120000))
-    (reject! :invalid-drain-timeout-ms {:timeout-ms drain-timeout-ms}))
+  (validate-managed-http-shutdown-plan! options)
   ;; Failure of one cleanup step must not skip the listener's shutdown.
   ;; Preserve the route-close failure, with any listener error suppressed.
   (let [route-error (try ((:close! route)) nil
@@ -493,3 +499,60 @@
       :timed-out {:outcome :listener-timed-out}
       (reject! :invalid-listener-drain-outcome
                {:listener-result (second listener-result)}))))
+
+(defn prepare-managed-http-shutdown
+  "Create a caller-owned, serialized shutdown coordinator for one host.
+
+   Accepts the same immutable plan as stop-managed-http-host! and rejects an
+   invalid plan before any effects. Returns {:stop! callback :status callback}.
+   Concurrent callers of :stop! share one monitor. A confirmed :stopped
+   result is returned unchanged to later callers: listener and host cleanup
+   cannot run twice through this coordinator.
+
+   An SSE or listener drain timeout, or a cleanup error *before* stop-host!
+   begins, restores :ready so the owner can retry. Both cleanup callbacks
+   must be idempotent across such retries. If stop-host! itself throws,
+   Gesso cannot know whether provider teardown occurred; status becomes
+   :host-stop-unknown and subsequent attempts reject with a typed error.
+   This avoids treating an ambiguous external side effect as safe to replay.
+
+   :status returns :ready, :running, :stopped, or :host-stop-unknown. The
+   coordinator does not own the listener, automatically interrupt work, or
+   infer that an external listener's drain acknowledgement is truthful."
+  [plan]
+  (validate-managed-http-shutdown-plan! plan)
+  (let [monitor (Object.)
+        phase (atom :ready)
+        completed (atom nil)]
+    {:status (fn [] @phase)
+     :stop!
+     (fn []
+       (locking monitor
+         (case @phase
+           :stopped @completed
+           :host-stop-unknown
+           (reject! :host-shutdown-outcome-unknown {})
+           :running
+           (reject! :reentrant-managed-http-shutdown {})
+           :ready
+           (let [host-stop-entered? (volatile! false)
+                 guarded-plan
+                 (assoc plan :stop-host!
+                        (fn []
+                          ;; Publish the uncertainty before invoking code that
+                          ;; may stop providers and then raise an exception.
+                          (vreset! host-stop-entered? true)
+                          ((:stop-host! plan))))]
+             (reset! phase :running)
+             (try
+               (let [result (stop-managed-http-host! guarded-plan)]
+                 (if (= :stopped (:outcome result))
+                   (do
+                     (reset! completed result)
+                     (reset! phase :stopped))
+                   (reset! phase :ready))
+                 result)
+               (catch Throwable error
+                 (reset! phase (if @host-stop-entered?
+                                 :host-stop-unknown :ready))
+                 (throw error)))))))}))
