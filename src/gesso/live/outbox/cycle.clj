@@ -100,6 +100,23 @@
       (reject! :invalid-worker-page {:page page :after after}))
     page))
 
+(defn- unverified-acquisition-attempt
+  "Retain a worker's submitted lease only as an unverified recovery lead.
+   A thrown acquisition may have committed, but the exception supplies no
+   permission to deliver or to treat the lease as physically owned."
+  [error worker-id expected-source-id]
+  (let [claim (:unverified-lease (ex-data error))]
+    (when (and (map? claim)
+               (= :unverified-acquisition-attempt (:evidence claim))
+               (uuid? (:intent-id claim))
+               (uuid? (:lease-id claim))
+               (= worker-id (:worker-id claim))
+               (= expected-source-id (:source-id claim))
+               (#{:acquire-pending :reclaim-expired}
+                (:acquisition-action claim)))
+      (select-keys claim [:intent-id :lease-id :worker-id :source-id
+                          :lease-until :acquisition-action :evidence]))))
+
 (defn- reported-acquisition-lease
   "Preserve a *reported*, not physically certified, acquired lease when a
    worker page is malformed. The cycle must fail before dispatch but provide
@@ -269,7 +286,9 @@
                        (worker/acquire-sweep! node work-opts)
                        (catch Throwable e
                          (interrupted! :acquisition :acquisition-exception
-                                       completed cursor nil
+                                       completed cursor
+                                       (unverified-acquisition-attempt
+                                        e worker-id expected-source-id)
                                        {:original-error/type (:error/type (ex-data e))}
                                        e)))
             page (try

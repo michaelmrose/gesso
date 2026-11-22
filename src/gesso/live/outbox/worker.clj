@@ -140,13 +140,36 @@
                :lease-id (random-uuid)
                :now now
                :lease-until (.plusMillis now (long lease-millis))}
-        outcome
-        (case action
-          :acquire-pending (acquisition/acquire-pending! node claim)
-          :reclaim-expired (acquisition/reclaim-expired! node claim)
-          (reject! :unknown-action {:action action :intent-id intent-id}))
-        verified (validate-acquisition-result! claim action outcome)]
-    (assoc verified :action action)))
+        reported {:intent-id intent-id
+                  :lease-id (:lease-id claim)
+                  :worker-id worker-id
+                  :source-id source-id
+                  :lease-until (:lease-until claim)
+                  :acquisition-action action
+                  :evidence :unverified-acquisition-attempt}]
+    (try
+      (let [outcome (case action
+                      :acquire-pending (acquisition/acquire-pending! node claim)
+                      :reclaim-expired (acquisition/reclaim-expired! node claim)
+                      (reject! :unknown-action {:action action :intent-id intent-id}))
+            verified (validate-acquisition-result! claim action outcome)]
+        (assoc verified :action action))
+      (catch Throwable cause
+        ;; A physical CAS may have committed before the adapter failed, or
+        ;; the adapter's result may have violated its contract after commit.
+        ;; Do not turn the attempted token into an authorized lease; retain
+        ;; the exact submitted credentials as *unverified* recovery evidence.
+        (when (instance? InterruptedException cause)
+          (.interrupt (Thread/currentThread)))
+        (let [original (or (ex-data cause) {})]
+          (throw (ex-info (or (.getMessage cause)
+                              "Physical acquisition outcome unknown.")
+                          (-> original
+                              (assoc :unverified-lease reported)
+                              (update :error/type
+                                      #(or % :gesso.live.outbox/acquisition-unknown))
+                              (update :reason #(or % :acquisition-exception)))
+                          cause)))))))
 
 (defn acquire-sweep!
   "Discover and attempt to acquire a finite number of current outbox intents.

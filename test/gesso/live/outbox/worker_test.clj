@@ -461,3 +461,80 @@
           (is (= "trusted-worker" (:worker-id lease)))
           (is (= (if (= status :acquired) 1 0) (:acquired result)))
           (is (= (if (= status :reclaimed) 1 0) (:reclaimed result))))))))
+
+(deftest uncertain-physical-acquisition-retains-attempted-lease-test
+  ;; XTDB may have installed the lease before the adapter throws. Preserve
+  ;; the exact attempted credentials for reconciliation, not as authority to
+  ;; deliver. The existing physical error must remain the direct cause.
+  (doseq [action [:acquire-pending :reclaim-expired]
+          interrupted? [false true]]
+    (let [id (random-uuid)
+          called (atom [])
+          cause (if interrupted?
+                  (InterruptedException. "physical acquisition interrupted")
+                  (ex-info "physical acquisition uncertain" {:phase :xtdb-submit}))
+          physical (fn [_ claim]
+                     (swap! called conj claim)
+                     (throw cause))]
+      (try
+        (Thread/interrupted)
+        (let [failure (with-redefs
+                        [discovery/discover-eligible!
+                         (fn [_ _]
+                           {:candidates [{:intent-id id :action action}]
+                            :has-more? false :next-after nil})
+                         acquisition/acquire-pending! physical
+                         acquisition/reclaim-expired! physical]
+                        (try
+                          (worker/acquire-sweep! :node
+                                                 {:worker-id "worker-a"
+                                                  :source-id "gesso/test-worker"})
+                          (catch Throwable error error)))
+              flag (.isInterrupted (Thread/currentThread))
+              intended (first @called)
+              evidence (:unverified-lease (ex-data failure))]
+          (Thread/interrupted)
+          (is (instance? clojure.lang.ExceptionInfo failure))
+          (is (identical? cause (.getCause ^Throwable failure)))
+          (is (= :unverified-acquisition-attempt (:evidence evidence)))
+          (is (= id (:intent-id evidence)))
+          (is (= (:lease-id intended) (:lease-id evidence)))
+          (is (= (:worker-id intended) (:worker-id evidence)))
+          (is (= (:source-id intended) (:source-id evidence)))
+          (is (= (:lease-until intended) (:lease-until evidence)))
+          (is (= action (:acquisition-action evidence)))
+          (is (= 1 (count @called)) "Do not automatically retry a CAS")
+          (is (= interrupted? flag) "A physical interrupt must remain visible")
+          (when-not interrupted?
+            (is (= :xtdb-submit (:phase (ex-data failure)))
+                "Preserve original physical error data")))
+        (finally
+          (Thread/interrupted))))))
+
+(deftest malformed-acquisition-result-retains-expected-not-forged-lease-test
+  ;; A post-CAS provider response can lie about its lease token. Keep the
+  ;; worker-generated token, NEVER a token copied from the malformed result.
+  (let [id (random-uuid)
+        submitted (atom nil)
+        forged (random-uuid)
+        error (with-redefs
+               [discovery/discover-eligible!
+                (fn [_ _]
+                  {:candidates [{:intent-id id :action :acquire-pending}]
+                   :has-more? false :next-after nil})
+                acquisition/acquire-pending!
+                (fn [_ claim]
+                  (reset! submitted claim)
+                  (assoc (select-keys claim [:intent-id :lease-id :worker-id :lease-until])
+                         :status :acquired :lease-id forged))]
+                (try
+                  (worker/acquire-sweep! :node
+                                         {:worker-id "worker-a"
+                                          :source-id "gesso/test-worker"})
+                  (catch Throwable e e)))
+        evidence (:unverified-lease (ex-data error))]
+    (is (= :unexpected-acquisition-result (:reason (ex-data error))))
+    (is (instance? clojure.lang.ExceptionInfo (.getCause ^Throwable error)))
+    (is (= (:lease-id @submitted) (:lease-id evidence)))
+    (is (not= forged (:lease-id evidence)))
+    (is (= :unverified-acquisition-attempt (:evidence evidence)))))

@@ -724,3 +724,88 @@
     (is (= :gesso.live.outbox/cycle-interrupted (:error/type (ex-data error))))
     (is (nil? (:in-flight (ex-data error)))
         "A contended page cannot fabricate successful lease evidence")))
+
+(deftest thrown-worker-acquisition-retains-unverified-physical-claim-test
+  ;; Exercise the real worker -> cycle boundary. A failed physical CAS can
+  ;; commit before reporting an exception; capture the attempted token without
+  ;; claiming the caller acquired or safely dispatched the lease.
+  (doseq [action [:acquire-pending :reclaim-expired]]
+    (let [id (intent-id 941)
+          claimed (atom [])
+          dispatch-count (atom 0)
+          cause (ex-info "XTDB outcome not observed" {:phase :physical-submit})
+          failure (with-redefs
+                   [discovery/discover-eligible!
+                    (fn [_ _]
+                      {:candidates [{:intent-id id :action action}]
+                       :has-more? false :next-after nil})
+                    acquisition/acquire-pending!
+                    (fn [_ claim] (swap! claimed conj claim) (throw cause))
+                    acquisition/reclaim-expired!
+                    (fn [_ claim] (swap! claimed conj claim) (throw cause))
+                    delivery/dispatch-acquired!
+                    (fn [& _] (swap! dispatch-count inc)
+                      {:status :dispatch-accepted})]
+                   (try
+                     (cycle/process-cycle! :node {:source ::source} {} source-id
+                                           {:worker-id "checked-worker" :max-items 1})
+                     (catch clojure.lang.ExceptionInfo e e)))
+          data (ex-data failure)
+          evidence (:in-flight data)
+          request (first @claimed)]
+      (is (= :gesso.live.outbox/cycle-interrupted (:error/type data)))
+      (is (= :acquisition (:phase data)))
+      (is (= :acquisition-exception (:reason data)))
+      (is (= :physical-submit (:phase (ex-data (.getCause (.getCause failure))))))
+      (is (= 0 (:completed-count data)))
+      (is (true? (:rescan-required? data)))
+      (is (= :unverified-acquisition-attempt (:evidence evidence)))
+      (is (= (:intent-id request) (:intent-id evidence)))
+      (is (= (:lease-id request) (:lease-id evidence)))
+      (is (= (:worker-id request) (:worker-id evidence)))
+      (is (= (:source-id request) (:source-id evidence)))
+      (is (= action (:acquisition-action evidence)))
+      (is (= 1 (count @claimed)))
+      (is (zero? @dispatch-count)))))
+
+(deftest uncertain-second-acquisition-retains-completed-prefix-and-token-test
+  (let [first-id (intent-id 942)
+        second-id (intent-id 943)
+        attempted (atom [])
+        sends (atom 0)
+        cause (InterruptedException. "physical lease timeout")
+        failure (try
+                  (Thread/interrupted)
+                  (with-redefs
+                   [discovery/discover-eligible!
+                    (fn [_ request]
+                      (let [id (if (:after request) second-id first-id)]
+                        {:candidates [{:intent-id id :action :acquire-pending}]
+                         :has-more? (= id first-id)
+                         :next-after (when (= id first-id) first-id)}))
+                    acquisition/acquire-pending!
+                    (fn [_ claim]
+                      (swap! attempted conj claim)
+                      (if (= (:intent-id claim) first-id)
+                        {:status :contended :intent-id first-id}
+                        (throw cause)))
+                    delivery/dispatch-acquired!
+                    (fn [& _] (swap! sends inc))]
+                    (try
+                      (cycle/process-cycle! :node {:source ::source} {} source-id
+                                            {:worker-id "checked-worker" :max-items 3})
+                      (catch Throwable error error)))
+                  (finally
+                    ;; Test flags below are captured separately in the assertion.
+                    (Thread/interrupted)))
+        data (ex-data failure)]
+    (is (= :gesso.live.outbox/cycle-interrupted (:error/type data)))
+    (is (= 1 (:completed-count data)))
+    (is (= first-id (:last-completed-cursor data)))
+    (is (= :contended (get-in data [:completed 0 :acquisition-status])))
+    (is (= second-id (get-in data [:in-flight :intent-id])))
+    (is (= (:lease-id (second @attempted))
+           (get-in data [:in-flight :lease-id])))
+    (is (= :unverified-acquisition-attempt (get-in data [:in-flight :evidence])))
+    (is (= 2 (count @attempted)))
+    (is (zero? @sends))))
