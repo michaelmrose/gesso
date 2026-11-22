@@ -827,6 +827,57 @@
          (is (eventually #(zero? (:subscription-count (source/stats src)))))
          (finally ((:close! route))))))))
 
+(deftest real-http-client-disconnect-releases-sse-capacity-test
+  ;; This tests a physical client abort, not route-wide :close! or a direct
+  ;; Manifold close. The loopback adapter must observe an abandoned response
+  ;; body, close the producer, release its Live interest, and make the
+  ;; per-route slot available to the next client.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 1
+                           ;; Keepalive frames give the actual HTTP writer an
+                           ;; opportunity to observe the disconnected reader.
+                           :sse-options {:keepalive-ms 30}
+                           :authorize-subscription (constantly scope)})
+           server (start-http! (:handler route))
+           client (-> (HttpClient/newBuilder)
+                      (.version HttpClient$Version/HTTP_1_1)
+                      (.build))]
+       (try
+         (let [first-reply (request client (:base server)
+                                    "/live/events" "GET" "Bearer allowed")]
+           (is (= 200 (.statusCode first-reply)))
+           (is (eventually #(= 1 ((:active-count route)))))
+           (is (eventually #(= 1 (:subscription-count (source/stats src)))))
+           (with-open [body (.body first-reply)
+                       reader (BufferedReader. (InputStreamReader.
+                                                body StandardCharsets/UTF_8))]
+             ;; Observing a frame on the wire establishes that the adapter
+             ;; has begun pumping the stream before the client disconnects.
+             (is (= [": ping"] (frame-lines reader)))))
+         ;; The route remains open; capacity must recover on its own.
+         (is (false? ((:closed? route))))
+         (is (eventually #(zero? ((:active-count route))))
+             "Closing the network response must release route capacity")
+         (is (eventually #(zero? (:subscription-count (source/stats src))))
+             "Closing the network response must release the Live interest")
+         (let [second-reply (request client (:base server)
+                                     "/live/events" "GET" "Bearer allowed")]
+           (with-open [body (.body second-reply)]
+             (is (= 200 (.statusCode second-reply))
+                 "A disconnected client's freed slot must be reusable")
+             (is (eventually #(= 1 ((:active-count route)))))
+             (is (eventually #(= 1 (:subscription-count (source/stats src)))))))
+         (finally
+           ((:close! route))
+           ((:close! server))
+           (.close ^HttpClient client)
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src)))))))))))
+
 (deftest real-http-sse-active-capacity-returns-503-without-eviction-test
   ;; A Ring-level status alone does not establish that a real HTTP adapter
   ;; sends the overload status while keeping the first EventSource alive.
