@@ -163,3 +163,46 @@
       (is (= "foreign/source"
              (:gesso.live.outbox/source-id (read-intent node id))))
       (is (= :pending (:gesso.live.outbox/status (read-intent node id)))))))
+
+(deftest interrupted-lease-transaction-preserves-thread-signal-test
+  ;; The acquisition and reclaim boundaries may receive InterruptedException
+  ;; from an interruptible physical XTDB call. That exception's identity is
+  ;; authoritative; a failed transaction is neither a safe :contended result
+  ;; nor permission to publish an invalidation. Preserve cancellation too.
+  (with-open [node (xtn/start-node {})]
+    (doseq [phase [:acquire :reclaim]]
+      (let [id (random-uuid)
+            _ (pending! node id)
+            ;; Recovery exercises the preexisting :leased row path. A future
+            ;; deadline is sufficient here: the injected exception precedes
+            ;; the physical expiration guard's evaluation.
+            _ (when (= phase :reclaim)
+                (is (= :acquired
+                       (:status (acquisition/acquire-pending!
+                                 node (claim id "initial-worker"))))))
+            before (read-intent node id)
+            request (claim id "new-worker")
+            cause (InterruptedException. (str (name phase) " interrupted"))
+            called (atom 0)]
+        (try
+          (Thread/interrupted)
+          (let [caught (with-redefs [live.xtdb/execute-tx!
+                                    (fn [& _]
+                                      (swap! called inc)
+                                      (throw cause))]
+                         (try
+                           (case phase
+                             :acquire (acquisition/acquire-pending! node request)
+                             :reclaim (acquisition/reclaim-expired! node request))
+                           (catch Throwable error error)))
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            (Thread/interrupted)
+            (is (identical? cause caught)
+                (str phase " must propagate the original XTDB interruption"))
+            (is interrupted?
+                (str phase " must retain JVM cancellation on the caller"))
+            (is (= 1 @called) (str phase " must attempt one physical write"))
+            (is (= before (read-intent node id))
+                (str phase " may not invent a successful lease transition")))
+          (finally
+            (Thread/interrupted)))))))

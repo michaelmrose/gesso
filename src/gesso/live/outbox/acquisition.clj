@@ -50,6 +50,13 @@
   "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?")
 (def ^:private lease-fence-keys #{:intent-id :lease-id :worker-id})
 
+(defn- restore-interrupt!
+  "Retain JVM cancellation when a physical lease transaction throws after
+   an interruptible operation has cleared the calling thread's flag."
+  [cause]
+  (when (instance? InterruptedException cause)
+    (.interrupt (Thread/currentThread))))
+
 (defn- reject!
   [reason data]
   (throw (ex-info "Invalid Gesso Live outbox acquisition."
@@ -172,6 +179,9 @@
                         :worker-id (:worker-id claim)
                         :lease-until (:lease-until claim)}))
               (catch Throwable cause
+                ;; Only a provider assertion is a known contention result;
+                ;; an interruption cannot silently authorize retry.
+                (restore-interrupt! cause)
                 (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data cause)))
                   {:status :contended :intent-id intent-id}
                   (throw cause))))))))))
@@ -296,6 +306,7 @@
                         :worker-id worker-id
                         :lease-until lease-until})
                 (catch Throwable cause
+                  (restore-interrupt! cause)
                   (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data cause)))
                     {:status :contended :intent-id intent-id}
                     (throw cause)))))))))))
