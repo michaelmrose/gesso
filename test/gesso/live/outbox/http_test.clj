@@ -1165,7 +1165,8 @@
                             (deliver listener-entered true)
                             @listener-release
                             {:outcome :drained})
-          :stop-host! (fn [] (swap! calls conj :host) :once)})
+          :stop-host! (fn [] (swap! calls conj :host)
+                        {:outcome :stopped :host-result :once})})
         first-call (future ((:stop! coordinator)))
         others (atom [])]
     (try
@@ -1202,7 +1203,8 @@
          {:route route :drain-timeout-ms 20
           :stop-listener! (fn [] (swap! calls conj :listener)
                             {:outcome :drained})
-          :stop-host! (fn [] (swap! calls conj :host) :ok)})]
+          :stop-host! (fn [] (swap! calls conj :host)
+                        {:outcome :stopped :host-result :ok})})]
     (is (= :ready ((:status coordinator))))
     (is (= {:outcome :timed-out} ((:stop! coordinator))))
     (is (= :ready ((:status coordinator)))
@@ -1224,6 +1226,42 @@
     (is (= :invalid-drain-timeout-ms
            (exception-reason #(http/prepare-managed-http-shutdown plan))))
     (is (zero? @called))))
+
+(deftest managed-http-host-stop-requires-confirmation-test
+  ;; The external host stop callback may return normally after timing out or
+  ;; after swallowing an error. Such results MUST NOT certify teardown.
+  (doseq [unconfirmed [nil :ok false {:outcome :timed-out}
+                       {:outcome :unknown} {:host-result :ok}]]
+    (let [calls (atom [])
+          coordinator
+          (http/prepare-managed-http-shutdown
+           {:route {:close! #(swap! calls conj :route)
+                    :await-drained! (fn [_] (swap! calls conj :drain)
+                                      {:outcome :drained})}
+            :drain-timeout-ms 25
+            :stop-listener! (fn [] (swap! calls conj :listener)
+                              {:outcome :drained})
+            :stop-host! (fn [] (swap! calls conj :host) unconfirmed)})]
+      (is (= :unconfirmed-host-stop-outcome
+             (exception-reason #((:stop! coordinator))))
+          (str "A normal callback return is not confirmation: "
+               (pr-str unconfirmed)))
+      (is (= :host-stop-unknown ((:status coordinator)))
+          "The provider could already have been partially stopped")
+      (is (= :host-shutdown-outcome-unknown
+             (exception-reason #((:stop! coordinator))))
+          "Ambiguous teardown must not be replayed")
+      (is (= [:route :listener :drain :host] @calls))))
+  ;; The single-attempt primitive must reject the same unsafe outcome.
+  (let [calls (atom [])
+        plan {:route {:close! #(swap! calls conj :route)
+                      :await-drained! (constantly {:outcome :drained})}
+              :drain-timeout-ms 25
+              :stop-listener! (constantly {:outcome :drained})
+              :stop-host! (fn [] (swap! calls conj :host) nil)}]
+    (is (= :unconfirmed-host-stop-outcome
+           (exception-reason #(http/stop-managed-http-host! plan))))
+    (is (= [:route :host] @calls))))
 
 (deftest managed-http-shutdown-coordinator-fences-unknown-host-outcome-test
   (let [calls (atom [])
@@ -1279,7 +1317,8 @@
                           (swap! events conj
                                  [:host ((:drained? route))
                                   (:subscription-count (source/stats src))])
-                          :host-stop-approved)})]
+                          {:outcome :stopped
+                           :host-result :host-stop-approved})})]
            (is (= {:outcome :stopped :host-result :host-stop-approved}
                   result))
            (is (= [[:listener true] [:host true 0]] @events))
@@ -1305,7 +1344,9 @@
                             {:uri "/live/events" :request-method :get}))
            stop-listener! #(do (swap! events conj :listener)
                                 {:outcome :drained})
-           stop-host! #(do (swap! events conj :host) :host-stop-approved)
+           stop-host! #(do (swap! events conj :host)
+                            {:outcome :stopped
+                             :host-result :host-stop-approved})
            plan {:route route :drain-timeout-ms 20
                  :stop-listener! stop-listener!
                  :stop-host! stop-host!}]

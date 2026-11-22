@@ -453,7 +453,14 @@
    :await-drained! verifies that no source-backed sessions or unfinished
    admissions remain. Only a confirmed drain permits :stop-host!.
 
-   Returns {:outcome :stopped :host-result ...} after successful host stop,
+   The host stop callback must explicitly return {:outcome :stopped}
+   (optionally with :host-result) after completing provider teardown.
+   This callback acknowledgment is an external assertion, not independent
+   proof that host providers have stopped. A normal return of nil, a
+   timeout, or any other result is ambiguous and
+   fails closed with :unconfirmed-host-stop-outcome. A coordinator retains
+   :host-stop-unknown after this ambiguity, prohibiting automatic replay.
+   Returns {:outcome :stopped :host-result ...} only upon confirmation,
    or {:outcome :timed-out} without touching the host's providers. The
    listener callback must return {:outcome :drained} ONLY after its server
    has stopped admitting new requests AND all relevant HTTP handlers (not
@@ -493,7 +500,21 @@
     (case (:outcome (second listener-result))
       :drained (let [drain ((:await-drained! route) drain-timeout-ms)]
                  (case (:outcome drain)
-                   :drained {:outcome :stopped :host-result (stop-host!)}
+                   :drained (let [host-outcome (stop-host!)]
+                              ;; A normal return is not proof of successful
+                              ;; teardown. In particular, nil or a reported
+                              ;; timeout may mean providers remain active.
+                              ;; Never upgrade those outcomes to :stopped.
+                              (if (and (map? host-outcome)
+                                       (= :stopped (:outcome host-outcome)))
+                                {:outcome :stopped
+                                 :host-result (:host-result host-outcome)}
+                                ;; Do not embed a raw callback return in
+                                ;; errors: it may contain sensitive host data.
+                                (reject! :unconfirmed-host-stop-outcome
+                                         {:reported-outcome
+                                          (when (map? host-outcome)
+                                            (:outcome host-outcome))})))
                    :timed-out {:outcome :timed-out}
                    (reject! :invalid-drain-outcome {:drain drain})))
       :timed-out {:outcome :listener-timed-out}
@@ -511,8 +532,9 @@
 
    An SSE or listener drain timeout, or a cleanup error *before* stop-host!
    begins, restores :ready so the owner can retry. Both cleanup callbacks
-   must be idempotent across such retries. If stop-host! itself throws,
-   Gesso cannot know whether provider teardown occurred; status becomes
+   must be idempotent across such retries. If stop-host! throws or
+   returns without the explicit :stopped outcome, Gesso cannot know whether
+   provider teardown occurred; status becomes
    :host-stop-unknown and subsequent attempts reject with a typed error.
    This avoids treating an ambiguous external side effect as safe to replay.
 
