@@ -43,6 +43,7 @@
 (def default-options
   {:id nil
    :coalesce-window-ms nil
+   :max-recorded-errors 256
    :on-error nil})
 
 ;; -----------------------------------------------------------------------------
@@ -69,11 +70,12 @@
 
 (defn- source-option-contract
   [options]
-  (compact-map
-   (select-keys options
-                [:id
-                 :coalesce-window-ms
-                 :on-error])))
+  ;; The bounded retention setting must still be validated when explicitly
+  ;; overridden with nil; omitting it from compact-map would silently restore
+  ;; unbounded history or defer a failure until diagnostic recording.
+  (assoc (compact-map
+          (select-keys options [:id :coalesce-window-ms :on-error]))
+         :max-recorded-errors (:max-recorded-errors options)))
 
 (defn- validate-options!
   [options]
@@ -203,22 +205,44 @@
 ;; -----------------------------------------------------------------------------
 
 (defn errors
-  "Return recorded source put errors/rejections."
+  "Return the bounded, oldest-first vector of retained source errors.
+
+   A long-running source never keeps more than :max-recorded-errors records.
+   Evicted errors remain visible in aggregate counters and through the
+   optional :on-error hook at the time they occur. Source/response acceptance
+   is not proof of eventual browser delivery."
   [source]
-  @(:errors source))
+  (:retained @(:errors source)))
 
 (defn clear-errors!
-  "Clear recorded source errors."
+  "Discard retained error objects without resetting lifetime counters."
   [source]
-  (reset! (:errors source) [])
+  (swap! (:errors source) assoc :retained [])
   :cleared)
 
 (defn- record-error!
   [source entry]
   (let [entry' (assoc entry
                       :source/id (:id source)
-                      :recorded-at (now-ms))]
-    (swap! (:errors source) conj entry')
+                      :recorded-at (now-ms))
+        limit (:max-recorded-errors source)]
+    ;; Keep diagnostics bounded even when a broken sink fails continuously.
+    ;; One pure atomic transition owns both retention and counters so CAS
+    ;; retries never overcount and concurrent put callbacks cannot lose work.
+    ;; Rebuild the capped vector instead of retaining a SubVector backed by
+    ;; an arbitrarily long historical vector.
+    (swap! (:errors source)
+           (fn [{:keys [retained] :as history}]
+             (let [next-retained (conj retained entry')
+                   evicted (max 0 (- (count next-retained) limit))]
+               (-> history
+                   (assoc :retained (if (pos? evicted)
+                                      (vec (drop evicted next-retained))
+                                      next-retained))
+                   (update :total inc)
+                   (update :evicted + evicted)))))
+    ;; This callback is observational and receives EACH failure, including
+    ;; those omitted from or evicted out of the bounded diagnostic history.
     (call-safely (:on-error source) entry')
     entry'))
 
@@ -383,8 +407,14 @@
 
        nil or 0 disables source-level coalescing/throttling.
 
+     :max-recorded-errors
+       Optional integer 0..4096 (default 256). Bounds retained diagnostic
+       entries, including invalidations/throwables from failed puts. Zero
+       disables object retention while :on-error and lifetime counts remain.
+
      :on-error
-       Optional function called with source error entries.
+       Optional function called for every source error, even if its record is
+       evicted from the bounded history.
 
    Normal subscribers should use subscribe. changes remains available as a
    broadcast fallback."
@@ -396,6 +426,7 @@
      {:id (source-id options')
       :created-at (now-ms)
       :coalesce-window-ms (:coalesce-window-ms options')
+      :max-recorded-errors (:max-recorded-errors options')
       :on-error (:on-error options')
       :closed? (atom false)
 
@@ -423,7 +454,7 @@
       :leading-count (LongAdder.)
       :trailing-count (LongAdder.)
       :suppressed-count (LongAdder.)
-      :errors (atom [])})))
+      :errors (atom {:retained [] :total 0 :evicted 0})})))
 
 (defn close!
   "Close source and all active streams.
@@ -482,7 +513,10 @@
      :leading-count (.sum ^LongAdder (:leading-count source))
      :trailing-count (.sum ^LongAdder (:trailing-count source))
      :suppressed-count (.sum ^LongAdder (:suppressed-count source))
-     :error-count (count @(:errors source))
+     :error-count (count (:retained @(:errors source)))
+     :total-error-count (:total @(:errors source))
+     :evicted-error-count (:evicted @(:errors source))
+     :max-recorded-errors (:max-recorded-errors source)
      :coalesce-window-ms (:coalesce-window-ms source)}))
 
 ;; -----------------------------------------------------------------------------

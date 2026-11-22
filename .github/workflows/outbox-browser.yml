@@ -130,6 +130,13 @@ jobs:
           timeout 150s clojure -M:test -n gesso.live.outbox.lifecycle-test \
             2>&1 | tee target/outbox-browser/lifecycle-owner.log
 
+      - name: Bound Live source diagnostic retention and interest fanout
+        shell: bash
+        run: |
+          set -euo pipefail
+          clojure -M:test -n gesso.live.source-test \
+            2>&1 | tee target/outbox-browser/live-source-retention.log
+
       - name: Inspect cold-host durable outbox debt by source
         shell: bash
         run: |

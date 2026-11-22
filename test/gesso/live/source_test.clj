@@ -931,3 +931,94 @@
         (is (= :put-error (:kind (last (source/errors src)))))
         (finally
           (source/close! src))))))
+
+(deftest source-error-history-is-bounded-and-reports-all-failed-deliveries-test
+  ;; A failing subscriber can cause arbitrarily many put errors over the life
+  ;; of a server. The source retains only its newest N records, while the
+  ;; diagnostic callback receives every failure and the source remains usable.
+  (let [reported (atom [])
+        src (source/create {:max-recorded-errors 3
+                            :on-error (fn [entry]
+                                        (swap! reported conj
+                                               (get-in entry [:invalidation :seq])))})
+        original-put (var-get #'gesso.live.source/put-consumer!)]
+    (try
+      (doseq [i (range 12)]
+        (let [broken (source/subscribe src {:topic :request :id "req-1"})]
+          (with-redefs-fn
+            {#'gesso.live.source/put-consumer!
+             (fn [stream value]
+               (if (identical? stream broken)
+                 (throw (ex-info "permanent sink failure" {:i i}))
+                 (original-put stream value)))}
+            (fn []
+              (is (= :emitted
+                     (:status (source/emit! src
+                                            (assoc invalidation-1 :seq i)))))))
+          (is (s/closed? broken))))
+      (is (= (vec (range 12)) @reported)
+          "Diagnostics must not disappear when bounded history overflows")
+      (is (= [9 10 11]
+             (mapv #(get-in % [:invalidation :seq]) (source/errors src))))
+      (let [stats (source/stats src)]
+        (is (= 3 (:max-recorded-errors stats)))
+        (is (= 3 (:error-count stats)))
+        (is (= 12 (:total-error-count stats)))
+        (is (= 9 (:evicted-error-count stats)))
+        (is (zero? (:tap-count stats))))
+      (is (= :cleared (source/clear-errors! src)))
+      (is (= [] (source/errors src)))
+      (is (= 12 (:total-error-count (source/stats src)))
+          "Clearing retained objects must not erase lifetime error evidence")
+      (finally (source/close! src)))))
+
+(deftest source-errors-may-be-unretained-without-suppressing-reporting-test
+  (let [seen (atom [])
+        src (source/create {:max-recorded-errors 0
+                            :on-error #(swap! seen conj (:sequence %))})]
+    (try
+      (doseq [i (range 5)]
+        (#'gesso.live.source/record-error! src
+         {:kind :test/synthetic-failure :sequence i}))
+      (is (= [] (source/errors src)))
+      (is (= [0 1 2 3 4] @seen))
+      (is (= {:error-count 0 :total-error-count 5
+              :evicted-error-count 5 :max-recorded-errors 0}
+             (select-keys (source/stats src)
+                          [:error-count :total-error-count
+                           :evicted-error-count :max-recorded-errors])))
+      (finally (source/close! src)))))
+
+(deftest source-errors-bound-concurrent-recording-without-lost-counters-test
+  ;; Repeated CAS retries under concurrent failed callbacks must not cause
+  ;; either unbounded retention or overcounted evictions.
+  (let [src (source/create {:max-recorded-errors 7})]
+    (try
+      (let [workers (doall (for [worker (range 8)]
+                             (future
+                               (dotimes [i 80]
+                                 (#'gesso.live.source/record-error! src
+                                  {:kind :test/concurrent-failure
+                                   :sequence [worker i]})))))]
+        (doseq [task workers]
+          (is (not= ::timeout (deref task 10000 ::timeout)))))
+      (let [stats (source/stats src)
+            recent (source/errors src)]
+        (is (= 7 (count recent)))
+        (is (= 640 (:total-error-count stats)))
+        (is (= 633 (:evicted-error-count stats)))
+        (is (= 7 (:error-count stats)))
+        (is (= 7 (count (distinct (map :sequence recent))))))
+      (finally (source/close! src)))))
+
+(deftest source-error-retention-option-is-validated-before-stream-creation-test
+  (doseq [bad [-1 4097 1.5 nil "unbounded"]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Invalid gesso.live value"
+         (source/create {:max-recorded-errors bad}))
+        (str "Invalid diagnostic retention must fail preflight: " bad)))
+  (let [src (source/create)]
+    (try
+      (is (= 256 (:max-recorded-errors (source/stats src))))
+      (finally (source/close! src)))))
