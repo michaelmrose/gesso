@@ -1095,6 +1095,55 @@
            ((:close! server))
            (.close ^HttpClient client)))))))
 
+(deftest starting-session-handoff-does-not-double-charge-capacity-test
+  ;; A single started SSE occupies either its :starting reservation or its
+  ;; registered :connections entry. Callback registration is a useful
+  ;; deterministic probe for the handoff before HTTP response delivery:
+  ;; :occupied-count must not report two slots for one physical source.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           original-start live/start-sse!
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events" :max-connections 1
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}
+           pending (atom nil)]
+       (try
+         (with-redefs [live/start-sse!
+                       (fn [& args]
+                         (let [session (apply original-start args)
+                               real-register! (:source-on-closed! session)]
+                           (assoc session :source-on-closed!
+                                  (fn [callback]
+                                    (deliver entered true)
+                                    @release
+                                    (real-register! callback)))))]
+           (reset! pending (future ((:handler route) request)))
+           (is (= true (deref entered 5000 ::timeout))
+               "Session handoff reached source callback registration")
+           (is (= 1 ((:active-count route)))
+               "The stream is now registered, though handoff is incomplete")
+           (is (= 1 ((:occupied-count route)))
+               "Starting reservation must transfer to connection, not double count")
+           (is (= 1 ((:pending-authorization-count route))))
+           (is (= 1 (:subscription-count (source/stats src))))
+           (deliver release true)
+           (let [response (deref @pending 10000 ::timeout)]
+             (is (= 200 (:status response)))
+             (is (= 1 ((:occupied-count route))))
+             (stream/close! (:body response)))
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? ((:occupied-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src)))))
+           (is (zero? ((:pending-authorization-count route)))))
+         (finally
+           (deliver release true)
+           (when @pending (future-cancel @pending))
+           ((:close! route))))))))
+
 (deftest stalled-sse-startup-reserves-active-connection-capacity-test
   (setup-host
    (fn [started]

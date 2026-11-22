@@ -412,7 +412,8 @@
                                     ::start)))]
                         (if (not= ::start decision)
                           decision
-                          (try
+                          (let [startup-slot? (volatile! true)]
+                            (try
                             ;; Starting a source-backed stream may block on
                             ;; provider work: never hold the shutdown monitor.
                             (let [[start-outcome session-or-error]
@@ -433,7 +434,18 @@
                                     (throw session-or-error))
                                   (let [session session-or-error
                                         key (random-uuid)]
-                                    (swap! state assoc-in [:connections key] session)
+                                    ;; Transfer one reserved startup slot
+                                    ;; into its registered session atomically.
+                                    ;; Otherwise :occupied-count transiently
+                                    ;; counts one session twice during callback
+                                    ;; registration, violating the stated cap.
+                                    (swap! state
+                                           (fn [s]
+                                             (-> s
+                                                 (update :starting dec)
+                                                 (assoc-in [:connections key]
+                                                           session))))
+                                    (vreset! startup-slot? false)
                                     (try
                                       ;; A disconnected HTTP stream may leave
                                       ;; its eager Live interest registered if
@@ -505,7 +517,11 @@
                                                               ^Throwable cancel-error))))
                                         (throw admission-error)))))))
                             (finally
-                              (swap! state update :starting dec))))))
+                              ;; Startup errors have no connection entry to
+                              ;; own the capacity. Only untransferred starts
+                              ;; release their reservation in this finally.
+                              (when @startup-slot?
+                                (swap! state update :starting dec))))))))
                     (finally
                       ;; Includes ordinary failure and thread interruption.
                       (swap! state update :pending-authorizations dec))))))))]
