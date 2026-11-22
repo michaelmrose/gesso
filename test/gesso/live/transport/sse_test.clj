@@ -538,6 +538,96 @@
             (is (= 1 @release-attempts)
                 "Cleanup is attempted exactly once after failed startup"))))))
 
+(deftest source-backed-handoff-failure-cancels-created-transport-test
+  ;; A successful start! is not yet a successfully handed-off source stream.
+  ;; If registering the source release hook throws, cancellation must retire
+  ;; the already-created transport *as well* as attempting eager source
+  ;; release. Any independent cleanup errors remain suppressed on the
+  ;; initiating handoff error, never replace it.
+  (doseq [failure-mode [:clean :cancel-fails :release-fails :both-fail
+                        :self-suppression]]
+    (let [handoff-error (ex-info "Source handoff failed" {:stage :handoff})
+          cancel-error (ex-info "Transport cancellation failed" {:stage :cancel})
+          release-error (ex-info "Source release failed" {:stage :release})
+          cancel-failure (case failure-mode
+                           (:cancel-fails :both-fail) cancel-error
+                           :self-suppression handoff-error
+                           nil)
+          release-failure (case failure-mode
+                            (:release-fails :both-fail) release-error
+                            :self-suppression handoff-error
+                            nil)
+          expected-suppressed (case failure-mode
+                                :cancel-fails [cancel-error]
+                                :release-fails [release-error]
+                                :both-fail [cancel-error release-error]
+                                [])
+          events (atom [])]
+      (with-redefs [flow/open-source-flow!
+                    (fn [_ _]
+                      {:flow nil
+                       :close! (fn []
+                                 (swap! events conj :release-source)
+                                 (when release-failure
+                                   (throw release-failure)))})
+                    sse/start! (fn [_ _]
+                                 (swap! events conj :start-transport)
+                                 {:stream :fake-stream
+                                  :closed? (atom false)
+                                  :cancel! (fn []
+                                             (swap! events conj :cancel-transport)
+                                             (when cancel-failure
+                                               (throw cancel-failure)))})
+                    sse/register-source-release! (fn [_ _]
+                                                   (swap! events conj :register-hook)
+                                                   (throw handoff-error))]
+        (let [caught (try
+                       (sse/start-source! :stub-source
+                                          {:subscription {:topic :request
+                                                          :id "req-1"}}
+                                          nil)
+                       (catch Throwable e e))]
+          (is (identical? handoff-error caught))
+          (is (= [:start-transport :register-hook :cancel-transport
+                  :release-source]
+                 @events)
+              "A partially created SSE transport must be canceled before release")
+          (is (= expected-suppressed
+                 (vec (.getSuppressed ^Throwable caught)))
+              "Keep independent cancel/release errors without self-suppression"))))))
+
+(deftest source-backed-handoff-error-retires-real-sse-transport-test
+  ;; Beyond the mock seam, prove that a real started Manifold response is
+  ;; physically closed if registering the eager-source hook fails. Disable
+  ;; close-on-complete so source exhaustion cannot accidentally conceal a
+  ;; transport leak in the negative control.
+  (let [src (source/create)
+        started (atom nil)
+        real-start sse/start!
+        handoff-error (ex-info "Hook registration rejected" {:test :v2163})]
+    (try
+      (with-redefs [sse/start! (fn [& args]
+                                (let [session (apply real-start args)]
+                                  (reset! started session)
+                                  session))
+                    sse/register-source-release!
+                    (fn [_ _] (throw handoff-error))]
+        (is (identical? handoff-error
+                        (try
+                          (sse/start-source! src
+                                             {:subscription {:topic :request
+                                                             :id "v2163-real"}}
+                                             {:close-on-complete? false})
+                          (catch Throwable e e))))
+        (is (some? @started))
+        (is (s/closed? (:stream @started))
+            "Failed release-hook handoff must close the real SSE response")
+        (is (eventually #(zero? (:subscription-count (source/stats src))))
+            "Even with a failed handoff, eager source registration must drain"))
+      (finally
+        (when @started (sse/cancel! @started))
+        (source/close! src)))))
+
 (deftest source-backed-sse-cancellation-confirms-interest-release-test
   (let [src (source/create)
         started (sse/start-source! src

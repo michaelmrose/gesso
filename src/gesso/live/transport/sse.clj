@@ -694,6 +694,11 @@
         :cancel! cancel!
         :closed? closed?}))))
 
+(defn- register-source-release!
+  "Attach eager source cleanup to the physical SSE response lifetime."
+  [out release-flow!]
+  (s/on-closed out release-flow!))
+
 (defn start-source!
   "Start a Live source-backed SSE stream, releasing its eager subscription
    if transport initialization fails or terminates before collection.
@@ -706,16 +711,21 @@
         {live-events :flow release-flow! :close!
          source-closed? :closed?
          source-on-closed! :on-closed!}
-        (flow/open-source-flow! src flow-options)]
+        (flow/open-source-flow! src flow-options)
+        ;; An SSE transport can be created successfully but its eager-source
+        ;; release-hook registration can still fail. Keep the partial handle
+        ;; so the failure path can retire the transport as well as the tap.
+        started-ref (volatile! nil)]
     (try
       (let [started (start! live-events options')]
+        (vreset! started-ref started)
         ;; The eager source registration remains ours until the transport
         ;; actually terminates. The event collector might never start (or
         ;; might be cancelled before observing the flow), so ordinary SSE
         ;; shutdown must also release it, not just synchronous startup errors.
         ;; Manifold invokes on-closed for streams already closed, preserving
         ;; the handoff if shutdown races with this callback registration.
-        (s/on-closed (:stream started) release-flow!)
+        (register-source-release! (:stream started) release-flow!)
         (when (true? @(:closed? started))
           (release-flow!))
         ;; Re-attempt source release independently of the response stream's
@@ -742,10 +752,19 @@
                             (when release-failure
                               (throw release-failure))))))
       (catch Throwable startup-error
-        ;; The original startup failure owns the diagnosis. A failed
-        ;; best-effort subscription release must not replace it, but it
-        ;; cannot be silently discarded either: preserve that independent
-        ;; cleanup failure as suppressed evidence for the caller.
+        ;; Startup may fail either before start! returns or during the
+        ;; subsequent source-release callback handoff. A successfully created
+        ;; transport must not keep emitting events or keepalive frames when
+        ;; callback registration fails: retire its producers and response.
+        ;; The eager source registration is owned separately, so attempt its
+        ;; release even when transport cancellation throws.
+        (when-let [started @started-ref]
+          (try
+            ((:cancel! started))
+            (catch Throwable cancel-error
+              (when-not (identical? startup-error cancel-error)
+                (.addSuppressed ^Throwable startup-error
+                                ^Throwable cancel-error)))))
         (try
           (release-flow!)
           (catch Throwable release-error
