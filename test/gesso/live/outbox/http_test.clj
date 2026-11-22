@@ -3955,3 +3955,142 @@
                  (reset! allow-release? true)
                  (when @worker ((:stop! @worker) 2000))
                  ((:close! route)))))))))))
+
+
+(deftest concurrent-admission-while-scheduled-release-reclaims-capacity-test
+  ;; The source is allowed one MORE consumer than this route. If the route's
+  ;; occupied-slot fence is lost while a release is in progress, the shared
+  ;; source limit cannot hide the resulting route over-admission. Twelve
+  ;; simultaneous authorized GETs race one blocked scheduled source release.
+  (setup-host
+   {:max-active-consumers 5}
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           real-open flow/open-source-flow!
+           ids (atom 0)
+           mode (atom :fail)
+           block-once? (atom true)
+           retry-entered (promise)
+           retry-release (promise)
+           failure (ex-info "churn source release unavailable" {:test :v2243})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source options]
+            (let [flow (real-open source options)
+                  id (swap! ids inc)
+                  real-close (:close! flow)]
+              (if (<= id 2)
+                (assoc flow :close!
+                       (fn []
+                         (case @mode
+                           :fail (throw failure)
+                           :retry (do
+                                    (when (compare-and-set! block-once? true false)
+                                      (deliver retry-entered true)
+                                      @retry-release)
+                                    (real-close))
+                           :release (real-close))))
+                flow)))
+          ;; The collector has its own legitimate release hook. Suppress it
+          ;; only to isolate the failed response-owner release under test.
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 4
+                                 :max-pending-authorizations 16
+                                 :sse-options {:keepalive-ms 15000
+                                               :frame-write-timeout-ms 30000}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}
+                 orphan-a ((:handler route) request)
+                 orphan-b ((:handler route) request)
+                 healthy ((:handler route) request)
+                 worker (atom nil)
+                 arrivals (java.util.concurrent.CountDownLatch. 1)
+                 contenders (atom [])
+                 results (atom [])]
+             (try
+               (is (= [200 200 200]
+                      [(:status orphan-a) (:status orphan-b) (:status healthy)]))
+               (stream/close! (:body orphan-a))
+               (stream/close! (:body orphan-b))
+               (is (eventually #(and (= 2 ((:disconnected-count route)))
+                                     (= 3 ((:occupied-count route)))
+                                     (= 3 (:active-consumer-count (source/stats src)))))
+                   "Failed releases retain physical interests and route slots")
+               (reset! mode :retry)
+               (reset! worker
+                       ((requiring-resolve
+                         'gesso.live.outbox.http-recovery/start-scheduled!)
+                        route {:poll-ms 10 :min-interval-ms 15000
+                               :max-attempts 1}))
+               (is (= true (deref retry-entered 4000 ::timeout))
+                   "One scheduled recovery must hold the physical release open")
+               (is (= 2 ((:disconnected-count route))))
+               (is (= 3 ((:occupied-count route))))
+               (is (= 3 (:active-consumer-count (source/stats src))))
+               ;; All authorized contenders reserve pending-authorization
+               ;; capacity before entering the route's lifecycle lock.
+               (reset! contenders
+                       (vec (repeatedly 12
+                                        #(future
+                                           (.await arrivals)
+                                           (try ((:handler route) request)
+                                                (catch Throwable e e))))))
+               (.countDown arrivals)
+               (is (eventually #(= 12 ((:pending-authorization-count route))))
+                   "All contenders must reach the admission lock")
+               (is (= 3 ((:occupied-count route)))
+                   "Blocked cleanup does not silently release capacity")
+               (is (= 3 (:active-consumer-count (source/stats src))))
+               (is (not (stream/closed? (:body healthy))))
+               ;; Resolve exactly one orphan's source closure, then permit
+               ;; all pending admissions to compete for the TWO free slots.
+               (reset! mode :release)
+               (deliver retry-release true)
+               (reset! results (mapv #(deref % 6000 ::timeout) @contenders))
+               (is (every? map? @results)
+                   "Authorized concurrent requests must terminate promptly")
+               (let [statuses (frequencies (map :status @results))
+                     admitted (filter #(= 200 (:status %)) @results)]
+                 (is (= 2 (get statuses 200 0))
+                     "Only two slots may be admitted across a racing release")
+                 (is (= 10 (get statuses 503 0)))
+                 (is (= 12 (reduce + 0 (vals statuses))))
+                 (is (= 4 ((:occupied-count route))))
+                 (is (= 4 (:active-consumer-count (source/stats src))))
+                 (is (= 4 (:subscription-count (source/stats src))))
+                 (is (= 1 ((:disconnected-count route)))
+                     "Only the selected orphan was physically reclaimed")
+                 (is (zero? ((:pending-authorization-count route))))
+                 (is (not (stream/closed? (:body healthy))))
+                 (is (false? ((:closed? route))))
+                 (is (= 5 @ids)
+                     "Rejected GETs must not allocate extra source flows")
+                 (doseq [response admitted]
+                   (stream/close! (:body response))))
+               (is (eventually #(= 2 ((:occupied-count route))))
+                   "Closing successful churn connections preserves healthy + orphan")
+               (is (= 2 (:active-consumer-count (source/stats src))))
+               (is (= :drained (:outcome ((:stop! @worker) 2000))))
+               (is (= {:attempted 1 :recovered 1}
+                      ((:retry-disconnected! route) 1)))
+               (is (= 1 ((:occupied-count route))))
+               (is (not (stream/closed? (:body healthy))))
+               (stream/close! (:body healthy))
+               (is (eventually #(zero? ((:occupied-count route)))))
+               (is (eventually #(zero? (:active-consumer-count
+                                       (source/stats src)))))
+               (finally
+                 (reset! mode :release)
+                 (deliver retry-release true)
+                 (.countDown arrivals)
+                 (doseq [task @contenders] (future-cancel task))
+                 (doseq [result @results]
+                   (when (and (map? result) (= 200 (:status result)))
+                     (stream/close! (:body result))))
+                 (stream/close! (:body healthy))
+                 (when @worker ((:stop! @worker) 2000))
+                 ((:close! route)))))))))))
