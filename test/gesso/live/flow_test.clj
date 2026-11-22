@@ -1533,3 +1533,83 @@
                   (cancel-runner! runner))))))
         (finally
           (source/close! src))))))
+
+(deftest interrupted-emit-refusal-restores-signal-test
+  ;; Missionary may reject an emission on a completed consumer. The bridge
+  ;; intentionally stops pulling instead of propagating the callback failure,
+  ;; but it must not consume an InterruptedException's JVM cancellation bit.
+  ;; Restore before diagnostics so the reporting hook sees the same signal.
+  (let [cause (InterruptedException. "observer emission interrupted")
+        observed (atom nil)]
+    (try
+      (Thread/interrupted)
+      (let [accepted?
+            (@#'gesso.live.flow/emit-safely!
+             (fn [_] (throw cause)) :invalidation
+             (fn [{:keys [event error]}]
+               (reset! observed [event error
+                                 (.isInterrupted (Thread/currentThread))])))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (false? accepted?) "Refused emission stops the pull loop")
+        (is (= :gesso.live.flow/emit-failed (first @observed)))
+        (is (identical? cause (second @observed)))
+        (is (true? (nth @observed 2))
+            "Error diagnostic must observe restored interrupt")
+        (is interrupted? "Refused emission must retain JVM cancellation"))
+      (finally
+        (Thread/interrupted)))))
+
+(deftest interrupted-flow-interest-predicate-retains-cause-and-interrupt-test
+  ;; Predicate failures remain typed stream failures. The wrapped exception
+  ;; must preserve both the original cause and the current thread interrupt.
+  (let [cause (InterruptedException. "interest predicate interrupted")
+        observed (atom nil)]
+    (try
+      (Thread/interrupted)
+      (let [failure
+            (try
+              (@#'gesso.live.flow/safe-interested?
+               (fn [_ _] (throw cause)) request-sub request-invalidation
+               (fn [{:keys [event]}]
+                 (reset! observed
+                         [event (.isInterrupted (Thread/currentThread))])))
+              (catch Throwable error error))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (instance? clojure.lang.ExceptionInfo failure))
+        (is (identical? cause (.getCause ^Throwable failure)))
+        (is (= :gesso.live.flow/interested-predicate-failed
+               (first @observed)))
+        (is (true? (second @observed))
+            "Predicate error diagnostic must see cancellation")
+        (is interrupted? "Wrapped predicate failure must restore interrupt"))
+      (finally
+        (Thread/interrupted)))))
+
+(deftest interrupted-flow-event-builder-retains-cause-and-interrupt-test
+  ;; A :data callback is application code and can interrupt while constructing
+  ;; the canonical event. Neither tracing nor the typed error wrapper should
+  ;; erase the interrupt or silently emit a fabricated event.
+  (let [cause (InterruptedException. "event data interrupted")
+        observed (atom nil)]
+    (try
+      (Thread/interrupted)
+      (let [failure
+            (try
+              (@#'gesso.live.flow/safe-event
+               request-invalidation {:data (fn [_] (throw cause))}
+               (fn [{:keys [event]}]
+                 (reset! observed
+                         [event (.isInterrupted (Thread/currentThread))])))
+              (catch Throwable error error))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (instance? clojure.lang.ExceptionInfo failure))
+        (is (identical? cause (.getCause ^Throwable failure)))
+        (is (= :gesso.live.flow/event-build-failed (first @observed)))
+        (is (true? (second @observed))
+            "Event error diagnostic must see cancellation")
+        (is interrupted? "Wrapped event-build failure must restore interrupt"))
+      (finally
+        (Thread/interrupted)))))

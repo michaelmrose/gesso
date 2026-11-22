@@ -263,6 +263,10 @@
   (try
     (boolean (interested? subscription invalidation))
     (catch Exception e
+      ;; The predicate may have performed an interruptible JVM operation
+      ;; that clears its flag before throwing. Keep the cancellation signal
+      ;; even as we wrap the original cause in a typed stream failure.
+      (restore-interrupt! e)
       (debug!
        debug-fn
        :gesso.live.flow/interested-predicate-failed
@@ -281,6 +285,7 @@
   (try
     (invalidation-event invalidation options)
     (catch Exception e
+      (restore-interrupt! e)
       (debug!
        debug-fn
        :gesso.live.flow/event-build-failed
@@ -358,6 +363,10 @@
     (emit! value)
     true
     (catch Throwable e
+      ;; Emission refusal is intentionally contained so the pump can release
+      ;; the stream, but an InterruptedException still signals cancellation.
+      ;; Restore before calling optional diagnostics and performing cleanup.
+      (restore-interrupt! e)
       (debug!
        debug-fn
        :gesso.live.flow/emit-failed
