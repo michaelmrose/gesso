@@ -25,3 +25,20 @@
     (is (str/includes? entry "gesso.live.outbox.http-aleph-qualification-main"))
     (is (not (str/includes? entry "-n"))
         "The Cognitect -n test selector may silently run zero integration tests")))
+
+(deftest github-aleph-workflow-enforces-real-strict-qualification-test
+  ;; Offline contract checks for the CI execution route. These assertions
+  ;; cannot count as a successful Aleph test run: CI itself must execute the
+  ;; opt-in integration namespace against actual Aleph dependencies.
+  (let [workflow (slurp ".github/workflows/outbox-aleph.yml")]
+    (is (str/includes? workflow "workflow_dispatch:"))
+    (is (str/includes? workflow "      - typed-clojure"))
+    (is (str/includes? workflow "ubuntu-24.04"))
+    (is (str/includes? workflow "clojure -P -M:aleph-integration"))
+    (is (str/includes? workflow "aleph-0\\.9\\.11\\.jar$"))
+    (is (str/includes? workflow
+                       "clojure -M:aleph-integration -m gesso.live.outbox.http-aleph-qualification-main"))
+    (is (not (re-find #"(?m)^\s*continue-on-error\s*:\s*true\b" workflow)))
+    (is (not (str/includes? workflow "|| true")))
+    (is (str/includes? workflow "- 'integration/gesso/live/outbox/http_aleph*'"))
+    (is (str/includes? workflow "- 'src/gesso/live/outbox/http_listener.clj'"))))

@@ -1,0 +1,82 @@
+name: Gesso real Aleph HTTP/1 qualification
+
+# A separate, strictly failing gate for Aleph 0.9.11. The existing core test
+# suite intentionally does not resolve Aleph. A green offline Netty simulation
+# is not evidence that the real server exercised its outbound write hooks.
+on:
+  push:
+    branches:
+      - typed-clojure
+    paths:
+      - .github/workflows/outbox-aleph.yml
+      - deps.edn
+      - bb.edn
+      - 'integration/gesso/live/outbox/http_aleph*'
+      - 'src/gesso/live/outbox/http_aleph_pipeline.clj'
+      - 'src/gesso/live/outbox/http_netty_terminal.clj'
+      - 'src/gesso/live/outbox/http_listener.clj'
+      - 'test/gesso/live/outbox/http_aleph_optin_test.clj'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: outbox-aleph-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-aleph-http1:
+    name: Real Aleph 0.9.11 HTTP/1 writer and listener drain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      JAVA_TOOL_OPTIONS: >-
+        -Xmx3g
+        --add-opens=java.base/java.nio=ALL-UNNAMED
+        --enable-native-access=ALL-UNNAMED
+        -Dio.netty.tryReflectionSetAccessible=true
+        -Dio.netty.noUnsafe=false
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13.7.0
+        with:
+          cli: '1.12.0.1530'
+
+      - name: Cache resolved Maven and Git dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            .cpcache
+          key: outbox-aleph-v1-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            outbox-aleph-v1-${{ runner.os }}-
+
+      - name: Resolve the real optional Aleph dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          clojure -P -M:aleph-integration
+          # A test against a synthesized Netty-only listener is not enough.
+          clojure -Spath -M:aleph-integration > "$RUNNER_TEMP/aleph-classpath.txt"
+          tr ':' '\n' < "$RUNNER_TEMP/aleph-classpath.txt" | grep -E '/aleph-0\.9\.11\.jar$'
+
+      - name: Run strict real Aleph HTTP/1 qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The dedicated main explicitly loads the Aleph integration
+          # namespace, rejects zero tests, and exits nonzero on any failure.
+          # Do NOT use Cognitect test-runner -n here: it can discover 0 tests.
+          clojure -M:aleph-integration -m gesso.live.outbox.http-aleph-qualification-main

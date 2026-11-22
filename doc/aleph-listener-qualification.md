@@ -24,6 +24,32 @@ not included in its discovery paths. The pinned alias is `:aleph-integration` in
 Qualification also requires checking the selected transitive Netty versions
 against XTDB/Biff's classpath; the version pin does not establish compatibility.
 
+## GitHub-hosted real-listener gate (v2251)
+
+The separate `.github/workflows/outbox-aleph.yml` lane runs the strict
+qualification entry point on **GitHub-hosted Ubuntu 24.04 with Java 21**.
+It is triggered by changes on `typed-clojure` to the optional Aleph
+harness, listener/Netty completion integration, dependencies, or workflow
+itself. `workflow_dispatch` also permits a manual run.
+
+The job resolves the pinned **real** `aleph/aleph` 0.9.11 artifact, verifies
+it appears on the selected classpath, then runs:
+
+```sh
+clojure -M:aleph-integration -m gesso.live.outbox.http-aleph-qualification-main
+```
+
+There is no fallback to the JDK listener, no mock server, no zero-test
+success, and no `continue-on-error` override. A failed dependency download,
+qualification assertion, or test-loader error must fail the job. Offline
+configuration tests validate these controls but **do not qualify Aleph**.
+
+**Configured is not passed.** Treat the GitHub Actions result as unknown until
+the actual job has completed successfully on the committed revision. An
+unexecuted, queued, skipped, or failing workflow is not positive evidence.
+Even a green HTTP/1 gate does not establish HTTP/2, production source
+cancellation, listener retirement under load, or browser delivery.
+
 ## What the first gate exercises
 
 The `integration/gesso/live/outbox/http_aleph_integration_test.clj` harness
