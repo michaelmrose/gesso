@@ -78,6 +78,13 @@
                  ;; lease is missing or admit a source emission from it.
                  (.interrupt (Thread/currentThread))
                  (throw cause)))]
+    ;; XTDB q returns a vector of maps (or [] for an observed absence).
+    ;; An arbitrary countable or seq of valid-looking rows is not a physical
+    ;; query result. In particular, it must not authorize source emission.
+    (when-not (and (vector? rows) (every? map? rows))
+      (reject! :invalid-physical-current-page
+               {:intent-id intent-id
+                :physical-type (some-> rows class .getName)}))
     (when-not (= 1 (count rows))
       (reject! :missing-or-ambiguous-intent {:intent-id intent-id
                                              :row-count (count rows)}))

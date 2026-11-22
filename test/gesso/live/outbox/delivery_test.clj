@@ -427,3 +427,90 @@
               (s/close! tap))))
         (finally
           (live/close! system))))))
+
+(deftest malformed-delivery-current-page-never-emits-or-acks-test
+  ;; This is an actual leased XTDB row. Even a non-vector *containing that
+  ;; valid row* is not an XTDB q result and must not authorize emission.
+  ;; Nil, empty maps/seqs and bad vector entries are not safe missing rows.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)
+          id (random-uuid)]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id)
+              physical (row node id)
+              invalid [[:nil nil]
+                       [:empty-map {}]
+                       [:empty-sequence '()]
+                       [:java-list (java.util.ArrayList.)]
+                       [:one-row-list (list physical)]
+                       [:one-row-sequence (seq [physical])]
+                       [:nil-row [nil]]
+                       [:false-row [false]]]
+              before (row node id)]
+          (doseq [[case-name provider-result] invalid]
+            (let [tap (source/subscribe (:source system)
+                                        {:topic :request :id subject-id})
+                  reads (atom 0)
+                  acks (atom 0)]
+              (try
+                (let [failure (with-redefs
+                                [xt/q (fn [& _]
+                                        (swap! reads inc)
+                                        provider-result)
+                                 acknowledgment/acknowledge-dispatch!
+                                 (fn [_ submitted]
+                                   (swap! acks inc)
+                                   {:status :acknowledged
+                                    :intent-id (:intent-id submitted)
+                                    :lease-id (:lease-id submitted)
+                                    :receipt-id (get-in submitted
+                                                        [:receipt :receipt-id])})]
+                                (try
+                                  (delivery/dispatch-acquired!
+                                   node system {} lease source-id)
+                                  (catch Throwable e e)))]
+                  (is (instance? clojure.lang.ExceptionInfo failure)
+                      (str case-name " must fail with a typed physical-read error"))
+                  (is (= :gesso.live.outbox/invalid-delivery
+                         (:error/type (ex-data failure)))
+                      (str case-name " must retain delivery's error type"))
+                  (is (= :invalid-physical-current-page
+                         (:reason (ex-data failure)))
+                      (str case-name " must reject the provider container"))
+                  (is (= 1 @reads) "Never retry a malformed physical read")
+                  (is (zero? @acks) "Never ack an invalid physical query")
+                  (is (= ::timeout (deref (s/take! tap) 75 ::timeout))
+                      "Never emit an invalidation on a malformed preflight")
+                  (is (= before (row node id))
+                      "No physical lease or receipt change"))
+                (finally (s/close! tap))))))
+        (finally (live/close! system))))))
+
+(deftest vector-delivery-current-page-has-explicit-missing-row-behavior-test
+  ;; Only a legitimate XTDB vector can represent observed absence. An empty
+  ;; vector does not authorize an emission; a genuine leased row vector does.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)
+          id (random-uuid)]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id)
+              physical (xt/q node
+                             ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?"
+                              id])
+              taps (source/subscribe (:source system)
+                                     {:topic :request :id subject-id})]
+          (try
+            (is (vector? physical))
+            (is (= 1 (count physical)))
+            (is (= :missing-or-ambiguous-intent
+                   (:reason (with-redefs [xt/q (fn [& _] [])]
+                              (rejection
+                               #(delivery/dispatch-acquired!
+                                 node system {} lease source-id))))))
+            (is (= ::timeout (deref (s/take! taps) 75 ::timeout))
+                "A missing physical row cannot emit an invalidation")
+            (is (= :leased (:gesso.live.outbox/status (row node id))))
+            (finally (s/close! taps))))
+        (finally (live/close! system))))))
