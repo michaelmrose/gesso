@@ -365,3 +365,57 @@
            (:candidates resumed)))
     (is (false? (:has-more? resumed)))
     (is (nil? (:next-after resumed)))))
+
+(deftest malformed-physical-result-container-never-certifies-empty-queue-test
+  ;; A failed provider contract is not an empty XTDB result. Nil, false, an
+  ;; empty map/string/seq, or a Java list can be counted or iterated,
+  ;; allowing false queue exhaustion; other non-vector values throw an
+  ;; unrelated exception. XTDB q normally returns a vector.
+  (let [cases [[:nil nil]
+               [:false false]
+               [:empty-map {}]
+               [:empty-string ""]
+               [:empty-seq '()]
+               [:java-list (java.util.ArrayList.)]
+               [:nonempty-seq (list (synthetic-discovery-row
+                                      (synthetic-discovery-id 501)))]]
+        opts {:source-id "gesso/test-discovery" :limit 2}]
+    (doseq [[label physical] cases]
+      (let [queries (atom 0)]
+        (with-redefs [xt/q (fn [& _]
+                             (swap! queries inc)
+                             physical)]
+          (is (try
+                (boolean
+                 (rejected? #(discovery/discover-eligible! :synthetic opts)
+                            :invalid-physical-page))
+                (catch Throwable _ false))
+              (str label " must fail with the typed physical-page error"))
+          (is (= 1 @queries) "Never retry a malformed physical read"))))))
+
+(deftest malformed-physical-result-cannot-make-worker-report-observed-end-test
+  ;; The worker must never report a healthy empty sweep when its XTDB
+  ;; discovery adapter returned an untyped/malformed physical result.
+  (let [attempts (atom 0)
+        opts {:source-id "gesso/test-discovery" :worker-id "worker-a"
+              :page-size 1 :max-pages 1}]
+    (doseq [physical [nil {} '()]]
+      (with-redefs [xt/q (fn [& _] physical)
+                    acquisition/acquire-pending!
+                    (fn [& _]
+                      (swap! attempts inc)
+                      (throw (AssertionError. "Unexpected acquisition")))]
+        (is (rejected? #(worker/acquire-sweep! :synthetic opts)
+                       :invalid-physical-page)
+            "Worker must propagate the physical discovery contract error")
+        (is (zero? @attempts)
+            "Bad provider result cannot cause a physical lease claim")))))
+
+(deftest physical-discovery-vector-is-required-and-legitimate-empty-vector-valid-test
+  ;; Verify against the real provider type, not only a mocked empty vector.
+  (with-open [node (xtn/start-node {})]
+    (let [raw (xt/q node ["SELECT _id FROM gesso_live_outbox LIMIT 1"])
+          result (discovery/discover-eligible!
+                  node {:source-id "gesso/test-discovery" :limit 1})]
+      (is (vector? raw) "The physical XTDB query contract returns a vector")
+      (is (= {:candidates [] :has-more? false :next-after nil} result)))))

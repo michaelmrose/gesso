@@ -119,6 +119,14 @@
                   ;; interrupt signal that the physical read may have cleared.
                   (.interrupt (Thread/currentThread))
                   (throw cause)))
+         ;; XTDB q returns a vector, including [] for a genuinely empty
+         ;; selection. Nil, maps and other containers are provider-contract
+         ;; failures, NOT evidence that the queue was observed empty. Guard
+         ;; this before count/mapv so malformed responses cannot silently
+         ;; certify :observed-end or throw unrelated collection errors.
+         _ (when-not (vector? rows)
+             (reject! :invalid-physical-page
+                      {:physical-type (some-> rows class .getName)}))
          ;; Query requests at most limit + 1 rows. Validate ALL returned
          ;; identities, including the lookahead row used to claim another
          ;; page exists. A malformed lookahead could otherwise certify a
