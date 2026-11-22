@@ -146,6 +146,7 @@
   (test-selection!
    [#'integration/concrete-host-eventsource-htmx-converges-to-authoritative-xtdb-test
     #'integration/recovered-biff-worker-redelivers-to-unchanged-chromium-fragment-test
+    #'integration/late-independent-browser-interests-acquire-without-replayed-notice-test
     #'restart/browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test]))
 
 (defn execute!

@@ -659,6 +659,145 @@
               ((:close! server))
               (host/stop! started))))))))
 
+(deftest late-independent-browser-interests-acquire-without-replayed-notice-test
+  ;; Stage 9 initial-interest seam: the authoritative domain write and its
+  ;; durable outbox acknowledgment PRECEDE every browser/SSE subscription.
+  ;; No replay is promised for a terminal notice. Two separate browser
+  ;; contexts must nevertheless obtain the latest authorized fragment using
+  ;; their own initial HTMX acquisition, rather than inferring freshness
+  ;; from an old notice or sharing one client's DOM/read grant.
+  (let [ops (standard-operations)
+        render (render-context ops)]
+    (with-surfaced-application
+      {:request-board [:main (rendered-operation-button
+                              render :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [ring (fn [_] (g/html-response
+                            [:main (rendered-operation-button
+                                    render :request/claim "/operations/request/claim")]))
+              started (host/start! assembly ring
+                                   (assoc (config) :worker-options
+                                          {:worker-id "late-interest-worker"
+                                           :poll-ms 20}))
+              node (:xtdb/connectable started)
+              sys (:gesso.live/system started)
+              requests (atom [])
+              browser* (atom nil)
+              contexts* (atom [])
+              route* (atom nil)
+              server* (atom nil)]
+          (try
+            ;; No EventSource or source tap is registered yet. The worker
+            ;; commits a terminal acknowledgment before any HTTP listener or
+            ;; Live interest for this fixture exists.
+            (let [intent-id (random-uuid)
+                  prepared (outbox/prepare!
+                             {:intent-ids [intent-id] :source-id source-id
+                              :operation :request/claim
+                              :purpose :gesso.live/refresh}
+                             [{:topic :request :id subject
+                               :change/kind :updated}])]
+              (xt/execute-tx node
+                             (into (vec (:guard-ops prepared))
+                                   [[:put-docs :requests
+                                     {:xt/id subject :status :claimed}]
+                                    (:tx-op prepared)]))
+              (is (eventually
+                   #(= :dispatch-accepted
+                       (:gesso.live.outbox/status
+                        (first (stable-q node
+                                ["SELECT * FROM gesso_live_outbox WHERE _id = ?"
+                                 intent-id]))))))
+              (is (= :claimed (:status
+                               (first (stable-q node
+                                               ["SELECT * FROM requests WHERE _id = ?"
+                                                subject])))))
+              ;; Only now admit connections. There is no backlog in the
+              ;; ephemeral Live source and the outbox is already terminal.
+              (let [route (http/wrap-authorized-sse
+                           started {:path "/live/events"
+                                    :authorize-subscription
+                                    (fn [request]
+                                      (when (str/includes?
+                                             (or (get-in request [:headers "cookie"]) "")
+                                             "v2109-test-session=1")
+                                        scope))})
+                    _ (reset! route* route)
+                    javascript {"/assets/htmx.js" (asset! htmx-assets)
+                                "/assets/sse.js" (asset! sse-assets)
+                                "/assets/gesso-live.js" (runtime!)}
+                    serve (fn [request]
+                            (cond
+                              (= "/live/events" (:uri request))
+                              ((:handler route) request)
+
+                              (contains? javascript (:uri request))
+                              {:status 200 :headers js-headers
+                               :body (get javascript (:uri request))}
+
+                              (= "/" (:uri request))
+                              {:status 200
+                               :headers (assoc html-headers "set-cookie"
+                                               "v2109-test-session=1; Path=/; SameSite=Lax")
+                               :body (page-html render)}
+
+                              (= "/fragment" (:uri request))
+                              (do (swap! requests conj request)
+                                  (fragment-response node request))
+
+                              :else ((:handler route) request)))
+                    server (start-loopback! serve)
+                    _ (reset! server* server)
+                    harness (chromium/start!
+                             {:args ["--no-sandbox" "--disable-dev-shm-usage"]})
+                    _ (reset! browser* harness)]
+                (doseq [client-index (range 2)]
+                  ;; A fresh Playwright context has its own cookies, stream,
+                  ;; JS state, listener root and HTTP acquisition lifecycle.
+                  (let [context (chromium/new-context! harness)
+                        _ (swap! contexts* conj context)
+                        page (chromium/new-page! context)]
+                    (chromium/navigate! page (str (:url server) "/"))
+                    (chromium/wait-for-js! page
+                      "() => window.__v2109?.runtime === true && window.__v2109.opens >= 1")
+                    (chromium/wait-for-js! page
+                      "() => document.getElementById('v2109-browser-panel')?.getAttribute('data-authoritative-status') === 'claimed'")
+                    (is (pos? (long (chromium/evaluate
+                                      page "() => window.__v2109.refreshes")))
+                        (str "client " client-index " made a real initial HTMX acquisition"))
+                    ;; An old advisory may still be in flight; unlike a
+                    ;; replay protocol, our initial GET must not rely on it.
+                    (is (= "claimed"
+                           (chromium/evaluate
+                            page "() => document.getElementById('v2109-browser-panel')?.textContent")))
+                    (is (= [] (chromium/evaluate
+                               page "() => window.__v2109.errors")))
+                    (is (true? (chromium/assert-clean! context)))))
+                (is (<= 2 (count @requests))
+                    "Each late client must obtain authoritative data through its own GET")
+                (is (= 2 ((:active-count route)))
+                    "The distinct browser contexts own distinct SSE interests")
+                (is (<= 2 (count (filter
+                                   #(nil? (get-in % [:headers
+                                                     progression.http/request-header-name]))
+                                   @requests)))
+                    "Each client must make a fresh initial GET without inventing a missed notice's progression")
+                (is (= :dispatch-accepted
+                       (:gesso.live.outbox/status
+                        (first (stable-q node
+                                ["SELECT * FROM gesso_live_outbox WHERE _id = ?"
+                                 intent-id])))))))
+            (finally
+              (doseq [context (reverse @contexts*)]
+                (chromium/close-context! context))
+              (when-let [harness @browser*]
+                (chromium/stop! harness))
+              (when-let [route @route*]
+                ((:close! route)))
+              (when-let [server @server*]
+                ((:close! server)))
+              (host/stop! started))))))))
+
 (defn- get-body!
   ([^HttpClient client base path] (get-body! client base path {}))
   ([^HttpClient client base path headers]
