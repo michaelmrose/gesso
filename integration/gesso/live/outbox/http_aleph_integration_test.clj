@@ -11,6 +11,8 @@
             [gesso.live.outbox.http :as http]
             [gesso.live.outbox.http-aleph-pipeline :as capture]
             [gesso.live.outbox.http-aleph-live :as aleph-live]
+            [gesso.live.flow :as flow]
+            [gesso.live.outbox.http-recovery :as recovery]
             [gesso.live.source :as source]
             [gesso.live.transport.sse :as sse]
             [gesso.live.outbox.http-listener :as listener]
@@ -579,3 +581,249 @@
              ;; If shutdown was not certified, the fixture must still
              ;; terminate its temporary XTDB host; never leak test resources.
              (when-not @host-stopped? (host-stop app)))))))))
+
+(deftest real-aleph-failed-release-scheduled-recovery-preserves-healthy-peer-test
+  ;; One genuine Gesso/XTDB host, two independently authorized source-backed
+  ;; SSE sessions and two real Aleph sockets. Failure injection is restricted
+  ;; to the first session's physical source-release callback: its route slot
+  ;; and disconnected debt must remain owned while scheduled recovery runs.
+  ;; Once the scheduler succeeds, Aleph's failed per-channel handoff must
+  ;; separately reconcile terminal completion (not infer it from route drain).
+  (let [original-open flow/open-source-flow!
+        release-blocked? (atom true)
+        bad-close-attempts (atom 0)
+        fault (ex-info "transient physical source-release failure" {:test :v2256})
+        standard ((requiring-resolve
+                   'gesso.live.application-preflight.fixture/standard-operations))
+        render ((requiring-resolve
+                 'gesso.live.application-preflight.fixture/render-context) standard)
+        button ((requiring-resolve
+                 'gesso.live.application-preflight.fixture/rendered-operation-button)
+                render :request/claim "/operations/request/claim")
+        fixture (requiring-resolve
+                 'gesso.live.application-preflight.fixture/with-surfaced-application)]
+    (with-redefs-fn
+      {#'flow/open-source-flow!
+       (fn [src options]
+         (let [opened (original-open src options)]
+           (if (= "v2256-bad" (get-in options [:subscription :id]))
+             (update opened :close!
+                     (fn [underlying-close!]
+                       (fn []
+                         (swap! bad-close-attempts inc)
+                         (if @release-blocked?
+                           (throw fault)
+                           (underlying-close!)))))
+             opened)))}
+      (fn []
+        (fixture
+         {:request-board [:main button]}
+         (fn [{:keys [assembly]}]
+           (let [host-start (requiring-resolve 'gesso.live.outbox.host/start!)
+                 host-stop (requiring-resolve 'gesso.live.outbox.host/stop!)
+                 app (host-start
+                      assembly
+                      (fn [_] {:status 200 :headers {} :body "ordinary"})
+                      {:xtdb-config {}
+                       :source-id "gesso/v2256-aleph-recovery"
+                       :rules-context {}
+                       :worker-options {:worker-id "v2256-recovery-worker"
+                                        :poll-ms 25}
+                       :live-options
+                       {:rules [{:when-topic :request
+                                 :expand (fn [_ change]
+                                           [(select-keys change
+                                                         [:topic :id :change/kind])])}]
+                        :source-options {:coalesce-window-ms 0
+                                         :max-active-consumers 4}
+                        :dispatch-options {:threads 1 :queue-size 8
+                                           :on-overflow :throw}}})
+                 src (:source (:gesso.live/system app))
+                 observer (capture/prepare!)
+                 pool (java.util.concurrent.Executors/newFixedThreadPool 2)
+                 server (atom nil)
+                 admitted (atom {})
+                 stopped? (atom false)
+                 scheduler (atom nil)
+                 shutdown (atom nil)
+                 sockets (atom [])
+                 route (http/wrap-authorized-sse
+                        app {:path "/live/events" :max-connections 2
+                             :authorize-subscription
+                             (fn [request]
+                               {:topic :request
+                                :id (if (= "client=bad" (:query-string request))
+                                      "v2256-bad" "v2256-good")})
+                             :on-session-admitted!
+                             (fn [request owned-session]
+                               (let [bridge (::route-bridge request)
+                                     ch (:aleph/channel request)
+                                     hook (aleph-live/attach!
+                                           {:channel ch :session owned-session
+                                            :bridge bridge :executor pool})]
+                                 (swap! admitted assoc (:query-string request)
+                                        {:bridge bridge :hook hook
+                                         :channel ch :session owned-session})))})
+                 guard (listener/prepare!
+                        {:dispatch-async!
+                         (fn [request done!]
+                           (let [bridge (terminal/prepare! done!)
+                                 response ((:handler route)
+                                           (assoc request ::route-bridge bridge))]
+                             ((:register-response! observer)
+                              (:aleph/channel request) bridge)
+                             (when-not (stream/stream? (:body response))
+                               ((:producer-ceased! bridge)))
+                             response))
+                         :max-in-flight 4
+                         :on-rejected!
+                         (constantly {:status 503 :headers {}
+                                      :body "listener draining"})
+                         :stop-accept! (fn []
+                                         (.close ^Closeable @server)
+                                         {:outcome :stopped})})
+                 open-client!
+                 (fn [id]
+                   (let [socket (java.net.Socket.)]
+                     (swap! sockets conj socket)
+                     (.connect socket
+                               (java.net.InetSocketAddress.
+                                "127.0.0.1" (aleph-netty/port @server)) 2000)
+                     (.setSoTimeout socket 5000)
+                     (let [writer (.getOutputStream socket)
+                           request (str "GET /live/events?client=" id " HTTP/1.1\r\n"
+                                        "Host: 127.0.0.1\r\n"
+                                        "Connection: keep-alive\r\n\r\n")
+                           reader (java.io.BufferedReader.
+                                   (java.io.InputStreamReader.
+                                    (.getInputStream socket)
+                                    StandardCharsets/UTF_8))]
+                       (.write writer (.getBytes request StandardCharsets/US_ASCII))
+                       (.flush writer)
+                       (when-not (re-find #"^HTTP/1\.1 200 " (or (.readLine reader) ""))
+                         (throw (ex-info "Aleph SSE connection was not admitted"
+                                         {:client id})))
+                       (loop []
+                         (let [line (.readLine reader)]
+                           (when-not line (throw (ex-info "Missing SSE headers" {})))
+                           (when (seq line) (recur))))
+                       {:socket socket :reader reader})))
+                 read-update!
+                 (fn [reader]
+                   (loop [lines 0]
+                     (cond (> lines 40) false
+                           :else (let [line (.readLine reader)]
+                                   (cond (nil? line) false
+                                         (= "event: live-update" line) true
+                                         :else (recur (inc lines)))))))]
+             (try
+               (reset! server
+                       (aleph/start-server
+                        (:handle! guard)
+                        {:port 0 :http-versions [:http1]
+                         :transport :nio :shutdown-timeout 0
+                         :http1-pipeline-transform
+                         (:http1-pipeline-transform observer)}))
+               (let [bad (open-client! "bad")
+                     good (open-client! "good")]
+                 (is (eventually #(and (= 2 ((:occupied-count route)))
+                                      (= 2 (:subscription-count (source/stats src)))
+                                      (= 2 (count @admitted)))))
+                 (is (= 2 ((:active-count guard))))
+                 (is (= 503
+                        (.statusCode
+                         (.send (HttpClient/newHttpClient)
+                                (get-request (str "http://127.0.0.1:"
+                                                  (aleph-netty/port @server)
+                                                  "/live/events?client=third"))
+                                (HttpResponse$BodyHandlers/ofString))))
+                     "The occupied route cannot admit a third session")
+                 (source/emit! src {:topic :request :id "v2256-good"
+                                    :change/kind :updated})
+                 (is (read-update! (:reader good))
+                     "A healthy peer receives SSE before recovery")
+                 (.setSoLinger ^java.net.Socket (:socket bad) true 0)
+                 (.close ^java.net.Socket (:socket bad))
+                 (is (eventually #(some? (:last-error
+                                         ((:status (:hook (get @admitted "client=bad")))))))
+                     "Aleph close attempts the route-owned release, which fails")
+                 (is (pos? @bad-close-attempts))
+                 (is (= 1 ((:disconnected-count route))))
+                 (is (= 2 ((:occupied-count route)))
+                     "Failed physical release preserves the route's occupied slot")
+                 (is (= 2 ((:active-count guard)))
+                     "The failed Aleph terminal callback cannot fake drain")
+                 (is (false? (:released?
+                              ((:status (get-in @admitted ["client=bad" :hook]))))))
+                 (reset! scheduler
+                         (recovery/start-scheduled!
+                          route {:poll-ms 20 :min-interval-ms 30
+                                 :max-attempts 1 :max-failure-interval-ms 100}))
+                 (is (eventually #(pos? (:failure-count ((:stats @scheduler)))))
+                     "Real route-owned scheduler observes physical release failures")
+                 (is (= 2 ((:occupied-count route))))
+                 (is (= 1 ((:disconnected-count route))))
+                 (is (zero? (:release-attempts
+                             ((:status (get-in @admitted ["client=good" :hook])))))
+                     "The healthy peer must not be canceled by recovery")
+                 (source/emit! src {:topic :request :id "v2256-good"
+                                    :change/kind :updated})
+                 (is (read-update! (:reader good))
+                     "The healthy peer must remain live during failed retries")
+                 (reset! release-blocked? false)
+                 (is (eventually #(and (zero? ((:disconnected-count route)))
+                                      (= 1 ((:occupied-count route)))))
+                     "Scheduled retry releases the failed route slot")
+                 (is (pos? (get-in ((:stats @scheduler))
+                                   [:last-physical-outcome :recovered] 0)))
+                 (is (= 2 ((:active-count guard)))
+                     "The Aleph terminal obligation is separate from route recovery")
+                 (is (= :released
+                        ((:retry! (:hook (get @admitted "client=bad")))))
+                     "Reconcile confirmed route release with the dead Netty channel")
+                 (is (eventually #(= 1 ((:active-count guard)))))
+                 (is (true? (:terminal?
+                             ((:status (get-in @admitted ["client=bad" :bridge]))))))
+                 (is (= 1 ((:occupied-count route))))
+                 (is (= 1 (:subscription-count (source/stats src))))
+                 (source/emit! src {:topic :request :id "v2256-good"
+                                    :change/kind :updated})
+                 (is (read-update! (:reader good))
+                     "Recovered failure must not disrupt healthy peer delivery")
+                 (.setSoLinger ^java.net.Socket (:socket good) true 0)
+                 (.close ^java.net.Socket (:socket good))
+                 (is (eventually #(and
+                                  (true? (:released?
+                                          ((:status (get-in @admitted ["client=good" :hook])))))
+                                  (zero? ((:occupied-count route)))
+                                  (zero? (:subscription-count (source/stats src)))
+                                  (zero? ((:active-count guard))))))
+                 (is (= 0 (:pending ((:stats observer)))))
+                 (reset! shutdown
+                         (recovery/prepare-owned-shutdown
+                          @scheduler
+                          {:route route
+                           :stop-listener! (fn [] ((:stop! guard) 3000))
+                           :stop-host! (fn []
+                                         (host-stop app)
+                                         (reset! stopped? true)
+                                         {:outcome :stopped})
+                           :drain-timeout-ms 3000}))
+                 (is (= :stopped (:outcome ((:stop! @shutdown)))))
+                 (is @stopped?)
+                 (is (true? ((:drained? route)))))
+               (finally
+                 (reset! release-blocked? false)
+                 (doseq [socket @sockets]
+                   (try (.close ^java.net.Socket socket)
+                        (catch Throwable _ nil)))
+                 (when-let [handle @scheduler]
+                   (try ((:stop! handle) 3000) (catch Throwable _ nil)))
+                 (when-let [coordinator @shutdown]
+                   (when-not @stopped?
+                     (try ((:stop! coordinator)) (catch Throwable _ nil))))
+                 (when-let [aleph-server @server]
+                   (try (.close ^Closeable aleph-server) (catch Throwable _ nil)))
+                 (.shutdownNow pool)
+                 (when-not @stopped?
+                   (try (host-stop app) (catch Throwable _ nil))))))))))))
