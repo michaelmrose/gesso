@@ -138,6 +138,83 @@
       (is (= :leased (:gesso.live.outbox/status (row node id))))
       (is (= "winner" (:gesso.live.outbox/lease-owner (row node id)))))))
 
+(deftest malformed-discovery-pages-never-signal-observed-end-test
+  ;; Discovery is advisory, but its page shape is a mandatory framework
+  ;; contract. A truncated/corrupt response must not certify an empty queue.
+  (let [id (random-uuid)
+        valid {:intent-id id :action :acquire-pending}
+        cases [nil
+               {}
+               {:candidates nil :has-more? false :next-after nil}
+               {:candidates [] :has-more? nil :next-after nil}
+               {:candidates [] :has-more? :unknown :next-after nil}
+               {:candidates [] :has-more? true :next-after id}
+               {:candidates [] :has-more? false :next-after id}
+               {:candidates [valid] :has-more? true :next-after nil}
+               {:candidates [valid] :has-more? true :next-after (random-uuid)}
+               {:candidates [valid] :has-more? true :next-after id}]]
+    (doseq [page cases]
+      (let [calls (atom 0)
+            opts {:source-id "gesso/test-worker" :worker-id "worker"
+                  :page-size 2 :max-pages 1}]
+        (with-redefs [discovery/discover-eligible! (fn [_ _] page)
+                      acquisition/acquire-pending!
+                      (fn [& _] (swap! calls inc) {:status :acquired})]
+          (is (rejected? #(worker/acquire-sweep! :no-xtdb opts)
+                         :invalid-discovery-page)
+              (str "Malformed discovery must be rejected: " (pr-str page)))
+          (is (zero? @calls)
+              "Malformed discovery must not commit any acquisition"))))))
+
+(deftest invalid-discovery-candidates-rejected-before-first-lease-test
+  ;; Whole-page validation must precede the first physical CAS. Otherwise a
+  ;; malformed later candidate can strand an earlier lease as partial work.
+  (let [a (random-uuid)
+        b (random-uuid)
+        good {:intent-id a :action :acquire-pending}
+        invalids [[good {:intent-id b :action :unrecognized}]
+                  [good {:intent-id :not-uuid :action :acquire-pending}]
+                  [good {:intent-id a :action :reclaim-expired}]
+                  [good nil]]]
+    (doseq [candidates invalids]
+      (let [calls (atom [])
+            page {:candidates candidates :has-more? false :next-after nil}]
+        (with-redefs [discovery/discover-eligible! (fn [_ _] page)
+                      acquisition/acquire-pending!
+                      (fn [_ request]
+                        (swap! calls conj (:intent-id request))
+                        {:status :acquired})
+                      acquisition/reclaim-expired!
+                      (fn [_ request]
+                        (swap! calls conj (:intent-id request))
+                        {:status :reclaimed})]
+          (is (rejected?
+               #(worker/acquire-sweep! :no-xtdb
+                                       {:source-id "gesso/test-worker"
+                                        :worker-id "worker"})
+               :invalid-discovery-page)
+              (str "Invalid candidate must reject the page: " (pr-str candidates)))
+          (is (empty? @calls)
+              "Invalid later candidate cannot commit an earlier lease"))))))
+
+(deftest malformed-discovery-continuation-cannot-loop-or-commit-test
+  ;; A continuation that repeats the input cursor must not be accepted as
+  ;; progress; nor can an incomplete has-more page justify further scanning.
+  (let [after (random-uuid)
+        page {:candidates [{:intent-id after :action :acquire-pending}]
+              :has-more? true :next-after after}
+        calls (atom 0)]
+    (with-redefs [discovery/discover-eligible! (fn [_ _] page)
+                  acquisition/acquire-pending!
+                  (fn [& _] (swap! calls inc) {:status :acquired})]
+      (is (rejected?
+           #(worker/acquire-sweep! :no-xtdb
+                                   {:source-id "gesso/test-worker"
+                                    :worker-id "worker" :after after
+                                    :page-size 1 :max-pages 2})
+           :invalid-discovery-page))
+      (is (zero? @calls)))))
+
 (deftest unexpected-acquisition-errors-are-not-silently-converted-test
   (with-open [node (xtn/start-node {})]
     (let [[id] (seed! node [{:id (random-uuid) :status :pending}])]

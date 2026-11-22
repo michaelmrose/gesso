@@ -62,6 +62,38 @@
     (reject! :invalid-cursor {:after (:after opts)}))
   opts)
 
+(defn- validate-discovery-page!
+  "Fail closed if a discovery response violates its mandatory page contract.
+   Validate the ENTIRE advisory page before its first physical acquisition,
+   so malformed later candidates cannot leave an unreported committed prefix."
+  [request page]
+  (let [candidates (:candidates page)
+        more? (:has-more? page)
+        cursor (:next-after page)
+        identities (when (vector? candidates)
+                     (mapv :intent-id candidates))]
+    (when-not
+     (and (map? page)
+          (vector? candidates)
+          (<= (count candidates) (:limit request))
+          (every? (fn [candidate]
+                    (and (map? candidate)
+                         (uuid? (:intent-id candidate))
+                         (#{:acquire-pending :reclaim-expired}
+                          (:action candidate))))
+                  candidates)
+          (= (count identities) (count (distinct identities)))
+          (or (true? more?) (false? more?))
+          (if more?
+            (and (= (:limit request) (count candidates))
+                 (uuid? cursor)
+                 (= cursor (peek identities))
+                 (not= cursor (:after request)))
+            (nil? cursor)))
+      (reject! :invalid-discovery-page
+               {:request request :page page}))
+    page))
+
 (defn- attempt!
   [node worker-id source-id lease-millis {:keys [intent-id action]}]
   (let [now (Instant/now)
@@ -117,7 +149,8 @@
            results []]
       (let [request (cond-> {:limit page-size :source-id source-id}
                       after (assoc :after after))
-            page (discovery/discover-eligible! node request)
+            page (validate-discovery-page!
+                  request (discovery/discover-eligible! node request))
             claimed (mapv #(attempt! node worker-id source-id lease-millis %)
                           (:candidates page))
             results' (into results claimed)
