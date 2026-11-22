@@ -257,6 +257,53 @@
         (finally
           (Thread/interrupted))))))
 
+(deftest interrupted-acknowledgment-current-read-preserves-unknown-and-signal-test
+  ;; Before any guarded write, acknowledgement loads the current lease.
+  ;; An interrupted physical query cannot establish a missing or stale lease,
+  ;; and must not erase the caller's JVM cancellation signal.
+  (with-open [node (xtn/start-node {})]
+    (let [existing-id (random-uuid)
+          missing-id (random-uuid)
+          _ (seed! node existing-id)
+          lease-id (pending->leased! node existing-id "worker-a")
+          original (row node existing-id)]
+      (doseq [[phase submission]
+              [[:existing (submit existing-id lease-id "worker-a")]
+               [:missing (submit missing-id (random-uuid) "worker-a")]]]
+        (let [cause (InterruptedException.
+                     (str (name phase) " acknowledgment read interrupted"))
+              queries (atom 0)
+              writes (atom 0)]
+          (try
+            (Thread/interrupted)
+            (let [failure (with-redefs
+                            [xt/q (fn [& _]
+                                    (swap! queries inc)
+                                    (throw cause))
+                             live.xtdb/execute-tx! (fn [& _]
+                                                     (swap! writes inc)
+                                                     (throw (AssertionError.
+                                                             "unexpected write")))]
+                            (try
+                              (acknowledgment/acknowledge-dispatch!
+                               node submission)
+                              (catch Throwable error error)))
+                  interrupted? (.isInterrupted (Thread/currentThread))]
+              (Thread/interrupted)
+              (is (identical? cause failure)
+                  (str phase " must propagate the exact XTDB read failure"))
+              (is interrupted?
+                  (str phase " must restore the JVM interruption signal"))
+              (is (= 1 @queries) "Failed current read must not be retried")
+              (is (zero? @writes)
+                  "Indeterminate current read cannot authorize a write")
+              (is (= original (row node existing-id))
+                  "The already leased intent must remain untouched")
+              (is (nil? (row node missing-id))
+                  "The missing intent must not be fabricated"))
+            (finally
+              (Thread/interrupted))))))))
+
 (deftest unexpected-provider-errors-are-not-called-safe-rejections-test
   (with-open [node (xtn/start-node {})]
     (let [id (random-uuid)

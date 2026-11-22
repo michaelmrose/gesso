@@ -68,7 +68,15 @@
 
 (defn- current-intent!
   [node intent-id]
-  (let [rows (xt/q node [current-sql intent-id])]
+  (let [rows (try
+               (xt/q node [current-sql intent-id])
+               (catch InterruptedException cause
+                 ;; An interrupted physical lease read does not establish
+                 ;; whether the intent is missing, current, or already leased.
+                 ;; Preserve the exact failure and the caller's JVM cancellation
+                 ;; signal instead of admitting an invented outcome.
+                 (.interrupt (Thread/currentThread))
+                 (throw cause)))]
     (when (> (count rows) 1)
       (reject! :ambiguous-current-row {:intent-id intent-id}))
     (first rows)))
