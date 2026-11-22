@@ -1611,6 +1611,83 @@
            (when @waiter (future-cancel @waiter))
            ((:close! route))))))))
 
+(deftest disconnected-unreleased-source-charges-route-capacity-test
+  ;; v2157 retains source interests after disconnect but counts only active
+  ;; responses + starting streams when enforcing :max-connections. A series
+  ;; of client disconnects with failed source cleanup could otherwise create
+  ;; unbounded subscriptions under a one-connection route limit.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           real-open flow/open-source-flow!
+           release-real! (atom nil)
+           permit-release? (atom false)
+           authorized (atom 0)]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source flow-options]
+            (let [opened (real-open source flow-options)
+                  release! (:close! opened)]
+              (reset! release-real! release!)
+              (assoc opened :close!
+                     (fn []
+                       (when @permit-release? (release!))))) )
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 1
+                                 :authorize-subscription
+                                 (fn [_] (swap! authorized inc) scope)})
+                 req {:uri "/live/events" :request-method :get}
+                 first-response ((:handler route) req)]
+             (try
+               (is (= 200 (:status first-response)))
+               (is (= 1 ((:active-count route))))
+               (is (= 1 ((:occupied-count route))))
+               (is (= 1 (:subscription-count (source/stats src))))
+               ;; A client disconnects but its source interest stays alive.
+               (stream/close! (:body first-response))
+               (is (eventually #(zero? ((:active-count route)))))
+               (is (= 1 ((:occupied-count route)))
+                   "The disconnected interest still consumes the only slot")
+               (is (= 1 (:subscription-count (source/stats src))))
+               ;; The inactive but unreleased source still occupies a
+               ;; finite subscription slot: it is not free capacity.
+               (let [second ((:handler route) req)]
+                 (is (= {:status 503 :headers {}
+                         :body "Live connection capacity reached"}
+                        second)
+                     "Unreleased disconnects must count against max connections")
+                 (when (= 200 (:status second))
+                   ;; Negative control: avoid leaking its admitted stream.
+                   (stream/close! (:body second))))
+               (is (= 1 (:subscription-count (source/stats src)))
+                   "Refused admission must not allocate another source interest")
+               (is (= 2 @authorized))
+               ;; Source closure must automatically return capacity without
+               ;; requiring a complete shutdown of the managed route.
+               (reset! permit-release? true)
+               (@release-real!)
+               (is (eventually #(zero? (:subscription-count (source/stats src)))))
+               (is (= 0 ((:occupied-count route)))
+                   "Successful delayed source release restores capacity")
+               (let [third ((:handler route) req)]
+                 (is (= 200 (:status third))
+                     "A genuine source release restores admission capacity")
+                 (is (= 1 ((:occupied-count route))))
+                 (is (= 1 (:subscription-count (source/stats src))))
+                 (stream/close! (:body third)))
+               (is (eventually #(zero? ((:active-count route)))))
+               (is (eventually #(zero? (:subscription-count
+                                      (source/stats src)))))
+               (is (= 0 ((:occupied-count route))))
+               (finally
+                 (reset! permit-release? true)
+                 (when @release-real! (@release-real!))
+                 ((:close! route)))))))))))
+
 (deftest client-disconnect-retains-unreleased-source-interest-test
   ;; A client can close the HTTP response directly, bypassing the managed
   ;; route's :close!. If the transport's normal release hook fails, the route

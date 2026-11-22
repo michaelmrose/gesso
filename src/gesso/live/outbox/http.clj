@@ -43,6 +43,18 @@
     (when-not (true? (source-closed?))
       (reject! :incomplete-sse-source-release {}))))
 
+(defn- occupied-sse-slots
+  "Count physical and unresolved sessions charged against route capacity.
+
+   A disconnected response may still hold an eager Live source subscription.
+   Such unresolved cleanup must not free a connection slot: otherwise a
+   client can reconnect repeatedly to exceed :max-connections while its
+   prior source interests remain registered. Duplicate keys across the
+   active and cleanup registries represent one session, not two."
+  [{:keys [connections starting retry-cancellations disconnect-cleanups]}]
+  (+ starting (count (merge connections
+                            retry-cancellations disconnect-cleanups))))
+
 (defn- drained-state? [{:keys [closed? close-completed? connections starting
                               retry-cancellations disconnect-cleanups
                               pending-authorizations]}]
@@ -99,7 +111,7 @@
 
 (defn wrap-authorized-sse
   "Return {:handler Ring-handler :close! callback :active-count callback
-           :pending-authorization-count callback :closed? callback
+           :occupied-count callback :pending-authorization-count callback :closed? callback
            :drained? callback :await-drained! callback}.
 
    Requires a started concrete host, a fixed canonical :path (absolute URL
@@ -143,6 +155,11 @@
    startup; a late starter must cancel its stream at the final admission
    fence and cannot return HTTP 200 after shutdown. A starting session is
    charged against :max-connections before its source interest exists.
+   Unresolved disconnect and failed-cancellation cleanup obligations also
+   retain capacity until source release is confirmed, even when the HTTP
+   response is already closed. :active-count reports current HTTP sessions;
+   :occupied-count additionally includes in-flight starters and unreleased
+   cleanup obligations (counting each session once).
    Since :close! can return while authorization/startup is still in flight,
    :drained? reports the stronger lifecycle condition: route close! has
    completed its cancellation pass successfully, no authorization or startup
@@ -385,8 +402,8 @@
 
                                 ;; Do not reveal connection capacity until
                                 ;; the request has passed authorization.
-                                (>= (+ (count (:connections @state))
-                                       (:starting @state)) max-connections)
+                                (>= (occupied-sse-slots @state)
+                                    max-connections)
                                 {:status 503 :headers {}
                                  :body "Live connection capacity reached"}
 
@@ -495,6 +512,7 @@
     {:handler handler
      :close! close!
      :active-count (fn [] (count (:connections @state)))
+     :occupied-count (fn [] (occupied-sse-slots @state))
      :pending-authorization-count (fn [] (:pending-authorizations @state))
      :closed? (fn [] (:closed? @state))
      :drained? (fn [] (drained-state? @state))
