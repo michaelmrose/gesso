@@ -5,6 +5,7 @@
    not part of Gesso's core test classpath). Network receipt is observed via
    java.net.http.HttpClient; no real browser/HTMX refresh is claimed."
   (:require [clojure.edn :as edn]
+            [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [gesso.core :as g]
@@ -3489,3 +3490,143 @@
                  (reset! release-permitted? true)
                  ((:close! route))))))))))
 )
+
+(deftest disconnected-retry-default-batch-is-bounded-test
+  ;; A manual retry pass must not traverse an arbitrarily large backlog
+  ;; while holding the route lifecycle lock. The default budget is 16;
+  ;; a later explicit pass handles the remainder without route shutdown.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           actual-open flow/open-source-flow!
+           can-release? (atom false)
+           failure (ex-info "disconnected release deferred" {:test :v2237})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source options]
+            (let [opened (actual-open source options)
+                  original-close (:close! opened)]
+              (assoc opened :close!
+                     (fn []
+                       (if @can-release?
+                         (original-close)
+                         (throw failure))))))
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 17
+                                 :sse-options {:keepalive-ms 15000
+                                               :frame-write-timeout-ms 30000}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}]
+             (try
+               (let [responses (doall (repeatedly 17 #((:handler route) request)))]
+                 (is (every? #(= 200 (:status %)) responses))
+                 (doseq [response responses]
+                   (stream/close! (:body response)))
+                 (is (eventually #(zero? ((:active-count route)))))
+                 (is (= 17 (:subscription-count (source/stats src))))
+                 (is (= 17 ((:occupied-count route))))
+                 (reset! can-release? true)
+                 (is (= {:attempted 16 :recovered 16}
+                        ((:retry-disconnected! route)))
+                     "Default manual cleanup pass must do at most 16 retries")
+                 (is (= 1 (:subscription-count (source/stats src))))
+                 (is (= 1 ((:occupied-count route))))
+                 (is (= {:attempted 1 :recovered 1}
+                        ((:retry-disconnected! route))))
+                 (is (= {:attempted 0 :recovered 0}
+                        ((:retry-disconnected! route))))
+                 (is (zero? (:subscription-count (source/stats src))))
+                 (is (zero? ((:occupied-count route))))
+                 (is (false? ((:closed? route)))))
+               (finally
+                 (reset! can-release? true)
+                 ((:close! route)))))))))))
+
+(deftest disconnected-retry-rotates-failed-batches-and-preserves-healthy-test
+  ;; Persistently failing releases must not monopolize every retry pass.
+  ;; Failed entries retain their slots, the cursor advances, and an active
+  ;; peer cannot be canceled by retrying the orphan backlog.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           actual-open flow/open-source-flow!
+           next-id (atom 0)
+           attempted-ids (atom [])
+           can-release? (atom false)
+           failure (ex-info "retry needs later intervention" {:test :v2237})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source options]
+            (let [opened (actual-open source options)
+                  id (swap! next-id inc)
+                  original-close (:close! opened)]
+              (assoc opened :close!
+                     (fn []
+                       (swap! attempted-ids conj id)
+                       (if @can-release?
+                         (original-close)
+                         (throw failure))))))
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 6
+                                 :sse-options {:keepalive-ms 15000
+                                               :frame-write-timeout-ms 30000}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}]
+             (try
+               (let [orphans (doall (repeatedly 5 #((:handler route) request)))
+                     healthy ((:handler route) request)
+                     retry! (:retry-disconnected! route)]
+                 (is (every? #(= 200 (:status %)) (conj orphans healthy)))
+                 (doseq [response orphans]
+                   (stream/close! (:body response)))
+                 (is (eventually #(= 1 ((:active-count route)))))
+                 (is (= 6 ((:occupied-count route))))
+                 (reset! attempted-ids [])
+                 (doseq [bad [nil 0 -1 1025 1.5 "two"]]
+                   (is (= :invalid-disconnected-retry-batch
+                          (exception-reason #(retry! bad)))))
+                 (is (empty? @attempted-ids)
+                     "Invalid budgets cannot start partial physical cleanup")
+                 (let [error-one (try (retry! 2) nil (catch Throwable e e))
+                       first-batch (set @attempted-ids)]
+                   (is (identical? failure error-one))
+                   (is (= 2 (count first-batch)))
+                   (reset! attempted-ids [])
+                   (let [error-two (try (retry! 2) nil (catch Throwable e e))
+                         second-batch (set @attempted-ids)]
+                     (is (identical? failure error-two))
+                     (is (= 2 (count second-batch)))
+                     (is (empty? (set/intersection
+                                  first-batch second-batch))
+                         "A failed early batch cannot starve later orphans")))
+                 (is (= 6 ((:occupied-count route)))
+                     "Failures cannot pretend to reclaim source capacity")
+                 (is (= 6 (:subscription-count (source/stats src))))
+                 (is (not (stream/closed? (:body healthy))))
+                 (is (= 1 ((:active-count route))))
+                 (reset! can-release? true)
+                 (loop [n 0]
+                   (let [{:keys [attempted recovered]} (retry! 2)]
+                     (is (<= 0 attempted 2))
+                     (is (= attempted recovered))
+                     (when (and (pos? attempted) (< n 10))
+                       (recur (inc n)))))
+                 (is (= 1 ((:occupied-count route))))
+                 (is (= 1 (:subscription-count (source/stats src))))
+                 (is (not (stream/closed? (:body healthy))))
+                 (is (false? ((:closed? route))))
+                 (stream/close! (:body healthy))
+                 (is (eventually #(zero? ((:occupied-count route)))))
+                 (is (eventually #(zero? (:subscription-count
+                                         (source/stats src))))))
+               (finally
+                 (reset! can-release? true)
+                 ((:close! route)))))))))))

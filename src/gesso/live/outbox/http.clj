@@ -28,6 +28,8 @@
 (def ^:private default-max-connections 1024)
 (def ^:private default-managed-keepalive-ms 15000)
 (def ^:private default-max-pending-authorizations 1024)
+(def ^:private default-disconnected-retry-batch 16)
+(def ^:private max-disconnected-retry-batch 1024)
 
 (defn- restore-interrupt!
   "Preserve JVM cancellation when an interrupted physical callback has
@@ -96,38 +98,64 @@
       (throw e))))
 
 (defn- retry-disconnected-sse!
-  "Explicitly retry cleanup for sessions whose HTTP response has closed.
+  "Retry an explicitly bounded batch of cleanup obligations without closing
+   healthy SSE sessions or the route. Default: 16 attempts; an owner may pass
+   a positive integer <=1024 to control one pass. No automatic schedule.
 
-   This never cancels a still-open response, closes the route, or creates a
-   new source interest. Retain every failed retry in the normal cancellation
-   registry and occupied-slot budget. Serialize with route shutdown so the
-   same session is not canceled by two route-owned cleanup passes at once."
-  [state]
-  (locking state
-    (let [disconnected (merge
-                        (into {}
-                              (filter (fn [[_ session]]
-                                        (stream/closed? (:stream session))))
-                              (:retry-cancellations @state))
-                        (:disconnect-cleanups @state))
-          failures (reduce-kv
-                    (fn [errors key session]
-                      (try
-                        (cancel-registered-sse! state key session)
-                        errors
-                        (catch Throwable e (conj errors e))))
-                    [] disconnected)]
-      ;; Attempt every orphan before propagating the first cancellation error.
-      ;; Interrupted cleanup must preserve the calling thread's interrupt flag.
-      (doseq [error failures]
-        (restore-interrupt! error))
-      (when-let [failure (first failures)]
-        (doseq [extra (rest failures)]
-          (when-not (identical? failure extra)
-            (.addSuppressed ^Throwable failure ^Throwable extra)))
-        (throw failure))
-      {:attempted (count disconnected)
-       :recovered (count disconnected)})))
+   A rotating key cursor prevents permanently failing early entries from
+   starving later ones. Attempt every selected cleanup before raising the
+   first error, retaining failed entries and their occupied capacity. The
+   budget bounds attempts, NOT elapsed time: a blocking physical callback
+   can still delay this pass and the route's lifecycle lock. The owning host
+   must schedule retries and bound callback behavior externally."
+  ([state]
+   (retry-disconnected-sse! state default-disconnected-retry-batch))
+  ([state max-attempts]
+   (when-not (and (integer? max-attempts)
+                  (<= 1 max-attempts max-disconnected-retry-batch))
+     (reject! :invalid-disconnected-retry-batch
+              {:max-attempts max-attempts}))
+   (locking state
+     (let [snapshot @state
+           ;; Both disconnected source interests and prior failed
+           ;; cancellations are already route-owned recovery obligations.
+           ;; A failed startup rollback can have an open stream that was
+           ;; never handed to a client; preserve its retry eligibility.
+           candidates (merge (:retry-cancellations snapshot)
+                             (:disconnect-cleanups snapshot))
+           ;; The route permits at most :max-connections retained sessions,
+           ;; so candidate sorting is bounded by its admission configuration.
+           ordered (sort-by (comp str key) candidates)
+           cursor (:last-disconnected-retry-key snapshot)
+           [before after] (if cursor
+                            (split-with
+                             (fn [[key _]]
+                               (not (pos? (compare (str key) cursor))))
+                             ordered)
+                            [[] ordered])
+           selected (vec (take max-attempts (concat after before)))
+           ;; Advance even on failure: the next pass must not starve the
+           ;; remainder of the backlog behind a permanently failing entry.
+           _ (when-let [[key _] (peek selected)]
+               (swap! state assoc :last-disconnected-retry-key (str key)))
+           failures (reduce
+                     (fn [errors [key session]]
+                       (try
+                         (cancel-registered-sse! state key session)
+                         errors
+                         (catch Throwable e (conj errors e))))
+                     [] selected)]
+       ;; Attempt every selected orphan before restoring interruption or
+       ;; propagating errors; unresolved work remains held by the route.
+       (doseq [error failures]
+         (restore-interrupt! error))
+       (when-let [failure (first failures)]
+         (doseq [extra (rest failures)]
+           (when-not (identical? failure extra)
+             (.addSuppressed ^Throwable failure ^Throwable extra)))
+         (throw failure))
+       {:attempted (count selected)
+        :recovered (count selected)}))))
 
 (defn- drained-state? [{:keys [closed? close-completed? connections starting
                               retry-cancellations disconnect-cleanups
@@ -255,12 +283,17 @@
    operations, and unreleased cleanup obligations (counting each session once).
    Slot accounting is constant-time regardless of how many active SSE sessions
    are registered. A slot remains occupied until all session cleanup owners
-   have relinquished it. :retry-disconnected! permits an explicit owner to
-   retry cleanup of already-closed response sessions without closing this
-   HTTP route or canceling healthy connections. It returns attempted/recovered
-   counts if all retries succeed; a failure retains the slot and propagates
-   the original error after attempting the other disconnected sessions.
-   Recovery is not automatic; the host must arrange safe retry scheduling.
+   have relinquished it. :retry-disconnected! permits an explicit owner to retry cleanup of
+   disconnected responses and prior failed cancellations without
+   closing this HTTP route or canceling healthy connections. With no
+   argument it attempts at most 16
+   unresolved sessions; an optional 1..1024 integer sets the per-call budget.
+   A rotating cursor gives later orphaned sessions a chance even when early
+   releases fail repeatedly. Successful passes return attempted/recovered
+   counts; failed releases retain their slots and propagate the original
+   error after the selected batch has been attempted. The budget is on the
+   number of attempts, NOT callback execution time. Recovery is not automatic;
+   the host must schedule retries and bound blocking callbacks separately.
    A route previously closed by :close! still requires a successful :close!
    pass to establish its separate provider-safe close completion marker.
    Since :close! can return while authorization/startup is still in flight,
@@ -670,7 +703,10 @@
      :close! close!
      :active-count (fn [] (count (:connections @state)))
      :occupied-count (fn [] (occupied-sse-slots @state))
-     :retry-disconnected! (fn [] (retry-disconnected-sse! state))
+     :retry-disconnected! (fn
+                            ([] (retry-disconnected-sse! state))
+                            ([max-attempts]
+                             (retry-disconnected-sse! state max-attempts)))
      :pending-authorization-count (fn [] (:pending-authorizations @state))
      :closed? (fn [] (:closed? @state))
      :drained? (fn [] (drained-state? @state))
