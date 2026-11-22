@@ -30,7 +30,8 @@
 (def ^:private default-max-items 32)
 (def ^:private default-poll-ms 250)
 
-(defrecord Lifecycle [state stop-signal done thread node expected-source-id])
+(defrecord Lifecycle [state stop-signal done thread node expected-source-id
+                      system ctx restart-claimed])
 
 (defn- reject! [reason data]
   (throw (ex-info "Invalid Live outbox lifecycle."
@@ -257,7 +258,7 @@
                                           opts state stop-signal done))
                         (str "gesso-live-outbox-" (:worker-id opts)))
         handle (->Lifecycle state stop-signal done thread
-                            node expected-source-id)]
+                            node expected-source-id system ctx (atom false))]
     (.setDaemon thread true)
     (.start thread)
     handle))
@@ -298,3 +299,56 @@
                  (= :failed (:status snapshot)) :failed
                  :else :drained)
       :snapshot snapshot})))
+
+(defn restart-recorded!
+  "Explicitly restart a halted worker, but ONLY when its reported in-flight
+   acknowledgment and every completed dispatch are still recorded under the
+   same physical XTDB lease and receipt identities.
+
+   This narrow recovery action preserves the original source, trusted context
+   and XTDB provider. A *new* worker ID is required; the successor always
+   starts its own full keyset rescan, never the interrupted cursor. The
+   stopped predecessor cannot be restarted twice, including by concurrent
+   callers. An unknown acquisition, missing/replaced lease, missing receipt,
+   nonterminal row, generic failure or incomplete report is not eligible.
+
+   Each read is a current physical observation, NOT an atomic snapshot or a
+   complete proof that old SSE frames reached browsers. The outbox remains
+   at-least-once; only the already-installed worker and physical transaction
+   fences protect concurrent reclamation and later acknowledgments. This API
+   does not release the original provider, change the failed handle, or
+   perform an unsafe replay of the failed dispatch. Owner must stop! the
+   returned successor before provider teardown.
+
+   Options use the same trusted validation as start!, and must select a new
+   nonblank :worker-id. Returns {:handle successor :reconciliation observed}
+   on successful *start*, not proof that the successor's later cycles succeed."
+  [handle opts]
+  (require-handle! handle)
+  (validate-worker-options! opts)
+  (let [snapshot (status handle)]
+    (when (= (:worker-id snapshot) (:worker-id opts))
+      (reject! :reused-worker-id {:worker-id (:worker-id opts)})))
+  (when @(.-restart-claimed ^Lifecycle handle)
+    (reject! :already-restarted {}))
+  (let [observed (inspect-failure! handle)
+        completed (:completed-observations observed)]
+    (when-not (and (= :matching-acknowledgment-recorded (:status observed))
+                   (vector? completed)
+                   (every? #(#{:matching-acknowledgment-recorded
+                                :no-dispatch-claim} (:status %)) completed))
+      (reject! :recovery-not-qualified
+               {:in-flight-status (:status observed)
+                :completed-statuses (when (vector? completed)
+                                      (mapv :status completed))}))
+    (when-not (compare-and-set! (.-restart-claimed ^Lifecycle handle) false true)
+      (reject! :already-restarted {}))
+    ;; The reservation is intentionally sticky if thread construction/start
+    ;; fails. A thrown start is not evidence that no successor escaped; the
+    ;; host must inspect and repair it rather than starting twice blindly.
+    {:handle (start! (.-node ^Lifecycle handle)
+                     (.-system ^Lifecycle handle)
+                     (.-ctx ^Lifecycle handle)
+                     (.-expected-source-id ^Lifecycle handle)
+                     opts)
+     :reconciliation observed}))
