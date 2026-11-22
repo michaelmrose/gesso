@@ -77,6 +77,14 @@
                  ;; signal instead of admitting an invented outcome.
                  (.interrupt (Thread/currentThread))
                  (throw cause)))]
+    ;; A real XTDB q returns a vector, including [] only when the row was
+    ;; observed missing. Other containers, and non-map row entries, are
+    ;; provider contract failures: never turn an indeterminate lease read
+    ;; into a safe :unavailable/:missing acknowledgment outcome.
+    (when-not (and (vector? rows) (every? map? rows))
+      (reject! :invalid-physical-current-page
+               {:intent-id intent-id
+                :physical-type (some-> rows class .getName)}))
     (when (> (count rows) 1)
       (reject! :ambiguous-current-row {:intent-id intent-id}))
     (first rows)))

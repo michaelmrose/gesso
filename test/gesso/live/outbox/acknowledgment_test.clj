@@ -316,3 +316,57 @@
                               (acknowledgment/acknowledge-dispatch!
                                node (submit id lease-id "worker")))))
       (is (= before (row node id))))))
+(deftest malformed-acknowledgment-current-page-cannot-certify-missing-lease-test
+  ;; A malformed provider response is not evidence of an absent intent.
+  ;; Only XTDB's observed empty vector may mean :unavailable/:missing.
+  ;; This applies to both an existing physical lease and a missing ID.
+  (with-open [node (xtn/start-node {})]
+    (let [existing-id (random-uuid)
+          missing-id (random-uuid)
+          _ (seed! node existing-id)
+          lease-id (pending->leased! node existing-id "worker-a")
+          before (row node existing-id)
+          invalid [nil {} '() (java.util.ArrayList.) [nil] [false]]]
+      (doseq [[phase submission]
+              [[:existing (submit existing-id lease-id "worker-a")]
+               [:missing (submit missing-id (random-uuid) "worker-a")]]
+              physical invalid]
+        (let [queries (atom 0)
+              writes (atom 0)
+              failure (with-redefs
+                       [xt/q (fn [& _] (swap! queries inc) physical)
+                        live.xtdb/execute-tx!
+                        (fn [& _]
+                          (swap! writes inc)
+                          (throw (AssertionError.
+                                  "No acknowledgment write after malformed read")))]
+                       (try
+                         (acknowledgment/acknowledge-dispatch! node submission)
+                         (catch Throwable cause cause)))]
+          (is (instance? clojure.lang.ExceptionInfo failure)
+              (str phase " malformed row must throw a typed error"))
+          (is (= :gesso.live.outbox/invalid-acknowledgment
+                 (:error/type (ex-data failure))))
+          (is (= :invalid-physical-current-page
+                 (:reason (ex-data failure)))
+              (str phase " malformed row cannot mean a missing lease"))
+          (is (= 1 @queries) "Do not retry an indeterminate physical read")
+          (is (zero? @writes) "No physical write after malformed read")
+          (is (= before (row node existing-id))
+              "Existing physical lease must remain untouched")
+          (is (nil? (row node missing-id))
+              "A missing intent must not be fabricated"))))))
+
+(deftest genuine-empty-xtdb-acknowledgment-page-remains-safe-missing-test
+  ;; Positive control: XTDB returns an empty vector for a missing ID.
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (seed! node (random-uuid))
+          current-rows (xt/q node
+                             ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?"
+                              id])
+          request (submit id (random-uuid) "worker-a")]
+      (is (vector? current-rows))
+      (is (empty? current-rows))
+      (is (= {:status :unavailable :reason :missing :intent-id id}
+             (acknowledgment/acknowledge-dispatch! node request))))))
