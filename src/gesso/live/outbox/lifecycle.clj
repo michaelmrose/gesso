@@ -300,29 +300,10 @@
                  :else :drained)
       :snapshot snapshot})))
 
-(defn restart-recorded!
-  "Explicitly restart a halted worker, but ONLY when its reported in-flight
-   acknowledgment and every completed dispatch are still recorded under the
-   same physical XTDB lease and receipt identities.
-
-   This narrow recovery action preserves the original source, trusted context
-   and XTDB provider. A *new* worker ID is required; the successor always
-   starts its own full keyset rescan, never the interrupted cursor. The
-   stopped predecessor cannot be restarted twice, including by concurrent
-   callers. An unknown acquisition, missing/replaced lease, missing receipt,
-   nonterminal row, generic failure or incomplete report is not eligible.
-
-   Each read is a current physical observation, NOT an atomic snapshot or a
-   complete proof that old SSE frames reached browsers. The outbox remains
-   at-least-once; only the already-installed worker and physical transaction
-   fences protect concurrent reclamation and later acknowledgments. This API
-   does not release the original provider, change the failed handle, or
-   perform an unsafe replay of the failed dispatch. Owner must stop! the
-   returned successor before provider teardown.
-
-   Options use the same trusted validation as start!, and must select a new
-   nonblank :worker-id. Returns {:handle successor :reconciliation observed}
-   on successful *start*, not proof that the successor's later cycles succeed."
+(defn- prepare-restart!
+  "Inspect the original failed lifecycle before a deliberate successor starts.
+   Require every reported completed dispatch to retain its own physical
+   acknowledgment. Contended/unavailable prefix entries are not sends."
   [handle opts]
   (require-handle! handle)
   (validate-worker-options! opts)
@@ -333,22 +314,77 @@
     (reject! :already-restarted {}))
   (let [observed (inspect-failure! handle)
         completed (:completed-observations observed)]
-    (when-not (and (= :matching-acknowledgment-recorded (:status observed))
-                   (vector? completed)
+    (when-not (and (vector? completed)
                    (every? #(#{:matching-acknowledgment-recorded
                                 :no-dispatch-claim} (:status %)) completed))
       (reject! :recovery-not-qualified
                {:in-flight-status (:status observed)
                 :completed-statuses (when (vector? completed)
                                       (mapv :status completed))}))
-    (when-not (compare-and-set! (.-restart-claimed ^Lifecycle handle) false true)
-      (reject! :already-restarted {}))
-    ;; The reservation is intentionally sticky if thread construction/start
-    ;; fails. A thrown start is not evidence that no successor escaped; the
-    ;; host must inspect and repair it rather than starting twice blindly.
-    {:handle (start! (.-node ^Lifecycle handle)
-                     (.-system ^Lifecycle handle)
-                     (.-ctx ^Lifecycle handle)
-                     (.-expected-source-id ^Lifecycle handle)
-                     opts)
-     :reconciliation observed}))
+    observed))
+
+(defn- start-reconciled! [handle opts observed recovery-mode]
+  (when-not (compare-and-set! (.-restart-claimed ^Lifecycle handle) false true)
+    (reject! :already-restarted {}))
+  ;; A successful reservation is deliberately sticky if start! throws: a
+  ;; failed thread start is not proof no successor escaped to the host.
+  {:handle (start! (.-node ^Lifecycle handle)
+                   (.-system ^Lifecycle handle)
+                   (.-ctx ^Lifecycle handle)
+                   (.-expected-source-id ^Lifecycle handle)
+                   opts)
+   :recovery-mode recovery-mode
+   :reconciliation observed})
+
+(defn restart-recorded!
+  "Explicitly restart a halted worker only when the failed in-flight
+   acknowledgment AND all previously completed dispatch acknowledgments are
+   still physically recorded with matching lease and receipt identities.
+
+   The successor uses the original provider, source and context, a NEW worker
+   ID and a fresh full discovery scan. Restart is one-shot even under races.
+   No external send, automatic retry, or browser-delivery proof is inferred.
+   The returned handle must be drained before shared provider teardown."
+  [handle opts]
+  (let [observed (prepare-restart! handle opts)]
+    (when-not (= :matching-acknowledgment-recorded (:status observed))
+      (reject! :recovery-not-qualified
+               {:in-flight-status (:status observed)
+                :completed-statuses (mapv :status
+                                          (:completed-observations observed))}))
+    (start-reconciled! handle opts observed :physically-recorded)))
+
+(defn restart-with-redelivery!
+  "Explicit at-least-once recovery after an uncertain advisory Live send.
+
+   This is NOT a generic retry of failed operations. It is permitted only for
+   an exited, failed outbox DELIVERY/ACKNOWLEDGMENT cycle where a physically
+   leased in-flight intent still has the EXACT original lease and worker,
+   and all prior completed dispatches retain matching XTDB acknowledgments.
+   A source-emission failure may have sent zero, one, or many notifications:
+   the new worker may issue a DUPLICATE invalidation after lease expiry.
+
+   Only outbox refresh notifications are eligible for replay by the existing
+   worker's source/purpose checks; they must be advisory/idempotent, with
+   authoritative reads reacquired by consumers. The successor starts from a
+   NEW full source-scoped scan and may wait for the old lease to expire. XTDB
+   discovery and guarded transaction-time CAS (not this non-atomic inspection)
+   decide whether it can actually reclaim and send. Competing workers and
+   unknown source sends remain possible; no exactly-once or browser receipt
+   is claimed. This operation requires explicit host invocation, never a
+   silent retry, and reserves the failed handle against a second successor."
+  [handle opts]
+  (let [observed (prepare-restart! handle opts)
+        failure (:failure (status handle))
+        in-flight (:in-flight failure)]
+    (when-not (and (= :same-lease-active (:status observed))
+                   (= :leased (:observed-status observed))
+                   (#{:delivery :acknowledgment} (:phase failure))
+                   (#{:acquired :reclaimed}
+                    (:acquisition-status in-flight)))
+      (reject! :recovery-not-qualified
+               {:in-flight-status (:status observed)
+                :phase (:phase failure)
+                :completed-statuses (mapv :status
+                                          (:completed-observations observed))}))
+    (start-reconciled! handle opts observed :at-least-once-invalidation)))

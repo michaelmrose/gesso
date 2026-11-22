@@ -713,6 +713,11 @@
       (is (= :recovery-not-qualified
              (invalid-reason #(lifecycle/restart-recorded!
                                old {:worker-id "new-prefix" :poll-ms 20}))))
+      ;; Even explicit duplicate-tolerant recovery cannot bypass a
+      ;; contradictory *completed* prefix.
+      (is (= :recovery-not-qualified
+             (invalid-reason #(lifecycle/restart-with-redelivery!
+                               old {:worker-id "new-redelivery" :poll-ms 20}))))
       (is (= :different-acknowledgment-recorded
              (get-in (lifecycle/inspect-failure! old)
                      [:completed-observations 0 :status])))
@@ -731,3 +736,105 @@
           (is (= 2 @attempts))
           (finally
             (is (= :drained (:outcome (lifecycle/stop! handle 3000))))))))))
+
+(deftest duplicate-invalidation-recovery-after-lost-ack-test
+  ;; A real Live source accepted the FIRST invalidation, but its physical XTDB
+  ;; acknowledgment threw. The failed worker must stop; deliberate opt-in
+  ;; recovery waits for provider-time lease expiry and sends an ADVISORY
+  ;; duplicate before acknowledging the intent through its new guarded lease.
+  (with-open [node (xtn/start-node {})]
+    (let [sys (system)
+          id (intent-id 880)
+          sub (source/subscribe (:source sys)
+                                 {:topic :request :id (str "request-" id)})]
+      (try
+        (seed! node id)
+        (let [old (with-redefs
+                    [acknowledgment/acknowledge-dispatch!
+                     (fn [_ _]
+                       (throw (ex-info "lost acknowledgment reply"
+                                       {:error/type :test/ack-unknown})))]
+                    (let [h (lifecycle/start! node sys {} source-id
+                                              {:worker-id "failed-emitter"
+                                               :poll-ms 30
+                                               :lease-millis 2500})]
+                      (is (eventually #(= :failed (:status (lifecycle/status h)))))
+                      (is (= :failed (:outcome (lifecycle/stop! h 5000))))
+                      h))
+              first-event (deref (s/take! sub) 3000 ::timeout)
+              prior (lifecycle/status old)]
+          (is (= (str "request-" id) (:id first-event)))
+          (is (= :leased (:gesso.live.outbox/status (row node id))))
+          (is (= :gesso.live.outbox/cycle-interrupted
+                 (get-in prior [:failure :error/type])))
+          (is (= :delivery (get-in prior [:failure :phase])))
+          (is (= :same-lease-active
+                 (:status (lifecycle/inspect-failure! old))))
+          (is (= :recovery-not-qualified
+                 (invalid-reason #(lifecycle/restart-recorded!
+                                   old {:worker-id "not-recorded"}))))
+          (let [{:keys [handle reconciliation recovery-mode]}
+                (lifecycle/restart-with-redelivery!
+                 old {:worker-id "explicit-re-emitter" :poll-ms 30
+                      :lease-millis 2500 :max-items 2})]
+            (try
+              (is (= :at-least-once-invalidation recovery-mode))
+              (is (= :same-lease-active (:status reconciliation)))
+              (is (= [] (:completed-observations reconciliation)))
+              (is (= :already-restarted
+                     (invalid-reason #(lifecycle/restart-recorded!
+                                       old {:worker-id "third-worker"}))))
+              (is (= :already-restarted
+                     (invalid-reason #(lifecycle/restart-with-redelivery!
+                                       old {:worker-id "fourth-worker"}))))
+              (let [second-event (deref (s/take! sub) 8000 ::timeout)]
+                (is (= (str "request-" id) (:id second-event)))
+                (is (some? (:progression second-event))))
+              (is (eventually #(= :dispatch-accepted
+                                  (:gesso.live.outbox/status (row node id)))))
+              (is (eventually #(= 1 (:total-dispatch-accepted
+                                     (lifecycle/status handle)))))
+              (is (= 0 (:total-dispatch-accepted prior)))
+              (is (= :failed (:status (lifecycle/status old))))
+              (finally
+                (is (= :drained (:outcome (lifecycle/stop! handle 5000))))))))
+        (finally
+          (s/close! sub)
+          (live/close! sys))))))
+
+(deftest redelivery-restart-refuses-physically-recorded-ack-test
+  ;; A completed physical acknowledgment must use restart-recorded!, never
+  ;; the duplicate-send path. This check is independent of receipt reporting.
+  (with-open [node (xtn/start-node {})]
+    (let [id (intent-id 881)
+          _ (seed! node id)
+          receipt (random-uuid)
+          old (with-redefs
+                [delivery/dispatch-acquired!
+                 (fn [_ _ _ acquired _]
+                   (is (= :acknowledged
+                          (:status (acknowledgment/acknowledge-dispatch!
+                                    node {:intent-id (:intent-id acquired)
+                                          :lease-id (:lease-id acquired)
+                                          :worker-id (:worker-id acquired)
+                                          :receipt {:receipt-id receipt
+                                                    :adapter :gesso.live/synchronous-source
+                                                    :result :accepted}}))))
+                   (throw (ex-info "reply lost" {:error/type
+                                                 :gesso.live.outbox/post-dispatch-ack-unknown
+                                                 :intent-id (:intent-id acquired)
+                                                 :lease-id (:lease-id acquired)
+                                                 :receipt-id receipt
+                                                 :dispatch/status :accepted
+                                                 :acknowledgment/status :unknown})))]
+                (let [h (lifecycle/start! node {:source :installed} {} source-id
+                                          {:worker-id "failed-ack" :poll-ms 20})]
+                  (is (eventually #(= :failed (:status (lifecycle/status h)))))
+                  (is (= :failed (:outcome (lifecycle/stop! h 5000))))
+                  h))]
+      (is (= :matching-acknowledgment-recorded
+             (:status (lifecycle/inspect-failure! old))))
+      (is (= :recovery-not-qualified
+             (invalid-reason #(lifecycle/restart-with-redelivery!
+                               old {:worker-id "not-a-replay"}))))
+      (is (= :dispatch-accepted (:gesso.live.outbox/status (row node id)))))))
