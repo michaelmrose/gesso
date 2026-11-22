@@ -3650,3 +3650,27 @@
        (is (= :disconnected-retry-after-route-close
               (exception-reason #((:retry-disconnected! route) 2))))
        (is (= {:outcome :drained} ((:await-drained! route) 0)))))))
+
+(deftest scheduled-recovery-and-actual-managed-route-stop-in-order-test
+  ;; A Gesso-owned scheduler is opt-in. With an actual managed route and
+  ;; provider, it must drain before route cancellation is performed; only
+  ;; then can the host's own ordered shutdown coordinator proceed.
+  (setup-host
+   (fn [started]
+     (let [route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           worker ((requiring-resolve
+                    'gesso.live.outbox.http-recovery/start-scheduled!)
+                   route {:poll-ms 15 :min-interval-ms 50})]
+       (try
+         (is (= 0 ((:disconnected-count route))))
+         (is (= :running ((:status worker))))
+         (is (= {:outcome :drained} ((:stop! worker) 2000)))
+         (is (true? ((:drained? worker))))
+         (is (= :closed ((:close! route))))
+         (is (= {:outcome :drained} ((:await-drained! route) 0)))
+         (is (= :drained ((:status worker))))
+         (finally
+           ((:stop! worker) 2000)
+           ((:close! route))))))))

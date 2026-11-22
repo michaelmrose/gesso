@@ -5,7 +5,10 @@
    calls :step! from its own bounded scheduler, and retains responsibility for
    scheduling, logging errors, and eventual route/provider shutdown. The
    managed HTTP route remains the authority on physical source release and
-   occupied capacity.")
+   occupied capacity."
+  (:require [gesso.live.outbox.http :as http])
+  (:import [java.util.concurrent ScheduledThreadPoolExecutor TimeUnit
+            ThreadFactory]))
 
 (def ^:private default-min-interval-ms 1000)
 (def ^:private default-max-attempts 16)
@@ -106,3 +109,118 @@
                              (swap! state update :failure-count inc)
                              (throw error))))))))))))
        :stats (fn [] @state)})))
+
+(def ^:private default-poll-ms 1000)
+(def ^:private default-stop-timeout-ms 5000)
+
+(defn start-scheduled!
+  "Explicitly own periodic cleanup ticks for one managed Ring SSE route.
+
+   This is an opt-IN daemon scheduler, never started by route construction or
+   prepare!. The owning HTTP host MUST stop and confirm drainage of this
+   handle before retiring the route, listener, Live and XTDB providers.
+
+   Options: :poll-ms (10..120000, default 1000), plus the :min-interval-ms
+   and :max-attempts options accepted by prepare!. One executor thread is
+   owned by this handle, and only one step! runs at a time. Cleanup errors
+   are retained in bounded diagnostics; a failed tick must not cancel future
+   ticks. No delivery/release outcome is inferred from a caught exception.
+
+   :stop! requests cancellation without interrupting in-flight physical
+   cleanup and awaits termination for at most the supplied milliseconds
+   (default 5000). A timeout means provider shutdown is NOT admitted.
+   Repeated :stop! calls may finish a previously timed-out drain. Neither
+   the poll interval nor a bounded retry batch bounds callback duration."
+  [route options]
+  (when-not (and (map? options)
+                 (every? #{:poll-ms :min-interval-ms :max-attempts}
+                         (keys options)))
+    (reject! :invalid-scheduled-options))
+  (let [poll-ms (get options :poll-ms default-poll-ms)]
+    (when-not (and (integer? poll-ms) (<= 10 poll-ms 120000))
+      (reject! :invalid-poll-ms))
+    (let [controller (prepare! route (dissoc options :poll-ms))
+          stopping? (atom false)
+          observations (atom {:tick-count 0 :failure-count 0
+                              :last-outcome nil :last-error nil})
+          factory (reify ThreadFactory
+                    (newThread [_ runnable]
+                      (doto (Thread. ^Runnable runnable
+                                     "gesso-live-sse-recovery")
+                        (.setDaemon true))))
+          executor (ScheduledThreadPoolExecutor. 1 factory)
+          task (reify Runnable
+                 (run [_]
+                   (when-not @stopping?
+                     (swap! observations update :tick-count inc)
+                     (try
+                       (let [result ((:step! controller))]
+                         (swap! observations assoc :last-outcome result))
+                       (catch Throwable error
+                         ;; Schedule-with-fixed-delay otherwise silently
+                         ;; suppresses every future run after an exception.
+                         ;; Preserve one failure for the trusted host owner.
+                         (swap! observations
+                                (fn [s]
+                                  (-> s
+                                      (update :failure-count inc)
+                                      (assoc :last-error error))))
+                         (when (instance? InterruptedException error)
+                           (.interrupt (Thread/currentThread))))))))]
+      (.setRemoveOnCancelPolicy executor true)
+      (.setContinueExistingPeriodicTasksAfterShutdownPolicy executor false)
+      (let [scheduled (.scheduleWithFixedDelay
+                       executor task 0 (long poll-ms) TimeUnit/MILLISECONDS)]
+        (letfn [(stop! ([] (stop! default-stop-timeout-ms))
+                  ([timeout-ms]
+                   (when-not (and (integer? timeout-ms)
+                                  (<= 0 timeout-ms 120000))
+                     (reject! :invalid-stop-timeout-ms))
+                   (when (compare-and-set! stopping? false true)
+                     (.cancel scheduled false)
+                     (.shutdown executor))
+                   (try
+                     {:outcome (if (.awaitTermination
+                                    executor (long timeout-ms)
+                                    TimeUnit/MILLISECONDS)
+                                 :drained :timed-out)}
+                     (catch InterruptedException error
+                       (.interrupt (Thread/currentThread))
+                       (throw error)))))]
+          {:stop! stop!
+           :drained? (fn [] (.isTerminated executor))
+           :status (fn [] (cond
+                            (.isTerminated executor) :drained
+                            @stopping? :stopping
+                            :else :running))
+           :stats (fn [] (assoc @observations
+                               :controller ((:stats controller))))})))))
+
+(defn prepare-owned-shutdown
+  "Compose scheduler drainage ahead of existing provider-safe HTTP shutdown.
+
+   The host owns both the recovery handle and the exact ordinary shutdown
+   plan. A scheduler timeout leaves the listener, route and providers intact;
+   retry the SAME coordinator once the in-flight tick has finished. On drain,
+   delegate to the existing serialized, once-only HTTP shutdown coordinator.
+   Its listener and host acknowledgments retain their original requirements.
+
+   This never starts a network listener or creates a Biff host. The owner
+   must call :stop! rather than bypassing this coordinator for safe ordering."
+  [recovery-handle shutdown-plan]
+  (when-not (and (map? recovery-handle)
+                 (fn? (:stop! recovery-handle))
+                 (fn? (:status recovery-handle)))
+    (reject! :invalid-recovery-handle))
+  ;; Preflight the physical shutdown plan before starting side effects.
+  (let [shutdown (http/prepare-managed-http-shutdown shutdown-plan)]
+    {:status (fn [] {:recovery ((:status recovery-handle))
+                     :shutdown ((:status shutdown))})
+     :stop!
+     (fn []
+       (let [result ((:stop! recovery-handle)
+                     (:drain-timeout-ms shutdown-plan))]
+         (case (:outcome result)
+           :drained ((:stop! shutdown))
+           :timed-out {:outcome :recovery-timed-out}
+           (reject! :invalid-recovery-drain-outcome))))}))

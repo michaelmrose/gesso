@@ -136,3 +136,138 @@
       (finally
         (deliver release true)
         (future-cancel a)))))
+
+(defn- await-condition
+  [pred]
+  (loop [n 0]
+    (cond
+      (pred) true
+      (>= n 300) false
+      :else (do (Thread/sleep 10) (recur (inc n))))))
+
+(deftest scheduled-recovery-starts-is-paced-and-stops-test
+  (let [pending (atom 3)
+        calls (atom [])
+        route {:closed? (constantly false)
+               :disconnected-count (fn [] @pending)
+               :retry-disconnected!
+               (fn [budget]
+                 (swap! calls conj (System/nanoTime))
+                 (is (= 1 budget))
+                 (swap! pending dec)
+                 {:attempted 1 :recovered 1})}
+        owner (recovery/start-scheduled!
+               route {:poll-ms 10 :min-interval-ms 75 :max-attempts 1})]
+    (try
+      (is (await-condition #(zero? @pending))
+          "Explicit scheduler must recover each outstanding unit")
+      (is (= 3 (count @calls)))
+      (is (every? #(>= % 50000000)
+                  (map - (rest @calls) @calls))
+          "Subsequent physical retries must be paced in monotonic time")
+      (is (= 3 (get-in ((:stats owner)) [:controller :attempt-count])))
+      (is (= :running ((:status owner))))
+      (is (= {:outcome :drained} ((:stop! owner) 2000)))
+      (is (= :drained ((:status owner))))
+      (is (true? ((:drained? owner))))
+      (let [before (count @calls)]
+        (Thread/sleep 70)
+        (is (= before (count @calls))))
+      (is (= {:outcome :drained} ((:stop! owner) 0)))
+      (finally ((:stop! owner) 2000)))))
+
+(deftest scheduled-recovery-errors-remain-visible-and-continue-test
+  (let [pending (atom 1)
+        attempts (atom 0)
+        original (ex-info "source cleanup failed" {:test :v2239})
+        route {:closed? (constantly false)
+               :disconnected-count (fn [] @pending)
+               :retry-disconnected!
+               (fn [_]
+                 (if (= 1 (swap! attempts inc))
+                   (throw original)
+                   (do (reset! pending 0)
+                       {:attempted 1 :recovered 1})))}
+        owner (recovery/start-scheduled!
+               route {:poll-ms 10 :min-interval-ms 60 :max-attempts 1})]
+    (try
+      (is (await-condition #(zero? @pending)))
+      (is (= 2 @attempts))
+      (is (= 1 (:failure-count ((:stats owner)))))
+      (is (identical? original (:last-error ((:stats owner)))))
+      (is (= 1 (get-in ((:stats owner)) [:controller :failure-count])))
+      (is (= :drained (:outcome ((:stop! owner) 2000))))
+      (finally ((:stop! owner) 2000)))))
+
+(deftest host-shutdown-fences-running-physical-cleanup-test
+  ;; No provider-stop callback may run while an in-flight recovery tick is
+  ;; still inside a physical source-release operation.
+  (let [pending (atom 1)
+        entered (promise)
+        release (promise)
+        closed? (atom false)
+        calls (atom [])
+        route {:closed? (fn [] @closed?)
+               :disconnected-count (fn [] @pending)
+               :retry-disconnected!
+               (fn [_]
+                 (deliver entered true)
+                 @release
+                 (reset! pending 0)
+                 {:attempted 1 :recovered 1})
+               :close! (fn []
+                         (swap! calls conj :route-close)
+                         (reset! closed? true)
+                         :closed)
+               :await-drained! (fn [_]
+                                 (swap! calls conj :route-drain)
+                                 {:outcome :drained})}
+        worker (recovery/start-scheduled!
+                route {:poll-ms 10 :min-interval-ms 50})
+        shutdown (recovery/prepare-owned-shutdown
+                  worker {:route route
+                          :stop-listener! (fn []
+                                            (swap! calls conj :listener-stop)
+                                            {:outcome :drained})
+                          :stop-host! (fn []
+                                        (swap! calls conj :host-stop)
+                                        {:outcome :stopped})
+                          :drain-timeout-ms 0})]
+    (try
+      (is (= true (deref entered 2000 ::timeout)))
+      (is (= {:outcome :recovery-timed-out} ((:stop! shutdown))))
+      (is (= :stopping ((:status worker))))
+      (is (empty? @calls)
+          "No listener, route or provider can be stopped before worker drain")
+      (is (= :ready (get ((:status shutdown)) :shutdown)))
+      (deliver release true)
+      (is (await-condition #((:drained? worker))))
+      (is (= :stopped (:outcome ((:stop! shutdown)))))
+      (is (= [:route-close :listener-stop :route-drain :host-stop] @calls))
+      (is (= :stopped (get ((:status shutdown)) :shutdown)))
+      (is (= :stopped (:outcome ((:stop! shutdown)))))
+      (is (= [:route-close :listener-stop :route-drain :host-stop] @calls)
+          "A repeated confirmed stop cannot replay provider teardown")
+      (finally
+        (deliver release true)
+        ((:stop! worker) 2000)))))
+
+(deftest scheduled-recovery-validates-before-starting-test
+  (let [route {:closed? (constantly false)
+               :disconnected-count (constantly 0)
+               :retry-disconnected! (fn [_] {:attempted 0 :recovered 0})}
+        reason (fn [f] (try (f) nil
+                            (catch clojure.lang.ExceptionInfo e
+                              (:reason (ex-data e)))))]
+    (doseq [opts [{:poll-ms 0} {:poll-ms 9} {:poll-ms 120001}
+                  {:poll-ms nil} {:poll-ms 1.5} {:unknown true}]]
+      (is (= (if (contains? opts :poll-ms)
+               :invalid-poll-ms :invalid-scheduled-options)
+             (reason #(recovery/start-scheduled! route opts)))))
+    (let [worker (recovery/start-scheduled!
+                  route {:poll-ms 1000})]
+      (try
+        (is (= :invalid-stop-timeout-ms
+               (reason #((:stop! worker) -1))))
+        (is (= :running ((:status worker))))
+        (finally (is (= :drained (:outcome ((:stop! worker) 2000)))))))))
