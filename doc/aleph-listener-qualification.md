@@ -44,11 +44,31 @@ success, and no `continue-on-error` override. A failed dependency download,
 qualification assertion, or test-loader error must fail the job. Offline
 configuration tests validate these controls but **do not qualify Aleph**.
 
-**Configured is not passed.** Treat the GitHub Actions result as unknown until
-the actual job has completed successfully on the committed revision. An
-unexecuted, queued, skipped, or failing workflow is not positive evidence.
+**Configured is not passed.** Every revision needs its own completed,
+successful Actions run before claiming its qualification tests have passed.
+An unexecuted, queued, skipped, or failing workflow is not positive evidence.
 Even a green HTTP/1 gate does not establish HTTP/2, production source
 cancellation, listener retirement under load, or browser delivery.
+
+## Executed HTTP/1 evidence (v2251) and next gate (v2252)
+
+The first actual Aleph qualification completed **successfully** on
+2026-11-22 for commit `7898953d95a39d8a61c1d77c73954ab86c490249`:
+
+- [GitHub Actions run 45071447647](https://github.com/michaelmrose/gesso/actions/runs/45071447647)
+- Real `aleph/aleph` **0.9.11** jar resolved successfully on Java 21.
+- The strict HTTP/1 qualification executed **2 tests / 15 assertions**,
+  reporting **0 failures / 0 errors** in the job log.
+- The result supports finite HTTP/1 response final-write capture and the
+  independently certified streaming-producer quiescence case, in the
+  controlled harness only.
+
+Revision v2252 extends this gate with a third test using **two sequential
+HTTP/1.1 requests over the same physical keep-alive socket**, confirming
+that each response has its own captured final-write completion and that
+neither the listener nor the per-channel pending registry leaks ownership.
+**This added case needs a separate successful workflow run on v2252**;
+a passed v2251 run does not validate the new test.
 
 ## What the first gate exercises
 
@@ -74,10 +94,12 @@ wiring before it may claim this property.
 
 ## Evidence and remaining obligations
 
-The supplied offline dependency bundle has **no Aleph jar** and its runtime
-cannot access Clojars. As of v2250 the gate's EDN and Clojure forms have
-been parsed, the optional-dependency invariants and existing Netty/listener
-regressions have been run, but **the real Aleph tests have not run**.
+The supplied local offline dependency bundle has **no Aleph jar** and
+cannot access Clojars. The optional dependency was resolved and the two
+original real HTTP/1 tests were successfully run in GitHub Actions for
+v2251. This does not independently establish that every combination of
+Aleph, Netty, Biff and XTDB is compatible in production, and the v2252
+keep-alive extension remains unqualified until its own workflow passes.
 
 Further qualification must exercise HTTP/2 stream channels, disconnects,
 interrupted and failed writes, actual application/Live SSE producer cleanup,

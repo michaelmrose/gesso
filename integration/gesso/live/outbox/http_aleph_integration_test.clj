@@ -5,6 +5,7 @@
    completion still require separate evidence before claiming a production
    Aleph adapter."
   (:require [aleph.http :as aleph]
+            [clojure.string :as str]
             [aleph.netty :as aleph-netty]
             [clojure.test :refer [deftest is]]
             [gesso.live.outbox.http :as http]
@@ -48,7 +49,8 @@
                     ;; Register BEFORE returning to Aleph, otherwise the
                     ;; outgoing final frame can race its capture registration.
                     ((:register-response! capture) channel bridge)
-                    (swap! responses conj {:bridge bridge :response response})
+                    (swap! responses conj {:bridge bridge :response response
+                                           :channel channel})
                     (when finite?
                       ;; A fully materialized finite body in this harness has
                       ;; no provider-using continuation after Ring returns.
@@ -140,4 +142,97 @@
         (stream/close! source)
         ;; Deliberately retain source debt if qualification fails; calling
         ;; stop! does not invent missing producer quiescence evidence.
+        ((:stop! server))))))
+
+(defn- read-raw-http1-response!
+  "Read exactly one finite HTTP/1.1 response from an existing keep-alive
+   socket. Require Content-Length rather than assuming the socket closes or
+   consuming bytes from the following pipelined response. Test-only parser."
+  [^java.io.BufferedReader reader]
+  (let [status-line (.readLine reader)
+        _ (when-not (and status-line
+                         (re-find #"^HTTP/1\.1 200(?:\s|$)" status-line))
+            (throw (ex-info "Unexpected HTTP/1 response status"
+                            {:status-line status-line})))
+        headers (loop [found {}]
+                  (let [line (.readLine reader)]
+                    (cond
+                      (nil? line)
+                      (throw (ex-info "Unexpected end of HTTP/1 headers" {}))
+
+                      (= "" line) found
+
+                      :else
+                      (let [[header value] (str/split line #":" 2)]
+                        (when-not value
+                          (throw (ex-info "Malformed HTTP/1 header"
+                                          {:line line})))
+                        (recur (assoc found (str/lower-case header)
+                                      (str/trim value)))))))]
+    (when-not (contains? headers "content-length")
+      (throw (ex-info "Finite HTTP/1 response needs Content-Length"
+                      {:headers headers})))
+    (let [length (Long/parseLong (get headers "content-length"))]
+      (when-not (<= 0 length 65536)
+        (throw (ex-info "Invalid response length" {:length length})))
+      (let [chars (char-array (int length))]
+        (loop [n 0]
+          (if (= n length)
+            {:status 200 :headers headers :body (String. chars)}
+            (let [read (.read reader chars n (int (- length n)))]
+              (when (neg? read)
+                (throw (ex-info "Truncated HTTP/1 response body"
+                                {:expected length :received n})))
+              (recur (+ n read)))))))))
+
+(deftest real-aleph-http1-persistent-socket-pairs-each-final-write-test
+  ;; Two separately admitted Ring requests share ONE physical HTTP/1.1
+  ;; keep-alive socket. Each LastHttpContent write must match precisely its
+  ;; own Gesso bridge; the second must neither reuse the first completion
+  ;; nor leak a pending response association.
+  (let [server (real-http1-server!
+                (fn [req] {:status 200
+                           :headers {"content-type" "text/plain"}
+                           :body (case (:uri req)
+                                   "/first" "first response"
+                                   "/second" "second response"
+                                   "unexpected request")}))
+        socket (java.net.Socket.)]
+    (try
+      (.connect socket
+                (java.net.InetSocketAddress.
+                 "127.0.0.1" (.getPort (URI/create (:url server))))
+                2000)
+      (.setSoTimeout socket 5000)
+      (with-open [reader (java.io.BufferedReader.
+                         (java.io.InputStreamReader.
+                          (.getInputStream socket) StandardCharsets/UTF_8))]
+        (doseq [[i uri expected] [[1 "/first" "first response"]
+                                  [2 "/second" "second response"]]]
+          (let [bytes (.getBytes
+                       (str "GET " uri " HTTP/1.1\r\n"
+                            "Host: 127.0.0.1\r\n"
+                            "Connection: keep-alive\r\n\r\n")
+                       StandardCharsets/US_ASCII)]
+            (.write (.getOutputStream socket) bytes)
+            (.flush (.getOutputStream socket)))
+          (let [response (read-raw-http1-response! reader)]
+            (is (= 200 (:status response)))
+            (is (= expected (:body response)))
+            (is (= "keep-alive" (get-in response [:headers "connection"])))
+            (is (eventually #(= i (:matched ((:stats (:capture server)))))))
+            (is (eventually #(zero? ((:active-count (:guard server))))))
+            (is (zero? (:pending ((:stats (:capture server)))))))))
+      (let [owned @(:responses server)]
+        (is (= 2 (count owned)))
+        (is (identical? (:channel (first owned))
+                        (:channel (second owned)))
+            "Both physical HTTP responses must belong to the same socket")
+        (is (every? #(= :succeeded
+                        (:write-outcome ((:status (:bridge %)))))
+                    owned)))
+      (is (= {:outcome :drained} ((:stop! server))))
+      (is ((:drained? (:guard server))))
+      (finally
+        (.close socket)
         ((:stop! server))))))
