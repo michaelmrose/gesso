@@ -119,11 +119,27 @@
                   ;; interrupt signal that the physical read may have cleared.
                   (.interrupt (Thread/currentThread))
                   (throw cause)))
-         has-more? (> (count rows) limit)
-         candidates (mapv #(candidate! (:source-id opts) %) (take limit rows))]
-     (when-not (= (count candidates)
-                  (count (distinct (map :intent-id candidates))))
-       (reject! :duplicate-current-identities {:candidates candidates}))
+         ;; Query requests at most limit + 1 rows. Validate ALL returned
+         ;; identities, including the lookahead row used to claim another
+         ;; page exists. A malformed lookahead could otherwise certify a
+         ;; continuation cursor that skips or repeats physical work.
+         _ (when (> (count rows) (inc limit))
+             (reject! :oversized-physical-page
+                      {:limit limit :row-count (count rows)}))
+         observed (mapv #(candidate! (:source-id opts) %) rows)
+         ids (mapv :intent-id observed)
+         _ (when-not (= (count ids) (count (distinct ids)))
+             (reject! :duplicate-current-identities {:candidates observed}))
+         ordered (cond->> ids (:after opts) (cons (:after opts)))
+         _ (when-not (every? (fn [[left right]]
+                               ;; XTDB UUID ORDER BY follows canonical
+                               ;; unsigned UUID order, unlike UUID.compareTo.
+                               (neg? (compare (str left) (str right))))
+                             (partition 2 1 ordered))
+             (reject! :invalid-physical-order
+                      {:after (:after opts) :identities ids}))
+         has-more? (> (count observed) limit)
+         candidates (vec (take limit observed))]
      {:candidates candidates
       :has-more? has-more?
       :next-after (when has-more? (:intent-id (peek candidates)))})))

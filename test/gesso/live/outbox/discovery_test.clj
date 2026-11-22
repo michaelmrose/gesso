@@ -291,3 +291,77 @@
             (is (= b (-> rescan :results first :intent-id)))))
         (finally
           (Thread/interrupted))))))
+
+
+(defn- synthetic-discovery-id [n]
+  (java.util.UUID/fromString
+   (format "00000000-0000-0000-0000-%012d" (long n))))
+
+(defn- synthetic-discovery-row [id]
+  {:xt/id id
+   :outbox-status :pending
+   :outbox-source-id "gesso/test-discovery"})
+
+(deftest physical-discovery-rejects-out-of-order-and-backward-provider-rows-test
+  ;; ORDER BY and WHERE _id > :after must be validated at the physical read
+  ;; boundary, independently of the worker's later advisory-page checks.
+  (let [[a b c] (mapv synthetic-discovery-id [401 402 403])
+        opts {:source-id "gesso/test-discovery" :limit 2}
+        cases [[:descending-visible opts [b a] :invalid-physical-order]
+               [:descending-lookahead opts [a c b] :invalid-physical-order]
+               [:behind-cursor (assoc opts :after b) [a] :invalid-physical-order]
+               [:repeated-cursor (assoc opts :after b) [b] :invalid-physical-order]
+               [:duplicate-lookahead opts [a b b] :duplicate-current-identities]]]
+    (doseq [[label request ids reason] cases]
+      (let [queries (atom 0)
+            rows (mapv synthetic-discovery-row ids)]
+        (with-redefs [xt/q (fn [& _] (swap! queries inc) rows)]
+          (is (rejected? #(discovery/discover-eligible! :synthetic request)
+                         reason)
+              (str label " must not invent a safe discovery cursor"))
+          (is (= 1 @queries) "A bad physical page must never be retried"))))))
+
+(deftest physical-discovery-validates-lookahead-and-page-size-test
+  ;; Lookahead determines :has-more? and therefore whether it is safe to
+  ;; resume. A mismatched source, malformed status, or invalid identity at
+  ;; that boundary cannot be dropped merely because it is not returned.
+  (let [[a b c] (mapv synthetic-discovery-id [411 412 413])
+        valid [(synthetic-discovery-row a) (synthetic-discovery-row b)]
+        bad-lookaheads [[:wrong-source (assoc (synthetic-discovery-row c)
+                                               :outbox-source-id "wrong/source")]
+                        [:bad-status (assoc (synthetic-discovery-row c)
+                                            :outbox-status :delivered)]
+                        [:invalid-id (assoc (synthetic-discovery-row c)
+                                           :xt/id "not-a-uuid")]]
+        opts {:source-id "gesso/test-discovery" :limit 2}]
+    (doseq [[label extra] bad-lookaheads]
+      (with-redefs [xt/q (fn [& _] (conj valid extra))]
+        (is (rejected? #(discovery/discover-eligible! :synthetic opts)
+                       :invalid-physical-candidate)
+            (str label " lookahead must fail before returning a cursor"))))
+    (with-redefs [xt/q (fn [& _] (conj valid (synthetic-discovery-row c)
+                                          (synthetic-discovery-row
+                                           (synthetic-discovery-id 414))))]
+      (is (rejected? #(discovery/discover-eligible! :synthetic opts)
+                     :oversized-physical-page)
+          "XTDB must never return more than the requested limit + 1"))))
+
+(deftest physical-discovery-accepts-sql-uuid-order-across-sign-boundary-test
+  ;; Canonical unsigned XTDB UUID ordering differs from Java UUID.compareTo.
+  ;; The adapter must accept both a full page and a continuation crossing it.
+  (let [a (java.util.UUID/fromString "7fffffff-ffff-ffff-ffff-ffffffffffff")
+        b (java.util.UUID/fromString "80000000-0000-0000-0000-000000000000")
+        opts {:source-id "gesso/test-discovery" :limit 1}
+        page (with-redefs [xt/q (fn [& _] [(synthetic-discovery-row a)
+                                           (synthetic-discovery-row b)])]
+               (discovery/discover-eligible! :synthetic opts))
+        resumed (with-redefs [xt/q (fn [& _] [(synthetic-discovery-row b)])]
+                  (discovery/discover-eligible! :synthetic
+                                               (assoc opts :after a)))]
+    (is (= [{:intent-id a :action :acquire-pending}] (:candidates page)))
+    (is (true? (:has-more? page)))
+    (is (= a (:next-after page)))
+    (is (= [{:intent-id b :action :acquire-pending}]
+           (:candidates resumed)))
+    (is (false? (:has-more? resumed)))
+    (is (nil? (:next-after resumed)))))
