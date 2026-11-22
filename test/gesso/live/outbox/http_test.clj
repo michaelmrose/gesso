@@ -3267,3 +3267,86 @@
          (finally
            (deliver release true)
            ((:close! route))))))))
+
+(deftest timeout-source-release-failure-retains-managed-capacity-for-retry-test
+  ;; Exercise the real keepalive write deadline, while the eager Live
+  ;; interest's physical close hook throws *without* releasing its tap.
+  ;; The Ring layer must retain that unverified source as a capacity and
+  ;; shutdown obligation even though the response stream has closed.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           real-open flow/open-source-flow!
+           allow-release? (atom false)
+           release-attempts (atom 0)
+           terminal (promise)
+           failure (ex-info "source release unavailable during SSE timeout"
+                            {:test :v2235})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [src opts]
+            (let [opened (real-open src opts)
+                  release! (:close! opened)]
+              (assoc opened :close!
+                     (fn []
+                       (swap! release-attempts inc)
+                       (if @allow-release?
+                         (release!)
+                         (throw failure))))))
+          ;; Keep the source registration eager but uncollected. The real
+          ;; event collector otherwise owns a second legitimate release
+          ;; path, which masks failure of the response-close hook.
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 1
+                                 :sse-options
+                                 {:keepalive-ms 15
+                                  :frame-write-timeout-ms 600
+                                  :on-close #(deliver terminal %)}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}]
+             (try
+               (let [response ((:handler route) request)
+                     closed (deref terminal 4000 ::timeout)]
+                 (is (= 200 (:status response)))
+                 (is (= :keepalive-error (:reason closed))
+                     "A real unread frame must select timeout termination")
+                 (is (= :gesso.live.sse/frame-write-unknown
+                        (-> closed :error ex-data :error/type))
+                     "Write timeout must remain an unknown delivery result")
+                 (is (stream/closed? (:body response)))
+                 (is (pos? @release-attempts)
+                     "The transport attempted physical source release")
+                 (is (= 1 (:subscription-count (source/stats src)))
+                     "Throwing release hook did not close the eager source tap")
+                 (is (eventually #(zero? ((:active-count route))))
+                     "Closed response is no longer an active connection")
+                 (is (= 1 ((:occupied-count route)))
+                     "Unreleased source retains the route's capacity slot")
+                 (is (= {:status 503 :headers {}
+                         :body "Live connection capacity reached"}
+                        ((:handler route) request))
+                     "No new authorized session can consume the same slot")
+                 (let [caught (try ((:close! route)) nil
+                                   (catch Throwable e e))]
+                   (is (identical? failure caught)
+                       "Failed cancellation retains its original cause"))
+                 (is (false? ((:drained? route))))
+                 (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+                 (is (= 1 ((:occupied-count route))))
+                 (is (= 1 (:subscription-count (source/stats src))))
+                 (reset! allow-release? true)
+                 (is (= :closed ((:close! route)))
+                     "Explicit retry must complete the physical release")
+                 (is (= {:outcome :drained} ((:await-drained! route) 0)))
+                 (is (zero? ((:occupied-count route))))
+                 (is (zero? (:subscription-count (source/stats src))))
+                 (is (= :keepalive-error (:reason (deref terminal 0 ::timeout)))
+                     "Retry must not replace the original timeout outcome"))
+               (finally
+                 (reset! allow-release? true)
+                 ((:close! route))))))))))
+)
