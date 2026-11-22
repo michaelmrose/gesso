@@ -1147,6 +1147,69 @@
            (when @first-request (future-cancel @first-request))
            ((:close! route))))))))
 
+(deftest managed-route-await-drain-is-bounded-and-observes-inflight-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           request {:uri "/live/events" :request-method :get}
+           entered (promise)
+           release (promise)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription
+                           (fn [_] (deliver entered true) @release scope)})
+           pending (atom nil)
+           waiter (atom nil)]
+       (try
+         (is (= {:outcome :timed-out} ((:await-drained! route) 0))
+             "An open route may be idle, but has not completed shutdown")
+         (doseq [invalid [nil -1 1.5 120001 "20" (inc (bigint Long/MAX_VALUE))]]
+           (is (= :invalid-drain-timeout-ms
+                  (exception-reason #((:await-drained! route) invalid)))))
+         (reset! pending (future ((:handler route) request)))
+         (is (= true (deref entered 5000 ::timeout)))
+         (is (= :closed ((:close! route))))
+         (is (false? ((:drained? route))))
+         (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+         (is (= {:outcome :timed-out} ((:await-drained! route) 10))
+             "A bounded drain must not claim progress during stalled auth")
+         (reset! waiter (future ((:await-drained! route) 5000)))
+         (is (not (realized? @waiter))
+             "A drain waiter must remain pending until authorization exits")
+         (deliver release true)
+         (is (= {:status 503 :headers {} :body "Live shutting down"}
+                (deref @pending 5000 ::timeout)))
+         (is (= {:outcome :drained} (deref @waiter 5000 ::timeout))
+             "A state transition should wake a blocked drain waiter")
+         (is (true? ((:drained? route))))
+         (is (= {:outcome :drained} ((:await-drained! route) 0))
+             "Drain completion remains observable to future waiters")
+         (is (zero? (:subscription-count (source/stats src))))
+         (finally
+           (deliver release true)
+           (when @pending (future-cancel @pending))
+           (when @waiter (future-cancel @waiter))
+           ((:close! route))))))))
+
+(deftest managed-route-await-drain-requires-last-active-session-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           response ((:handler route) {:uri "/live/events"
+                                       :request-method :get})]
+       (try
+         (is (= 200 (:status response)))
+         (is (= 1 ((:active-count route))))
+         (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+         (is (= :closed ((:close! route))))
+         (is (= {:outcome :drained} ((:await-drained! route) 2000)))
+         (is (true? ((:drained? route))))
+         (is (eventually #(zero? (:subscription-count (source/stats src)))))
+         (finally ((:close! route))))))))
+
 (deftest managed-route-drain-requires-closed-and-no-inflight-work-test
   (setup-host
    (fn [started]

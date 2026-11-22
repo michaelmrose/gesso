@@ -29,6 +29,11 @@
 (def ^:private default-managed-keepalive-ms 15000)
 (def ^:private default-max-pending-authorizations 1024)
 
+(defn- drained-state? [{:keys [closed? connections starting
+                              pending-authorizations]}]
+  (and closed? (zero? pending-authorizations)
+       (zero? starting) (empty? connections)))
+
 (defn- reserve-pending-authorization! [state live-system limit]
   ;; Session construction and close! hold the state monitor. A fresh GET must
   ;; still reject overload promptly while that monitor is occupied. CAS is
@@ -74,7 +79,7 @@
 (defn wrap-authorized-sse
   "Return {:handler Ring-handler :close! callback :active-count callback
            :pending-authorization-count callback :closed? callback
-           :drained? callback}.
+           :drained? callback :await-drained! callback}.
 
    Requires a started concrete host, a fixed canonical :path (absolute URL
    path with no query string, repeated slash, or dot traversal segment), and
@@ -121,7 +126,14 @@
    :drained? reports the stronger lifecycle condition: the route is closed,
    no authorization or startup is outstanding, and no session remains
    registered. A completed :close! alone does not establish this condition.
-   The flag is observational, not an interrupt or a drain barrier.
+   :await-drained! takes a bounded timeout in milliseconds (0..120000),
+   waits for the same terminal state without polling, and returns either
+   {:outcome :drained} or {:outcome :timed-out}. It does NOT initiate close!,
+   interrupt application work, stop the network listener, or release the
+   host's providers. A timeout is retryable. To safely stop the host, close
+   the managed route, stop the owning HTTP listener, await drain, and call
+   host/stop! only after the result is :drained. An unbounded callback can
+   still prevent drain; hosts must not mistake a timeout for safe teardown.
    If the owning Live provider has already closed, return the same 503
    before application authorization or subscription admission. The provider
    check cannot replace the host's required ordered listener teardown.
@@ -232,6 +244,14 @@
         live-system (:gesso.live/system started)
         state (atom {:closed? false :connections {} :starting 0
                      :pending-authorizations 0})
+        drained-signal (promise)
+        _ (add-watch state ::drain
+                     (fn [_ _ _ updated]
+                       ;; Once closed and empty, admission is permanently
+                       ;; fenced. A single promise is sufficient for all
+                       ;; waiters, and cannot miss a transition to drained.
+                       (when (drained-state? updated)
+                         (deliver drained-signal true))))
         close! (fn []
                  ;; A session may still be starting without the monitor.
                  ;; Publish closure first; the in-flight starter will cancel
@@ -395,12 +415,15 @@
      :active-count (fn [] (count (:connections @state)))
      :pending-authorization-count (fn [] (:pending-authorizations @state))
      :closed? (fn [] (:closed? @state))
-     :drained? (fn []
-                 ;; Inspect one atom snapshot: closure, in-flight requests,
-                 ;; starting sessions, and registered sessions must all agree.
-                 (let [{:keys [closed? connections starting
-                               pending-authorizations]} @state]
-                   (and closed?
-                        (zero? pending-authorizations)
-                        (zero? starting)
-                        (empty? connections))))}))
+     :drained? (fn [] (drained-state? @state))
+     :await-drained!
+     (fn [timeout-ms]
+       (when-not (and (integer? timeout-ms)
+                      (<= 0 timeout-ms 120000))
+         (reject! :invalid-drain-timeout-ms {:timeout-ms timeout-ms}))
+       ;; The watch observes every state transition. Unlike polling, the
+       ;; waiter is signaled when the final in-flight request is released.
+       ;; A zero timeout is a nonblocking snapshot of terminal state.
+       {:outcome (if (or (drained-state? @state)
+                         (true? (deref drained-signal timeout-ms false)))
+                   :drained :timed-out)})}))
