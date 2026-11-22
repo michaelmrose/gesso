@@ -617,6 +617,23 @@
     (reject! :invalid-drain-timeout-ms {:timeout-ms drain-timeout-ms}))
   options)
 
+(defn- restore-interrupt!
+  "Preserve JVM cancellation when an interrupted physical shutdown callback
+   has cleared the calling thread's interrupt flag."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
+(defn- invoke-shutdown-callback!
+  "Callbacks after listener cleanup propagate immediately; preserve any
+   interruption without replacing the exact physical exception."
+  [callback & args]
+  (try
+    (apply callback args)
+    (catch InterruptedException error
+      (restore-interrupt! error)
+      (throw error))))
+
 (defn stop-managed-http-host!
   "Perform caller-owned HTTP shutdown before stopping a Gesso host.
 
@@ -662,6 +679,12 @@
                          (catch Throwable e e))
         listener-result (try [:returned (stop-listener!)]
                              (catch Throwable e [:failed e]))]
+    ;; Defer restoration until both independent cleanup callbacks have run.
+    ;; An immediately restored interrupt on the route-close failure could
+    ;; preempt an interruptible listener stop before it attempts cleanup.
+    (restore-interrupt! route-error)
+    (when (= :failed (first listener-result))
+      (restore-interrupt! (second listener-result)))
     (when route-error
       (when (and (= :failed (first listener-result))
                  (not (identical? route-error (second listener-result))))
@@ -673,9 +696,11 @@
     ;; The listener owner must explicitly certify the entire handler drain.
     ;; A stopped socket alone says nothing about in-flight ordinary requests.
     (case (:outcome (second listener-result))
-      :drained (let [drain ((:await-drained! route) drain-timeout-ms)]
+      :drained (let [drain (invoke-shutdown-callback!
+                            (:await-drained! route) drain-timeout-ms)]
                  (case (:outcome drain)
-                   :drained (let [host-outcome (stop-host!)]
+                   :drained (let [host-outcome
+                                  (invoke-shutdown-callback! stop-host!)]
                               ;; A normal return is not proof of successful
                               ;; teardown. In particular, nil or a reported
                               ;; timeout may mean providers remain active.

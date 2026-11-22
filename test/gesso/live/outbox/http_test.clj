@@ -1567,6 +1567,88 @@
            (future-cancel pending)
            ((:close! route))))))))
 
+(deftest managed-http-shutdown-retains-interrupt-across-failed-cleanup-test
+  ;; The route and listener are separate physical owners. Even when either
+  ;; callback interrupts, both cleanup attempts must execute before the owner
+  ;; propagates the original failure and restores the JVM interrupt bit.
+  (doseq [[label route-interrupted? listener-interrupted?]
+          [[:route-interrupted true false]
+           [:listener-interrupted false true]
+           [:both-interrupted true true]
+           [:ordinary-route-interrupted-listener false true]]]
+    (let [route-error (if (= :ordinary-route-interrupted-listener label)
+                        (ex-info "route close failed" {:phase :route})
+                        (when route-interrupted?
+                          (InterruptedException. "route close interrupted")))
+          listener-error (when listener-interrupted?
+                           (InterruptedException. "listener stop interrupted"))
+          primary (or route-error listener-error)
+          secondary (if (and route-error listener-error) [listener-error] [])
+          calls (atom [])
+          plan {:route {:close! (fn []
+                                  (swap! calls conj :route)
+                                  (when route-error (throw route-error)))
+                        :await-drained! (fn [_]
+                                          (swap! calls conj :drain)
+                                          {:outcome :drained})}
+                :drain-timeout-ms 20
+                :stop-listener! (fn []
+                                  (swap! calls conj :listener)
+                                  (when listener-error (throw listener-error))
+                                  {:outcome :drained})
+                :stop-host! (fn []
+                              (swap! calls conj :host)
+                              {:outcome :stopped})}]
+      (try
+        (Thread/interrupted)
+        (let [caught (try (http/stop-managed-http-host! plan)
+                          (catch Throwable error error))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? primary caught) (str label " primary error"))
+          (is (= secondary (vec (.getSuppressed ^Throwable caught)))
+              (str label " secondary error ordering"))
+          (is (= [:route :listener] @calls)
+              (str label " must attempt both independent cleanups"))
+          (is interrupted? (str label " must restore interruption")))
+        (finally
+          (Thread/interrupted))))))
+
+(deftest managed-http-shutdown-retains-interrupt-in-drain-and-host-stop-test
+  ;; Once route and listener cleanup succeed, an interrupted drain must fence
+  ;; provider shutdown, while an interrupted provider stop is propagated as
+  ;; uncertain and cannot be promoted to a successful shutdown result.
+  (doseq [phase [:drain :host]]
+    (let [cause (InterruptedException. (str (name phase) " interrupted"))
+          calls (atom [])
+          plan {:route {:close! (fn [] (swap! calls conj :route))
+                        :await-drained! (fn [_]
+                                          (swap! calls conj :drain)
+                                          (when (= :drain phase) (throw cause))
+                                          {:outcome :drained})}
+                :drain-timeout-ms 20
+                :stop-listener! (fn []
+                                  (swap! calls conj :listener)
+                                  {:outcome :drained})
+                :stop-host! (fn []
+                              (swap! calls conj :host)
+                              (throw cause))}]
+      (try
+        (Thread/interrupted)
+        (let [caught (try (http/stop-managed-http-host! plan)
+                          (catch Throwable error error))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? cause caught) (str phase " exact cause"))
+          (is (= (if (= :drain phase)
+                   [:route :listener :drain]
+                   [:route :listener :drain :host])
+                 @calls)
+              (str phase " must not skip or repeat shutdown phases"))
+          (is interrupted? (str phase " must restore interruption")))
+        (finally
+          (Thread/interrupted))))))
+
 (deftest managed-http-owner-shutdown-rejects-unsafe-cleanup-test
   (let [events (atom [])
         route {:close! #(swap! events conj :route)
