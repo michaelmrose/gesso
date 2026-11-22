@@ -36,6 +36,13 @@
 
 (def ^:private default-stop-timeout-ms 10000)
 
+(defn- restore-interrupt!
+  "A captured provider interruption must not clear the host's JVM cancellation
+   signal, even when checked startup reports a rollback or retryable fence."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defn- reject! [reason info]
   (throw (ex-info "Invalid managed Gesso/Biff outbox lifecycle."
                   (assoc info :error/type :gesso.live.outbox/invalid-biff-lifecycle
@@ -250,7 +257,9 @@
             (let [failure (try
                             (when stop (stop system))
                             nil
-                            (catch Throwable cause cause))]
+                            (catch Throwable cause
+                              (restore-interrupt! cause)
+                              cause))]
               (if failure
                 (do
                   (swap! (.-state cleanup) assoc :status :blocked)
@@ -450,6 +459,10 @@
                               :rollback/stop-cause-class (.getName (class cause))
                               :cleanup/handle cleanup))
                      startup-cause)]
+          ;; Roll back physical resources before reinstating the startup
+          ;; thread's interrupt. An interrupted rollback stop already restored
+          ;; its own flag in cleanup-started!, even when cleanup was blocked.
+          (restore-interrupt! startup-cause)
           ;; Preserve both failures for operators: the startup exception is
           ;; the cause; a failed teardown is a suppressed exception.
           (when cause

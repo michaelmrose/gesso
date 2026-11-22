@@ -928,3 +928,93 @@
     (is (= :unadmitted-init (:reason (ex-data failure))))
     (is (= :fixture/unadmitted-later (:module-id (ex-data failure))))
     (is (empty? @events))))
+
+(deftest interrupted-checked-startup-restores-caller-cancellation-test
+  ;; Native Biff already failed a provider :start. Checked startup must unwind
+  ;; the completed provider, retain the exact cause and restore the JVM signal
+  ;; after rollback, which must still be allowed to attempt physical cleanup.
+  (let [events (atom [])
+        interruption (InterruptedException. "provider start interrupted")
+        provider {:biff.core/id :fixture/dependency
+                  :biff.core/start (fn [system]
+                                     (swap! events conj :start-dependency)
+                                     system)
+                  :biff.core/stop (fn [_]
+                                    (swap! events conj :stop-dependency))}
+        doomed {:biff.core/id :fixture/doomed
+                :biff.core/start (fn [_]
+                                   (swap! events conj :start-doomed)
+                                   (throw interruption))}]
+    (try
+      (Thread/interrupted)
+      (let [error (try (start-checked-fixture! [provider doomed])
+                       (catch Throwable failure failure))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (instance? clojure.lang.ExceptionInfo error))
+        (is (= :gesso.live.outbox/checked-startup-failed
+               (:error/type (ex-data error))))
+        (is (= :drained (:rollback/status (ex-data error))))
+        (is (identical? interruption (.getCause ^Throwable error)))
+        (is (= [:start-dependency :start-doomed :stop-dependency] @events)
+            "Rollback must release a started dependency after interruption")
+        (is interrupted? "Checked startup must retain JVM interruption"))
+      (finally
+        (Thread/interrupted)))))
+
+(deftest interrupted-checked-rollback-stop-retains-retryable-fence-test
+  ;; An interrupt during a provider's physical stop does not establish that
+  ;; its resources drained. Retain its place in the cleanup journal, keep its
+  ;; prerequisites open, report the exact suppressed stop error, and preserve
+  ;; the interrupted caller's flag so the host can retry intentionally.
+  (let [events (atom [])
+        attempts (atom 0)
+        start-error (ex-info "startup failed" {:test :startup})
+        interruption (InterruptedException. "rollback stop interrupted")
+        dependency {:biff.core/id :fixture/dependency
+                    :biff.core/start (fn [system]
+                                       (swap! events conj :start-dependency)
+                                       system)
+                    :biff.core/stop (fn [_]
+                                      (swap! events conj :stop-dependency))}
+        provider {:biff.core/id :fixture/provider
+                  :biff.core/start (fn [system]
+                                     (swap! events conj :start-provider)
+                                     system)
+                  :biff.core/stop
+                  (fn [_]
+                    (swap! events conj :stop-provider)
+                    (when (= 1 (swap! attempts inc))
+                      (throw interruption)))}
+        doomed {:biff.core/id :fixture/doomed
+                :biff.core/start (fn [_]
+                                   (swap! events conj :start-doomed)
+                                   (throw start-error))}]
+    (try
+      (Thread/interrupted)
+      (let [error (try (start-checked-fixture! [dependency provider doomed])
+                       (catch Throwable failure failure))
+            interrupted? (.isInterrupted (Thread/currentThread))
+            data (ex-data error)
+            handle (:cleanup/handle data)]
+        (Thread/interrupted)
+        (is (instance? clojure.lang.ExceptionInfo error))
+        (is (= :blocked (:rollback/status data)))
+        (is (identical? start-error (.getCause ^Throwable error)))
+        (is (= [interruption] (vec (.getSuppressed ^Throwable error))))
+        (is (= :fixture/provider (:rollback/blocked-module-id data)))
+        (is (= [:fixture/dependency :fixture/provider]
+               (:rollback/remaining-module-ids data)))
+        (is (= [:start-dependency :start-provider :start-doomed :stop-provider]
+               @events)
+            "An interrupted provider stop must fence earlier dependencies")
+        (is interrupted? "A blocked rollback must retain JVM cancellation")
+        (is (some? handle))
+        (when handle
+          (is (= :drained (:status (managed/retry-startup-cleanup! handle))))
+          (is (= [:start-dependency :start-provider :start-doomed
+                  :stop-provider :stop-provider :stop-dependency]
+                 @events))
+          (is (= 2 @attempts))))
+      (finally
+        (Thread/interrupted)))))
