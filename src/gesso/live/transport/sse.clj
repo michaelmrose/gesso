@@ -741,9 +741,18 @@
                               (throw failure))
                             (when release-failure
                               (throw release-failure))))))
-      (catch Throwable e
-        (release-flow!)
-        (throw e)))))
+      (catch Throwable startup-error
+        ;; The original startup failure owns the diagnosis. A failed
+        ;; best-effort subscription release must not replace it, but it
+        ;; cannot be silently discarded either: preserve that independent
+        ;; cleanup failure as suppressed evidence for the caller.
+        (try
+          (release-flow!)
+          (catch Throwable release-error
+            (when-not (identical? startup-error release-error)
+              (.addSuppressed ^Throwable startup-error
+                              ^Throwable release-error))))
+        (throw startup-error)))))
 
 (defn cancel!
   "Cancel a started SSE stream returned by start!."

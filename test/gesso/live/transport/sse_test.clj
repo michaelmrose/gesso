@@ -4,6 +4,7 @@
    [clojure.test :refer [deftest is testing]]
    [gesso.live.progression :as progression]
    [gesso.live.model :as model]
+   [gesso.live.flow :as flow]
    [gesso.live.source :as source]
    [gesso.live.transport.sse :as sse]
    [manifold.stream :as s]
@@ -498,6 +499,44 @@
              (get-in started [:response :headers "content-type"])))
       (finally
         (sse/cancel! started)))))
+
+(deftest source-backed-startup-retains-primary-error-after-release-failure-test
+  ;; The eager source tap has to be released if SSE startup throws. Its own
+  ;; cleanup can fail too. Keep the original startup exception primary and
+  ;; expose the cleanup exception as suppressed evidence (not a replacement).
+  (doseq [release-mode [:success :throws :same-error]]
+    (let [startup-error (ex-info "SSE startup failed" {:stage :startup})
+          release-error (ex-info "Eager source release failed" {:stage :release})
+          cleanup-exception (case release-mode
+                              :success nil
+                              :throws release-error
+                              ;; Java forbids self-suppression. Keep the
+                              ;; primary error without attaching it to itself.
+                              :same-error startup-error)
+          expected-suppressed (if (= :throws release-mode)
+                                [release-error] [])
+          release-attempts (atom 0)]
+        (with-redefs [flow/open-source-flow!
+                      (fn [_ _]
+                        {:flow nil
+                         :close! (fn []
+                                   (swap! release-attempts inc)
+                                   (when cleanup-exception
+                                     (throw cleanup-exception)))})
+                      sse/start! (fn [_ _] (throw startup-error))]
+          (let [caught (try
+                         (sse/start-source! :stub-source
+                                            {:subscription {:topic :request
+                                                            :id "req-1"}}
+                                            nil)
+                         (catch Throwable e e))]
+            (is (identical? startup-error caught)
+                "The startup failure must retain its exact identity")
+            (is (= expected-suppressed
+                   (vec (.getSuppressed ^Throwable caught)))
+                "Any independent release failure is suppressed, not masked")
+            (is (= 1 @release-attempts)
+                "Cleanup is attempted exactly once after failed startup"))))))
 
 (deftest source-backed-sse-cancellation-confirms-interest-release-test
   (let [src (source/create)
