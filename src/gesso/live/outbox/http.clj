@@ -116,6 +116,11 @@
      (reject! :invalid-disconnected-retry-batch
               {:max-attempts max-attempts}))
    (locking state
+     ;; A host-owned retry may have observed the open route immediately before
+     ;; another owner requested shutdown. Refuse it at the same lock used by
+     ;; close!, rather than touching providers after ordered teardown begins.
+     (when (:closed? @state)
+       (reject! :disconnected-retry-after-route-close {}))
      (let [snapshot @state
            ;; Both disconnected source interests and prior failed
            ;; cancellations are already route-owned recovery obligations.
@@ -226,6 +231,7 @@
 (defn wrap-authorized-sse
   "Return {:handler Ring-handler :close! callback :active-count callback
            :occupied-count callback :retry-disconnected! callback
+           :disconnected-count callback
            :pending-authorization-count callback :closed? callback
            :drained? callback :await-drained! callback}.
 
@@ -294,8 +300,9 @@
    error after the selected batch has been attempted. The budget is on the
    number of attempts, NOT callback execution time. Recovery is not automatic;
    the host must schedule retries and bound blocking callbacks separately.
-   A route previously closed by :close! still requires a successful :close!
-   pass to establish its separate provider-safe close completion marker.
+   Once route shutdown has been requested, :retry-disconnected! refuses
+   further attempts at its lifecycle lock. A closed route must use its
+   ordered :close! retry instead to establish provider-safe completion.
    Since :close! can return while authorization/startup is still in flight,
    :drained? reports the stronger lifecycle condition: route close! has
    completed its cancellation pass successfully, no authorization or startup
@@ -703,6 +710,9 @@
      :close! close!
      :active-count (fn [] (count (:connections @state)))
      :occupied-count (fn [] (occupied-sse-slots @state))
+     :disconnected-count (fn [] (let [s @state]
+                                  (count (merge (:retry-cancellations s)
+                                                (:disconnect-cleanups s)))))
      :retry-disconnected! (fn
                             ([] (retry-disconnected-sse! state))
                             ([max-attempts]

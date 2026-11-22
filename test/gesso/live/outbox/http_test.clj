@@ -3397,6 +3397,8 @@
                  (is (= 1 (:subscription-count (source/stats src))))
                  (is (zero? ((:active-count route))))
                  (is (= 1 ((:occupied-count route))))
+                 (is (= 1 ((:disconnected-count route)))
+                     "Only unreleased disconnected interests are retry debt")
                  (is (= {:status 503 :headers {}
                          :body "Live connection capacity reached"}
                         ((:handler route) request)))
@@ -3409,10 +3411,12 @@
                          "A failed retry must report its original cause")
                      (is (= 1 ((:occupied-count route)))
                          "Failed recovery must not free the occupied slot")
+                     (is (= 1 ((:disconnected-count route))))
                      (is (= 1 (:subscription-count (source/stats src))))
                      (reset! allow-release? true)
                      (is (= {:attempted 1 :recovered 1} (retry!)))
                      (is (zero? ((:occupied-count route))))
+                     (is (zero? ((:disconnected-count route))))
                      (is (zero? (:subscription-count (source/stats src))))
                      (is (false? ((:closed? route)))
                          "Recovery must not retire the healthy route")
@@ -3630,3 +3634,19 @@
                (finally
                  (reset! can-release? true)
                  ((:close! route)))))))))))
+
+(deftest disconnected-retry-refuses-route-after-close-test
+  ;; An owner-driven retry racing route shutdown cannot act after the
+  ;; shutdown fence has been published, even when the route has no debt.
+  (setup-host
+   (fn [started]
+     (let [route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})]
+       (is (zero? ((:disconnected-count route))))
+       (is (= :closed ((:close! route))))
+       (is (= :disconnected-retry-after-route-close
+              (exception-reason #((:retry-disconnected! route)))))
+       (is (= :disconnected-retry-after-route-close
+              (exception-reason #((:retry-disconnected! route) 2))))
+       (is (= {:outcome :drained} ((:await-drained! route) 0)))))))
