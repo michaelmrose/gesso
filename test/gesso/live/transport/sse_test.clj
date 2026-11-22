@@ -1168,6 +1168,91 @@
           (is (empty? @errors)
               "a keepalive failure after terminal close cannot become on-error"))))))
 
+(deftest error-subtype-event-start-retires-keepalive-and-response-test
+  ;; An Error thrown before the event task returns its cancellation handle
+  ;; must not escape with an already-installed keepalive still running.
+  (let [failure (AssertionError. "event constructor assertion")
+        keepalive-cancels (atom 0)
+        errors (atom [])
+        closes (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [_ _]
+         (fn [_ _]
+           (fn [] (swap! keepalive-cancels inc))))
+       #'gesso.live.transport.sse/write-events-task
+       (fn [_ _ _] (throw failure))}
+      (fn []
+        (let [result (try
+                       (sse/start! (never-flow)
+                                   {:keepalive-ms 1000
+                                    :on-error (fn [e _] (swap! errors conj e))
+                                    :on-close (fn [entry] (swap! closes conj entry))})
+                       (catch Throwable e e))]
+          (is (map? result) "A failed producer still returns a closed handle")
+          (when (map? result)
+            (is (sse/closed? result))
+            (is (s/closed? (:stream result)))
+            (sse/cancel! result))
+          (is (= 1 @keepalive-cancels)
+              "The independent producer is canceled despite the Error")
+          (is (= [failure] @errors))
+          (is (= [:startup-error] (mapv :reason @closes))))))))
+
+(deftest error-subtype-keepalive-start-skips-event-producer-test
+  ;; A keepalive constructor AssertionError must fail closed before event
+  ;; subscription startup rather than bypassing its cleanup boundary.
+  (let [failure (AssertionError. "keepalive constructor assertion")
+        event-starts (atom 0)
+        errors (atom [])
+        closes (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [_ _] (throw failure))
+       #'gesso.live.transport.sse/write-events-task
+       (fn [_ _ _]
+         (fn [_ _]
+           (swap! event-starts inc)
+           (fn [] nil)))}
+      (fn []
+        (let [result (try
+                       (sse/start! (never-flow)
+                                   {:keepalive-ms 1000
+                                    :on-error (fn [e _] (swap! errors conj e))
+                                    :on-close (fn [entry] (swap! closes conj entry))})
+                       (catch Throwable e e))]
+          (is (map? result) "An Error cannot leak the response lifecycle")
+          (when (map? result)
+            (is (sse/closed? result))
+            (is (s/closed? (:stream result)))
+            (sse/cancel! result))
+          (is (zero? @event-starts))
+          (is (= [failure] @errors))
+          (is (= [:startup-error] (mapv :reason @closes))))))))
+
+(deftest error-subtype-source-backed-startup-releases-eager-interest-test
+  ;; The transport may close before the eager source interest is collected.
+  ;; Even Error-subtype producer failures must trigger source release.
+  (let [src (source/create)
+        failure (AssertionError. "event startup assertion")
+        started (atom nil)]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.transport.sse/write-events-task
+         (fn [_ _ _] (throw failure))}
+        (fn []
+          (reset! started
+                  (sse/start-source!
+                   src {:subscription {:topic :request :id "v2165"}}
+                   {:close-on-complete? false}))
+          (is (= 200 (get-in @started [:response :status])))
+          (is (sse/closed? @started))
+          (is (s/closed? (:stream @started)))
+          (is (eventually #(zero? (:subscription-count (source/stats src)))))))
+      (finally
+        (when @started (sse/cancel! @started))
+        (source/close! src)))))
+
 (deftest throwing-synchronous-event-start-closes-and-retires-keepalive-test
   ;; Task construction can throw before it returns a physical cancel handle.
   ;; An already-installed keepalive must not be orphaned by that exception.

@@ -648,8 +648,13 @@
              (close-once! :keepalive-error {:error error}))))
         :keepalive
         debug-fn))
-       (catch Exception e
-         (fail-startup! e)))
+       (catch Throwable startup-error
+         ;; Producer construction can throw Error subtypes as well as
+         ;; Exceptions. A partially installed keepalive must not leave the
+         ;; response and source-backed interest alive when startup aborts.
+         (when (instance? InterruptedException startup-error)
+           (.interrupt (Thread/currentThread)))
+         (fail-startup! startup-error)))
 
      (let [cancel-events!
            ;; A synchronous keepalive failure or downstream disconnect may
@@ -676,8 +681,13 @@
                       :at (now-ms)})
                     (do
                       (close-once! :error {:error error})))))))
-             (catch Exception e
-               (fail-startup! e)
+             (catch Throwable startup-error
+               ;; If the event producer fails before returning its cancel
+               ;; handle, retire the already-started keepalive and response.
+               ;; Error subtypes cannot bypass this terminal handoff.
+               (when (instance? InterruptedException startup-error)
+                 (.interrupt (Thread/currentThread)))
+               (fail-startup! startup-error)
                nil))
 
            cancel!
