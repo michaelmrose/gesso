@@ -110,9 +110,11 @@
    Exceptions while the route is open retain their original identity.
    If an authorization callback raises, its pending slot is released
    before the exception propagates. A pending callback cannot install a
-   session after the route closes. If the owning Live provider has already
-   closed, return the same 503 before application authorization or
-   subscription admission. The provider
+   session after the route closes. Closing a route publishes its closed state
+   before waiting for the admission lock, so a stalled SSE startup cannot
+   keep new GETs in authorization or return a live stream after shutdown.
+   If the owning Live provider has already closed, return the same 503
+   before application authorization or subscription admission. The provider
    check cannot replace the host's required ordered listener teardown.
 
    Call :close! and stop the owning HTTP listener before host/stop!. If a
@@ -222,12 +224,15 @@
         state (atom {:closed? false :connections {}
                      :pending-authorizations 0})
         close! (fn []
+                 ;; Publish route closure before taking the admission monitor.
+                 ;; An application SSE startup may be blocked while holding
+                 ;; that monitor; shutdown must immediately fence NEW GETs,
+                 ;; even if teardown must await the in-flight startup.
+                 (swap! state assoc :closed? true)
                  (locking state
-                   ;; Mark closed before cancellation so no request can admit
-                   ;; another session. Retain failures in :connections: a
-                   ;; later close! must be able to retry them, even if one
-                   ;; cancellation aborts before its stream is closed.
-                   (swap! state assoc :closed? true)
+                   ;; Retain failures in :connections so a later close! can
+                   ;; retry them even if cancellation aborted before the
+                   ;; stream closed.
                    (let [failures
                          (reduce-kv
                           (fn [failures key session]
@@ -328,14 +333,15 @@
                                   ;; terminate during startup. A synchronously
                                   ;; closed body is not an admissible HTTP 200
                                   ;; EventSource response even when Live is healthy.
-                                  (let [provider-closed? (live/closed? live-system)]
-                                    (if (or provider-closed?
+                                  (let [route-closed? (:closed? @state)
+                                        provider-closed? (live/closed? live-system)]
+                                    (if (or route-closed? provider-closed?
                                             (stream/closed? (:stream session)))
                                       (do
                                         (live/cancel-sse! session)
                                         (swap! state update :connections dissoc key)
                                         {:status 503 :headers {}
-                                         :body (if provider-closed?
+                                         :body (if (or route-closed? provider-closed?)
                                                  "Live shutting down"
                                                  "Live stream unavailable")})
                                       (:response session)))

@@ -1094,6 +1094,61 @@
            ((:close! server))
            (.close ^HttpClient client)))))))
 
+(deftest shutdown-fences-get-during-stalled-sse-startup-test
+  ;; The SSE startup path holds the admission monitor. If it stalls, close!
+  ;; must publish its closure before waiting for that monitor, preventing
+  ;; further authorization and rejecting the in-flight startup at handoff.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           request {:uri "/live/events" :request-method :get}
+           entered (promise)
+           release (promise)
+           authorized (atom 0)
+           original-start live/start-sse!
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription
+                           (fn [_] (swap! authorized inc) scope)})
+           startup (atom nil)
+           closing (atom nil)]
+       (try
+         (with-redefs [live/start-sse!
+                       (fn [& args]
+                         (deliver entered true)
+                         @release
+                         (apply original-start args))]
+           (reset! startup (future ((:handler route) request)))
+           (is (= true (deref entered 5000 ::timeout))
+               "A permitted request must enter SSE startup under the lock")
+           (reset! closing (future ((:close! route))))
+           (is (eventually #((:closed? route)))
+               "Shutdown must fence new GETs even when startup holds the lock")
+           ;; Even the negative control must not hang the test runner when
+           ;; the old implementation waits on the admission monitor.
+           (let [next-request (future ((:handler route) request))]
+             (try
+               (is (= {:status 503 :headers {} :body "Live shutting down"}
+                      (deref next-request 1000 ::timeout))
+                   "An overloaded or closing route cannot keep authorizing")
+               (finally (future-cancel next-request))))
+           (is (= 1 @authorized))
+           (is (= 1 ((:pending-authorization-count route)))
+               "Stalled startup owns its reservation until it exits")
+           (deliver release true)
+           (is (= {:status 503 :headers {} :body "Live shutting down"}
+                  (deref @startup 10000 ::timeout))
+               "A stream started after close begins must never return 200")
+           (is (= :closed (deref @closing 10000 ::timeout)))
+           (is (zero? ((:pending-authorization-count route))))
+           (is (zero? ((:active-count route))))
+           (is (eventually #(zero? (:subscription-count (source/stats src))))))
+         (finally
+           (deliver release true)
+           (when @startup (future-cancel @startup))
+           (when @closing (future-cancel @closing))
+           ((:close! route))))))))
+
 (deftest closed-route-skips-authorization-and-inflight-admission-test
   (setup-host
    (fn [started]
