@@ -110,9 +110,12 @@
    Exceptions while the route is open retain their original identity.
    If an authorization callback raises, its pending slot is released
    before the exception propagates. A pending callback cannot install a
-   session after the route closes. Closing a route publishes its closed state
-   before waiting for the admission lock, so a stalled SSE startup cannot
-   keep new GETs in authorization or return a live stream after shutdown.
+   session after the route closes. Starting SSE streams happens *outside*
+   the admission lock, but reserves one active-connection slot first. This
+   lets :close! retire registered streams without waiting for a stalled
+   startup; a late starter must cancel its stream at the final admission
+   fence and cannot return HTTP 200 after shutdown. A starting session is
+   charged against :max-connections before its source interest exists.
    If the owning Live provider has already closed, return the same 503
    before application authorization or subscription admission. The provider
    check cannot replace the host's required ordered listener teardown.
@@ -221,13 +224,13 @@
             (reject! :duplicate-sse-header {:header field}))
         base-handler (:biff.ring/handler started)
         live-system (:gesso.live/system started)
-        state (atom {:closed? false :connections {}
+        state (atom {:closed? false :connections {} :starting 0
                      :pending-authorizations 0})
         close! (fn []
-                 ;; Publish route closure before taking the admission monitor.
-                 ;; An application SSE startup may be blocked while holding
-                 ;; that monitor; shutdown must immediately fence NEW GETs,
-                 ;; even if teardown must await the in-flight startup.
+                 ;; A session may still be starting without the monitor.
+                 ;; Publish closure first; the in-flight starter will cancel
+                 ;; its newly created stream at the final handoff fence.
+                 ;; Thus shutdown does not await a stalled SSE startup.
                  (swap! state assoc :closed? true)
                  (locking state
                    ;; Retain failures in :connections so a later close! can
@@ -288,75 +291,96 @@
                       ;; Hold the reservation until the response has passed
                       ;; the admission fence, not merely until authorization
                       ;; returns. This also bounds GETs waiting on that lock.
-                      (locking state
-                        (cond
-                          (or (:closed? @state) (live/closed? live-system))
-                          {:status 503 :headers {} :body "Live shutting down"}
+                      ;; First reserve a connection slot under the monitor.
+                      ;; An in-progress start counts toward the same finite
+                      ;; budget as an established connection. No unbounded
+                      ;; queue can form behind a slow source-backed startup.
+                      (let [decision
+                            (locking state
+                              (cond
+                                (or (:closed? @state) (live/closed? live-system))
+                                {:status 503 :headers {}
+                                 :body "Live shutting down"}
 
-                          (= :failed outcome)
-                          (throw value)
+                                (= :failed outcome)
+                                (throw value)
 
-                          (nil? value)
-                          {:status 403 :headers {} :body "Forbidden"}
+                                (nil? value)
+                                {:status 403 :headers {} :body "Forbidden"}
 
-                          (not (valid-scope? value))
-                          (reject! :invalid-authorized-subscription {})
+                                (not (valid-scope? value))
+                                (reject! :invalid-authorized-subscription {})
 
-                          ;; Authorize before revealing capacity, but serialize the
-                          ;; admission decision with shutdown and other GETs. A full
-                          ;; route must never open another source-backed stream.
-                          (>= (count (:connections @state)) max-connections)
-                          {:status 503 :headers {}
-                           :body "Live connection capacity reached"}
+                                ;; Do not reveal connection capacity until
+                                ;; the request has passed authorization.
+                                (>= (+ (count (:connections @state))
+                                       (:starting @state)) max-connections)
+                                {:status 503 :headers {}
+                                 :body "Live connection capacity reached"}
 
-                          :else
-                          (let [[start-outcome session-or-error]
-                                (try
-                                  [:started (live/start-sse! live-system value
-                                                             {:sse-options validated-sse})]
-                                  ;; A provider shutdown cannot suppress thread
-                                  ;; interruption or fatal JVM failure.
-                                  (catch InterruptedException e (throw e))
-                                  (catch Exception e [:failed e]))]
-                            (if (= :failed start-outcome)
-                              (if (live/closed? live-system)
-                                {:status 503 :headers {} :body "Live shutting down"}
-                                (throw session-or-error))
-                              (let [session session-or-error
-                                    key (random-uuid)]
-                                (swap! state assoc-in [:connections key] session)
-                                (try
-                                  (stream/on-closed
-                                   (:stream session)
-                                   #(swap! state update :connections dissoc key))
-                                  ;; Either the provider or the SSE transport can
-                                  ;; terminate during startup. A synchronously
-                                  ;; closed body is not an admissible HTTP 200
-                                  ;; EventSource response even when Live is healthy.
-                                  (let [route-closed? (:closed? @state)
-                                        provider-closed? (live/closed? live-system)]
-                                    (if (or route-closed? provider-closed?
-                                            (stream/closed? (:stream session)))
-                                      (do
-                                        (live/cancel-sse! session)
-                                        (swap! state update :connections dissoc key)
-                                        {:status 503 :headers {}
-                                         :body (if (or route-closed? provider-closed?)
-                                                 "Live shutting down"
-                                                 "Live stream unavailable")})
-                                      (:response session)))
-                                  (catch Throwable admission-error
-                                    ;; A failed HTTP hook or rollback cannot orphan
-                                    ;; a source interest. Failed cancellation stays
-                                    ;; in :connections for the next close! retry.
+                                :else
+                                (do (swap! state update :starting inc)
+                                    ::start)))]
+                        (if (not= ::start decision)
+                          decision
+                          (try
+                            ;; Starting a source-backed stream may block on
+                            ;; provider work: never hold the shutdown monitor.
+                            (let [[start-outcome session-or-error]
+                                  (try
+                                    [:started (live/start-sse! live-system value
+                                                               {:sse-options validated-sse})]
+                                    (catch InterruptedException e (throw e))
+                                    (catch Exception e [:failed e]))]
+                              ;; Only the final handoff is locked, so close!
+                              ;; can retire established streams while an
+                              ;; unrelated startup is stalled outside.
+                              (locking state
+                                (if (= :failed start-outcome)
+                                  (if (or (:closed? @state)
+                                          (live/closed? live-system))
+                                    {:status 503 :headers {}
+                                     :body "Live shutting down"}
+                                    (throw session-or-error))
+                                  (let [session session-or-error
+                                        key (random-uuid)]
+                                    (swap! state assoc-in [:connections key] session)
                                     (try
-                                      (live/cancel-sse! session)
-                                      (swap! state update :connections dissoc key)
-                                      (catch Throwable cancel-error
-                                        (when-not (identical? admission-error cancel-error)
-                                          (.addSuppressed ^Throwable admission-error
-                                                          ^Throwable cancel-error))))
-                                    (throw admission-error)))))))))
+                                      (stream/on-closed
+                                       (:stream session)
+                                       #(swap! state update :connections dissoc key))
+                                      ;; The route may have closed *while*
+                                      ;; startup was running without the lock.
+                                      ;; Never hand back an admitted 200 in
+                                      ;; that case, even for a live provider.
+                                      (let [route-closed? (:closed? @state)
+                                            provider-closed? (live/closed? live-system)]
+                                        (if (or route-closed? provider-closed?
+                                                (stream/closed? (:stream session)))
+                                          (do
+                                            (live/cancel-sse! session)
+                                            (swap! state update :connections dissoc key)
+                                            {:status 503 :headers {}
+                                             :body (if (or route-closed?
+                                                           provider-closed?)
+                                                     "Live shutting down"
+                                                     "Live stream unavailable")})
+                                          (:response session)))
+                                      (catch Throwable admission-error
+                                        ;; Preserve a failed cancellation for
+                                        ;; an explicit close! retry, and retain
+                                        ;; the original error as the cause.
+                                        (try
+                                          (live/cancel-sse! session)
+                                          (swap! state update :connections dissoc key)
+                                          (catch Throwable cancel-error
+                                            (when-not (identical? admission-error
+                                                                  cancel-error)
+                                              (.addSuppressed ^Throwable admission-error
+                                                              ^Throwable cancel-error))))
+                                        (throw admission-error)))))))
+                            (finally
+                              (swap! state update :starting dec))))))
                     (finally
                       ;; Includes ordinary failure and thread interruption.
                       (swap! state update :pending-authorizations dec))))))))]

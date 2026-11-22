@@ -1094,6 +1094,59 @@
            ((:close! server))
            (.close ^HttpClient client)))))))
 
+(deftest stalled-sse-startup-reserves-active-connection-capacity-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           started-count (atom 0)
+           authorized (atom 0)
+           request {:uri "/live/events" :request-method :get}
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events" :max-connections 1
+                           :max-pending-authorizations 2
+                           :authorize-subscription
+                           (fn [_] (swap! authorized inc) scope)})
+           original-start live/start-sse!
+           first-request (atom nil)]
+       (try
+         (with-redefs [live/start-sse!
+                       (fn [& args]
+                         (swap! started-count inc)
+                         (deliver entered true)
+                         @release
+                         (apply original-start args))]
+           (reset! first-request (future ((:handler route) request)))
+           (is (= true (deref entered 5000 ::timeout)))
+           (is (= 1 ((:pending-authorization-count route))))
+           (is (zero? ((:active-count route)))
+               "A reserved starting slot is not yet an active stream")
+           ;; A second authorized GET may reach the admission lock but must
+           ;; not start a second session or wait for the first startup.
+           (let [second-request (future ((:handler route) request))]
+             (try
+               (is (= {:status 503 :headers {}
+                       :body "Live connection capacity reached"}
+                      (deref second-request 1500 ::timeout)))
+               (finally (future-cancel second-request))))
+           (is (= 2 @authorized))
+           (is (= 1 @started-count))
+           (is (zero? (:subscription-count (source/stats src))))
+           (deliver release true)
+           (let [response (deref @first-request 10000 ::timeout)]
+             (is (= 200 (:status response)))
+             (is (= 1 ((:active-count route))))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (stream/close! (:body response)))
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src)))))
+           (is (zero? ((:pending-authorization-count route)))))
+         (finally
+           (deliver release true)
+           (when @first-request (future-cancel @first-request))
+           ((:close! route))))))))
+
 (deftest shutdown-fences-get-during-stalled-sse-startup-test
   ;; The SSE startup path holds the admission monitor. If it stalls, close!
   ;; must publish its closure before waiting for that monitor, preventing
@@ -1135,6 +1188,8 @@
            (is (= 1 @authorized))
            (is (= 1 ((:pending-authorization-count route)))
                "Stalled startup owns its reservation until it exits")
+           (is (= :closed (deref @closing 1500 ::timeout))
+               "Route shutdown must not wait for blocked SSE startup")
            (deliver release true)
            (is (= {:status 503 :headers {} :body "Live shutting down"}
                   (deref @startup 10000 ::timeout))
