@@ -809,3 +809,163 @@
     (is (= :unverified-acquisition-attempt (get-in data [:in-flight :evidence])))
     (is (= 2 (count @attempted)))
     (is (zero? @sends))))
+
+(deftest post-dispatch-cycle-retains-submitted-receipt-test
+  ;; The delivery adapter knows the submitted XTDB receipt before a physical
+  ;; acknowledgment failure. Its typed uncertainty reaches the cycle, which
+  ;; must keep the attempted receipt for reconciliation without certifying a
+  ;; committed receipt or automatically retrying a possibly emitted event.
+  (doseq [interrupted? [false true]]
+    (with-open [node (xtn/start-node {})]
+      (let [system (make-system)
+            id (intent-id (if interrupted? 22081 22080))
+            physical-cause (if interrupted?
+                             (InterruptedException. "physical acknowledgment interrupted")
+                             (ex-info "acknowledgment outcome unknown" {:physical :unknown}))
+            submitted (atom [])]
+        (try
+          (seed! node [id])
+          (let [tap (source/subscribe (:source system)
+                                      {:topic :request :id (str "request-" id)})]
+            (try
+              (Thread/interrupted)
+              (let [failure
+                    (with-redefs [acknowledgment/acknowledge-dispatch!
+                                  (fn [_ submission]
+                                    (swap! submitted conj submission)
+                                    (throw physical-cause))]
+                      (try
+                        (cycle/process-cycle! node system {} source-id
+                                              {:worker-id "receipt-worker" :max-items 1})
+                        (catch Throwable error error)))
+                    interrupt-flag (.isInterrupted (Thread/currentThread))
+                    details (ex-data failure)
+                    issued (first @submitted)
+                    receipt-id (get-in issued [:receipt :receipt-id])]
+                (Thread/interrupted)
+                (is (= :gesso.live.outbox/cycle-interrupted (:error/type details)))
+                (is (= :delivery (:phase details)))
+                (is (= :delivery-exception (:reason details)))
+                (is (= :gesso.live.outbox/post-dispatch-ack-unknown
+                       (:original-error/type details)))
+                (is (= :reported (:source-acceptance details)))
+                (is (true? (:rescan-required? details)))
+                (is (zero? (:completed-count details)))
+                (is (= id (get-in details [:in-flight :intent-id])))
+                (is (= (:lease-id issued) (get-in details [:in-flight :lease-id])))
+                (is (uuid? receipt-id))
+                (is (= receipt-id (get-in details [:in-flight :receipt-id]))
+                    "The cycle must preserve the actual receipt submitted to XTDB")
+                (is (= :unverified-post-dispatch-receipt
+                       (get-in details [:in-flight :receipt-evidence]))
+                    "A submitted receipt is NOT proof that XTDB committed it")
+                (is (= 1 (count @submitted)) "No acknowledgment retry")
+                (is (identical? physical-cause
+                                (.getCause ^Throwable (.getCause ^Throwable failure))))
+                (is (= interrupted? interrupt-flag))
+                (is (= (str "request-" id)
+                       (:id (deref (s/take! tap) 1500 ::timeout)))
+                    "Live emitted before XTDB receipt outcome became unknown")
+                (is (= :leased (:gesso.live.outbox/status (physical-row node id))))
+                (is (nil? (:gesso.live.outbox/dispatch-receipt-id
+                           (physical-row node id)))))
+              (finally
+                (Thread/interrupted)
+                (s/close! tap))))
+          (finally
+            (Thread/interrupted)
+            (live/close! system)))))))
+
+(deftest rejected-post-dispatch-ack-still-retains-submitted-receipt-test
+  ;; A KNOWN negative acknowledgment may follow actual Live emission. The
+  ;; cycle stops, but the exact receipt submitted to XTDB remains relevant
+  ;; to reconciliation and must not be silently lost.
+  (doseq [[status reason] [[:contended nil] [:unavailable :missing]]]
+    (with-open [node (xtn/start-node {})]
+      (let [system (make-system)
+            id (intent-id (if (= status :contended) 22082 22083))
+            submitted (atom [])]
+        (try
+          (seed! node [id])
+          (let [tap (source/subscribe (:source system)
+                                      {:topic :request :id (str "request-" id)})]
+            (try
+              (let [failure
+                    (with-redefs [acknowledgment/acknowledge-dispatch!
+                                  (fn [_ submission]
+                                    (swap! submitted conj submission)
+                                    (cond-> {:status status :intent-id (:intent-id submission)}
+                                      reason (assoc :reason reason)))]
+                      (try
+                        (cycle/process-cycle! node system {} source-id
+                                              {:worker-id "receipt-worker" :max-items 1})
+                        (catch Throwable error error)))
+                    data (ex-data failure)
+                    receipt-id (get-in (first @submitted) [:receipt :receipt-id])]
+                (is (= :gesso.live.outbox/cycle-interrupted (:error/type data)))
+                (is (= :acknowledgment (:phase data)))
+                (is (= :not-dispatch-accepted (:reason data)))
+                (is (= :reported (:source-acceptance data)))
+                (is (= status (:acknowledgment-status data)))
+                (is (= 0 (:completed-count data)))
+                (is (= 1 (count @submitted)))
+                (is (uuid? receipt-id))
+                (is (= receipt-id (get-in data [:in-flight :receipt-id])))
+                (is (= :unverified-post-dispatch-receipt
+                       (get-in data [:in-flight :receipt-evidence])))
+                (is (= (:lease-id (first @submitted))
+                       (get-in data [:in-flight :lease-id])))
+                (is (= (str "request-" id)
+                       (:id (deref (s/take! tap) 1500 ::timeout))))
+                (is (= :leased (:gesso.live.outbox/status (physical-row node id)))))
+              (finally (s/close! tap))))
+          (finally (live/close! system)))))))
+
+(deftest forged-post-dispatch-receipts-are-not-adopted-by-cycle-test
+  ;; Only accept reported receipt evidence for this acquired intent and lease,
+  ;; and only from a typed post-dispatch acknowledgment-unknown exception or
+  ;; a matching :dispatched-unacknowledged result. Never accept forged tokens.
+  (let [id (intent-id 22084)
+        other (intent-id 22085)
+        lease-id (random-uuid)
+        receipt-id (random-uuid)
+        worker-page {:attempted 1
+                     :results [{:status :acquired :intent-id id
+                                :lease-id lease-id :worker-id "receipt-worker"}]
+                     :halt-reason :observed-end :next-after nil}
+        cases [[:wrong-intent-error :throw {:intent-id other :lease-id lease-id}]
+               [:wrong-lease-error :throw {:intent-id id :lease-id (random-uuid)}]
+               [:wrong-intent-result :return {:intent-id other :lease-id lease-id}]
+               [:wrong-lease-result :return {:intent-id id :lease-id (random-uuid)}]
+               [:missing-receipt-error :throw {:intent-id id :lease-id lease-id
+                                               :receipt-id nil}]]]
+    (doseq [[label mode override] cases]
+      (let [calls (atom 0)
+            details (with-redefs
+                      [worker/acquire-sweep! (fn [_ _] worker-page)
+                       delivery/dispatch-acquired!
+                       (fn [& _]
+                         (swap! calls inc)
+                         (let [base (merge {:intent-id id :lease-id lease-id
+                                            :receipt-id receipt-id} override)]
+                           (if (= :throw mode)
+                             (throw (ex-info "unverified acknowledgment"
+                                             (merge base
+                                                    {:error/type
+                                                     :gesso.live.outbox/post-dispatch-ack-unknown
+                                                     :dispatch/status :accepted
+                                                     :acknowledgment/status :unknown})))
+                             (assoc base :status :dispatched-unacknowledged
+                                         :acknowledgment {:status :contended}))))]
+                      (exception-data
+                       #(cycle/process-cycle! :node {:source ::source} {}
+                                              source-id {:worker-id "receipt-worker"
+                                                         :max-items 1})))]
+        (is (= :gesso.live.outbox/cycle-interrupted (:error/type details))
+            (str label " must stop the cycle"))
+        (is (= id (get-in details [:in-flight :intent-id])))
+        (is (= lease-id (get-in details [:in-flight :lease-id])))
+        (is (nil? (get-in details [:in-flight :receipt-id]))
+            (str label " must not adopt a forged receipt"))
+        (is (nil? (get-in details [:in-flight :receipt-evidence])))
+        (is (= 1 @calls))))))

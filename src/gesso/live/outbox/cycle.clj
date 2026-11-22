@@ -168,6 +168,19 @@
          (= (:count source) (count emissions))
          (every? #(#{:emitted :queued} (:status %)) emissions))))
 
+(defn- reported-post-dispatch-receipt
+  "Retain a delivery adapter's *submitted*, not committed, receipt only when
+   its intent and lease match the physical acquisition that this cycle owns.
+   A reported post-send receipt aids reconciliation but is not proof XTDB
+   acknowledged it, nor permission to replay an emission."
+  [acquired report]
+  (when (and (map? report)
+             (= (:intent-id acquired) (:intent-id report))
+             (= (:lease-id acquired) (:lease-id report))
+             (uuid? (:receipt-id report)))
+    {:receipt-id (:receipt-id report)
+     :receipt-evidence :unverified-post-dispatch-receipt}))
+
 (defn- attempt-result!
   [node system ctx expected-source-id acquired completed cursor]
   (let [{:keys [intent-id lease-id status]} acquired
@@ -185,25 +198,35 @@
                         (delivery/dispatch-acquired!
                          node system ctx acquired expected-source-id)
                         (catch Throwable e
-                          (interrupted! :delivery :delivery-exception
-                                        completed cursor in-flight
-                                        {:original-error/type (:error/type (ex-data e))
-                                         :source-acceptance
-                                         (if (= :gesso.live.outbox/post-dispatch-ack-unknown
-                                                (:error/type (ex-data e)))
-                                           :reported
-                                           :unknown)}
-                                        e)))]
+                          (let [data (ex-data e)
+                                post-ack? (= :gesso.live.outbox/post-dispatch-ack-unknown
+                                             (:error/type data))
+                                reported (when (and post-ack?
+                                                    (= :accepted (:dispatch/status data))
+                                                    (= :unknown (:acknowledgment/status data)))
+                                           (reported-post-dispatch-receipt acquired data))]
+                            (interrupted! :delivery :delivery-exception
+                                          completed cursor (merge in-flight reported)
+                                          {:original-error/type (:error/type data)
+                                           :source-acceptance
+                                           (if post-ack? :reported :unknown)}
+                                          e))))]
         (when-not (= :dispatch-accepted (:status delivered))
-          (interrupted! :acknowledgment :not-dispatch-accepted
-                        completed cursor in-flight
-                        {:source-acceptance
-                         (if (= :dispatched-unacknowledged (:status delivered))
-                           :reported :unknown)
-                         :delivery-status (:status delivered)
-                         :acknowledgment-status
-                         (get-in delivered [:acknowledgment :status])}
-                        nil))
+          (let [known-negative? (and (= :dispatched-unacknowledged
+                                        (:status delivered))
+                                     (#{:contended :unavailable}
+                                      (get-in delivered [:acknowledgment :status])))
+                reported (when known-negative?
+                           (reported-post-dispatch-receipt acquired delivered))]
+            (interrupted! :acknowledgment :not-dispatch-accepted
+                          completed cursor (merge in-flight reported)
+                          {:source-acceptance
+                           (if (= :dispatched-unacknowledged (:status delivered))
+                             :reported :unknown)
+                           :delivery-status (:status delivered)
+                           :acknowledgment-status
+                           (get-in delivered [:acknowledgment :status])}
+                          nil)))
         (when-not (accepted-delivery-result? acquired delivered)
           ;; A positive label can conceal a mismatched receipt or unverified
           ;; source acceptance. The physical send/ack may have happened; do
