@@ -149,7 +149,7 @@
         stop-calls (atom 0)]
     (with-redefs [lifecycle/start!
                   (fn [& _] (Object.))
-                  lifecycle/stop!
+                  lifecycle/retire!
                   (fn [_ _]
                     (if (= 1 (swap! stop-calls inc))
                       {:outcome :timed-out}
@@ -420,7 +420,7 @@
                                        (vec (rest @modules)))]
                         (biff/start initial providers (vec (rest order)))))
                     lifecycle/start! (fn [& _] :fake-handle)
-                    lifecycle/stop! (fn [& _]
+                    lifecycle/retire! (fn [& _]
                                       (swap! events conj :stop-worker)
                                       {:outcome :drained})]
         (let [started (managed/start-biff-application!
@@ -570,7 +570,7 @@
                     (is (= :resource (:fixture/owned-resource s)))
                     (swap! events conj :normal-stop))}]
     (with-redefs [lifecycle/start! (fn [& _] :worker-handle)
-                  lifecycle/stop! (fn [& _] {:outcome :drained})]
+                  lifecycle/retire! (fn [& _] {:outcome :drained})]
       (let [started (start-checked-fixture! [provider])]
         (is (= :resource (:fixture/owned-resource started)))
         (is (= [:acquire] @events))
@@ -646,7 +646,7 @@
                                 {:source :fake :closed? (atom false)}))
                 :biff.core/stop (fn [_] (swap! events conj :stop))}]
     (with-redefs [lifecycle/start! (fn [& _] :worker-handle)
-                  lifecycle/stop! (fn [& _] {:outcome :drained})]
+                  lifecycle/retire! (fn [& _] {:outcome :drained})]
       (let [running (start-checked-fixture! [module])]
         (is (= 42 (:fixture/pure-setting running)))
         (is (= [:init :start] @events))
@@ -765,7 +765,7 @@
                                               {:source :fake :closed? (atom false)}))
                   :biff.core/stop (fn [_] (swap! events conj :stop-provider))}]
     (with-redefs [lifecycle/start! (fn [& _] :worker)
-                  lifecycle/stop! (fn [& _]
+                  lifecycle/retire! (fn [& _]
                                     (swap! events conj :stop-worker)
                                     {:outcome :drained})]
       (let [running (start-checked-fixture! [init provider])]
@@ -832,7 +832,7 @@
                                               {:source :fake :closed? (atom false)}))
                   :biff.core/stop (fn [_] (swap! events conj :stop-provider))}]
     (with-redefs [lifecycle/start! (fn [& _] :worker)
-                  lifecycle/stop! (fn [& _]
+                  lifecycle/retire! (fn [& _]
                                     (swap! events conj :stop-worker)
                                     {:outcome :drained})]
       (let [running (start-checked-fixture! [init provider])
@@ -871,7 +871,7 @@
                                     (when (= 1 (swap! attempts inc))
                                       (throw (ex-info "provider busy" {}))))}]
     (with-redefs [lifecycle/start! (fn [& _] :worker)
-                  lifecycle/stop! (fn [& _] {:outcome :drained})]
+                  lifecycle/retire! (fn [& _] {:outcome :drained})]
       (let [running (start-checked-fixture! [init provider])]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"provider busy"
                               (biff/stop running)))
@@ -1145,7 +1145,7 @@
                     (when (= 1 (swap! attempts inc))
                       (throw interruption)))}]
     (with-redefs [lifecycle/start! (fn [& _] :worker)
-                  lifecycle/stop! (fn [& _]
+                  lifecycle/retire! (fn [& _]
                                     (swap! events conj :worker-stop)
                                     {:outcome :drained})]
       (let [running (start-checked-fixture! [init provider])]

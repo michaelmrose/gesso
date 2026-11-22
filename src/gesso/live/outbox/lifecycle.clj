@@ -31,7 +31,7 @@
 (def ^:private default-poll-ms 250)
 
 (defrecord Lifecycle [state stop-signal done thread node expected-source-id
-                      system ctx restart-claimed])
+                      system ctx restart-claimed successor retired])
 
 (defn- reject! [reason data]
   (throw (ex-info "Invalid Live outbox lifecycle."
@@ -258,47 +258,83 @@
                                           opts state stop-signal done))
                         (str "gesso-live-outbox-" (:worker-id opts)))
         handle (->Lifecycle state stop-signal done thread
-                            node expected-source-id system ctx (atom false))]
+                            node expected-source-id system ctx
+                            (atom false) (atom nil) (atom false))]
     (.setDaemon thread true)
     (.start thread)
     handle))
 
+(defn- stop-owned!
+  [handle timeout-ms]
+  (require-handle! handle)
+  (when-not (and (integer? timeout-ms) (<= 0 timeout-ms 120000))
+    (reject! :invalid-stop-timeout {:timeout-ms timeout-ms}))
+  (when (identical? (Thread/currentThread) (.-thread ^Lifecycle handle))
+    (reject! :self-stop {}))
+  ;; The predecessor is also the lifetime owner of any explicitly restarted
+  ;; worker. Holding this lock while finding and draining the successor
+  ;; excludes a concurrent restart that could otherwise escape host teardown.
+  (locking handle
+    (swap! (.-state ^Lifecycle handle) assoc :stop-requested? true)
+    (.countDown ^CountDownLatch (.-stop-signal ^Lifecycle handle))
+    (let [finished? (try
+                      (.await ^CountDownLatch (.-done ^Lifecycle handle)
+                              (long timeout-ms) TimeUnit/MILLISECONDS)
+                      (catch InterruptedException error
+                        (.interrupt (Thread/currentThread))
+                        (throw error)))
+          snapshot (status handle)
+          own-outcome (if (= :failed (:status snapshot)) :failed :drained)]
+      (if-not finished?
+        {:outcome :timed-out :snapshot snapshot}
+        (if-let [child @(.-successor ^Lifecycle handle)]
+          (let [child-result (stop-owned! child timeout-ms)]
+            (if (= :timed-out (:outcome child-result))
+              {:outcome :timed-out :snapshot snapshot
+               :successor-outcome :timed-out}
+              {:outcome own-outcome :snapshot snapshot
+               :successor-outcome (:outcome child-result)}))
+          {:outcome own-outcome :snapshot snapshot})))))
+
 (defn stop!
-  "Request cooperative shutdown; optionally await one current cycle.
+  "Request cooperative shutdown and await ALL descendants created by an
+   explicit restart. A timeout on any successor is a timeout for the original
+   owner too: the host must not close shared XTDB/Live dependencies.
 
-   Returns {:outcome :drained|:failed|:timed-out :snapshot ...}. A timed-out
-   result explicitly means the worker may still hold a lease or be sending;
-   the host MUST keep XTDB and Live open and try stop! again before teardown.
-   No interruption or forced cancellation of in-flight work is performed.
-   Repeated stop! calls are safe; failure status remains visible after stop.
-
-   Timeout in milliseconds must be between 0 and 120000 (default 5000).
-   Calling from the worker thread itself is rejected to avoid self-wait."
+   This is a drain, not permanent retirement. A previously failed, stopped
+   lifecycle can still be explicitly restarted afterwards. An owner closing
+   providers MUST call retire! instead, which atomically prevents later
+   restarts as well as draining the entire restart lineage."
   ([handle] (stop! handle 5000))
+  ([handle timeout-ms]
+   (stop-owned! handle timeout-ms)))
+
+(defn- retire-chain!
+  [handle]
+  (locking handle
+    (reset! (.-retired ^Lifecycle handle) true)
+    (when-let [child @(.-successor ^Lifecycle handle)]
+      (retire-chain! child))))
+
+(defn retire!
+  "Permanently retire a managed lifecycle AND every restart descendant
+   before their provider can close. New successors are rejected once any
+   relevant handle is retired. Return :timed-out while ANY descendant still
+   runs; callers must keep dependencies open and retry retiring the SAME
+   original handle. After successful retirement, no successor can escape.
+
+   This is the correct stop boundary for a Biff-managed lifecycle. Ordinary
+   stop! remains a non-retiring join for explicit recovery operators."
+  ([handle] (retire! handle 5000))
   ([handle timeout-ms]
    (require-handle! handle)
    (when-not (and (integer? timeout-ms) (<= 0 timeout-ms 120000))
      (reject! :invalid-stop-timeout {:timeout-ms timeout-ms}))
    (when (identical? (Thread/currentThread) (.-thread ^Lifecycle handle))
      (reject! :self-stop {}))
-   (swap! (.-state ^Lifecycle handle) assoc :stop-requested? true)
-   (.countDown ^CountDownLatch (.-stop-signal ^Lifecycle handle))
-   (let [finished? (try
-                     (.await ^CountDownLatch (.-done ^Lifecycle handle)
-                             (long timeout-ms) TimeUnit/MILLISECONDS)
-                     (catch InterruptedException error
-                       ;; The cooperative stop request is already committed.
-                       ;; A caller-side interrupted wait cannot establish
-                       ;; drain, and must retain JVM cancellation for the
-                       ;; owner to retry with this same lifecycle handle.
-                       (.interrupt (Thread/currentThread))
-                       (throw error)))
-         snapshot (status handle)]
-     {:outcome (cond
-                 (not finished?) :timed-out
-                 (= :failed (:status snapshot)) :failed
-                 :else :drained)
-      :snapshot snapshot})))
+   (locking handle
+     (retire-chain! handle)
+     (stop-owned! handle timeout-ms))))
 
 (defn- prepare-restart!
   "Inspect the original failed lifecycle before a deliberate successor starts.
@@ -310,6 +346,8 @@
   (let [snapshot (status handle)]
     (when (= (:worker-id snapshot) (:worker-id opts))
       (reject! :reused-worker-id {:worker-id (:worker-id opts)})))
+  (when @(.-retired ^Lifecycle handle)
+    (reject! :retired-lifecycle {}))
   (when @(.-restart-claimed ^Lifecycle handle)
     (reject! :already-restarted {}))
   (let [observed (inspect-failure! handle)
@@ -324,17 +362,25 @@
     observed))
 
 (defn- start-reconciled! [handle opts observed recovery-mode]
-  (when-not (compare-and-set! (.-restart-claimed ^Lifecycle handle) false true)
-    (reject! :already-restarted {}))
-  ;; A successful reservation is deliberately sticky if start! throws: a
-  ;; failed thread start is not proof no successor escaped to the host.
-  {:handle (start! (.-node ^Lifecycle handle)
-                   (.-system ^Lifecycle handle)
-                   (.-ctx ^Lifecycle handle)
-                   (.-expected-source-id ^Lifecycle handle)
-                   opts)
-   :recovery-mode recovery-mode
-   :reconciliation observed})
+  ;; Serialize successor creation with host teardown. Biff retirement takes
+  ;; the SAME monitor, so a successor cannot be created after retirement or
+  ;; escape between start! and the owner's successor registration.
+  (locking handle
+    (when @(.-retired ^Lifecycle handle)
+      (reject! :retired-lifecycle {}))
+    (when-not (compare-and-set! (.-restart-claimed ^Lifecycle handle) false true)
+      (reject! :already-restarted {}))
+    ;; The reservation stays sticky if thread construction/start fails. Such
+    ;; a failure is not evidence that no worker escaped to the host.
+    (let [child (start! (.-node ^Lifecycle handle)
+                        (.-system ^Lifecycle handle)
+                        (.-ctx ^Lifecycle handle)
+                        (.-expected-source-id ^Lifecycle handle)
+                        opts)]
+      (reset! (.-successor ^Lifecycle handle) child)
+      {:handle child
+       :recovery-mode recovery-mode
+       :reconciliation observed})))
 
 (defn restart-recorded!
   "Explicitly restart a halted worker only when the failed in-flight

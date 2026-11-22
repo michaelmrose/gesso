@@ -95,14 +95,15 @@
     (assoc system handle-key handle)))
 
 (defn stop-module!
-  "Biff's reverse-order stop callback. A timeout is a *hard teardown fence*:
-   throwing prevents Biff from invoking later provider stops. Retry biff/stop
-   on the SAME system, after keeping XTDB and Live open."
+  "Biff's reverse-order stop permanently retires the original worker AND
+   every successor created through explicit recovery. A timeout anywhere in
+   the restart lineage is a hard provider-teardown fence. A concurrent restart
+   cannot escape retirement: retry biff/stop on the SAME original system."
   [system]
   (let [handle (get system handle-key)]
     (when-not handle
       (reject! :missing-managed-handle {}))
-    (let [result (lifecycle/stop!
+    (let [result (lifecycle/retire!
                   handle
                   (get system stop-timeout-key default-stop-timeout-ms))]
       (when (= :timed-out (:outcome result))
