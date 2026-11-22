@@ -468,6 +468,8 @@
    {:outcome :timed-out} returns {:outcome :listener-timed-out} without
    stopping the host; an unrecognized outcome fails closed. These are
    explicit caller-owned assertions, not independently proven facts.
+   Invalid listener, SSE-drain, and host-stop acknowledgments expose only
+   fixed rejection reasons, never the external callback's result payload.
 
    The caller may retry once in-flight work finishes, provided its
    listener-stop callback is idempotent. This is a single-attempt primitive;
@@ -509,17 +511,15 @@
                                        (= :stopped (:outcome host-outcome)))
                                 {:outcome :stopped
                                  :host-result (:host-result host-outcome)}
-                                ;; Do not embed a raw callback return in
-                                ;; errors: it may contain sensitive host data.
-                                (reject! :unconfirmed-host-stop-outcome
-                                         {:reported-outcome
-                                          (when (map? host-outcome)
-                                            (:outcome host-outcome))})))
+                                ;; External callback results may contain
+                                ;; credentials or other application state,
+                                ;; including within an unrecognized :outcome.
+                                ;; Report the fixed reason only.
+                                (reject! :unconfirmed-host-stop-outcome {})))
                    :timed-out {:outcome :timed-out}
-                   (reject! :invalid-drain-outcome {:drain drain})))
+                   (reject! :invalid-drain-outcome {})))
       :timed-out {:outcome :listener-timed-out}
-      (reject! :invalid-listener-drain-outcome
-               {:listener-result (second listener-result)}))))
+      (reject! :invalid-listener-drain-outcome {}))))
 
 (defn prepare-managed-http-shutdown
   "Create a caller-owned, serialized shutdown coordinator for one host.

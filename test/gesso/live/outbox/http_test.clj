@@ -1263,6 +1263,65 @@
            (exception-reason #(http/stop-managed-http-host! plan))))
     (is (= [:route :host] @calls))))
 
+(deftest managed-http-shutdown-rejections-redact-callback-results-test
+  ;; External callbacks may return app-private diagnostics or tokens. An
+  ;; invalid drain/stop acknowledgment must not put that payload into
+  ;; exception data, which callers may log or send to error reporters.
+  (doseq [[boundary invalid-outcome expected-reason]
+          [[:listener {:outcome "private-listener-outcome"
+                       :secret "listener-token"}
+            :invalid-listener-drain-outcome]
+           [:drain {:outcome "private-drain-outcome"
+                    :secret "drain-token"}
+            :invalid-drain-outcome]
+           [:host {:outcome "private-host-outcome"
+                   :secret "host-token"}
+            :unconfirmed-host-stop-outcome]]]
+    (let [events (atom [])
+          callback-result (fn [kind]
+                            (if (= boundary kind)
+                              invalid-outcome
+                              {:outcome (if (= kind :host) :stopped :drained)}))
+          coordinator
+          (http/prepare-managed-http-shutdown
+           {:route {:close! #(swap! events conj :route)
+                    :await-drained! (fn [_]
+                                      (swap! events conj :drain)
+                                      (callback-result :drain))}
+            :drain-timeout-ms 50
+            :stop-listener! (fn []
+                              (swap! events conj :listener)
+                              (callback-result :listener))
+            :stop-host! (fn []
+                          (swap! events conj :host)
+                          (callback-result :host))})
+          thrown (try ((:stop! coordinator))
+                      (catch clojure.lang.ExceptionInfo e e))
+          public-data {:error/type :gesso.live.outbox/invalid-http-route
+                       :reason expected-reason}]
+      (is (instance? clojure.lang.ExceptionInfo thrown)
+          (str boundary " must reject the invalid callback outcome"))
+      (when (instance? clojure.lang.ExceptionInfo thrown)
+        (is (= public-data (ex-data thrown))
+            (str boundary " must expose only the stable typed rejection"))
+        (is (not (.contains (pr-str (ex-data thrown)) "private-")))
+        (is (not (.contains (pr-str (ex-data thrown)) "-token"))))
+      (is (= (case boundary
+               :listener [:route :listener]
+               :drain [:route :listener :drain]
+               :host [:route :listener :drain :host])
+             @events)
+          (str boundary " must not enter later teardown phases"))
+      (is (= (if (= boundary :host)
+               :host-stop-unknown :ready)
+             ((:status coordinator)))
+          "Only attempted host teardown must poison automatic retries")
+      (when (= boundary :host)
+        (is (= :host-shutdown-outcome-unknown
+               (exception-reason #((:stop! coordinator)))))
+        (is (= [:route :listener :drain :host] @events)
+            "A failed confirmation must not replay host stop")))))
+
 (deftest managed-http-shutdown-coordinator-fences-unknown-host-outcome-test
   (let [calls (atom [])
         failed-stop (ex-info "Host stop may have happened" {:test :v2149})
