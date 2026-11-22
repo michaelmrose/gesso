@@ -44,7 +44,8 @@
            (step!)))
     (is (= {:outcome :idle :pending 0} (step!)))
     (is (= [2 2 2] @calls))
-    (is (= {:last-attempt-ms 12000 :attempt-count 3 :failure-count 0}
+    (is (= {:last-attempt-ms 12000 :attempt-count 3 :failure-count 0
+            :consecutive-failures 0}
            ((:stats driver))))
     (reset! closed? true)
     (reset! pending 4)
@@ -73,7 +74,8 @@
     (swap! now + 100)
     (is (= {:outcome :attempted :attempted 1 :recovered 1 :remaining 1}
            (step!)))
-    (is (= {:last-attempt-ms 200 :attempt-count 2 :failure-count 1}
+    (is (= {:last-attempt-ms 200 :attempt-count 2 :failure-count 1
+            :consecutive-failures 0}
            ((:stats controller))))
     (is (= [1 1] @calls))))
 
@@ -89,6 +91,11 @@
     (doseq [[config expected]
             [[{:min-interval-ms 0} :invalid-min-interval-ms]
              [{:min-interval-ms 120001} :invalid-min-interval-ms]
+             [{:max-failure-interval-ms 0} :invalid-max-failure-interval-ms]
+             [{:max-failure-interval-ms 120001} :invalid-max-failure-interval-ms]
+             [{:max-failure-interval-ms nil} :invalid-max-failure-interval-ms]
+             [{:min-interval-ms 100 :max-failure-interval-ms 99}
+              :invalid-max-failure-interval-ms]
              [{:max-attempts 0} :invalid-max-attempts]
              [{:max-attempts 1025} :invalid-max-attempts]
              [{:now-ms 4} :invalid-clock]
@@ -271,3 +278,141 @@
                (reason #((:stop! worker) -1))))
         (is (= :running ((:status worker))))
         (finally (is (= :drained (:outcome ((:stop! worker) 2000)))))))))
+
+(deftest repeated-source-release-failures-backoff-and-recover-test
+  ;; A persistently failing physical release must not be retried at the
+  ;; minimum cadence forever. After the first failure preserve the original
+  ;; interval; double it for later failures, cap it, then reset on success.
+  (let [now (atom 1000)
+        pending (atom 2)
+        calls (atom [])
+        fails-left (atom 4)
+        failure (ex-info "persistent physical source release" {:test :v2241})
+        route {:closed? (constantly false)
+               :disconnected-count (fn [] @pending)
+               :retry-disconnected!
+               (fn [max-attempts]
+                 (is (= 1 max-attempts))
+                 (swap! calls conj @now)
+                 (if (pos? @fails-left)
+                   (do (swap! fails-left dec)
+                       (throw failure))
+                   (do (swap! pending dec)
+                       {:attempted 1 :recovered 1})))}
+        driver (recovery/prepare!
+                route {:min-interval-ms 100
+                       :max-failure-interval-ms 400
+                       :max-attempts 1
+                       :now-ms #(deref now)})
+        step! (:step! driver)
+        blocked! (fn [remaining]
+                   (is (= {:outcome :deferred :pending @pending
+                           :retry-after-ms remaining}
+                          (step!))))
+        fail! (fn []
+                (is (identical? failure
+                                (try (step!) nil (catch Throwable e e)))))]
+    (fail!)                         ; 1000, first failure
+    (is (= 1 (:consecutive-failures ((:stats driver)))))
+    (blocked! 100)                 ; first failure: no extra latency
+    (swap! now + 99)
+    (blocked! 1)
+    (swap! now inc)
+    (fail!)                         ; 1100, second failure
+    (is (= 2 (:consecutive-failures ((:stats driver)))))
+    (blocked! 200)
+    (swap! now + 200)
+    (fail!)                         ; 1300, third failure
+    (blocked! 400)
+    (swap! now + 400)
+    (fail!)                         ; 1700, fourth failure
+    (blocked! 400)                  ; capped, not exponential forever
+    (swap! now + 400)
+    (is (= {:outcome :attempted :attempted 1 :recovered 1 :remaining 1}
+           (step!)))                ; 2100 succeeds
+    (is (= 0 (:consecutive-failures ((:stats driver)))))
+    (blocked! 100)                  ; success resets to normal cadence
+    (swap! now + 100)
+    (is (= {:outcome :attempted :attempted 1 :recovered 1 :remaining 0}
+           (step!)))
+    (is (= {:last-attempt-ms 2200 :attempt-count 6
+            :failure-count 4 :consecutive-failures 0}
+           ((:stats driver))))
+    (is (= [1000 1100 1300 1700 2100 2200] @calls))
+    (is (zero? @pending))))
+
+(deftest scheduled-physical-failure-observability-and-backoff-test
+  ;; The hosted scheduler must distinguish an active failure streak from an
+  ;; earlier historical error; a later successful release clears the streak.
+  (let [pending (atom 1)
+        calls (atom 0)
+        failing? (atom true)
+        error (ex-info "unreleased source" {:test :v2241-scheduled})
+        route {:closed? (constantly false)
+               :disconnected-count (fn [] @pending)
+               :retry-disconnected!
+               (fn [_]
+                 (swap! calls inc)
+                 (if @failing?
+                   (throw error)
+                   (do (reset! pending 0)
+                       {:attempted 1 :recovered 1})))}
+        owner (recovery/start-scheduled!
+               route {:poll-ms 10 :min-interval-ms 80
+                      :max-failure-interval-ms 320 :max-attempts 1})]
+    (try
+      (is (await-condition #(pos? (:failure-count ((:stats owner))))))
+      (let [status ((:stats owner))]
+        (is (= :failed (get-in status [:last-physical-outcome :outcome])))
+        (is (identical? error (:last-error status)))
+        (is (pos? (get-in status [:controller :consecutive-failures]))))
+      (reset! failing? false)
+      (is (await-condition #(zero? @pending)))
+      (is (zero? (get-in ((:stats owner))
+                         [:controller :consecutive-failures])))
+      (is (= :attempted
+             (get-in ((:stats owner)) [:last-physical-outcome :outcome])))
+      (is (identical? error (:last-error ((:stats owner))))
+          "Historical error stays visible without claiming current failure")
+      (is (pos? @calls))
+      (is (= :drained (:outcome ((:stop! owner) 2000))))
+      (finally ((:stop! owner) 2000)))))
+
+(deftest idle-observation-clears-stale-backoff-test
+  ;; Another physical owner can release outstanding resources between ticks.
+  ;; Once the route reports no cleanup debt, a new unrelated orphan should
+  ;; not inherit a long failure streak from an already-resolved obligation.
+  (let [now (atom 0)
+        pending (atom 1)
+        failure? (atom true)
+        calls (atom [])
+        error (ex-info "prior orphan cleanup failed" {:test :v2241-idle})
+        route {:closed? (constantly false)
+               :disconnected-count (fn [] @pending)
+               :retry-disconnected!
+               (fn [max-attempts]
+                 (swap! calls conj @now)
+                 (if @failure?
+                   (throw error)
+                   (do (swap! pending dec)
+                       {:attempted 1 :recovered 1})))}
+        controller (recovery/prepare!
+                    route {:min-interval-ms 100
+                           :max-failure-interval-ms 400
+                           :max-attempts 1 :now-ms #(deref now)})
+        step! (:step! controller)]
+    (is (identical? error (try (step!) nil (catch Throwable e e))))
+    (swap! now + 100)
+    (is (identical? error (try (step!) nil (catch Throwable e e))))
+    (is (= 2 (:consecutive-failures ((:stats controller)))))
+    ;; An independent owner completes the old physical cleanup.
+    (reset! pending 0)
+    (is (= {:outcome :idle :pending 0} (step!)))
+    (is (zero? (:consecutive-failures ((:stats controller)))))
+    (reset! pending 1)
+    (reset! failure? false)
+    (swap! now + 100)
+    (is (= {:outcome :attempted :attempted 1 :recovered 1 :remaining 0}
+           (step!)))
+    (is (= [0 100 200] @calls))
+    (is (zero? @pending))))
