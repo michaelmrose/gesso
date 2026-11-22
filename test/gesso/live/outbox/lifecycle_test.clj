@@ -99,6 +99,53 @@
           (is (false? (get-in @out [:snapshot :in-cycle?]))))
         (finally (live/close! sys))))))
 
+(deftest interrupted-stop-wait-preserves-caller-signal-and-retryable-drain-test
+  ;; stop! has already requested cooperative shutdown when its wait begins.
+  ;; If that wait is interrupted, it must rethrow the exact interruption while
+  ;; retaining JVM cancellation. A later stop! on the same handle must still
+  ;; drain the original, non-interrupted physical worker before host teardown.
+  (let [entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        calls (atom 0)
+        worker-interrupted? (atom false)]
+    (with-redefs [cycle/process-cycle!
+                  (fn [& _]
+                    (swap! calls inc)
+                    (.countDown entered)
+                    (try
+                      (.await release)
+                      (catch InterruptedException error
+                        (reset! worker-interrupted? true)
+                        (throw error)))
+                    (summary :observed-end nil))]
+      (let [handle (lifecycle/start! :unused {:source :fake} {} source-id
+                                     {:worker-id "interrupted-stop" :poll-ms 10})]
+        (try
+          (is (.await entered 3000 TimeUnit/MILLISECONDS))
+          (Thread/interrupted)
+          (.interrupt (Thread/currentThread))
+          (let [caught (try
+                         (lifecycle/stop! handle 3000)
+                         (catch Throwable error error))
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            (Thread/interrupted)
+            (is (instance? InterruptedException caught)
+                "An interrupted await must not claim a drained worker")
+            (is interrupted?
+                "An interrupted await must preserve caller cancellation")
+            (is (true? (:stop-requested? (lifecycle/status handle))))
+            (is (true? (:in-cycle? (lifecycle/status handle)))))
+          (.countDown release)
+          (let [drained (lifecycle/stop! handle 3000)]
+            (is (= :drained (:outcome drained)))
+            (is (= :stopped (get-in drained [:snapshot :status])))
+            (is (= 1 @calls))
+            (is (false? @worker-interrupted?)))
+          (finally
+            (Thread/interrupted)
+            (.countDown release)
+            (lifecycle/stop! handle 3000)))))))
+
 (deftest stop-drains-blocked-cycle-without-interruption-or-new-cycles-test
   (let [entered (CountDownLatch. 1)
         release (CountDownLatch. 1)

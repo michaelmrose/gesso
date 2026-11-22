@@ -210,8 +210,16 @@
      (reject! :self-stop {}))
    (swap! (.-state ^Lifecycle handle) assoc :stop-requested? true)
    (.countDown ^CountDownLatch (.-stop-signal ^Lifecycle handle))
-   (let [finished? (.await ^CountDownLatch (.-done ^Lifecycle handle)
-                           (long timeout-ms) TimeUnit/MILLISECONDS)
+   (let [finished? (try
+                     (.await ^CountDownLatch (.-done ^Lifecycle handle)
+                             (long timeout-ms) TimeUnit/MILLISECONDS)
+                     (catch InterruptedException error
+                       ;; The cooperative stop request is already committed.
+                       ;; A caller-side interrupted wait cannot establish
+                       ;; drain, and must retain JVM cancellation for the
+                       ;; owner to retry with this same lifecycle handle.
+                       (.interrupt (Thread/currentThread))
+                       (throw error)))
          snapshot (status handle)]
      {:outcome (cond
                  (not finished?) :timed-out
