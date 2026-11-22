@@ -506,8 +506,13 @@
                                                    :id "v2156-source"}} nil)]
     (try
       (is (fn? (:source-closed? started)))
-      (is (false? ((:source-closed? started))))
-      (is (= 1 (:subscription-count (source/stats src))))
+      (is (fn? (:source-on-closed! started)))
+      (let [closed-calls (atom 0)]
+        ((:source-on-closed! started) #(swap! closed-calls inc))
+        (is (false? ((:source-closed? started))))
+        (is (= 1 (:subscription-count (source/stats src))))
+        (sse/cancel! started)
+        (is (= 1 @closed-calls)))
       (sse/cancel! started)
       (is (s/closed? (:stream started)))
       (is (true? ((:source-closed? started))))

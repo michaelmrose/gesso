@@ -44,14 +44,16 @@
       (reject! :incomplete-sse-source-release {}))))
 
 (defn- drained-state? [{:keys [closed? close-completed? connections starting
-                              retry-cancellations pending-authorizations]}]
+                              retry-cancellations disconnect-cleanups
+                              pending-authorizations]}]
   ;; A disconnect hook can remove the last connection while close! is still
   ;; inside live/cancel-sse!. Do not declare provider-safe quiescence until
   ;; the ordered route cancellation pass itself has returned successfully.
   (and closed? close-completed?
        (zero? pending-authorizations)
        (zero? starting)
-       (empty? connections) (empty? retry-cancellations)))
+       (empty? connections) (empty? retry-cancellations)
+       (empty? disconnect-cleanups)))
 
 (defn- reserve-pending-authorization! [state live-system limit]
   ;; Session construction and close! hold the state monitor. A fresh GET must
@@ -146,9 +148,11 @@
    completed its cancellation pass successfully, no authorization or startup
    is outstanding, and neither a session nor a failed-cancellation retry
    remains registered. For source-backed SSE the cancellation handoff must
-   also confirm the eager Live source interest was physically released. A stream disconnect callback can remove a connection
-   *before* its cancellation finishes; a cancellation that then throws must
-   preserve a separate retry obligation despite that disconnect.
+   also confirm the eager Live source interest was physically released. A
+   stream disconnect callback can remove a connection before cancellation
+   finishes; a cancellation that then throws keeps a retry obligation.
+   Client-initiated disconnects also retain unresolved source-release work
+   until the source interest closes or a close! retry succeeds.
    A completed :close! alone does not establish full quiescence.
    :await-drained! takes a bounded timeout in milliseconds (0..120000),
    waits for the same terminal state without polling, and returns either
@@ -267,7 +271,8 @@
         base-handler (:biff.ring/handler started)
         live-system (:gesso.live/system started)
         state (atom {:closed? false :close-completed? false
-                     :connections {} :retry-cancellations {} :starting 0
+                     :connections {} :retry-cancellations {}
+                     :disconnect-cleanups {} :starting 0
                      :pending-authorizations 0})
         drained-signal (promise)
         _ (add-watch state ::drain
@@ -296,7 +301,8 @@
                               (swap! state
                                      (fn [s] (-> s
                                                  (update :connections dissoc key)
-                                                 (update :retry-cancellations dissoc key))))
+                                                 (update :retry-cancellations dissoc key)
+                                                 (update :disconnect-cleanups dissoc key))))
                               failures
                               (catch Throwable e
                                 ;; Keep the obligation even when the stream's
@@ -306,6 +312,7 @@
                                 (conj failures e))))
                           []
                           (merge (:connections @state)
+                                 (:disconnect-cleanups @state)
                                  (:retry-cancellations @state)))]
                      ;; Never abandon later sessions because an earlier
                      ;; cancellation failed. Preserve the original error
@@ -411,9 +418,40 @@
                                         key (random-uuid)]
                                     (swap! state assoc-in [:connections key] session)
                                     (try
+                                      ;; A disconnected HTTP stream may leave
+                                      ;; its eager Live interest registered if
+                                      ;; the transport release hook fails. Keep
+                                      ;; only unresolved disconnects; remove
+                                      ;; them when the source tap actually closes.
+                                      (when-let [on-source-closed!
+                                                 (:source-on-closed! session)]
+                                        (on-source-closed!
+                                         #(swap! state update
+                                                 :disconnect-cleanups dissoc key)))
                                       (stream/on-closed
                                        (:stream session)
-                                       #(swap! state update :connections dissoc key))
+                                       (fn []
+                                         (if-let [source-closed?
+                                                  (:source-closed? session)]
+                                           (do
+                                             ;; Move atomically: no transient
+                                             ;; false quiescence between removing
+                                             ;; an active stream and retaining an
+                                             ;; unverified source release.
+                                             (swap! state
+                                                    (fn [s]
+                                                      (-> s
+                                                          (update :connections dissoc key)
+                                                          (assoc-in [:disconnect-cleanups key]
+                                                                    session))))
+                                             ;; If the source closed just before
+                                             ;; registration, its hook cannot
+                                             ;; clear an obligation added later.
+                                             ;; Recheck *after* publication.
+                                             (when (true? (source-closed?))
+                                               (swap! state update
+                                                      :disconnect-cleanups dissoc key)))
+                                           (swap! state update :connections dissoc key))))
                                       ;; The route may have closed *while*
                                       ;; startup was running without the lock.
                                       ;; Never hand back an admitted 200 in

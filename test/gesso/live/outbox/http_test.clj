@@ -1611,6 +1611,100 @@
            (when @waiter (future-cancel @waiter))
            ((:close! route))))))))
 
+(deftest client-disconnect-retains-unreleased-source-interest-test
+  ;; A client can close the HTTP response directly, bypassing the managed
+  ;; route's :close!. If the transport's normal release hook fails, the route
+  ;; must retain the source interest as a pending shutdown obligation.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           real-open flow/open-source-flow!
+           permit-release? (atom false)
+           attempts (atom 0)
+           release-real! (atom nil)]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [src opts]
+            (let [opened (real-open src opts)
+                  release! (:close! opened)]
+              (reset! release-real! release!)
+              (assoc opened :close!
+                     (fn []
+                       (swap! attempts inc)
+                       (when @permit-release? (release!))))) )
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :authorize-subscription (constantly scope)})
+                 response ((:handler route)
+                           {:uri "/live/events" :request-method :get})
+                 out (:body response)]
+             (try
+               (is (= 200 (:status response)))
+               (is (= 1 ((:active-count route))))
+               (is (= 1 (:subscription-count (source/stats src))))
+               ;; The client closes its connection; no route :close! yet.
+               (stream/close! out)
+               (is (stream/closed? out))
+               (is (eventually #(zero? ((:active-count route)))))
+               (is (= 1 (:subscription-count (source/stats src)))
+                   "The source release hook deliberately did not close the tap")
+               (is (pos? @attempts))
+               (is (= :incomplete-sse-source-release
+                      (exception-reason #((:close! route))))
+                   "Route close must retry the lost disconnect cleanup")
+               (is (false? ((:drained? route))))
+               (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+               (reset! permit-release? true)
+               (is (= :closed ((:close! route))))
+               (is (true? ((:drained? route))))
+               (is (= {:outcome :drained} ((:await-drained! route) 0)))
+               (is (zero? (:subscription-count (source/stats src))))
+               (finally
+                 (reset! permit-release? true)
+                 (when @release-real! (@release-real!))
+                 ((:close! route)))))))))))
+
+(deftest client-disconnect-source-release-clears-pending-cleanup-test
+  ;; The stream-close callback may publish a pending cleanup first. If a
+  ;; delayed source release then succeeds, it must automatically retire that
+  ;; obligation instead of retaining disconnected sessions indefinitely.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           real-open flow/open-source-flow!
+           release-real! (atom nil)]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [src opts]
+            (let [opened (real-open src opts)]
+              (reset! release-real! (:close! opened))
+              (assoc opened :close! (fn [] nil))))
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :authorize-subscription (constantly scope)})
+                 response ((:handler route)
+                           {:uri "/live/events" :request-method :get})]
+             (try
+               (is (= 200 (:status response)))
+               (stream/close! (:body response))
+               (is (eventually #(zero? ((:active-count route)))))
+               (is (= 1 (:subscription-count (source/stats src))))
+               (@release-real!)
+               (is (eventually #(zero? (:subscription-count
+                                       (source/stats src)))))
+               (is (= :closed ((:close! route))))
+               (is (true? ((:drained? route))))
+               (is (= {:outcome :drained} ((:await-drained! route) 0)))
+               (finally
+                 (when @release-real! (@release-real!))
+                 ((:close! route)))))))))))
+
 (deftest route-drain-requires-physical-source-subscription-release-test
   ;; A response can physically close while an eager source registration
   ;; remains open (e.g., its first on-closed callback does not release it).

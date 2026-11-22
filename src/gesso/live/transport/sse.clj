@@ -704,7 +704,8 @@
   [src flow-options sse-options]
   (let [options' (prepare-options! sse-options)
         {live-events :flow release-flow! :close!
-         source-closed? :closed?}
+         source-closed? :closed?
+         source-on-closed! :on-closed!}
         (flow/open-source-flow! src flow-options)]
     (try
       (let [started (start! live-events options')]
@@ -722,6 +723,7 @@
         ;; subscription registered after the response body is closed.
         (assoc started
                :source-closed? source-closed?
+               :source-on-closed! source-on-closed!
                :cancel! (fn []
                           (let [failure (try
                                           ((:cancel! started))

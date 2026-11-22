@@ -763,7 +763,11 @@
                (flow-for-stream* tap options''))
        :close! (fn [] (s/close! tap))
        ;; Per-interest physical evidence, not an aggregate source count.
-       :closed? (fn [] (s/closed? tap))}
+       :closed? (fn [] (s/closed? tap))
+       ;; The owner can observe spontaneous physical release without polling.
+       ;; This closes the race between its response-disconnect callback and
+       ;; the subscription's own on-closed callback.
+       :on-closed! (fn [callback] (s/on-closed tap callback))}
       (catch Throwable e
         (s/close! tap)
         (throw e)))))

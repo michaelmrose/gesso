@@ -1347,13 +1347,18 @@
 (deftest open-source-flow-exposes-per-interest-closure-test
   (let [src (source/create)]
     (try
-      (let [{release! :close! closed? :closed?}
-            (flow/open-source-flow! src {:subscription request-sub})]
+      (let [{release! :close! closed? :closed?
+             on-closed! :on-closed!}
+            (flow/open-source-flow! src {:subscription request-sub})
+            closed-calls (atom 0)]
         (is (fn? closed?))
+        (is (fn? on-closed!))
+        (on-closed! #(swap! closed-calls inc))
         (is (false? (closed?)))
         (is (= 1 (:subscription-count (source/stats src))))
         (release!)
         (is (true? (closed?)))
+        (is (= 1 @closed-calls))
         (is (zero? (:subscription-count (source/stats src)))))
       (finally (source/close! src)))))
 
