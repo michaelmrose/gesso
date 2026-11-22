@@ -236,3 +236,96 @@
       (finally
         (.close socket)
         ((:stop! server))))))
+
+(deftest real-aleph-http1-abrupt-client-disconnect-preserves-owner-until-confirmed-cleanup-test
+  ;; A real RST/close of an active streaming client makes Aleph's HTTP/1
+  ;; channel inactive and causes it to stop consuming its Manifold source.
+  ;; That does NOT prove the source owner's provider-using work has ceased.
+  ;; The listener must retain the obligation until (1) final write outcome
+  ;; or confirmed channel abort, AND (2) explicit producer quiescence.
+  (let [source (stream/stream 4)
+        producer-closed (promise)
+        server (real-http1-server!
+                (fn [_] {:status 200
+                         :headers {"content-type" "text/event-stream"}
+                         :body source}))
+        socket (java.net.Socket.)]
+    (stream/on-closed source #(deliver producer-closed true))
+    (try
+      (.connect socket
+                (java.net.InetSocketAddress.
+                 "127.0.0.1" (.getPort (URI/create (:url server))))
+                2000)
+      (.setSoTimeout socket 5000)
+      (.write (.getOutputStream socket)
+              (.getBytes (str "GET /disconnect HTTP/1.1\r\n"
+                              "Host: 127.0.0.1\r\n"
+                              "Connection: keep-alive\r\n\r\n")
+                         StandardCharsets/US_ASCII))
+      (.flush (.getOutputStream socket))
+      (let [reader (java.io.BufferedReader.
+                    (java.io.InputStreamReader.
+                     (.getInputStream socket) StandardCharsets/UTF_8))
+            status (.readLine reader)]
+        (is (some? (re-find #"^HTTP/1\.1 200 " (or status ""))))
+        (loop []
+          (let [line (.readLine reader)]
+            (when-not line
+              (throw (ex-info "HTTP SSE response headers unexpectedly ended" {})))
+            (when-not (empty? line) (recur))))
+        (is (true? (deref (stream/put! source
+                                    "event: live-update\ndata: before-disconnect\n\n")
+                          2000 false)))
+        (is (loop [n 0]
+              (cond
+                (> n 20) false
+                :else (let [line (.readLine reader)]
+                        (cond (nil? line) false
+                              (= "event: live-update" line) true
+                              :else (recur (inc n))))))
+            "Actual streaming HTTP/1 data must precede the disconnect")
+        (is (eventually #(= 1 (count @(:responses server)))))
+        (let [{:keys [bridge channel]} (first @(:responses server))
+              guard (:guard server)]
+          (is (= 1 ((:active-count guard))))
+          (is (false? (:terminal? ((:status bridge)))))
+          ;; Send an abrupt real client-side reset. No direct source/bridge
+          ;; cancellation is initiated by the test until Aleph observes it.
+          (.setSoLinger socket true 0)
+          (.close socket)
+          (is (eventually #(and (.isDone (.closeFuture channel))
+                                (not (.isActive channel))))
+              "Aleph must observe actual channel disconnection")
+          (is (= true (deref producer-closed 4000 ::timeout))
+              "Aleph's disconnect cleanup must close its response source")
+          (is (stream/closed? source))
+          (is (= 1 ((:active-count guard)))
+              "Disconnection/source close alone is not owner retirement")
+          (is (false? (:terminal? ((:status bridge)))))
+          (is (zero? (:pending ((:stats (:capture server)))))
+              "Closed channels do not retain pipeline-registry references")
+          (is (= {:outcome :timed-out} ((:stop! server)))
+              "Host must not drain before producer and writer completion")
+          (is (false? ((:drained? guard))))
+          ;; The channel closeFuture proves this socket can never resume its
+          ;; response. A final-write failure/success, if already observed,
+          ;; is also terminal. Otherwise explicitly certify an aborted writer
+          ;; *after* channel closure, not on the upstream stream-close event.
+          (when (#{:unregistered :pending} (:write-outcome ((:status bridge))))
+            ((:writer-aborted! bridge)))
+          (is (#{:succeeded :failed :aborted}
+               (:write-outcome ((:status bridge)))))
+          (is (= 1 ((:active-count guard)))
+              "Writer termination alone must still wait for producer cleanup")
+          ;; This harness's response producer has no additional callbacks
+          ;; after its observed stream-close callback has returned. Production
+          ;; source owners must supply their own such evidence.
+          ((:producer-ceased! bridge))
+          (is (eventually #(zero? ((:active-count guard)))))
+          (is (= {:outcome :drained} ((:stop! server))))
+          (is ((:drained? guard)))
+          (is (true? (:terminal? ((:status bridge)))))))
+      (finally
+        (.close socket)
+        (stream/close! source)
+        ((:stop! server))))))
