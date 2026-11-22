@@ -184,7 +184,9 @@
                                     {:topic :request :id subject-id})
               lease (acquire! node id)
               result (with-redefs [acknowledgment/acknowledge-dispatch!
-                                   (fn [_ _] {:status :contended})]
+                                   (fn [_ submission]
+                                     {:status :contended
+                                      :intent-id (:intent-id submission)})]
                        (delivery/dispatch-acquired! node system {} lease source-id))]
           (is (= :dispatched-unacknowledged (:status result)))
           (is (= :contended (get-in result [:acknowledgment :status])))
@@ -316,3 +318,112 @@
           (is (= :unknown (:acknowledgment/status error)))
           (is (= :leased (:gesso.live.outbox/status (row node id)))))
         (finally (live/close! system))))))
+
+(deftest invalid-acknowledgment-result-after-source-emission-requires-reconciliation-test
+  ;; A status of :acknowledged is not physical receipt evidence when the
+  ;; returned intent, lease or receipt differs from the guarded submission.
+  ;; The source has already emitted by this point: never classify these
+  ;; contradictions as safe pre-dispatch rejection or completed delivery.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)]
+      (try
+        (doseq [[label distort]
+                [[:wrong-intent #(assoc % :intent-id (random-uuid))]
+                 [:missing-intent #(dissoc % :intent-id)]
+                 [:wrong-lease #(assoc % :lease-id (random-uuid))]
+                 [:missing-lease #(dissoc % :lease-id)]
+                 [:wrong-receipt #(assoc % :receipt-id (random-uuid))]
+                 [:missing-receipt #(dissoc % :receipt-id)]
+                 [:unknown-status #(assoc % :status :surprising)]
+                 [:missing-status #(dissoc % :status)]
+                 [:nil-result (constantly nil)]]]
+          (let [id (random-uuid)
+                _ (seed! node id)
+                lease (acquire! node id)
+                tap (source/subscribe (:source system)
+                                      {:topic :request :id subject-id})
+                calls (atom [])]
+            (try
+              (let [outcome
+                    (with-redefs
+                      [acknowledgment/acknowledge-dispatch!
+                       (fn [_ submission]
+                         (swap! calls conj submission)
+                         (distort {:status :acknowledged
+                                   :intent-id (:intent-id submission)
+                                   :lease-id (:lease-id submission)
+                                   :receipt-id (get-in submission
+                                                       [:receipt :receipt-id])}))]
+                      (try
+                        (delivery/dispatch-acquired! node system {} lease
+                                                     source-id)
+                        (catch Throwable error error)))
+                    data (when (instance? clojure.lang.ExceptionInfo outcome)
+                           (ex-data outcome))
+                    receipt-id (get-in (first @calls) [:receipt :receipt-id])]
+                (is (instance? clojure.lang.ExceptionInfo outcome)
+                    (str label " must not report success"))
+                (is (= :gesso.live.outbox/post-dispatch-ack-unknown
+                       (:error/type data))
+                    (str label " must require post-emission reconciliation"))
+                (is (= :invalid-acknowledgment-result (:reason data)))
+                (is (= :accepted (:dispatch/status data)))
+                (is (= :unknown (:acknowledgment/status data)))
+                (is (= id (:intent-id data)))
+                (is (= (:lease-id lease) (:lease-id data)))
+                (is (uuid? receipt-id))
+                (is (= receipt-id (:receipt-id data))
+                    "Exact submitted receipt is necessary for reconciliation")
+                (is (= 1 (count @calls)) "No implicit acknowledgment retry")
+                (is (= subject-id (:id (deref (s/take! tap) 1500 ::timeout)))
+                    "Source emission preceded acknowledgment uncertainty")
+                (is (= :leased (:gesso.live.outbox/status (row node id)))
+                    "Fake positive acknowledgment did not commit XTDB")
+                (is (nil? (:gesso.live.outbox/dispatch-receipt-id (row node id)))))
+              (finally
+                (s/close! tap)))))
+        (finally
+          (live/close! system))))))
+
+(deftest post-dispatch-ack-exception-retains-submitted-receipt-test
+  ;; A real acknowledgment adapter can fail after submitting its XTDB CAS.
+  ;; Retain the receipt and lease identities even when the callback throws,
+  ;; because physical commit is then uncertain and the source already sent.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)
+          id (random-uuid)
+          attempted (atom nil)
+          cause (ex-info "XTDB acknowledgment indeterminate" {:physical :unknown})]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id)
+              tap (source/subscribe (:source system)
+                                    {:topic :request :id subject-id})]
+          (try
+            (let [failure
+                  (with-redefs
+                    [acknowledgment/acknowledge-dispatch!
+                     (fn [_ submission]
+                       (reset! attempted submission)
+                       (throw cause))]
+                    (try
+                      (delivery/dispatch-acquired! node system {} lease source-id)
+                      (catch Throwable error error)))
+                  data (ex-data failure)]
+              (is (instance? clojure.lang.ExceptionInfo failure))
+              (is (identical? cause (.getCause ^Throwable failure)))
+              (is (= :gesso.live.outbox/post-dispatch-ack-unknown
+                     (:error/type data)))
+              (is (= :accepted (:dispatch/status data)))
+              (is (= :unknown (:acknowledgment/status data)))
+              (is (= id (:intent-id data)))
+              (is (= (:lease-id lease) (:lease-id data)))
+              (is (= (get-in @attempted [:receipt :receipt-id])
+                     (:receipt-id data)))
+              (is (uuid? (:receipt-id data)))
+              (is (= subject-id (:id (deref (s/take! tap) 1500 ::timeout))))
+              (is (= :leased (:gesso.live.outbox/status (row node id)))))
+            (finally
+              (s/close! tap))))
+        (finally
+          (live/close! system))))))

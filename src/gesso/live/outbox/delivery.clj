@@ -131,6 +131,31 @@
                 :dispatch-status (:status dispatch-result)}))
     source-result))
 
+(defn- require-acknowledgment-result!
+  "Classify a physical acknowledgment adapter result only after source
+   emission. A positive label must match the exact guarded submission;
+   contradictory or unrecognized results are POST-DISPATCH uncertainty,
+   never a successful terminal receipt or a safe pre-dispatch rejection."
+  [ack intent-id lease-id receipt-id]
+  (when-not
+   (and (map? ack)
+        (= intent-id (:intent-id ack))
+        (or (and (= :acknowledged (:status ack))
+                 (= lease-id (:lease-id ack))
+                 (= receipt-id (:receipt-id ack)))
+            (#{:contended :unavailable} (:status ack))))
+    (throw (ex-info
+            "Live source accepted an invalidation but XTDB acknowledgment returned inconsistent evidence."
+            {:error/type :gesso.live.outbox/post-dispatch-ack-unknown
+             :reason :invalid-acknowledgment-result
+             :intent-id intent-id
+             :lease-id lease-id
+             :receipt-id receipt-id
+             :dispatch/status :accepted
+             :acknowledgment/status :unknown
+             :reported-acknowledgment-status (:status ack)})))
+  ack)
+
 (defn dispatch-acquired!
   "Synchronously emit one acquired/reclaimed intent, then acknowledge it.
 
@@ -181,10 +206,13 @@
                   (throw (ex-info "Live source accepted an invalidation before XTDB acknowledgment failed."
                                   {:error/type :gesso.live.outbox/post-dispatch-ack-unknown
                                    :intent-id intent-id
+                                   :lease-id (:lease-id acquisition)
                                    :receipt-id (:receipt-id receipt)
                                    :dispatch/status :accepted
                                    :acknowledgment/status :unknown}
                                   e))))]
+      (require-acknowledgment-result!
+       ack intent-id (:lease-id acquisition) (:receipt-id receipt))
       (if (= :acknowledged (:status ack))
         {:status :dispatch-accepted
          :intent-id intent-id
