@@ -84,6 +84,13 @@
 ;; Debug
 ;; -----------------------------------------------------------------------------
 
+(defn- restore-interrupt!
+  "Suppressed Live core callbacks and cleanup must preserve the JVM thread's
+   interruption signal instead of silently consuming cancellation."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defmacro ^:private debug!
   "Emit a debug event only when debug-fn is truthy.
 
@@ -96,7 +103,8 @@
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Throwable _#
+       (catch Throwable error#
+         (restore-interrupt! error#)
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -182,7 +190,8 @@
       (apply f args)
       ;; Optional hooks and cleanup calls must not prevent later owned
       ;; resources from closing or falsify a committed delivery outcome.
-      (catch Throwable _
+      (catch Throwable error
+        (restore-interrupt! error)
         nil))))
 
 (defn- with-inherited-debug

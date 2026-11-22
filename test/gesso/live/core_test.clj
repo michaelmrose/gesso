@@ -2282,6 +2282,90 @@
         (when @allocated-dispatcher (dispatch/close! @allocated-dispatcher))
         (when @allocated-source (source/close! @allocated-source))))))
 
+(deftest interrupted-core-creation-debug-restores-caller-interrupt-test
+  ;; The core creation diagnostic is observational. Its interruption cannot
+  ;; abandon a constructed system or silently erase JVM cancellation state.
+  (Thread/interrupted)
+  (let [seen (atom [])
+        outcome (try
+                  (live/create
+                   {:dispatch-options {:threads 1 :queue-size 2}
+                    :debug-fn (fn [{:keys [event]}]
+                                (when (= :gesso.live.core/created event)
+                                  (swap! seen conj event)
+                                  (throw (InterruptedException.
+                                          "create diagnostic interrupted"))))})
+                  (catch Throwable error error))
+        interrupted? (.isInterrupted (Thread/currentThread))]
+    (Thread/interrupted)
+    (try
+      (is (map? outcome) "The diagnostic cannot abort system creation")
+      (is (= [:gesso.live.core/created] @seen))
+      (is interrupted? "A swallowed create diagnostic must restore interrupt")
+      (when (map? outcome)
+        (is (false? (live/closed? outcome)))
+        (live/close! outcome)
+        (is (source/closed? (:source outcome)))
+        (is (dispatch/closed? (:dispatcher outcome))))
+      (finally
+        (Thread/interrupted)))))
+
+(deftest interrupted-core-closing-diagnostic-completes-shutdown-test
+  (let [system (live/create {:dispatch-options {:threads 1 :queue-size 2}})
+        seen (atom [])
+        noisy (assoc-in system [:options :debug-fn]
+                        (fn [{:keys [event]}]
+                          (swap! seen conj event)
+                          (when (= :gesso.live.core/closing event)
+                            (throw (InterruptedException.
+                                    "closing diagnostic interrupted")))))]
+    (try
+      (Thread/interrupted)
+      (let [result (try (live/close! noisy)
+                        (catch Throwable error error))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (identical? noisy result))
+        (is interrupted? "Shutdown cannot erase interrupted diagnostic")
+        (is (live/closed? noisy))
+        (is (dispatch/closed? (:dispatcher system)))
+        (is (source/closed? (:source system)))
+        (is (= [:gesso.live.core/closing :gesso.live.core/closed] @seen)))
+      (finally
+        (Thread/interrupted)
+        (dispatch/close! (:dispatcher system))
+        (source/close! (:source system))))))
+
+(deftest interrupted-core-owned-cleanup-continues-and-restores-flag-test
+  ;; A best-effort owned dispatcher close can be interrupted; core must still
+  ;; close the source and retain the signal through terminal shutdown.
+  (let [calls (atom [])
+        interrupted (InterruptedException. "dispatcher cleanup interrupted")
+        system {:source ::owned-source
+                :dispatcher ::owned-dispatcher
+                :owned {:source true :dispatcher true}
+                :options {}
+                :closed? (atom false)}]
+    (try
+      (Thread/interrupted)
+      (let [outcome (with-redefs [dispatch/close! (fn [_]
+                                                   (swap! calls conj :dispatcher)
+                                                   (throw interrupted))
+                                 source/close! (fn [_]
+                                                 (swap! calls conj
+                                                        [:source (.isInterrupted
+                                                                  (Thread/currentThread))]))]
+                      (live/close! system))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (identical? system outcome))
+        (is (= [:dispatcher [:source true]] @calls)
+            "Source release must execute after an interrupted dispatcher close")
+        (is interrupted? "The best-effort cleanup must retain interruption")
+        (is (live/closed? system)))
+      (finally
+        (Thread/interrupted)))))
+
 (deftest core-assertion-debug-during-close-still-closes-owned-resources-test
   (let [system (live/create {:dispatch-options {:threads 1 :queue-size 2}})
         seen (atom [])
