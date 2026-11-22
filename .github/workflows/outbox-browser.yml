@@ -123,6 +123,8 @@ jobs:
             2>&1 | tee target/outbox-browser/reconciliation-owner.log
           clojure -M:test -n gesso.live.outbox.cycle-test \
             2>&1 | tee target/outbox-browser/cycle-owner.log
+          clojure -M:test -n gesso.live.outbox.acquisition-recovery-test \
+            2>&1 | tee target/outbox-browser/acquisition-recovery.log
 
       - name: Require real Chromium EventSource/HTMX/DOM convergence
         shell: bash

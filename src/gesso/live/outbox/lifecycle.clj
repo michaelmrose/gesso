@@ -400,6 +400,53 @@
                                           (:completed-observations observed))}))
     (start-reconciled! handle opts observed :physically-recorded)))
 
+(defn restart-after-acquisition!
+  "Explicit recovery when a cycle stopped BEFORE dispatching its next intent.
+
+   Only :acquisition/:acquisition-exception failures qualify. The interrupted
+   cycle cannot have called its delivery adapter for this in-flight attempt;
+   a physical lease might nevertheless have committed before its response
+   was lost. Prior completed dispatches must still have matching physical
+   worker/lease/receipt evidence. If a reported lease exists, it must come
+   from the failed worker's verified acquisition-attempt or rejected-page
+   reporting boundary, never from a delivery/receipt claim.
+
+   A replacement uses the same trusted provider/source/context but starts a
+   NEW full source-scoped scan with a new worker ID. Pending intents can be
+   acquired; unacknowledged physical leases become eligible only after XTDB's
+   transaction-time expiry and guarded reclaim. This operation NEVER directly
+   dispatches an unverified lease and NEVER assumes that acquisition committed.
+   It is an explicit host action, not a generic retry of uncertain sends.
+   Like all restarts it owns a single successor through the original handle."
+  [handle opts]
+  (let [observed (prepare-restart! handle opts)
+        failure (:failure (status handle))
+        claim (:in-flight failure)
+        original-id (:worker-id (status handle))
+        acquisition-evidence?
+        (or (nil? claim)
+            (and (= original-id (:worker-id claim))
+                 (not (contains? claim :receipt-id))
+                 (not (contains? claim :receipt-evidence))
+                 (or (nil? (:source-id claim))
+                     (= (:source-id (status handle)) (:source-id claim)))
+                 (case (:evidence claim)
+                   :unverified-acquisition-attempt
+                   (#{:acquire-pending :reclaim-expired}
+                    (:acquisition-action claim))
+                   :unverified-worker-page
+                   (#{:acquired :reclaimed} (:acquisition-status claim))
+                   false)))]
+    (when-not (and (= :acquisition (:phase failure))
+                   (= :acquisition-exception (:reason failure))
+                   acquisition-evidence?)
+      (reject! :recovery-not-qualified
+               {:phase (:phase failure)
+                :reason (:reason failure)
+                :in-flight-status (:status observed)
+                :acquisition-evidence? (boolean acquisition-evidence?)}))
+    (start-reconciled! handle opts observed :acquisition-rescan)))
+
 (defn restart-with-redelivery!
   "Explicit at-least-once recovery after an uncertain advisory Live send.
 

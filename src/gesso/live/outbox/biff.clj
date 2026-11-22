@@ -124,7 +124,8 @@
    A caller must select one named mode and trusted new-worker options:
    :physically-recorded requires exact current XTDB acknowledgment evidence;
    :at-least-once-invalidation deliberately permits duplicate advisory
-   refreshes after the original lease expires. This API neither derives the
+   refreshes after the original lease expires; :acquisition-rescan resumes
+   only after a failed pre-dispatch acquisition and physical prefix check. This API neither derives the
    mode from a failure report nor retries automatically. A returned successor
    is an owned worker, NOT proof of final delivery or browser adoption.
 
@@ -136,7 +137,7 @@
   [system mode worker-options]
   (when-not (map? system)
     (reject! :invalid-system {}))
-  (when-not (#{:physically-recorded :at-least-once-invalidation} mode)
+  (when-not (#{:physically-recorded :at-least-once-invalidation :acquisition-rescan} mode)
     (reject! :invalid-recovery-mode {:mode mode}))
   (let [handle (get system handle-key)]
     (when-not (instance? gesso.live.outbox.lifecycle.Lifecycle handle)
@@ -157,7 +158,9 @@
       :physically-recorded
       (lifecycle/restart-recorded! handle worker-options)
       :at-least-once-invalidation
-      (lifecycle/restart-with-redelivery! handle worker-options))))
+      (lifecycle/restart-with-redelivery! handle worker-options)
+      :acquisition-rescan
+      (lifecycle/restart-after-acquisition! handle worker-options))))
 
 (def module
   "The singleton, actual Biff 2 module. Include it exactly once in a modules
