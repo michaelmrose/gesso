@@ -1166,6 +1166,93 @@
       (finally
         (s/close! stream)))))
 
+(deftest interrupted-flow-creation-trace-restores-caller-interrupt-test
+  ;; A swallowed optional diagnostic failure must not erase JVM cancellation
+  ;; state on the thread that constructed the flow.
+  (let [stream (s/stream)
+        trace-calls (atom 0)]
+    (try
+      (Thread/interrupted)
+      (let [created (flow/flow-for-stream
+                     stream
+                     {:subscription request-sub
+                      :relieve? false
+                      :debug-fn (fn [event]
+                                  (when (= :gesso.live.flow/flow-for-stream-created
+                                           (:event event))
+                                    (swap! trace-calls inc)
+                                    (throw (InterruptedException.
+                                            "trace interrupted"))))})
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (some? created) "A failed trace must not abort flow creation")
+        (is (= 1 @trace-calls))
+        (is interrupted? "The swallowed interrupt must remain observable"))
+      (finally
+        (Thread/interrupted)
+        (s/close! stream)))))
+
+(deftest interrupted-source-open-trace-preserves-subscription-test
+  ;; Source-backed Live registers the physical interest before it reports
+  ;; source-tap-opened. A diagnostic interruption must not throw away that
+  ;; successfully opened registration or silently clear the caller's flag.
+  (let [src (source/create)]
+    (try
+      (Thread/interrupted)
+      (let [opened (flow/open-source-flow!
+                    src
+                    {:subscription request-sub
+                     :relieve? false
+                     :debug-fn (fn [event]
+                                 (when (= :gesso.live.flow/source-tap-opened
+                                          (:event event))
+                                   (throw (InterruptedException.
+                                           "source trace interrupted"))))})
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (try
+          (is (some? (:flow opened)))
+          (is (false? ((:closed? opened))))
+          (is (= 1 (:tap-count (source/stats src))))
+          (is interrupted? "The source diagnostic must preserve interrupt")
+          (finally
+            ((:close! opened)))))
+      (finally
+        (Thread/interrupted)
+        (source/close! src)))))
+
+(deftest interrupted-flow-close-hook-preserves-terminal-diagnostic-test
+  ;; The close hook runs after physical stream release, before final tracing.
+  ;; It may fail with InterruptedException, but the later diagnostic must
+  ;; still execute on that thread with its interrupt flag restored.
+  (let [stream (s/stream)
+        close-called (promise)
+        terminal-interrupted? (promise)
+        runner (collect-runner
+                (flow/stream-flow
+                 stream
+                 {:on-close (fn []
+                              (deliver close-called true)
+                              (throw (InterruptedException.
+                                      "close hook interrupted")))
+                  :debug-fn (fn [event]
+                              (when (= :gesso.live.flow/stream-flow-closed
+                                       (:event event))
+                                (let [interrupted?
+                                      (.isInterrupted (Thread/currentThread))]
+                                  ;; Do not poison a pooled callback thread.
+                                  (Thread/interrupted)
+                                  (deliver terminal-interrupted? interrupted?))))}))]
+    (try
+      (cancel-runner! runner)
+      (is (= true (deref close-called timeout-ms ::timeout)))
+      (is (= true (deref terminal-interrupted? timeout-ms ::timeout))
+          "Later diagnostic must see the preserved interruption")
+      (is (s/closed? stream))
+      (finally
+        (Thread/interrupted)
+        (s/close! stream)))))
+
 (deftest assertion-error-in-stream-trace-does-not-strand-completion-pump-test
   ;; Optional tracing must never strand a Manifold -> Missionary pull when
   ;; application diagnostics throw an Error instead of an Exception.

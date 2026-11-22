@@ -34,6 +34,14 @@
 ;; Debug
 ;; -----------------------------------------------------------------------------
 
+(defn- restore-interrupt!
+  "A suppressed callback interruption must not clear the current JVM thread's
+   cancellation signal. User hooks may throw after an interruptible wait has
+   already cleared that flag."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defmacro ^:private debug!
   "Emit a debug event only when debug-fn is truthy.
 
@@ -46,7 +54,8 @@
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Throwable _#
+       (catch Throwable error#
+         (restore-interrupt! error#)
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -191,7 +200,8 @@
       (apply f args)
       ;; Terminal cleanup must not be interrupted by application hooks that
       ;; throw Error rather than Exception.
-      (catch Throwable _
+      (catch Throwable error
+        (restore-interrupt! error)
         nil))))
 
 (defn- data-value
