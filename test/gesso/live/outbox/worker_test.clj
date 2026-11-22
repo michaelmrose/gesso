@@ -268,7 +268,10 @@
                     acquisition/acquire-pending!
                     (fn [_ claim]
                       (swap! calls conj (:intent-id claim))
-                      {:status :acquired :intent-id (:intent-id claim)})]
+                      (assoc (select-keys claim
+                                          [:intent-id :lease-id :worker-id
+                                           :lease-until])
+                             :status :acquired))]
         (let [result (worker/acquire-sweep!
                       :no-xtdb (cond-> {:source-id "gesso/test-worker"
                                        :worker-id "worker" :page-size 2}
@@ -360,3 +363,101 @@
       (is (= :source-mismatch (get-in result [:results 0 :reason])))
       (is (= :pending (:gesso.live.outbox/status (row node id))))
       (is (= "another/source" (:gesso.live.outbox/source-id (row node id)))))))
+
+(deftest malformed-successful-acquisition-results-cannot-grant-lease-test
+  ;; A :status alone is not proof that the physical CAS granted the lease
+  ;; generated for THIS request. Reject missing or switched ownership fields
+  ;; rather than handing a fabricated lease to downstream delivery.
+  (let [intent-id (random-uuid)
+        candidate {:intent-id intent-id :action :acquire-pending}
+        other-id (random-uuid)
+        other-lease (random-uuid)
+        mutations [[:status-only (fn [outcome] {:status (:status outcome)})]
+                   [:different-intent #(assoc % :intent-id other-id)]
+                   [:different-lease #(assoc % :lease-id other-lease)]
+                   [:missing-lease #(dissoc % :lease-id)]
+                   [:different-worker #(assoc % :worker-id "other-worker")]
+                   [:different-deadline #(update % :lease-until
+                                                (fn [deadline]
+                                                  (.plusSeconds ^Instant deadline 1)))]
+                   [:missing-deadline #(dissoc % :lease-until)]]]
+    (doseq [action [:acquire-pending :reclaim-expired]
+            [label mutate] mutations]
+      (let [candidate (assoc candidate :action action)
+            call-count (atom 0)
+            acquire (fn [_ claim]
+                      (swap! call-count inc)
+                      (mutate (assoc (select-keys claim
+                                                 [:intent-id :lease-id
+                                                  :worker-id :lease-until])
+                                     :status (if (= action :acquire-pending)
+                                               :acquired :reclaimed))))]
+        (with-redefs [discovery/discover-eligible!
+                      (fn [_ _]
+                        {:candidates [candidate] :has-more? false :next-after nil})
+                      acquisition/acquire-pending! acquire
+                      acquisition/reclaim-expired! acquire]
+          (is (rejected?
+               #(worker/acquire-sweep! :no-xtdb
+                                       {:source-id "gesso/test-worker"
+                                        :worker-id "trusted-worker"})
+               :unexpected-acquisition-result)
+              (str action " / " label " cannot provide lease authority"))
+          (is (= 1 @call-count)
+              "A malformed result cannot cause an implicit second acquisition"))))))
+
+(deftest malformed-unavailable-acquisition-results-cannot-swap-intent-test
+  ;; A contention/unavailability observation is scoped to exactly the
+  ;; discovered candidate. A different or missing identity would corrupt
+  ;; result accounting in the enclosing sweep or cycle.
+  (let [id (random-uuid)]
+    (doseq [status [:contended :unavailable]
+            bad-id [nil (random-uuid)]]
+      (let [call-count (atom 0)]
+        (with-redefs [discovery/discover-eligible!
+                      (fn [_ _]
+                        {:candidates [{:intent-id id :action :acquire-pending}]
+                         :has-more? false :next-after nil})
+                      acquisition/acquire-pending!
+                      (fn [_ _]
+                        (swap! call-count inc)
+                        {:status status :intent-id bad-id})]
+          (is (rejected?
+               #(worker/acquire-sweep! :no-xtdb
+                                       {:source-id "gesso/test-worker"
+                                        :worker-id "trusted-worker"})
+               :unexpected-acquisition-result)
+              (str status " must not report another/missing intent"))
+          (is (= 1 @call-count)))))))
+
+(deftest matching-physical-acquisition-result-remains-accepted-test
+  ;; A well-formed physical result, with the actual lease token that the
+  ;; worker just supplied, is still returned as successful acquisition.
+  (doseq [[action status]
+          [[:acquire-pending :acquired] [:reclaim-expired :reclaimed]]]
+    (let [id (random-uuid)
+          calls (atom [])
+          physical (fn [_ claim]
+                     (swap! calls conj claim)
+                     (assoc (select-keys claim
+                                         [:intent-id :lease-id :worker-id :lease-until])
+                            :status status))]
+      (with-redefs [discovery/discover-eligible!
+                    (fn [_ _]
+                      {:candidates [{:intent-id id :action action}]
+                       :has-more? false :next-after nil})
+                    acquisition/acquire-pending! physical
+                    acquisition/reclaim-expired! physical]
+        (let [result (worker/acquire-sweep! :no-xtdb
+                                            {:source-id "gesso/test-worker"
+                                             :worker-id "trusted-worker"})
+              lease (-> result :results first)
+              supplied (first @calls)]
+          (is (= 1 (:attempted result)))
+          (is (= status (:status lease)))
+          (is (= id (:intent-id lease)))
+          (is (= (:lease-id supplied) (:lease-id lease)))
+          (is (= (:lease-until supplied) (:lease-until lease)))
+          (is (= "trusted-worker" (:worker-id lease)))
+          (is (= (if (= status :acquired) 1 0) (:acquired result)))
+          (is (= (if (= status :reclaimed) 1 0) (:reclaimed result))))))))

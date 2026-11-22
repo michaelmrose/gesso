@@ -108,6 +108,29 @@
                {:request request :page page}))
     page))
 
+(defn- validate-acquisition-result!
+  "Reject a status that claims the wrong intent or a lease that the current
+   physical CAS was never asked to install. A successful status alone is not
+   evidence that its reported credentials authorize downstream delivery."
+  [{:keys [intent-id lease-id worker-id lease-until]} action outcome]
+  (let [status (:status outcome)
+        expected-success (case action
+                           :acquire-pending :acquired
+                           :reclaim-expired :reclaimed)
+        success? (and (= expected-success status)
+                      (= lease-id (:lease-id outcome))
+                      (= worker-id (:worker-id outcome))
+                      (= lease-until (:lease-until outcome)))
+        rejection? (and (#{:contended :unavailable} status)
+                        (not-any? #(contains? outcome %)
+                                  [:lease-id :worker-id :lease-until]))]
+    (when-not (and (map? outcome)
+                   (= intent-id (:intent-id outcome))
+                   (or success? rejection?))
+      (reject! :unexpected-acquisition-result
+               {:intent-id intent-id :action action :status status}))
+    outcome))
+
 (defn- attempt!
   [node worker-id source-id lease-millis {:keys [intent-id action]}]
   (let [now (Instant/now)
@@ -122,14 +145,8 @@
           :acquire-pending (acquisition/acquire-pending! node claim)
           :reclaim-expired (acquisition/reclaim-expired! node claim)
           (reject! :unknown-action {:action action :intent-id intent-id}))
-        status (:status outcome)]
-    ;; An unrecognized result must not be treated as safely unavailable.
-    (when-not (or (and (= action :acquire-pending) (= :acquired status))
-                  (and (= action :reclaim-expired) (= :reclaimed status))
-                  (#{:contended :unavailable} status))
-      (reject! :unexpected-acquisition-result
-               {:intent-id intent-id :action action :status status}))
-    (assoc outcome :action action)))
+        verified (validate-acquisition-result! claim action outcome)]
+    (assoc verified :action action)))
 
 (defn acquire-sweep!
   "Discover and attempt to acquire a finite number of current outbox intents.
