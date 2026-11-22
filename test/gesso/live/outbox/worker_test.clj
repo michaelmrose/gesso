@@ -215,6 +215,91 @@
            :invalid-discovery-page))
       (is (zero? @calls)))))
 
+
+(deftest malformed-discovery-keyset-order-rejects-before-acquisition-test
+  ;; :next-after merely differing from :after does not prove progress. An
+  ;; advisory provider returning reversed identities or a row <= :after must
+  ;; fail before ANY physical lease transition, regardless of :has-more?.
+  (let [a (java.util.UUID/fromString "00000000-0000-0000-0000-000000000001")
+        b (java.util.UUID/fromString "00000000-0000-0000-0000-000000000002")
+        c (java.util.UUID/fromString "00000000-0000-0000-0000-000000000003")
+        item (fn [id] {:intent-id id :action :acquire-pending})
+        cases [[:reversed-terminal nil [b a] false nil]
+               [:reversed-continuation nil [b a] true a]
+               [:behind-initial-cursor b [a] false nil]
+               [:equal-initial-cursor b [b] false nil]
+               [:backward-continuation b [c a] true a]
+               [:backward-terminal b [c a] false nil]]]
+    (doseq [[label after ids more? cursor] cases]
+      (let [calls (atom [])
+            page {:candidates (mapv item ids)
+                  :has-more? more?
+                  :next-after cursor}
+            options (cond-> {:source-id "gesso/test-worker"
+                             :worker-id "worker" :page-size 2 :max-pages 2}
+                      after (assoc :after after))]
+        (with-redefs [discovery/discover-eligible! (fn [_ _] page)
+                      acquisition/acquire-pending!
+                      (fn [_ claim]
+                        (swap! calls conj (:intent-id claim))
+                        {:status :acquired})]
+          (is (rejected? #(worker/acquire-sweep! :no-xtdb options)
+                         :invalid-discovery-page)
+              (str label " must reject a non-advancing discovery page"))
+          (is (empty? @calls)
+              (str label " must not acquire a lease before validation")))))))
+
+(deftest canonical-uuid-keyset-order-crosses-java-signed-boundary-test
+  ;; XTDB orders UUID SQL keys by unsigned canonical representation. Java's
+  ;; UUID.compareTo places 8000... before 7fff...; do NOT use it for this
+  ;; validation. Both an entire ascending page and an advancing resume must
+  ;; remain legal, even when they cross that signed Java representation.
+  (let [low (java.util.UUID/fromString "7fffffff-ffff-ffff-ffff-ffffffffffff")
+        high (java.util.UUID/fromString "80000000-0000-0000-0000-000000000000")
+        calls (atom [])
+        item (fn [id] {:intent-id id :action :acquire-pending})]
+    (doseq [[label after ids]
+            [[:whole-page nil [low high]]
+             [:resumed-page low [high]]]]
+      (with-redefs [discovery/discover-eligible!
+                    (fn [_ _]
+                      {:candidates (mapv item ids)
+                       :has-more? false :next-after nil})
+                    acquisition/acquire-pending!
+                    (fn [_ claim]
+                      (swap! calls conj (:intent-id claim))
+                      {:status :acquired :intent-id (:intent-id claim)})]
+        (let [result (worker/acquire-sweep!
+                      :no-xtdb (cond-> {:source-id "gesso/test-worker"
+                                       :worker-id "worker" :page-size 2}
+                                 after (assoc :after after)))]
+          (is (= ids (mapv :intent-id (:results result)))
+              (str label " must preserve actual XTDB ordering"))
+          (is (= :observed-end (:halt-reason result)))
+          (is (= (count ids) (:acquired result))))))
+    (is (= [low high high] @calls))))
+
+(deftest physical-xtdb-uuid-keyset-crosses-signed-boundary-test
+  ;; Regress against the actual XTDB ORDER BY _id and WHERE _id > ? behavior,
+  ;; not merely the worker's simulated provider response.
+  (with-open [node (xtn/start-node {})]
+    (let [low (java.util.UUID/fromString "7fffffff-ffff-ffff-ffff-ffffffffffff")
+          high (java.util.UUID/fromString "80000000-0000-0000-0000-000000000000")
+          _ (seed! node [{:id low :status :pending}
+                         {:id high :status :pending}])
+          opts {:source-id "gesso/test-worker" :worker-id "worker"
+                :page-size 1 :max-pages 1}
+          first-page (worker/acquire-sweep! node opts)
+          next-page (worker/acquire-sweep! node
+                                           (assoc opts :after (:next-after first-page)))]
+      (is (= [low] (mapv :intent-id (:results first-page))))
+      (is (= :page-budget (:halt-reason first-page)))
+      (is (= low (:next-after first-page)))
+      (is (= [high] (mapv :intent-id (:results next-page))))
+      (is (= :observed-end (:halt-reason next-page)))
+      (is (= :leased (:gesso.live.outbox/status (row node low))))
+      (is (= :leased (:gesso.live.outbox/status (row node high)))))))
+
 (deftest unexpected-acquisition-errors-are-not-silently-converted-test
   (with-open [node (xtn/start-node {})]
     (let [[id] (seed! node [{:id (random-uuid) :status :pending}])]

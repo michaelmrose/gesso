@@ -62,6 +62,16 @@
     (reject! :invalid-cursor {:after (:after opts)}))
   opts)
 
+(defn- ascending-uuid-identities?
+  "Verify that every returned identity advances the XTDB SQL keyset cursor.
+   SQL UUID ordering follows the unsigned canonical UUID representation;
+   Java UUID.compareTo sorts its signed long fields and differs at 0x8000..."
+  [after identities]
+  (let [ordered (cond->> identities after (cons after))]
+    (every? (fn [[left right]]
+              (neg? (compare (str left) (str right))))
+            (partition 2 1 ordered))))
+
 (defn- validate-discovery-page!
   "Fail closed if a discovery response violates its mandatory page contract.
    Validate the ENTIRE advisory page before its first physical acquisition,
@@ -83,6 +93,10 @@
                           (:action candidate))))
                   candidates)
           (= (count identities) (count (distinct identities)))
+          ;; A page behind :after, or in decreasing order, can silently skip
+          ;; work or drive a paged sweep backward even if its cursor differs.
+          ;; Validate against the same ascending UUID order as XTDB's SQL.
+          (ascending-uuid-identities? (:after request) identities)
           (or (true? more?) (false? more?))
           (if more?
             (and (= (:limit request) (count candidates))
