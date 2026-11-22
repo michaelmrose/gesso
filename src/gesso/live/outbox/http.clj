@@ -95,6 +95,40 @@
                    (update :cancelling-session-ids disj key))))
       (throw e))))
 
+(defn- retry-disconnected-sse!
+  "Explicitly retry cleanup for sessions whose HTTP response has closed.
+
+   This never cancels a still-open response, closes the route, or creates a
+   new source interest. Retain every failed retry in the normal cancellation
+   registry and occupied-slot budget. Serialize with route shutdown so the
+   same session is not canceled by two route-owned cleanup passes at once."
+  [state]
+  (locking state
+    (let [disconnected (merge
+                        (into {}
+                              (filter (fn [[_ session]]
+                                        (stream/closed? (:stream session))))
+                              (:retry-cancellations @state))
+                        (:disconnect-cleanups @state))
+          failures (reduce-kv
+                    (fn [errors key session]
+                      (try
+                        (cancel-registered-sse! state key session)
+                        errors
+                        (catch Throwable e (conj errors e))))
+                    [] disconnected)]
+      ;; Attempt every orphan before propagating the first cancellation error.
+      ;; Interrupted cleanup must preserve the calling thread's interrupt flag.
+      (doseq [error failures]
+        (restore-interrupt! error))
+      (when-let [failure (first failures)]
+        (doseq [extra (rest failures)]
+          (when-not (identical? failure extra)
+            (.addSuppressed ^Throwable failure ^Throwable extra)))
+        (throw failure))
+      {:attempted (count disconnected)
+       :recovered (count disconnected)})))
+
 (defn- drained-state? [{:keys [closed? close-completed? connections starting
                               retry-cancellations disconnect-cleanups
                               cancelling-session-ids occupied-session-ids
@@ -163,7 +197,8 @@
 
 (defn wrap-authorized-sse
   "Return {:handler Ring-handler :close! callback :active-count callback
-           :occupied-count callback :pending-authorization-count callback :closed? callback
+           :occupied-count callback :retry-disconnected! callback
+           :pending-authorization-count callback :closed? callback
            :drained? callback :await-drained! callback}.
 
    Requires a started concrete host, a fixed canonical :path (absolute URL
@@ -220,7 +255,14 @@
    operations, and unreleased cleanup obligations (counting each session once).
    Slot accounting is constant-time regardless of how many active SSE sessions
    are registered. A slot remains occupied until all session cleanup owners
-   have relinquished it.
+   have relinquished it. :retry-disconnected! permits an explicit owner to
+   retry cleanup of already-closed response sessions without closing this
+   HTTP route or canceling healthy connections. It returns attempted/recovered
+   counts if all retries succeed; a failure retains the slot and propagates
+   the original error after attempting the other disconnected sessions.
+   Recovery is not automatic; the host must arrange safe retry scheduling.
+   A route previously closed by :close! still requires a successful :close!
+   pass to establish its separate provider-safe close completion marker.
    Since :close! can return while authorization/startup is still in flight,
    :drained? reports the stronger lifecycle condition: route close! has
    completed its cancellation pass successfully, no authorization or startup
@@ -628,6 +670,7 @@
      :close! close!
      :active-count (fn [] (count (:connections @state)))
      :occupied-count (fn [] (occupied-sse-slots @state))
+     :retry-disconnected! (fn [] (retry-disconnected-sse! state))
      :pending-authorization-count (fn [] (:pending-authorizations @state))
      :closed? (fn [] (:closed? @state))
      :drained? (fn [] (drained-state? @state))

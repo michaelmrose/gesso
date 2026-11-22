@@ -3350,3 +3350,142 @@
                  (reset! allow-release? true)
                  ((:close! route))))))))))
 )
+(deftest disconnected-source-cleanup-recovers-without-closing-route-test
+  ;; A transient failure while releasing a *disconnected* source tap must
+  ;; not permanently consume its route slot or require retiring unrelated
+  ;; HTTP/SSE connections. Only explicitly orphaned sessions are retried.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           open-original flow/open-source-flow!
+           allow-release? (atom false)
+           attempts (atom 0)
+           terminal (promise)
+           failure (ex-info "temporary source-release failure" {:test :v2236})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source options]
+            (let [flow (open-original source options)
+                  release! (:close! flow)]
+              (assoc flow :close!
+                     (fn []
+                       (swap! attempts inc)
+                       (if @allow-release?
+                         (release!)
+                         (throw failure))))))
+          ;; Do not let the event collector independently release the tap:
+          ;; this test isolates the physical response's source-release hook.
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 1
+                                 :sse-options {:keepalive-ms 15
+                                               :frame-write-timeout-ms 600
+                                               :on-close #(deliver terminal %)}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}]
+             (try
+               (let [response ((:handler route) request)]
+                 (is (= 200 (:status response)))
+                 (is (= :keepalive-error
+                        (:reason (deref terminal 4000 ::timeout))))
+                 (is (stream/closed? (:body response)))
+                 (is (pos? @attempts))
+                 (is (= 1 (:subscription-count (source/stats src))))
+                 (is (zero? ((:active-count route))))
+                 (is (= 1 ((:occupied-count route))))
+                 (is (= {:status 503 :headers {}
+                         :body "Live connection capacity reached"}
+                        ((:handler route) request)))
+                 (let [retry! (:retry-disconnected! route)]
+                   (is (fn? retry!) "A route must expose explicit recovery")
+                   (when (fn? retry!)
+                     (is (identical? failure
+                                     (try (retry!) nil
+                                          (catch Throwable e e)))
+                         "A failed retry must report its original cause")
+                     (is (= 1 ((:occupied-count route)))
+                         "Failed recovery must not free the occupied slot")
+                     (is (= 1 (:subscription-count (source/stats src))))
+                     (reset! allow-release? true)
+                     (is (= {:attempted 1 :recovered 1} (retry!)))
+                     (is (zero? ((:occupied-count route))))
+                     (is (zero? (:subscription-count (source/stats src))))
+                     (is (false? ((:closed? route)))
+                         "Recovery must not retire the healthy route")
+                     (let [next-response ((:handler route) request)]
+                       (is (= 200 (:status next-response)))
+                       (is (= 1 (:subscription-count (source/stats src))))
+                       (stream/close! (:body next-response))
+                       (is (eventually #(zero? ((:occupied-count route)))))
+                       (is (eventually #(zero? (:subscription-count
+                                               (source/stats src))))))
+                     (is (= {:attempted 0 :recovered 0} (retry!))
+                         "Recovery is idempotent once the orphan is gone")))
+                 (is (= :keepalive-error
+                        (:reason (deref terminal 0 ::timeout)))
+                     "Source cleanup cannot rewrite an unknown write result"))
+               (finally
+                 (reset! allow-release? true)
+                 ((:close! route))))))))))
+)
+
+(deftest disconnected-retry-preserves-unrelated-live-connection-test
+  ;; Retry only orphaned *closed* response owners. An unrelated active HTTP
+  ;; session must not be canceled to reclaim the failed one's slot.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           real-open flow/open-source-flow!
+           opened (atom 0)
+           release-permitted? (atom false)
+           failure (ex-info "first release failed" {:test :v2236-peer})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source opts]
+            (let [result (real-open source opts)
+                  first? (= 1 (swap! opened inc))
+                  close! (:close! result)]
+              (if first?
+                (assoc result :close!
+                       (fn [] (if @release-permitted?
+                                (close!)
+                                (throw failure))))
+                result)))
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 2
+                                 :sse-options {:keepalive-ms 15000
+                                               :frame-write-timeout-ms 30000}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}]
+             (try
+               (let [orphan ((:handler route) request)
+                     healthy ((:handler route) request)]
+                 (is (= [200 200] [(:status orphan) (:status healthy)]))
+                 (is (= 2 (:subscription-count (source/stats src))))
+                 (stream/close! (:body orphan))
+                 (is (eventually #(= 1 ((:active-count route)))))
+                 (is (= 2 ((:occupied-count route))))
+                 (reset! release-permitted? true)
+                 (is (= {:attempted 1 :recovered 1}
+                        ((:retry-disconnected! route))))
+                 (is (= 1 ((:occupied-count route))))
+                 (is (= 1 ((:active-count route))))
+                 (is (= 1 (:subscription-count (source/stats src))))
+                 (is (not (stream/closed? (:body healthy)))
+                     "Retrying the orphan must not cancel a healthy SSE stream")
+                 (is (false? ((:closed? route))))
+                 (stream/close! (:body healthy))
+                 (is (eventually #(zero? ((:occupied-count route)))))
+                 (is (eventually #(zero? (:subscription-count
+                                         (source/stats src))))))
+               (finally
+                 (reset! release-permitted? true)
+                 ((:close! route))))))))))
+)
