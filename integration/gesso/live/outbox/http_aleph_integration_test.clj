@@ -426,3 +426,156 @@
           (try (.close ^Closeable server) (catch Throwable _ nil)))
         (source/close! src)
         (.shutdownNow executor)))))
+
+(deftest real-aleph-authorized-route-disconnect-retires-owned-capacity-test
+  ;; Exercise the actual Biff/XTDB-hosted authorized SSE route, NOT a
+  ;; separately constructed Live session. The session-admission callback
+  ;; hands the Aleph listener the route-owned cancellation handle, so
+  ;; disconnect cleanup and explicit host retry share a single ledger.
+  (let [standard ((requiring-resolve
+                   'gesso.live.application-preflight.fixture/standard-operations))
+        render ((requiring-resolve
+                   'gesso.live.application-preflight.fixture/render-context) standard)
+        button ((requiring-resolve
+                   'gesso.live.application-preflight.fixture/rendered-operation-button)
+                render :request/claim "/operations/request/claim")
+        fixture (requiring-resolve
+                 'gesso.live.application-preflight.fixture/with-surfaced-application)]
+    (fixture
+     {:request-board [:main button]}
+     (fn [{:keys [assembly]}]
+       (let [host-start (requiring-resolve 'gesso.live.outbox.host/start!)
+             host-stop (requiring-resolve 'gesso.live.outbox.host/stop!)
+             config {:xtdb-config {}
+                     :source-id "gesso/v2255-aleph-route"
+                     :rules-context {}
+                     :worker-options {:worker-id "v2255-aleph-worker"
+                                      :poll-ms 25}
+                     :live-options
+                     {:rules [{:when-topic :request
+                               :expand (fn [_ change]
+                                         [(select-keys change
+                                                       [:topic :id :change/kind])])}]
+                      :source-options {:coalesce-window-ms 0}
+                      :dispatch-options {:threads 1 :queue-size 8
+                                         :on-overflow :throw}}}
+             app (host-start assembly
+                             (fn [_] {:status 200 :headers {} :body "ordinary"})
+                             config)
+             src (:source (:gesso.live/system app))
+             capture (capture/prepare!)
+             executor (java.util.concurrent.Executors/newFixedThreadPool 2)
+             server-ref (atom nil)
+             admitted (atom [])
+             host-stopped? (atom false)
+             route (http/wrap-authorized-sse
+                    app {:path "/live/events" :max-connections 1
+                         :authorize-subscription
+                         (constantly {:topic :request :id "v2255-item"})
+                         :on-session-admitted!
+                         (fn [request owned-session]
+                           (let [bridge (::route-bridge request)
+                                 channel (:aleph/channel request)
+                                 hook (aleph-live/attach!
+                                       {:channel channel
+                                        :session owned-session
+                                        :bridge bridge
+                                        :executor executor})]
+                             (swap! admitted conj {:session owned-session
+                                                   :bridge bridge
+                                                   :channel channel
+                                                   :hook hook})))})
+             guard (listener/prepare!
+                    {:dispatch-async!
+                     (fn [request done!]
+                       (let [bridge (terminal/prepare! done!)
+                             response ((:handler route)
+                                       (assoc request ::route-bridge bridge))]
+                         ((:register-response! capture)
+                          (:aleph/channel request) bridge)
+                         (when-not (stream/stream? (:body response))
+                           ((:producer-ceased! bridge)))
+                         response))
+                     :max-in-flight 4
+                     :on-rejected!
+                     (constantly {:status 503 :headers {} :body "draining"})
+                     :stop-accept! (fn []
+                                     (.close ^Closeable @server-ref)
+                                     {:outcome :stopped})})
+             shutdown (http/prepare-managed-http-shutdown
+                       {:route route
+                        :stop-listener! (fn [] ((:stop! guard) 3000))
+                        :stop-host! (fn []
+                                      (host-stop app)
+                                      (reset! host-stopped? true)
+                                      {:outcome :stopped})
+                        :drain-timeout-ms 3000})
+             socket (java.net.Socket.)]
+         (try
+           (reset! server-ref
+                   (aleph/start-server (:handle! guard)
+                                       {:port 0 :http-versions [:http1]
+                                        :transport :nio :shutdown-timeout 0
+                                        :http1-pipeline-transform
+                                        (:http1-pipeline-transform capture)}))
+           (.connect socket
+                     (java.net.InetSocketAddress.
+                      "127.0.0.1" (aleph-netty/port @server-ref))
+                     2000)
+           (.setSoTimeout socket 5000)
+           (.write (.getOutputStream socket)
+                   (.getBytes (str "GET /live/events HTTP/1.1\r\n"
+                                   "Host: 127.0.0.1\r\n"
+                                   "Connection: keep-alive\r\n\r\n")
+                              StandardCharsets/US_ASCII))
+           (.flush (.getOutputStream socket))
+           (let [reader (java.io.BufferedReader.
+                         (java.io.InputStreamReader.
+                          (.getInputStream socket) StandardCharsets/UTF_8))]
+             (is (re-find #"^HTTP/1\.1 200 " (or (.readLine reader) "")))
+             (loop []
+               (let [line (.readLine reader)]
+                 (when-not line (throw (ex-info "Lost SSE headers" {})))
+                 (when (seq line) (recur))))
+             (is (eventually #(= 1 (:subscription-count (source/stats src)))))
+             (is (= 1 ((:occupied-count route))))
+             (is (= 1 (count @admitted)))
+             (let [response ((:handler route)
+                             {:uri "/live/events" :request-method :get})]
+               (is (= 503 (:status response))
+                   "Route cap still applies while Aleph owns first stream"))
+             (source/emit! src {:topic :request :id "v2255-item"
+                                :change/kind :updated})
+             (is (loop [n 0]
+                   (cond (> n 30) false
+                         :else (let [line (.readLine reader)]
+                                 (cond (nil? line) false
+                                       (= "event: live-update" line) true
+                                       :else (recur (inc n)))))))
+             (.setSoLinger socket true 0)
+             (.close socket)
+             (let [{:keys [bridge hook channel]} (first @admitted)]
+               (is (eventually #(.isDone (.closeFuture channel))))
+               (is (eventually #(:released? ((:status hook)))))
+               (is (= 1 (:release-attempts ((:status hook)))))
+               (is (nil? (:last-error ((:status hook)))))
+               (is (true? (:terminal? ((:status bridge))))))
+             (is (eventually #(and (zero? ((:occupied-count route)))
+                                   (zero? ((:disconnected-count route)))
+                                   (zero? (:subscription-count (source/stats src)))
+                                   (zero? ((:active-count guard))))))
+             (is (= 0 (:pending ((:stats capture)))))
+             (is (= :stopped (:outcome ((:stop! shutdown)))))
+             (is @host-stopped?)
+             (is (true? ((:drained? route))))
+             (is (= :stopped (:outcome ((:stop! shutdown))))))
+           (finally
+             (.close socket)
+             (when-not @host-stopped?
+               (try ((:stop! shutdown)) (catch Throwable _ nil)))
+             (when-let [server @server-ref]
+               (try (.close ^Closeable server) (catch Throwable _ nil)))
+             (.shutdownNow executor)
+             ;; If shutdown was not certified, the fixture must still
+             ;; terminate its temporary XTDB host; never leak test resources.
+             (when-not @host-stopped? (host-stop app)))))))))

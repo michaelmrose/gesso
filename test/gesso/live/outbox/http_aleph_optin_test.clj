@@ -11,7 +11,7 @@
     (is (not (contains? (:deps project) 'aleph/aleph)))
     (is (= {:mvn/version "0.9.11"}
            (get-in alias [:extra-deps 'aleph/aleph])))
-    (is (= ["integration"] (:extra-paths alias)))
+    (is (= ["integration" "test"] (:extra-paths alias)))
     (is (not-any? #{"integration"} (get-in project [:aliases :test :extra-paths])))
     (is (not-any? #{"integration"} (:paths project)))
     (is (not (contains? (get-in project [:aliases :test :extra-deps])
@@ -43,4 +43,6 @@
     (is (str/includes? workflow "- 'integration/gesso/live/outbox/http_aleph*'"))
     (is (str/includes? workflow "- 'src/gesso/live/outbox/http_listener.clj'"))
     (is (str/includes? workflow "- 'src/gesso/live/outbox/http_aleph_live.clj'"))
-    (is (str/includes? workflow "- 'test/gesso/live/outbox/http_aleph_live_test.clj'"))))
+    (is (str/includes? workflow "- 'test/gesso/live/outbox/http_aleph_live_test.clj'"))
+    (is (str/includes? workflow "- 'src/gesso/live/outbox/http.clj'"))
+    (is (str/includes? workflow "- 'test/gesso/live/outbox/http_test.clj'"))))

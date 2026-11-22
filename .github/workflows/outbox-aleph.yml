@@ -17,6 +17,8 @@ on:
       - 'test/gesso/live/outbox/http_aleph_live_test.clj'
       - 'src/gesso/live/outbox/http_netty_terminal.clj'
       - 'src/gesso/live/outbox/http_listener.clj'
+      - 'src/gesso/live/outbox/http.clj'
+      - 'test/gesso/live/outbox/http_test.clj'
       - 'test/gesso/live/outbox/http_aleph_optin_test.clj'
   workflow_dispatch:
 

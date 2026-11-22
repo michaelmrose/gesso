@@ -235,6 +235,20 @@
            :pending-authorization-count callback :closed? callback
            :drained? callback :await-drained! callback}.
 
+   Optional :on-session-admitted! is a trusted, synchronous transport
+   installation callback (request, route-owned-session) called after
+   authorization, source admission, and route registration, but before
+   handing the HTTP 200 stream to the server. The provided session's
+   :cancel! is a route-owned cancellation handle: it serializes with
+   route shutdown, retains the connection slot on failed source release,
+   and participates in :retry-disconnected! and ordered :close!. The callback
+   MUST only register bounded asynchronous adapter hooks; it cannot
+   block indefinitely or claim an independent physical source owner.
+   Failure to install the hook rolls the session back under the same
+   route-owned accounting. Non-SSE, unauthorized and rejected requests
+   never invoke it. This opt-in hook does not automatically install an
+   Aleph listener or certify browser delivery.
+
    Requires a started concrete host, a fixed canonical :path (absolute URL
    path with no query string, repeated slash, or dot traversal segment), and
    a trusted :authorize-subscription callback. Authorization is bounded by
@@ -346,13 +360,15 @@
    silently ignoring a misspelled operational setting. Duplicate HTTP header
    names that differ only by case also fail preflight; Ring maps distinguish
    them, but HTTP does not."
-  [started {:keys [path authorize-subscription sse-options] :as options}]
+  [started {:keys [path authorize-subscription sse-options
+                   on-session-admitted!] :as options}]
   (when-not (and (map? options)
                  (= (set (keys options))
                     (set (filter #(contains? options %)
                                  [:path :authorize-subscription :sse-options
                                   :max-connections
-                                  :max-pending-authorizations]))))
+                                  :max-pending-authorizations
+                                  :on-session-admitted!]))))
     (reject! :unknown-options {}))
   (when-not (and (string? path)
                  (re-matches #"/[A-Za-z0-9._~/-]+" path)
@@ -365,6 +381,9 @@
     (reject! :invalid-path {:path path}))
   (when-not (fn? authorize-subscription)
     (reject! :missing-authorization-callback {}))
+  (when (and (contains? options :on-session-admitted!)
+             (not (fn? on-session-admitted!)))
+    (reject! :invalid-session-admission-callback {}))
   (doseq [[option default reason]
           [[:max-connections default-max-connections :invalid-max-connections]
            [:max-pending-authorizations default-max-pending-authorizations
@@ -674,7 +693,53 @@
                                                            provider-closed?)
                                                      "Live shutting down"
                                                      "Live stream unavailable")})
-                                          (:response session)))
+                                          (do
+                                            (when on-session-admitted!
+                                              ;; This is the original source-
+                                              ;; backed session with a single
+                                              ;; route-mediated cancellation
+                                              ;; boundary. No parallel Aleph
+                                              ;; source ownership is invented.
+                                              (on-session-admitted!
+                                               request
+                                               (assoc session :cancel!
+                                                      (fn []
+                                                        (locking state
+                                                          (cond
+                                                            ;; The route has already confirmed
+                                                            ;; physical release. A late Aleph
+                                                            ;; channel close must not re-enter
+                                                            ;; providers after shutdown.
+                                                            (not (contains?
+                                                                  (:occupied-session-ids @state)
+                                                                  key))
+                                                            :already-released
+
+                                                            ;; Ordered route close! owns every
+                                                            ;; remaining cleanup attempt once
+                                                            ;; shutdown has started.
+                                                            (:closed? @state)
+                                                            (reject!
+                                                             :session-cancel-after-route-close
+                                                             {})
+
+                                                            :else
+                                                            (cancel-registered-sse!
+                                                             state key session)))))))
+                                            ;; A hook may synchronously
+                                            ;; observe an already-dead channel
+                                            ;; or invoke cancellation itself.
+                                            ;; Recheck before returning 200.
+                                            (if (or (:closed? @state)
+                                                    (live/closed? live-system)
+                                                    (stream/closed? (:stream session)))
+                                              (do
+                                                (vreset! rollback-started? true)
+                                                (cancel-registered-sse!
+                                                 state key session)
+                                                {:status 503 :headers {}
+                                                 :body "Live stream unavailable"})
+                                              (:response session)))))
                                       (catch Throwable admission-error
                                         ;; Preserve a failed cancellation for
                                         ;; an explicit close! retry, and retain

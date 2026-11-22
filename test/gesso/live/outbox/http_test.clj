@@ -4230,3 +4230,206 @@
                  (when @worker ((:stop! @worker) 2000))
                  ((:close! route))))))))))
 )
+
+(deftest authorized-session-hook-cancels-through-route-ledger-test
+  (setup-host
+   (fn [started]
+     (let [admitted (atom [])
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events" :max-connections 1
+                           :authorize-subscription (constantly scope)
+                           :on-session-admitted!
+                           (fn [req owned-session]
+                             (swap! admitted conj [req owned-session]))})
+           request {:uri "/live/events" :request-method :get}
+           response ((:handler route) request)
+           src (:source (:gesso.live/system started))]
+       (try
+         (is (= 200 (:status response)))
+         (is (= 1 (count @admitted)))
+         (is (= request (ffirst @admitted)))
+         (let [session (second (first @admitted))]
+           (is (identical? (:body response) (:stream session)))
+           (is (= 1 ((:occupied-count route))))
+           (is (= 1 (:subscription-count (source/stats src))))
+           (is (= 503 (:status ((:handler route) request))))
+           ((:cancel! session))
+           (is (eventually #(and (zero? ((:occupied-count route)))
+                                 (zero? (:subscription-count (source/stats src))))))
+           (is (zero? ((:disconnected-count route))))
+           (is (= 200 (:status ((:handler route) request)))
+               "Canceled route-owned session must free admission capacity"))
+         (finally ((:close! route))))))))
+
+(deftest failing-route-owned-aleph-cancel-keeps-capacity-and-retry-test
+  (setup-host
+   {:max-active-consumers 2}
+   (fn [started]
+     (let [original flow/open-source-flow!
+           fail-release? (atom true)
+           source-failure (ex-info "temporary physical source failure" {:test :v2255})
+           acquired (atom nil)]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [src options]
+            (let [opened (original src options)
+                  close! (:close! opened)]
+              (assoc opened :close!
+                     (fn []
+                       (when @fail-release?
+                         (throw source-failure))
+                       (close!)))))
+          ;; Keep the collector's separate release path from masking the
+          ;; response-owned close failure under test.
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events" :max-connections 1
+                                 :authorize-subscription (constantly scope)
+                                 :on-session-admitted!
+                                 (fn [_ session] (reset! acquired session))})
+                 request {:uri "/live/events" :request-method :get}
+                 response ((:handler route) request)
+                 src (:source (:gesso.live/system started))]
+             (try
+               (is (= 200 (:status response)))
+               (is (identical? source-failure
+                               (try ((:cancel! @acquired))
+                                    (catch Throwable e e))))
+               (is (= 1 ((:occupied-count route))))
+               (is (= 1 ((:disconnected-count route))))
+               (is (= 1 (:active-consumer-count (source/stats src))))
+               (is (= 503 (:status ((:handler route) request))))
+               (reset! fail-release? false)
+               (is (= {:attempted 1 :recovered 1}
+                      ((:retry-disconnected! route) 1)))
+               (is (eventually #(and (zero? ((:occupied-count route)))
+                                     (zero? (:active-consumer-count (source/stats src))))))
+               (is (= 200 (:status ((:handler route) request))))
+               (finally ((:close! route)))))))))))
+
+(deftest session-admission-hook-failure-rolls-back-without-leaks-test
+  (setup-host
+   (fn [started]
+     (let [seen (atom 0)
+           refused (ex-info "cannot register Aleph channel" {:test :v2255})
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 1
+                           :authorize-subscription (constantly scope)
+                           :on-session-admitted!
+                           (fn [_ _] (swap! seen inc) (throw refused))})
+           request {:uri "/live/events" :request-method :get}
+           src (:source (:gesso.live/system started))]
+       (try
+         (is (identical? refused
+                         (try ((:handler route) request)
+                              (catch Throwable e e))))
+         (is (= 1 @seen))
+         (is (eventually #(and (zero? ((:occupied-count route)))
+                               (zero? ((:disconnected-count route)))
+                               (zero? (:subscription-count (source/stats src))))))
+         (is (= 403 (:status
+                     ((:handler (http/wrap-authorized-sse
+                                 started {:path "/other"
+                                          :authorize-subscription (constantly nil)
+                                          :on-session-admitted! (fn [_ _]
+                                                                  (throw refused))}))
+                      {:uri "/other" :request-method :get}))))
+         (finally ((:close! route))))))))
+
+(deftest route-session-admission-hook-is-validated-before-start-test
+  (setup-host
+   (fn [started]
+     (is (= :invalid-session-admission-callback
+            (exception-reason
+             #(http/wrap-authorized-sse
+               started {:path "/live/events"
+                        :authorize-subscription (constantly scope)
+                        :on-session-admitted! :not-a-function})))))))
+
+(deftest synchronously-canceled-route-admission-never-returns-dead-eventsource-test
+  (setup-host
+   (fn [started]
+     (let [route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)
+                           :on-session-admitted!
+                           (fn [_ session] ((:cancel! session)))})
+           src (:source (:gesso.live/system started))]
+       (try
+         (let [response ((:handler route)
+                         {:uri "/live/events" :request-method :get})]
+           (is (= 503 (:status response))))
+         (is (zero? ((:occupied-count route))))
+         (is (zero? ((:disconnected-count route))))
+         (is (zero? (:subscription-count (source/stats src))))
+         (finally ((:close! route))))))))
+
+(deftest route-owned-session-cancel-is-idempotent-after-route-shutdown-test
+  (setup-host
+   (fn [started]
+     (let [admitted (atom nil)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)
+                           :on-session-admitted!
+                           (fn [_ session] (reset! admitted session))})
+           response ((:handler route)
+                     {:uri "/live/events" :request-method :get})
+           src (:source (:gesso.live/system started))]
+       (is (= 200 (:status response)))
+       (is (= 1 ((:occupied-count route))))
+       (is (= :closed ((:close! route))))
+       (is (true? ((:drained? route))))
+       (is (= :already-released ((:cancel! @admitted)))
+           "Late Netty channel closure must not touch already retired source")
+       (is (zero? (:subscription-count (source/stats src))))
+       (is (zero? ((:occupied-count route))))))))
+
+(deftest route-owned-session-retries-obey-ordered-close-exclusivity-test
+  (setup-host
+   (fn [started]
+     (let [original flow/open-source-flow!
+           fail-release? (atom true)
+           owned (atom nil)
+           failure (ex-info "route closing before tap can release" {:test :v2255})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [src opts]
+            (let [flow (original src opts)
+                  close! (:close! flow)]
+              (assoc flow :close!
+                     (fn []
+                       (if @fail-release?
+                         (throw failure)
+                         (close!))))))
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :authorize-subscription (constantly scope)
+                                 :on-session-admitted!
+                                 (fn [_ session] (reset! owned session))})
+                 response ((:handler route)
+                           {:uri "/live/events" :request-method :get})
+                 src (:source (:gesso.live/system started))]
+             (try
+               (is (= 200 (:status response)))
+               (is (identical? failure
+                               (try ((:close! route)) (catch Throwable e e))))
+               (is (= 1 ((:occupied-count route))))
+               (is (= :session-cancel-after-route-close
+                      (exception-reason #((:cancel! @owned)))))
+               (is (= 1 (:active-consumer-count (source/stats src))))
+               (reset! fail-release? false)
+               (is (= :closed ((:close! route))))
+               (is (= :already-released ((:cancel! @owned))))
+               (is (zero? ((:occupied-count route))))
+               (is (zero? (:active-consumer-count (source/stats src))))
+               (finally
+                 (reset! fail-release? false)
+                 ((:close! route))))))))))
+)

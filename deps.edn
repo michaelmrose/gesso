@@ -62,7 +62,7 @@
   ;; integration/ tests fail if a real Aleph server cannot be started;
   ;; they are not included by the :test alias alone.
   :aleph-integration
-  {:extra-paths ["integration"]
+  {:extra-paths ["integration" "test"]
    :extra-deps
    {aleph/aleph {:mvn/version "0.9.11"}}}
 

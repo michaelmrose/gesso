@@ -127,3 +127,31 @@ Aleph listener acceptance shutdown, and combined host-provider drain under
 load. A successful outbound ChannelFuture is only Netty pipeline completion,
 not TCP acknowledgment or browser DOM adoption. Do not claim Aleph-backed
 production lifecycle safety until those separate gates pass.
+
+## Managed authorized route ownership handoff (v2255)
+
+`wrap-authorized-sse` optionally accepts `:on-session-admitted!`, a trusted
+synchronous callback receiving the already-authorized Ring request and a
+**route-owned** Live SSE session, before the HTTP 200 stream is returned.
+The session's `:cancel!` is mediated by the route's existing cancellation
+and recovery ledger; it is **not** a second independent source owner. The
+Aleph adapter may give that session to `http-aleph-live/attach!` along with
+the Netty channel, its terminal bridge, and a bounded cleanup executor.
+The hook is never run for denied, non-SSE or over-capacity requests.
+
+Failed hook installation rolls back the registered session. An immediate
+cancellation inside the hook cannot return an already-dead HTTP 200 stream.
+After successful release, later disconnect calls are idempotent even if the
+route has shut down. Once route shutdown starts, *unresolved* release debt
+belongs exclusively to its ordered `:close!` retry; a late channel callback
+may not start a separate cancellation attempt. The Aleph cleanup adapter can
+retain its own retry obligation until this route drain completes.
+
+The v2255 strict Aleph test starts an actual Biff/XTDB-backed Gesso host and
+an authorized managed SSE route, verifies a real source-generated frame on
+the wire, resets the client socket and checks the combined route's occupied
+capacity, indexed source subscription, pending Netty writes, and listener
+ownership drain. This new test is **not qualified** until the corresponding
+v2255 GitHub Actions run succeeds. As before, the host must call ordered
+route/listener/host shutdown; this hook does not automatically select Aleph
+or cover unrelated application-owned asynchronous continuations.
