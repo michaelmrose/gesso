@@ -69,7 +69,15 @@
 (defn- require-current-intent!
   [node acquisition expected-source-id]
   (let [intent-id (:intent-id acquisition)
-        rows (xt/q node [select-current-sql intent-id])]
+        rows (try
+               (xt/q node [select-current-sql intent-id])
+               (catch InterruptedException cause
+                 ;; The physical pre-dispatch read is indeterminate after an
+                 ;; interrupted XTDB operation. Preserve JVM cancellation
+                 ;; while propagating the exact error; never infer that the
+                 ;; lease is missing or admit a source emission from it.
+                 (.interrupt (Thread/currentThread))
+                 (throw cause)))]
     (when-not (= 1 (count rows))
       (reject! :missing-or-ambiguous-intent {:intent-id intent-id
                                              :row-count (count rows)}))

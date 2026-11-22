@@ -237,6 +237,70 @@
           (Thread/interrupted)
           (live/close! system))))))
 
+(deftest interrupted-delivery-preflight-read-keeps-original-error-and-no-emission-test
+  ;; The physical current-row read precedes Live source acceptance. A failed
+  ;; read is NOT proof that a lease is missing, present, or still current.
+  ;; Preserve the original InterruptedException and JVM cancellation signal,
+  ;; without emitting any invalidation or attempting an acknowledgment.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)]
+      (try
+        (doseq [phase [:current :stale]]
+          (let [id (random-uuid)
+                _ (seed! node id)
+                lease (acquire! node id)
+                _ (when (= phase :stale)
+                    (xt/execute-tx node
+                                   [[:put-docs outbox/intent-table
+                                     (-> (row node id)
+                                         (dissoc :xt/system-from)
+                                         (assoc :gesso.live.outbox/lease-owner
+                                                "other-worker"))]]))
+                before (row node id)
+                tap (source/subscribe (:source system)
+                                      {:topic :request :id subject-id})
+                cause (InterruptedException.
+                       (str (name phase) " lease preflight interrupted"))
+                reads (atom 0)
+                acknowledgments (atom 0)]
+            (try
+              (Thread/interrupted)
+              (let [failure
+                    (with-redefs [xt/q (fn [& _]
+                                         (swap! reads inc)
+                                         (throw cause))
+                                  acknowledgment/acknowledge-dispatch!
+                                  (fn [& _]
+                                    (swap! acknowledgments inc)
+                                    (throw (AssertionError.
+                                            "No ack before physical read")))]
+                      (try
+                        (delivery/dispatch-acquired!
+                         node system {} lease source-id)
+                        (catch Throwable error error)))
+                    interrupted? (.isInterrupted (Thread/currentThread))]
+                (Thread/interrupted)
+                (is (identical? cause failure)
+                    (str phase " must propagate exact physical read failure"))
+                (is interrupted?
+                    (str phase " must preserve JVM cancellation signal"))
+                (is (= 1 @reads)
+                    "A failed physical preflight must not be retried")
+                (is (zero? @acknowledgments)
+                    "No acknowledgement can follow indeterminate preflight")
+                (is (= ::timeout (deref (s/take! tap) 100 ::timeout))
+                    "No invalidation can be emitted before preflight")
+                (is (= before (row node id))
+                    "Delivery preflight does not change durable lease state")
+                (is (nil? (:gesso.live.outbox/dispatch-receipt-id
+                           (row node id)))))
+              (finally
+                (Thread/interrupted)
+                (s/close! tap)))))
+        (finally
+          (Thread/interrupted)
+          (live/close! system))))))
+
 (deftest unknown-post-acceptance-ack-outcome-has-explicit-classification-test
   (with-open [node (xtn/start-node {})]
     (let [system (create-system) id (random-uuid)]
