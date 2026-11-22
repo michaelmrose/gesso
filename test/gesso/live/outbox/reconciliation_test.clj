@@ -210,6 +210,7 @@
 
 (defn- committed-prefix [intent-id lease-id receipt-id]
   {:intent-id intent-id
+   :worker-id "worker-a"
    :acquisition-status :acquired
    :status :dispatch-accepted
    :lease-id lease-id
@@ -235,6 +236,8 @@
                      (assoc baseline :completed (vec (repeat 129 x)))
                      (assoc baseline :completed [42])
                      (assoc baseline :completed [(dissoc x :receipt-id) y])
+                     (assoc baseline :completed [(dissoc x :worker-id) y])
+                     (assoc baseline :completed [(assoc x :worker-id " ") y])
                      (assoc baseline :completed [(assoc x :lease-id "bad") y])
                      (assoc baseline :completed [(assoc x :status :unsent) y])
                      (assoc baseline :completed [(assoc x :acquisition-status
@@ -276,13 +279,35 @@
                (mapv :status (:completed-observations result))))
         (is (every? :observed-system-from (:completed-observations result)))
         (is (not (contains? result :may-replay?)))
-        ;; Unlike a purely reported completion, a current physical state
-        ;; that changes after the send must no longer be certified as matching.
+        ;; Changing ONLY the physical worker identity while retaining the
+        ;; old lease token and receipt must invalidate reconciliation.
+        ;; This cannot be inferred from lease/receipt equality alone.
         (let [row (physical-row node b)
-              modified (assoc (dissoc row :xt/system-from)
-                              :gesso.live.outbox/dispatch-receipt-id
-                              (random-uuid))]
-          (xt/execute-tx node [[:put-docs outbox/intent-table modified]])
+              wrong-owner (-> row
+                              (dissoc :xt/system-from)
+                              (assoc :gesso.live.outbox/lease-owner "other-worker"))]
+          (xt/execute-tx node [[:put-docs outbox/intent-table wrong-owner]])
+          (is (= [:matching-acknowledgment-recorded
+                  :different-acknowledgment-recorded]
+                 (mapv :status
+                       (:completed-observations
+                        (reconciliation/inspect! node source-id report))))
+              "A matching token and receipt with a foreign owner is not our completion")
+          ;; Restore the original physical evidence to prove this check is
+          ;; the owner identity, not an unrelated terminal-status failure.
+          (xt/execute-tx node [[:put-docs outbox/intent-table
+                                (dissoc row :xt/system-from)]])
+          (is (= [:matching-acknowledgment-recorded
+                  :matching-acknowledgment-recorded]
+                 (mapv :status
+                       (:completed-observations
+                        (reconciliation/inspect! node source-id report))))
+              "Restoring the correct owner restores qualified observation")
+          ;; Also preserve the existing receipt-change negative test.
+          (let [modified (assoc (dissoc row :xt/system-from)
+                                :gesso.live.outbox/dispatch-receipt-id
+                                (random-uuid))]
+            (xt/execute-tx node [[:put-docs outbox/intent-table modified]]))
           (is (= [:matching-acknowledgment-recorded
                   :different-acknowledgment-recorded]
                  (mapv :status
@@ -377,6 +402,8 @@
       (is (= :gesso.live.outbox/cycle-interrupted (:error/type failure)))
       (is (= 1 (:completed-count failure)))
       (is (= a (get-in failure [:completed 0 :intent-id])))
+      (is (= "worker-a" (get-in failure [:completed 0 :worker-id]))
+          "Real completed prefix must preserve its actual lease owner")
       (is (= b (get-in failure [:in-flight :intent-id])))
       (is (= :matching-acknowledgment-recorded (:status examined)))
       (is (= a (get-in examined [:completed-observations 0 :intent-id])))

@@ -115,6 +115,15 @@ jobs:
           clojure -M:test -n gesso.live.outbox.reclaim-send-race-test \
             2>&1 | tee target/outbox-browser/reclaim-send-race.log
 
+      - name: Verify physical completed-prefix worker correspondence
+        shell: bash
+        run: |
+          set -euo pipefail
+          clojure -M:test -n gesso.live.outbox.reconciliation-test \
+            2>&1 | tee target/outbox-browser/reconciliation-owner.log
+          clojure -M:test -n gesso.live.outbox.cycle-test \
+            2>&1 | tee target/outbox-browser/cycle-owner.log
+
       - name: Require real Chromium EventSource/HTMX/DOM convergence
         shell: bash
         run: |

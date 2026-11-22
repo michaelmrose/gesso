@@ -244,6 +244,9 @@
         {:intent-id intent-id
          :acquisition-status status
          :status :dispatch-accepted
+         ;; Keep the actual acquisition owner in the durable reconciliation
+         ;; report. Lease and receipt alone do not establish who owned it.
+         :worker-id (:worker-id acquired)
          :lease-id lease-id
          :receipt-id (:receipt-id delivered)
          :progression (:progression delivered)})

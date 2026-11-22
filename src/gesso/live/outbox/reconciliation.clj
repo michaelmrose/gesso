@@ -131,6 +131,7 @@
                     (case (:acquisition-status item)
                       (:acquired :reclaimed)
                       (and (= :dispatch-accepted (:status item))
+                           (valid-worker? (:worker-id item))
                            (uuid? (:lease-id item))
                            (uuid? (:receipt-id item))
                            (some? (:progression item)))
@@ -156,6 +157,12 @@
           (let [row (require-row! row intent-id expected-source-id)
                 status (:gesso.live.outbox/status row)
                 matched? (and (= :dispatch-accepted status)
+                              ;; The physical lease owner is part of the
+                              ;; acknowledged dispatch identity. A reused
+                              ;; token/receipt under another owner must not
+                              ;; certify the completed prefix for restart.
+                              (= (:worker-id entry)
+                                 (:gesso.live.outbox/lease-owner row))
                               (= (:lease-id entry)
                                  (:gesso.live.outbox/lease-id row))
                               (= (:receipt-id entry)
