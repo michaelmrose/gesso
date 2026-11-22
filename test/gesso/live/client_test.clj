@@ -802,6 +802,35 @@
         (close-response!
          response)))))
 
+(deftest interrupted-client-startup-wake-preserves-caller-interrupt-test
+  ;; A startup wake can fail after registration but before the caller receives
+  ;; its Ring response. Retire the unowned physical stream, preserve the exact
+  ;; error, and restore the interrupt flag that the JVM may have cleared.
+  (let [channel (test-channel)
+        failed-stream (atom nil)
+        interruption (InterruptedException. "startup wake interrupted")]
+    (try
+      (Thread/interrupted)
+      (let [outcome
+            (with-redefs-fn
+              {#'gesso.live.client/wake-client-stream!
+               (fn [_channel _id stream]
+                 (reset! failed-stream stream)
+                 (throw interruption))}
+              #(try
+                 (connect! channel "client-1")
+                 (catch Throwable error error)))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (identical? interruption outcome)
+            "Startup must preserve its original interruption failure")
+        (is interrupted? "A rethrown interruption must retain the JVM flag")
+        (is (some? @failed-stream))
+        (is (s/closed? @failed-stream))
+        (is (empty? (client/connected-clients channel))))
+      (finally
+        (Thread/interrupted)))))
+
 (deftest stream-response-initial-wake-failure-retires-registration-test
   ;; Stream registration precedes the initial wake. If the physical wake
   ;; fails synchronously, the Ring response is never returned, so nobody
@@ -2546,6 +2575,83 @@ data: client-1
 
     (close-response!
      response-2)))
+
+(defn- close-probe-stream
+  "A real IEventStream wrapper used to exercise Manifold's inlined close!.
+   A Var redefinition cannot intercept that inline JVM interface call."
+  [delegate on-close]
+  (reify manifold.stream.core.IEventStream
+    (close [_]
+      (let [result (s/close! delegate)]
+        (on-close)
+        result))
+    (description [_] nil)
+    (downstream [_] nil)
+    (isSynchronous [_] true)
+    (weakHandle [_ _] nil)))
+
+(deftest interrupted-client-reset-close-preserves-interrupt-and-other-closes-test
+  ;; Channel reset commits empty state before closing displaced streams.
+  ;; One failing close must not prevent other physical close attempts, and
+  ;; its swallowed interruption must be observable by the reset caller.
+  (let [channel (test-channel)
+        one (connect! channel "client-1")
+        two (connect! channel "client-2")
+        originals [(:body one) (:body two)]
+        close-calls (atom [])
+        interruption (InterruptedException. "stream close interrupted")]
+    (try
+      (swap! (:state channel) assoc-in [:clients "client-1" :stream]
+             (close-probe-stream (:body one)
+                                 #(do (swap! close-calls conj :one)
+                                      (throw interruption))))
+      (swap! (:state channel) assoc-in [:clients "client-2" :stream]
+             (close-probe-stream (:body two)
+                                 #(swap! close-calls conj :two)))
+      (Thread/interrupted)
+      (let [result (client/reset-channel! channel)
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (= :reset result))
+        (is (= #{:one :two} (set @close-calls))
+            "Both physical streams must receive a close attempt")
+        (is (every? s/closed? originals))
+        (is (empty? (client/connected-clients channel)))
+        (is interrupted? "A suppressed close interruption must survive"))
+      (finally
+        (Thread/interrupted)
+        (close-response! one)
+        (close-response! two)))))
+
+(deftest interrupted-client-reconnect-close-preserves-new-owner-test
+  ;; Replacement registration is committed before closing the old stream.
+  ;; The best-effort old close must not erase its interrupted signal or
+  ;; unregister the new stream that has already become the current owner.
+  (let [channel (test-channel)
+        old (connect! channel "client-1")
+        old-stream (:body old)
+        close-called (atom false)
+        interruption (InterruptedException. "old stream close interrupted")
+        replacement (atom nil)]
+    (try
+      (swap! (:state channel) assoc-in [:clients "client-1" :stream]
+             (close-probe-stream old-stream
+                                 #(do (reset! close-called true)
+                                      (throw interruption))))
+      (Thread/interrupted)
+      (reset! replacement (connect! channel "client-1"))
+      (let [interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is @close-called "The old stream must receive its close attempt")
+        (is interrupted? "The old close's interruption must be retained")
+        (is (s/closed? old-stream))
+        (is (= (:body @replacement)
+               (get-in @(:state channel) [:clients "client-1" :stream])))
+        (is (not (s/closed? (:body @replacement)))))
+      (finally
+        (Thread/interrupted)
+        (close-response! old)
+        (close-response! @replacement)))))
 
 (deftest reset-channel-closes-each-connected-stream-test
   (let [channel

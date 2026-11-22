@@ -144,12 +144,20 @@
   [client]
   (dissoc client :stream))
 
+(defn- restore-interrupt!
+  "An InterruptedException caught at a client SSE cleanup boundary must
+   preserve the JVM thread's cancellation signal."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defn- close-stream!
   [stream]
   (when stream
     (try
       (s/close! stream)
-      (catch Throwable _
+      (catch Throwable error
+        (restore-interrupt! error)
         nil))))
 
 (defn- call-client-fn
@@ -630,6 +638,7 @@
         ;; must also be identity-guarded: another same-id connection can have
         ;; replaced this stream before the failing wake returns.
         (remove-client-if-same-stream! channel client-id stream)
+        (restore-interrupt! error)
         (throw error)))))
 
 ;; -----------------------------------------------------------------------------
