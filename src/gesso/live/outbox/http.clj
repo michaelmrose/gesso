@@ -25,6 +25,8 @@
                   (assoc data :error/type :gesso.live.outbox/invalid-http-route
                          :reason reason))))
 
+(def ^:private default-max-connections 1024)
+
 (def ^:private reserved-sse-response-headers
   ;; The managed route owns stream framing, representation metadata, cache
   ;; safety and proxy buffering. The transport emits uncompressed SSE text:
@@ -98,7 +100,8 @@
   (when-not (and (map? options)
                  (= (set (keys options))
                     (set (filter #(contains? options %)
-                                 [:path :authorize-subscription :sse-options]))))
+                                 [:path :authorize-subscription :sse-options
+                                  :max-connections]))))
     (reject! :unknown-options {}))
   (when-not (and (string? path)
                  (re-matches #"/[A-Za-z0-9._~/-]+" path)
@@ -111,6 +114,10 @@
     (reject! :invalid-path {:path path}))
   (when-not (fn? authorize-subscription)
     (reject! :missing-authorization-callback {}))
+  (let [limit (get options :max-connections default-max-connections)]
+    (when-not (and (integer? limit) (pos? limit)
+                   (<= limit Long/MAX_VALUE))
+      (reject! :invalid-max-connections {:max-connections limit})))
   (when-not (and (map? started)
                  (get started managed/handle-key)
                  (fn? (:biff.ring/handler started))
@@ -129,7 +136,8 @@
   ;; Validate the EventSource HTTP response contract before registering any
   ;; interest or exposing a route. The lower-level SSE transport intentionally
   ;; permits arbitrary valid HTTP statuses, but browser EventSource does not.
-  (let [validated-sse (sse/prepare-options! sse-options)
+  (let [max-connections (get options :max-connections default-max-connections)
+        validated-sse (sse/prepare-options! sse-options)
         _ (when (not= 200 (:status validated-sse))
             (reject! :invalid-sse-status {:status (:status validated-sse)}))
         ;; A fixed HTTP length can truncate an indefinitely streamed body.
@@ -229,6 +237,13 @@
 
                     (not (valid-scope? value))
                     (reject! :invalid-authorized-subscription {})
+
+                    ;; Authorize before revealing capacity, but serialize the
+                    ;; admission decision with shutdown and other GETs. A full
+                    ;; route must never open another source-backed stream.
+                    (>= (count (:connections @state)) max-connections)
+                    {:status 503 :headers {}
+                     :body "Live connection capacity reached"}
 
                     :else
                     (let [[start-outcome session-or-error]

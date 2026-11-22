@@ -533,6 +533,101 @@
        (is (= 4 @authorized))
        (is (zero? (:subscription-count (source/stats src))))))))
 
+(deftest managed-route-limits-active-connections-before-source-admission-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           calls (atom 0)
+           request {:uri "/live/events" :request-method :get}
+           base {:path "/live/events"
+                 :authorize-subscription (fn [_] (swap! calls inc) scope)}]
+       ;; Misconfigured limits must fail before invoking authorization or
+       ;; allocating a Live interest, rather than silently disabling the cap.
+       (doseq [limit [nil 0 -1 1.5 (inc (bigint Long/MAX_VALUE))]]
+         (let [result (try
+                        (http/wrap-authorized-sse
+                         started (assoc base :max-connections limit))
+                        (catch clojure.lang.ExceptionInfo e e))]
+           (try
+             (is (= :invalid-max-connections
+                    (when (instance? clojure.lang.ExceptionInfo result)
+                      (:reason (ex-data result)))))
+             (is (zero? @calls))
+             (is (zero? (:subscription-count (source/stats src))))
+             (finally (when (map? result) ((:close! result)))))))
+       ;; The resource limit is enforced inside the atomic source-admission
+       ;; fence: another authorized GET is refused without opening a stream.
+       (let [route (http/wrap-authorized-sse
+                    started (assoc base :max-connections 1))]
+         (try
+           (let [first-response ((:handler route) request)]
+             (is (= 200 (:status first-response)))
+             (is (= 1 ((:active-count route))))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (is (= {:status 503 :headers {}
+                     :body "Live connection capacity reached"}
+                    ((:handler route) request)))
+             (is (= 2 @calls)
+                 "Capacity is checked only after authorization")
+             (is (= 1 ((:active-count route))))
+             (is (= 1 (:subscription-count (source/stats src)))
+                 "Over-capacity admission must not allocate an interest")
+             ;; Reclaiming the slot permits a subsequent authorized GET.
+             (stream/close! (:body first-response))
+             (is (eventually #(zero? ((:active-count route)))))
+             (is (eventually #(zero? (:subscription-count (source/stats src)))))
+             (let [second-response ((:handler route) request)]
+               (is (= 200 (:status second-response)))
+               (is (= 1 ((:active-count route))))
+               (is (= 1 (:subscription-count (source/stats src))))
+               (stream/close! (:body second-response))
+               (is (eventually #(zero? ((:active-count route)))))
+               (is (eventually #(zero? (:subscription-count
+                                       (source/stats src)))))))
+           (finally ((:close! route)))))
+       (is (= 3 @calls))
+       (is (zero? (:subscription-count (source/stats src))))))))
+
+(deftest concurrent-managed-route-admission-respects-capacity-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (atom 0)
+           release (promise)
+           request {:uri "/live/events" :request-method :get}
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events" :max-connections 1
+                           :authorize-subscription
+                           (fn [_]
+                             (swap! entered inc)
+                             @release
+                             scope)})
+           first-request (future ((:handler route) request))
+           second-request (future ((:handler route) request))]
+       (try
+         (is (eventually #(= 2 @entered))
+             "Both callbacks should begin outside the admission lock")
+         (deliver release true)
+         (let [a (deref first-request 10000 ::timeout)
+               b (deref second-request 10000 ::timeout)
+               responses [a b]
+               accepted (first (filter #(= 200 (:status %)) responses))]
+           (is (= #{200 503} (set (map :status responses)))
+               "Exactly one racing request should acquire the route capacity")
+           (is (= 1 ((:active-count route))))
+           (is (= 1 (:subscription-count (source/stats src))))
+           (is (= {:status 503 :headers {}
+                   :body "Live connection capacity reached"}
+                  (first (filter #(= 503 (:status %)) responses))))
+           (when accepted (stream/close! (:body accepted)))
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src))))))
+         (finally
+           (deliver release true)
+           (future-cancel first-request)
+           (future-cancel second-request)
+           ((:close! route))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]
