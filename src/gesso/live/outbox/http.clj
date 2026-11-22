@@ -29,6 +29,13 @@
 (def ^:private default-managed-keepalive-ms 15000)
 (def ^:private default-max-pending-authorizations 1024)
 
+(defn- restore-interrupt!
+  "Preserve JVM cancellation when an interrupted physical callback has
+   cleared the calling thread's interrupt flag."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defn- cancel-physical-sse! [session]
   ;; A transport cancellation handle may already have been consumed by a
   ;; failing first attempt. A subsequent no-op must not be mistaken for
@@ -368,6 +375,11 @@
                      ;; Never abandon later sessions because an earlier
                      ;; cancellation failed. Preserve the original error
                      ;; identity and report additional failures as suppressed.
+                     ;; Complete the whole cancellation pass before restoring
+                     ;; interruptions: an earlier restored flag could preempt
+                     ;; later interruptible physical cleanup callbacks.
+                     (doseq [failure failures]
+                       (restore-interrupt! failure))
                      (when-let [failure (first failures)]
                        (doseq [additional (rest failures)]
                          (when-not (identical? failure additional)
@@ -409,7 +421,9 @@
                             ;; Do not suppress thread interruption or VM-level
                             ;; errors during shutdown. Only ordinary callback
                             ;; failures may be superseded by the route's 503.
-                            (catch InterruptedException e (throw e))
+                            (catch InterruptedException e
+                              (restore-interrupt! e)
+                              (throw e))
                             (catch Exception e [:failed e]))]
                       ;; Hold the reservation until the response has passed
                       ;; the admission fence, not merely until authorization
@@ -454,7 +468,9 @@
                                   (try
                                     [:started (live/start-sse! live-system value
                                                                {:sse-options validated-sse})]
-                                    (catch InterruptedException e (throw e))
+                                    (catch InterruptedException e
+                                      (restore-interrupt! e)
+                                      (throw e))
                                     (catch Exception e [:failed e]))]
                               ;; Only the final handoff is locked, so close!
                               ;; can retire established streams while an
@@ -571,7 +587,12 @@
                                               (when-not (identical? admission-error
                                                                     cancel-error)
                                                 (.addSuppressed ^Throwable admission-error
-                                                                ^Throwable cancel-error)))))
+                                                                ^Throwable cancel-error))
+                                              (restore-interrupt! cancel-error))))
+                                        ;; Cleanup has now been attempted.
+                                        ;; An admission or cancellation failure
+                                        ;; must not erase JVM cancellation.
+                                        (restore-interrupt! admission-error)
                                         (throw admission-error)))))))
                             (finally
                               ;; Startup errors have no connection entry to
@@ -616,13 +637,6 @@
                  (<= 0 drain-timeout-ms 120000))
     (reject! :invalid-drain-timeout-ms {:timeout-ms drain-timeout-ms}))
   options)
-
-(defn- restore-interrupt!
-  "Preserve JVM cancellation when an interrupted physical shutdown callback
-   has cleared the calling thread's interrupt flag."
-  [error]
-  (when (instance? InterruptedException error)
-    (.interrupt (Thread/currentThread))))
 
 (defn- invoke-shutdown-callback!
   "Callbacks after listener cleanup propagate immediately; preserve any

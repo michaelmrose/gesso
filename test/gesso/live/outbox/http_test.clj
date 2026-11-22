@@ -2582,6 +2582,142 @@
            (future-cancel pending)
            ((:close! route))))))))
 
+(defn- with-local-sse-route [callback]
+  ;; Exercise the real Live SSE transport without bringing up an XTDB host.
+  ;; The route checks only the host's recorded ownership, Live lifecycle,
+  ;; and Ring handler at admission; the worker is not used by this profile.
+  (let [system (live/create {:rules []
+                             :source-options {:coalesce-window-ms 0}
+                             :dispatch-options {:threads 1 :queue-size 8}})
+        started {managed/handle-key ::local-worker
+                 :gesso.live/system system
+                 :biff.ring/handler (fn [_] {:status 200 :body :ordinary})}
+        route (http/wrap-authorized-sse
+               started {:path "/live/events"
+                        :authorize-subscription (constantly scope)})]
+    (try
+      (callback route system)
+      (finally
+        (Thread/interrupted)
+        ((:close! route))
+        (live/close! system)))))
+
+(deftest interrupted-managed-sse-route-close-retains-retry-test
+  ;; The first failed physical cancellation must not prevent the route from
+  ;; trying the second SSE session, admitting new GETs, or keeping the failed
+  ;; session's occupied capacity for explicit retry. Interruption survives.
+  (with-local-sse-route
+    (fn [route system]
+      (let [request {:uri "/live/events" :request-method :get}
+            first-response ((:handler route) request)
+            second-response ((:handler route) request)
+            cause (InterruptedException. "physical SSE cancellation interrupted")
+            original-cancel live/cancel-sse!
+            attempts (atom 0)]
+        (is (= 200 (:status first-response)))
+        (is (= 200 (:status second-response)))
+        (try
+          (Thread/interrupted)
+          (let [failure (with-redefs [live/cancel-sse!
+                                      (fn [session]
+                                        (if (= 1 (swap! attempts inc))
+                                          (throw cause)
+                                          (original-cancel session)))]
+                          (try ((:close! route))
+                               (catch Throwable error error)))
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            (Thread/interrupted)
+            (is (identical? cause failure))
+            (is (= 2 @attempts) "Close must attempt every session")
+            (is interrupted? "The caught physical cancellation must keep interruption")
+            (is (true? ((:closed? route))))
+            (is (= 1 ((:occupied-count route))))
+            (is (false? ((:drained? route))))
+            (is (= 503 (:status ((:handler route) request))))
+            (is (= 1 (:subscription-count (source/stats (:source system)))))
+            (is (= :closed ((:close! route))) "Explicit retry must release the retained session")
+            (is (= {:outcome :drained} ((:await-drained! route) 0)))
+            (is (= 0 (:subscription-count (source/stats (:source system))))))
+          (finally
+            (Thread/interrupted)))))))
+
+(deftest interrupted-managed-sse-admission-rollback-retains-suppressed-cause-test
+  ;; When the on-closed registration fails, Gesso must attempt to cancel the
+  ;; already started stream. A failed rollback is secondary to the admission
+  ;; error; a suppressed interruption still has to restore JVM cancellation.
+  (with-local-sse-route
+    (fn [route system]
+      (let [request {:uri "/live/events" :request-method :get}
+            original-start live/start-sse!
+            original-cancel live/cancel-sse!
+            cause (InterruptedException. "rollback cancellation interrupted")
+            attempts (atom 0)]
+        (try
+          (Thread/interrupted)
+          (let [failure (with-redefs [live/start-sse!
+                                      (fn [& args]
+                                        (assoc (apply original-start args)
+                                               :stream (Object.)))
+                                      live/cancel-sse!
+                                      (fn [_]
+                                        (swap! attempts inc)
+                                        (throw cause))]
+                          (try ((:handler route) request)
+                               (catch Throwable error error)))
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            (Thread/interrupted)
+            (is (instance? Throwable failure))
+            (is (not (identical? failure cause)) "Keep admission failure primary")
+            (is (some #(identical? cause %) (.getSuppressed ^Throwable failure))
+                "Keep rollback interruption as a suppressed cause")
+            (is (= 1 @attempts) "Do not retry the same failed rollback internally")
+            (is interrupted? "A suppressed rollback interruption still signals cancellation")
+            (is (= 1 ((:occupied-count route))))
+            (is (false? ((:drained? route))))
+            (is (= :closed ((:close! route))) "Later explicit retry releases physical stream")
+            (is (zero? (:subscription-count (source/stats (:source system))))))
+          (finally
+            (Thread/interrupted)))))))
+
+(deftest interrupted-managed-sse-authorization-and-startup-preserve-thread-test
+  ;; Both callbacks are trusted host boundaries. They propagate a physical
+  ;; interruption, but cannot accidentally erase the JVM flag or leave a
+  ;; pending authorization/startup slot charged after the exception.
+  (doseq [phase [:authorization :startup]]
+    (let [system (live/create {:rules []
+                               :source-options {:coalesce-window-ms 0}
+                               :dispatch-options {:threads 1 :queue-size 8}})
+          cause (InterruptedException. (str (name phase) " interrupted"))
+          started {managed/handle-key ::local-worker
+                   :gesso.live/system system
+                   :biff.ring/handler (fn [_] {:status 200})}
+          route (http/wrap-authorized-sse
+                 started {:path "/live/events"
+                          :authorize-subscription
+                          (if (= phase :authorization)
+                            (fn [_] (throw cause))
+                            (constantly scope))})]
+      (try
+        (Thread/interrupted)
+        (let [failure (if (= phase :startup)
+                        (with-redefs [live/start-sse! (fn [& _] (throw cause))]
+                          (try ((:handler route) {:uri "/live/events" :request-method :get})
+                               (catch Throwable e e)))
+                        (try ((:handler route) {:uri "/live/events" :request-method :get})
+                             (catch Throwable e e)))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? cause failure) (str phase " exact exception"))
+          (is interrupted? (str phase " lost interrupted-thread signal"))
+          (is (zero? ((:pending-authorization-count route))))
+          (is (zero? ((:occupied-count route))))
+          (is (= :closed ((:close! route))))
+          (is (true? ((:drained? route)))))
+        (finally
+          (Thread/interrupted)
+          ((:close! route))
+          (live/close! system))))))
+
 (deftest route-shutdown-retries-failed-cancellation-test
   (setup-host
    (fn [started]
