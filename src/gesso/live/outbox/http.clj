@@ -427,3 +427,69 @@
        {:outcome (if (or (drained-state? @state)
                          (true? (deref drained-signal timeout-ms false)))
                    :drained :timed-out)})}))
+
+(defn stop-managed-http-host!
+  "Perform caller-owned HTTP shutdown before stopping a Gesso host.
+
+   Requires {:route managed-route :stop-listener! fn :stop-host! fn
+             :drain-timeout-ms integer}, with a finite timeout in 0..120000.
+   The route is closed first, then the caller's listener is stopped, then
+   :await-drained! verifies that no source-backed sessions or unfinished
+   admissions remain. Only a confirmed drain permits :stop-host!.
+
+   Returns {:outcome :stopped :host-result ...} after successful host stop,
+   or {:outcome :timed-out} without touching the host's providers. The
+   listener callback must return {:outcome :drained} ONLY after its server
+   has stopped admitting new requests AND all relevant HTTP handlers (not
+   merely SSE sessions) have finished using host providers. A listener
+   {:outcome :timed-out} returns {:outcome :listener-timed-out} without
+   stopping the host; an unrecognized outcome fails closed. These are
+   explicit caller-owned assertions, not independently proven facts.
+
+   The caller may retry once in-flight work finishes, provided its
+   listener-stop callback is idempotent. The owner must serialize shutdown
+   invocations so that a successful host stop cannot be invoked twice.
+   A route-close failure does not suppress listener cleanup, but neither
+   failure can authorize host stop. Invalid plans fail before effects.
+
+   The timeout bounds only the SSE route drain wait, not arbitrary caller
+   callbacks, listener drain, or provider shutdown. This helper never
+   creates, owns, or implicitly drains the HTTP listener."
+  [{:keys [route stop-listener! stop-host! drain-timeout-ms] :as options}]
+  (when-not (and (map? options)
+                 (= #{:route :stop-listener! :stop-host! :drain-timeout-ms}
+                    (set (keys options)))
+                 (map? route)
+                 (fn? (:close! route))
+                 (fn? (:await-drained! route))
+                 (fn? stop-listener!)
+                 (fn? stop-host!))
+    (reject! :invalid-http-shutdown-plan {}))
+  (when-not (and (integer? drain-timeout-ms)
+                 (<= 0 drain-timeout-ms 120000))
+    (reject! :invalid-drain-timeout-ms {:timeout-ms drain-timeout-ms}))
+  ;; Failure of one cleanup step must not skip the listener's shutdown.
+  ;; Preserve the route-close failure, with any listener error suppressed.
+  (let [route-error (try ((:close! route)) nil
+                         (catch Throwable e e))
+        listener-result (try [:returned (stop-listener!)]
+                             (catch Throwable e [:failed e]))]
+    (when route-error
+      (when (and (= :failed (first listener-result))
+                 (not (identical? route-error (second listener-result))))
+        (.addSuppressed ^Throwable route-error
+                        ^Throwable (second listener-result)))
+      (throw route-error))
+    (when (= :failed (first listener-result))
+      (throw (second listener-result)))
+    ;; The listener owner must explicitly certify the entire handler drain.
+    ;; A stopped socket alone says nothing about in-flight ordinary requests.
+    (case (:outcome (second listener-result))
+      :drained (let [drain ((:await-drained! route) drain-timeout-ms)]
+                 (case (:outcome drain)
+                   :drained {:outcome :stopped :host-result (stop-host!)}
+                   :timed-out {:outcome :timed-out}
+                   (reject! :invalid-drain-outcome {:drain drain})))
+      :timed-out {:outcome :listener-timed-out}
+      (reject! :invalid-listener-drain-outcome
+               {:listener-result (second listener-result)}))))

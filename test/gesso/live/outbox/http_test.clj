@@ -1147,6 +1147,136 @@
            (when @first-request (future-cancel @first-request))
            ((:close! route))))))))
 
+(deftest managed-http-owner-shutdown-orders-listener-drain-and-host-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           events (atom [])
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           server (start-http! (:handler route))
+           client (-> (HttpClient/newBuilder)
+                      (.version HttpClient$Version/HTTP_1_1)
+                      (.build))
+           response (request client (:base server)
+                             "/live/events" "GET" "Bearer allowed")]
+       (try
+         (is (= 200 (.statusCode response)))
+         (is (eventually #(= 1 ((:active-count route)))))
+         (let [result (http/stop-managed-http-host!
+                       {:route route :drain-timeout-ms 2000
+                        :stop-listener!
+                        (fn []
+                          (swap! events conj [:listener ((:closed? route))])
+                          ((:close! server))
+                          ;; This loopback test has only the SSE request. A
+                          ;; production listener must also drain its ordinary
+                          ;; HTTP handlers before returning this outcome.
+                          {:outcome :drained})
+                        :stop-host!
+                        (fn []
+                          (swap! events conj
+                                 [:host ((:drained? route))
+                                  (:subscription-count (source/stats src))])
+                          :host-stop-approved)})]
+           (is (= {:outcome :stopped :host-result :host-stop-approved}
+                  result))
+           (is (= [[:listener true] [:host true 0]] @events))
+           (is (true? ((:drained? route)))))
+         (finally
+           (.close (.body response))
+           ((:close! route))
+           ((:close! server))
+           (.close ^HttpClient client)))))))
+
+(deftest managed-http-owner-shutdown-timeout-preserves-providers-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           events (atom [])
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription
+                           (fn [_] (deliver entered true) @release scope)})
+           pending (future ((:handler route)
+                            {:uri "/live/events" :request-method :get}))
+           stop-listener! #(do (swap! events conj :listener)
+                                {:outcome :drained})
+           stop-host! #(do (swap! events conj :host) :host-stop-approved)
+           plan {:route route :drain-timeout-ms 20
+                 :stop-listener! stop-listener!
+                 :stop-host! stop-host!}]
+       (try
+         (is (= true (deref entered 5000 ::timeout)))
+         (is (= {:outcome :timed-out}
+                (http/stop-managed-http-host! plan)))
+         (is (= [:listener] @events))
+         (is (false? (live/closed? (:gesso.live/system started)))
+             "Timed-out drain must retain the Live provider for cleanup")
+         (is (zero? (:subscription-count (source/stats src))))
+         (deliver release true)
+         (is (= {:status 503 :headers {} :body "Live shutting down"}
+                (deref pending 5000 ::timeout)))
+         (is (= {:outcome :stopped :host-result :host-stop-approved}
+                (http/stop-managed-http-host! plan)))
+         (is (= [:listener :listener :host] @events))
+         (finally
+           (deliver release true)
+           (future-cancel pending)
+           ((:close! route))))))))
+
+(deftest managed-http-owner-shutdown-rejects-unsafe-cleanup-test
+  (let [events (atom [])
+        route {:close! #(swap! events conj :route)
+               :await-drained! (fn [_] {:outcome :drained})}
+        base {:route route :drain-timeout-ms 10
+              :stop-listener! #(do (swap! events conj :listener)
+                                   {:outcome :drained})
+              :stop-host! #(swap! events conj :host)}]
+    (doseq [bad [(dissoc base :stop-listener!)
+                 (assoc base :stop-host! nil)
+                 (assoc base :unexpected true)]]
+      (is (= :invalid-http-shutdown-plan
+             (exception-reason #(http/stop-managed-http-host! bad)))))
+    (doseq [timeout [-1 nil 1.5 120001]]
+      (is (= :invalid-drain-timeout-ms
+             (exception-reason #(http/stop-managed-http-host!
+                                 (assoc base :drain-timeout-ms timeout))))))
+    (is (empty? @events) "Invalid plans must not initiate shutdown")
+    (let [failure (ex-info "route failed" {})
+          listener-failure (ex-info "listener failed" {})
+          failing (assoc base
+                         :route {:close! #(throw failure)
+                                 :await-drained! (:await-drained! route)}
+                         :stop-listener!
+                         (fn [] (swap! events conj :listener)
+                           (throw listener-failure)))
+          thrown (try (http/stop-managed-http-host! failing)
+                      (catch Throwable e e))]
+      (is (identical? failure thrown))
+      (is (= [listener-failure]
+             (vec (.getSuppressed ^Throwable thrown))))
+      (is (= [:listener] @events))
+      (is (not-any? #{:host} @events)))
+    (reset! events [])
+    (is (= {:outcome :listener-timed-out}
+           (http/stop-managed-http-host!
+            (assoc base :stop-listener! (fn []
+                                          (swap! events conj :listener)
+                                          {:outcome :timed-out})))))
+    (is (= [:route :listener] @events))
+    (is (not-any? #{:host} @events))
+    (reset! events [])
+    (is (= :invalid-listener-drain-outcome
+           (exception-reason
+            #(http/stop-managed-http-host!
+              (assoc base :stop-listener! (constantly nil))))))
+    (is (= [:route] @events))
+    (is (not-any? #{:host} @events))))
+
 (deftest managed-route-await-drain-is-bounded-and-observes-inflight-test
   (setup-host
    (fn [started]
