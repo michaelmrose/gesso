@@ -219,7 +219,7 @@
           (let [response (read-raw-http1-response! reader)]
             (is (= 200 (:status response)))
             (is (= expected (:body response)))
-            (is (= "keep-alive" (get-in response [:headers "connection"])))
+            (is (= "keep-alive" (some-> response :headers (get "connection") str/lower-case)))
             (is (eventually #(= i (:matched ((:stats (:capture server)))))))
             (is (eventually #(zero? ((:active-count (:guard server))))))
             (is (zero? (:pending ((:stats (:capture server)))))))))
