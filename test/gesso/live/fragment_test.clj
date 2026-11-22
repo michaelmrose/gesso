@@ -928,6 +928,82 @@
 ;; Diagnostic callback failures must not change fragment delivery
 ;; -----------------------------------------------------------------------------
 
+(deftest interrupted-fragment-cache-diagnostic-preserves-thread-interrupt-test
+  ;; Observe the interrupt immediately after a synchronous cache lookup.
+  ;; An enclosing Missionary task may resume on another worker, so a later
+  ;; diagnostic does not establish what happened on the original thread.
+  (let [calls (atom 0)
+        manager (fragment/create
+                 {:ttl-ms 1000
+                  :clock (constantly 10)
+                  :debug-fn (fn [{:keys [event]}]
+                              (when (= :gesso.live.fragment/cache-miss event)
+                                (swap! calls inc)
+                                (throw (InterruptedException.
+                                        "cache lookup diagnostic interrupted"))))})]
+    (try
+      (Thread/interrupted)
+      (let [outcome (try
+                      (@#'gesso.live.fragment/cache-lookup
+                       manager fragment-key (:options manager))
+                      (catch Throwable error error))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (= fragment/miss outcome)
+            "Diagnostic failures must not change cache-miss semantics")
+        (is (= 1 @calls))
+        (is interrupted? "A suppressed cache diagnostic retains interruption")
+        (is (= 0 (:cache-count (fragment/stats manager)))))
+      (finally
+        (Thread/interrupted)))))
+
+(deftest interrupted-fragment-cancel-diagnostic-preserves-caller-interrupt-test
+  ;; Physical cancellation fails after logical invalidation is committed.
+  ;; The error-trace hook may itself interrupt; the caller must retain that
+  ;; signal even though neither failure changes the typed waiter outcome.
+  (let [observed (promise)
+        manager (fragment/create
+                 {:debug-fn (fn [{:keys [event]}]
+                              (when (= :gesso.live.fragment/physical-cancel-failed
+                                       event)
+                                (deliver observed :reported)
+                                (throw (InterruptedException.
+                                        "cancel diagnostic interrupted"))))})
+        started (promise)
+        release (promise)
+        cancelled (promise)
+        calls (atom 0)
+        owner (start-task
+               (fragment/protect-task
+                manager fragment-key
+                (controlled-success-task started release :stale calls cancelled)))]
+    (try
+      (is (= :started (deref started timeout-ms ::timeout)))
+      (let [flight (get @(:inflight manager) fragment-key)]
+        (is (some? flight))
+        (reset! (:cancel-ref flight)
+                (fn []
+                  (throw (ex-info "physical cancellation failed" {}))))
+        (Thread/interrupted)
+        (let [outcome (try
+                        (fragment/clear-key! manager fragment-key)
+                        (catch Throwable e e))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? manager outcome)
+              "Diagnostic interruption cannot retract invalidation")
+          (is interrupted? "The caller must retain a diagnostic interrupt"))
+        (is (= :reported (deref observed timeout-ms ::timeout)))
+        (let [result (task-result owner)]
+          (is (= :failure (:status result)))
+          (is (= :fragment-invalidated
+                 (:reason (ex-data (:error result))))))
+        (is (zero? (:inflight-count (fragment/stats manager)))))
+      (finally
+        (Thread/interrupted)
+        (deliver release :go)
+        (cancel-runner! owner)))))
+
 (deftest assertion-error-in-fragment-tracing-preserves-render-cache-test
   ;; Optional instrumentation must not stop rendering or prevent cache reuse.
   ;; AssertionError is not caught by an Exception-only diagnostic boundary.

@@ -41,6 +41,14 @@
 ;; Debug
 ;; -----------------------------------------------------------------------------
 
+(defn- restore-interrupt!
+  "Optional fragment diagnostics may fail after an interruptible operation
+   cleared the JVM thread's interrupt flag. Keep that cancellation signal
+   visible while containing the diagnostic exception."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defmacro ^:private debug!
   "Emit a debug event only when debug-fn is truthy.
 
@@ -54,7 +62,8 @@
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Throwable _#
+       (catch Throwable error#
+         (restore-interrupt! error#)
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -606,8 +615,7 @@
     ;; Physical cancellation is external cleanup, so Error subtypes must not
     ;; retract an already committed logical invalidation result.
     (catch Throwable e
-      (when (instance? InterruptedException e)
-        (.interrupt (Thread/currentThread)))
+      (restore-interrupt! e)
       (debug!
        (get-in manager [:options :debug-fn])
        :gesso.live.fragment/physical-cancel-failed
