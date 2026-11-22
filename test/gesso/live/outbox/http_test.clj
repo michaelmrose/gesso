@@ -1344,6 +1344,95 @@
     (is (= [:route :listener :drain :host] @calls)
         "Do not replay host teardown when the initial effect is ambiguous")))
 
+(deftest real-http-ordinary-handler-must-drain-before-host-stop-test
+  ;; A closed SSE route does not establish quiescence for unrelated Ring
+  ;; requests. Exercise a real loopback HTTP handler that still owns host
+  ;; resources when the coordinated shutdown first attempts listener drain.
+  (setup-host
+   (fn [started]
+     (let [entered (promise)
+           release (promise)
+           in-flight (atom 0)
+           events (atom [])
+           listener-stopped? (atom false)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           ring-handler
+           (fn [req]
+             (if (= "/slow" (:uri req))
+               (do
+                 (swap! in-flight inc)
+                 (deliver entered true)
+                 (try
+                   @release
+                   {:status 200 :headers {} :body "ordinary response"}
+                   (finally (swap! in-flight dec))))
+               ((:handler route) req)))
+           server (start-http! ring-handler)
+           client (-> (HttpClient/newBuilder)
+                      (.version HttpClient$Version/HTTP_1_1)
+                      (.build))
+           coordinator
+           (http/prepare-managed-http-shutdown
+            {:route route
+             :drain-timeout-ms 2000
+             :stop-listener!
+             (fn []
+               ;; This is an explicit, test-owned listener drain contract:
+               ;; the callback may not certify drain while an HTTP handler
+               ;; is still executing against the Gesso host.
+               (swap! events conj [:listener @in-flight])
+               (if (pos? @in-flight)
+                 {:outcome :timed-out}
+                 (do
+                   (when (compare-and-set! listener-stopped? false true)
+                     ((:close! server)))
+                   {:outcome :drained})))
+             :stop-host!
+             (fn []
+               (swap! events conj [:host @in-flight])
+               {:outcome :stopped :host-result :approved})})
+           pending (future (request client (:base server)
+                                    "/slow" "GET" nil))]
+       (try
+         (is (= true (deref entered 5000 ::timeout))
+             "A real network request must enter the ordinary Ring handler")
+         (is (= 1 @in-flight))
+         (is (= {:outcome :listener-timed-out}
+                ((:stop! coordinator)))
+             "SSE drain alone cannot certify an unrelated HTTP handler")
+         (is (= :ready ((:status coordinator))))
+         (is (= [[:listener 1]] @events)
+             "No provider stop can occur while ordinary HTTP work remains")
+         (is (false? (live/closed? (:gesso.live/system started))))
+         (is (true? ((:drained? route)))
+             "The SSE route can be fully drained while HTTP is still busy")
+         (deliver release true)
+         (let [response (deref pending 10000 ::timeout)]
+           (is (not= ::timeout response))
+           (when (not= ::timeout response)
+             (with-open [body (.body response)]
+               (is (= 200 (.statusCode response)))
+               (is (= "ordinary response"
+                      (String. (.readAllBytes body) StandardCharsets/UTF_8))))))
+         (is (eventually #(zero? @in-flight)))
+         (is (= {:outcome :stopped :host-result :approved}
+                ((:stop! coordinator))))
+         (is (= :stopped ((:status coordinator))))
+         (is (= [[:listener 1] [:listener 0] [:host 0]] @events))
+         (is (= {:outcome :stopped :host-result :approved}
+                ((:stop! coordinator))))
+         (is (= 1 (count (filter #(= :host (first %)) @events)))
+             "A second call cannot repeat the already confirmed stop")
+         (finally
+           (deliver release true)
+           (future-cancel pending)
+           ((:close! route))
+           (when-not @listener-stopped?
+             ((:close! server)))
+           (.close ^HttpClient client)))))))
+
 (deftest managed-http-owner-shutdown-orders-listener-drain-and-host-test
   (setup-host
    (fn [started]
