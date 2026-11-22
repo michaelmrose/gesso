@@ -3674,3 +3674,173 @@
          (finally
            ((:stop! worker) 2000)
            ((:close! route))))))))
+
+(deftest scheduled-recovery-reclaims-failed-source-release-with-healthy-peer-test
+  ;; A real managed SSE session keeps its source interest and capacity slot
+  ;; when physical release fails. The opt-in scheduler must retry the actual
+  ;; cancellation and reclaim that slot without closing an unrelated peer.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           open-original flow/open-source-flow!
+           opened (atom 0)
+           allowed? (atom false)
+           failures (atom 0)
+           refusal (ex-info "transient source-release failure" {:test :v2240})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source options]
+            (let [opened-flow (open-original source options)
+                  first? (= 1 (swap! opened inc))
+                  original-close (:close! opened-flow)]
+              (if first?
+                (assoc opened-flow :close!
+                       (fn []
+                         (if @allowed?
+                           (original-close)
+                           (do (swap! failures inc)
+                               (throw refusal)))))
+                opened-flow)))
+          ;; Prevent a second independent collector owner from concealing
+          ;; failure of the response's physical source-release callback.
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events" :max-connections 2
+                                 :sse-options {:keepalive-ms 15000
+                                               :frame-write-timeout-ms 30000}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}
+                 orphan ((:handler route) request)
+                 healthy ((:handler route) request)]
+             (try
+               (is (= [200 200] [(:status orphan) (:status healthy)]))
+               (stream/close! (:body orphan))
+               (is (eventually #(= 1 ((:disconnected-count route)))))
+               (is (= 2 (:subscription-count (source/stats src))))
+               (is (= 2 ((:occupied-count route))))
+               (is (= {:status 503 :headers {}
+                       :body "Live connection capacity reached"}
+                      ((:handler route) request)))
+               (let [worker ((requiring-resolve
+                              'gesso.live.outbox.http-recovery/start-scheduled!)
+                             route {:poll-ms 10 :min-interval-ms 80
+                                    :max-attempts 1})]
+                 (try
+                   (is (eventually #(pos? (:failure-count ((:stats worker)))))
+                       "Scheduler must observe the actual release failure")
+                   (is (identical? refusal (:last-error ((:stats worker)))))
+                   (is (pos? @failures))
+                   (is (= 2 ((:occupied-count route)))
+                       "Failed retries must not free source-owned capacity")
+                   (is (not (stream/closed? (:body healthy))))
+                   (reset! allowed? true)
+                   (is (eventually #(and (zero? ((:disconnected-count route)))
+                                         (= 1 (:subscription-count
+                                               (source/stats src)))))
+                       "A scheduled retry must physically release the orphan")
+                   (is (= 1 ((:occupied-count route))))
+                   (is (not (stream/closed? (:body healthy))))
+                   (is (false? ((:closed? route))))
+                   (let [replacement ((:handler route) request)]
+                     (is (= 200 (:status replacement))
+                         "Recovered capacity permits fresh authorized admission")
+                     (when (= 200 (:status replacement))
+                       (stream/close! (:body replacement))
+                       (is (eventually #(= 1 (:subscription-count
+                                               (source/stats src)))))))
+                   (is (= :drained (:outcome ((:stop! worker) 2000))))
+                   (finally
+                     (reset! allowed? true)
+                     ((:stop! worker) 2000))))
+               (stream/close! (:body healthy))
+               (is (eventually #(zero? ((:occupied-count route)))))
+               (is (eventually #(zero? (:subscription-count
+                                       (source/stats src)))))
+               (finally
+                 (reset! allowed? true)
+                 ((:close! route)))))))))))
+
+(deftest scheduled-physical-retry-blocks-owned-host-shutdown-until-drain-test
+  ;; Actual source release is in progress inside the scheduler's route lock.
+  ;; Ordered host retirement must first fence and drain that callback; a
+  ;; timeout is not permission to stop the listener or provider.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           open-original flow/open-source-flow!
+           first-failure? (atom true)
+           entered (promise)
+           release (promise)
+           refusal (ex-info "initial source release failed" {:test :v2240})
+           events (atom [])]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source options]
+            (let [opened (open-original source options)
+                  original-close (:close! opened)]
+              (assoc opened :close!
+                     (fn []
+                       (if (compare-and-set! first-failure? true false)
+                         (throw refusal)
+                         (do
+                           (deliver entered true)
+                           @release
+                           (original-close)))))))
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events" :max-connections 1
+                                 :sse-options {:keepalive-ms 15000
+                                               :frame-write-timeout-ms 30000}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}
+                 response ((:handler route) request)]
+             (try
+               (is (= 200 (:status response)))
+               (stream/close! (:body response))
+               (is (eventually #(= 1 ((:disconnected-count route)))))
+               (let [worker ((requiring-resolve
+                              'gesso.live.outbox.http-recovery/start-scheduled!)
+                             route {:poll-ms 10 :min-interval-ms 50
+                                    :max-attempts 1})
+                     shutdown ((requiring-resolve
+                                'gesso.live.outbox.http-recovery/prepare-owned-shutdown)
+                               worker {:route route :drain-timeout-ms 0
+                                       :stop-listener!
+                                       (fn [] (swap! events conj :listener)
+                                         {:outcome :drained})
+                                       :stop-host!
+                                       (fn [] (swap! events conj :host)
+                                         {:outcome :stopped})})]
+                 (try
+                   (is (= true (deref entered 4000 ::timeout))
+                       "Scheduler must enter the actual blocked source close")
+                   (is (= 1 ((:occupied-count route))))
+                   (is (= 1 (:subscription-count (source/stats src))))
+                   (is (= {:outcome :recovery-timed-out}
+                          ((:stop! shutdown))))
+                   (is (= :stopping ((:status worker))))
+                   (is (= :ready (get ((:status shutdown)) :shutdown)))
+                   (is (empty? @events)
+                       "No provider or listener callback while source close blocks")
+                   (is (false? ((:closed? route)))
+                       "Timed-out scheduler drain must not close route")
+                   (deliver release true)
+                   (is (eventually #((:drained? worker))))
+                   (is (zero? (:subscription-count (source/stats src))))
+                   (is (= :stopped (:outcome ((:stop! shutdown)))))
+                   (is (= [:listener :host] @events))
+                   (is (true? ((:closed? route))))
+                   (is (= {:outcome :drained} ((:await-drained! route) 0)))
+                   (is (= :stopped (:outcome ((:stop! shutdown)))))
+                   (is (= [:listener :host] @events)
+                       "Idempotent shutdown must not replay provider teardown")
+                   (finally
+                     (deliver release true)
+                     ((:stop! worker) 2000))))
+               (finally
+                 (deliver release true)
+                 ((:close! route)))))))))))
