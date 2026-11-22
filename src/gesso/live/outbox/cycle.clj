@@ -57,6 +57,11 @@
 
 (defn- interrupted!
   [phase reason completed cursor in-flight details cause]
+  ;; Acquisition or dispatch can throw after an interruptible JVM operation
+  ;; has cleared its interrupt flag. The reconciliation envelope must retain
+  ;; that cancellation signal without changing its cause or lease accounting.
+  (when (instance? InterruptedException cause)
+    (.interrupt (Thread/currentThread)))
   (throw
    (ex-info "Live outbox processing cycle interrupted; reconcile XTDB before retry."
             (merge {:error/type :gesso.live.outbox/cycle-interrupted

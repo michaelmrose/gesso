@@ -48,6 +48,97 @@
   (try (f) nil
        (catch clojure.lang.ExceptionInfo e (ex-data e))))
 
+(deftest interrupted-acquisition-cycle-preserves-prefix-and-thread-signal-test
+  ;; A physical sweep may throw after a previous candidate completed.
+  ;; The cycle must retain that prefix and the original cause without erasing
+  ;; the caller's JVM cancellation signal when the failing sweep interrupted.
+  (let [first-id (intent-id 901)
+        interruption (InterruptedException. "discovery interrupted")
+        sweeps (atom 0)
+        system {:source ::source}]
+    (try
+      (Thread/interrupted)
+      (let [failure
+            (with-redefs [worker/acquire-sweep!
+                          (fn [_ _]
+                            (if (= 1 (swap! sweeps inc))
+                              {:results [{:intent-id first-id
+                                          :status :contended
+                                          :reason :lease-held}]
+                               :attempted 1
+                               :halt-reason :page-budget
+                               :next-after first-id}
+                              (throw interruption)))]
+              (try
+                (cycle/process-cycle! :node system {} source-id
+                                      {:worker-id "w" :max-items 2})
+                (catch Throwable error error)))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (instance? clojure.lang.ExceptionInfo failure))
+        (is (= :gesso.live.outbox/cycle-interrupted
+               (:error/type (ex-data failure))))
+        (is (= :acquisition (:phase (ex-data failure))))
+        (is (= :acquisition-exception (:reason (ex-data failure))))
+        (is (identical? interruption (.getCause ^Throwable failure)))
+        (is (= 1 (:completed-count (ex-data failure))))
+        (is (= first-id (:last-completed-cursor (ex-data failure))))
+        (is (= :contended (get-in (ex-data failure)
+                                  [:completed 0 :acquisition-status])))
+        (is (nil? (:in-flight (ex-data failure))))
+        (is (= 2 @sweeps))
+        (is interrupted?
+            "An interrupted acquisition must not erase JVM cancellation"))
+      (finally
+        (Thread/interrupted)))))
+
+(deftest interrupted-delivery-cycle-preserves-lease-and-thread-signal-test
+  ;; A leased intent may already have been delivered when dispatch throws.
+  ;; Keep its uncertainty and physical lease identity, plus the JVM interrupt
+  ;; that the interruptible external operation may have cleared.
+  (let [id (intent-id 902)
+        lease (random-uuid)
+        interruption (InterruptedException. "delivery interrupted")
+        calls (atom [])
+        system {:source ::source}]
+    (try
+      (Thread/interrupted)
+      (let [failure
+            (with-redefs [worker/acquire-sweep!
+                          (fn [_ _]
+                            (swap! calls conj :acquire)
+                            {:results [{:intent-id id :status :acquired
+                                        :lease-id lease :worker-id "w"}]
+                             :attempted 1
+                             :halt-reason :page-budget
+                             :next-after id})
+                          delivery/dispatch-acquired!
+                          (fn [& _]
+                            (swap! calls conj :dispatch)
+                            (throw interruption))]
+              (try
+                (cycle/process-cycle! :node system {} source-id
+                                      {:worker-id "w" :max-items 2})
+                (catch Throwable error error)))
+            interrupted? (.isInterrupted (Thread/currentThread))
+            details (ex-data failure)]
+        (Thread/interrupted)
+        (is (instance? clojure.lang.ExceptionInfo failure))
+        (is (= :gesso.live.outbox/cycle-interrupted (:error/type details)))
+        (is (= :delivery (:phase details)))
+        (is (= :delivery-exception (:reason details)))
+        (is (= :unknown (:source-acceptance details)))
+        (is (identical? interruption (.getCause ^Throwable failure)))
+        (is (= 0 (:completed-count details)))
+        (is (= id (get-in details [:in-flight :intent-id])))
+        (is (= lease (get-in details [:in-flight :lease-id])))
+        (is (true? (:rescan-required? details)))
+        (is (= [:acquire :dispatch] @calls))
+        (is interrupted?
+            "An interrupted dispatch must preserve the caller's signal"))
+      (finally
+        (Thread/interrupted)))))
+
 (deftest invalid-options-reject-before-discovery-test
   (let [system (make-system)]
     (try
