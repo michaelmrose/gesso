@@ -3162,3 +3162,108 @@
                     ((:handler route) request)))
              (finally (future-cancel closing))))
          (finally ((:close! route))))))))
+
+(deftest blocked-timeout-error-observer-does-not-delay-managed-route-drain-test
+  ;; A source-backed SSE timeout is terminal before an app-supplied error
+  ;; observer runs. If that observer stalls, route ownership must still be
+  ;; able to close and drain, even though diagnostic callbacks remain blocked.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           close-events (atom [])
+           error-events (atom [])
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 1
+                           :sse-options
+                           {:keepalive-ms 15
+                            :frame-write-timeout-ms 450
+                            :on-error (fn [error _details]
+                                        (swap! error-events conj error)
+                                        (deliver entered true)
+                                        @release)
+                            :on-close #(swap! close-events conj %)}
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}]
+       (try
+         (let [response ((:handler route) request)]
+           (is (= 200 (:status response)))
+           (is (= 1 ((:occupied-count route))))
+           (is (= true (deref entered 3000 ::timeout))
+               "A real unread keepalive write must reach the error observer")
+           (is (= :gesso.live.sse/frame-write-unknown
+                  (-> @error-events first ex-data :error/type)))
+           (is (stream/closed? (:body response))
+               "The stream must close before calling user error observers")
+           (is (eventually #(zero? (:subscription-count (source/stats src)))))
+           (is (eventually #(zero? ((:occupied-count route)))))
+           (is (empty? @close-events)
+               "on-close is still queued behind blocked on-error")
+           (let [closing (future ((:close! route)))]
+             (try
+               (is (= :closed (deref closing 2000 ::timeout))
+                   "Route close must not wait for an application observer")
+               (is (= {:outcome :drained} ((:await-drained! route) 500)))
+               (is (zero? (:subscription-count (source/stats src))))
+               (is (= {:status 503 :headers {} :body "Live shutting down"}
+                      ((:handler route) request)))
+               (finally (future-cancel closing))))
+           (deliver release true)
+           (is (eventually #(= 1 (count @close-events))))
+           (is (= :keepalive-error (:reason (first @close-events))))
+           (is (= 1 (count @error-events)))
+           (is (= 1 (count @close-events))
+               "A shutdown race must not produce a second terminal result"))
+         (finally
+           (deliver release true)
+           ((:close! route))))))))
+
+(deftest blocked-timeout-close-observer-does-not-delay-managed-route-drain-test
+  ;; The only terminal close notification may remain blocked in user code.
+  ;; A route shutdown racing with that callback must not leave the underlying
+  ;; source interest retained or claim an extra terminal result.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           close-events (atom [])
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 1
+                           :sse-options
+                           {:keepalive-ms 15
+                            :frame-write-timeout-ms 450
+                            :on-close (fn [entry]
+                                        (swap! close-events conj entry)
+                                        (deliver entered true)
+                                        @release)}
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}]
+       (try
+         (let [response ((:handler route) request)]
+           (is (= 200 (:status response)))
+           (is (= true (deref entered 3000 ::timeout)))
+           (is (= :keepalive-error (:reason (first @close-events))))
+           (is (= :gesso.live.sse/frame-write-unknown
+                  (-> @close-events first :error ex-data :error/type)))
+           (is (stream/closed? (:body response)))
+           (is (eventually #(zero? (:subscription-count (source/stats src)))))
+           (is (eventually #(zero? ((:occupied-count route)))))
+           ;; The :on-close callback remains blocked; :close! must still
+           ;; complete cancellation and provider-safe drain independently.
+           (let [closing (future ((:close! route)))]
+             (try
+               (is (= :closed (deref closing 2000 ::timeout)))
+               (is (= {:outcome :drained} ((:await-drained! route) 500)))
+               (is (stream/closed? (:body response)))
+               (is (zero? (:subscription-count (source/stats src))))
+               (finally (future-cancel closing))))
+           (deliver release true)
+           (is (= 1 (count @close-events))
+               "No duplicate close notification after shutdown"))
+         (finally
+           (deliver release true)
+           ((:close! route))))))))
