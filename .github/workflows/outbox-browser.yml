@@ -130,6 +130,13 @@ jobs:
           timeout 150s clojure -M:test -n gesso.live.outbox.lifecycle-test \
             2>&1 | tee target/outbox-browser/lifecycle-owner.log
 
+      - name: Inspect cold-host durable outbox debt by source
+        shell: bash
+        run: |
+          set -euo pipefail
+          clojure -M:test -n gesso.live.outbox.recovery-audit-test \
+            2>&1 | tee target/outbox-browser/recovery-audit.log
+
       - name: Require real Chromium EventSource/HTMX/DOM convergence
         shell: bash
         run: |
