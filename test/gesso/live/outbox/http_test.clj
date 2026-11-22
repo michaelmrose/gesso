@@ -827,6 +827,37 @@
          (is (eventually #(zero? (:subscription-count (source/stats src)))))
          (finally ((:close! route))))))))
 
+(deftest managed-route-default-keepalive-and-explicit-overrides-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           seen (atom [])
+           original live/start-sse!
+           request {:uri "/live/events" :request-method :get}
+           base {:path "/live/events"
+                 :authorize-subscription (constantly scope)}]
+       (with-redefs [live/start-sse!
+                     (fn [system subscription opts]
+                       (swap! seen conj (get-in opts [:sse-options :keepalive-ms]))
+                       (original system subscription opts))]
+         ;; The managed default is distinct from the generic SSE transport
+         ;; default (nil). A caller may choose a different interval or
+         ;; explicitly opt out when another HTTP disconnect probe exists.
+         (doseq [[options expected]
+                 [[base 15000]
+                  [(assoc base :sse-options {:keepalive-ms 55}) 55]
+                  [(assoc base :sse-options {:keepalive-ms nil}) nil]]]
+           (let [route (http/wrap-authorized-sse started options)]
+             (try
+               (let [response ((:handler route) request)]
+                 (is (= 200 (:status response)))
+                 (is (= expected (last @seen)))
+                 (is (= 1 ((:active-count route))))
+                 (stream/close! (:body response)))
+               (finally ((:close! route))))))
+         (is (= [15000 55 nil] @seen))
+         (is (eventually #(zero? (:subscription-count (source/stats src))))))))))
+
 (deftest real-http-client-disconnect-releases-sse-capacity-test
   ;; This tests a physical client abort, not route-wide :close! or a direct
   ;; Manifold close. The loopback adapter must observe an abandoned response
@@ -835,13 +866,15 @@
   (setup-host
    (fn [started]
      (let [src (:source (:gesso.live/system started))
-           route (http/wrap-authorized-sse
-                  started {:path "/live/events"
-                           :max-connections 1
-                           ;; Keepalive frames give the actual HTTP writer an
-                           ;; opportunity to observe the disconnected reader.
-                           :sse-options {:keepalive-ms 30}
-                           :authorize-subscription (constantly scope)})
+           ;; Scale only the managed default interval down for this physical
+           ;; test. The route gets no :sse-options override: its own default
+           ;; must supply the probe that reveals the abandoned HTTP writer.
+           route (with-redefs-fn
+                   {#'gesso.live.outbox.http/default-managed-keepalive-ms 30}
+                   #(http/wrap-authorized-sse
+                     started {:path "/live/events"
+                              :max-connections 1
+                              :authorize-subscription (constantly scope)}))
            server (start-http! (:handler route))
            client (-> (HttpClient/newBuilder)
                       (.version HttpClient$Version/HTTP_1_1)

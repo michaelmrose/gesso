@@ -26,6 +26,7 @@
                          :reason reason))))
 
 (def ^:private default-max-connections 1024)
+(def ^:private default-managed-keepalive-ms 15000)
 (def ^:private default-max-pending-authorizations 1024)
 
 (defn- reserve-pending-authorization! [state live-system limit]
@@ -77,7 +78,12 @@
    Requires a started concrete host, a fixed canonical :path (absolute URL
    path with no query string, repeated slash, or dot traversal segment), and
    a trusted :authorize-subscription callback. Authorization is bounded by
-   :max-pending-authorizations (1024 by default). The reservation covers
+   :max-pending-authorizations (1024 by default). The managed route also
+   enables SSE keepalive comments every 15 seconds by default, allowing an
+   HTTP writer to observe disconnected idle clients and reclaim slots when
+   its adapter closes the stream. A caller may override :keepalive-ms in
+   :sse-options, including explicitly nil to opt out when its HTTP adapter
+   supplies equivalent disconnect detection. The reservation covers
    both the application callback and any wait for session admission, so a
    stalled SSE startup cannot queue unlimited GETs. Excess requests receive
    HTTP 503 without invoking the callback. The callback authenticates the
@@ -174,7 +180,14 @@
   (let [max-connections (get options :max-connections default-max-connections)
         max-pending-authorizations (get options :max-pending-authorizations
                                         default-max-pending-authorizations)
-        validated-sse (sse/prepare-options! sse-options)
+        ;; Generic SSE flows may intentionally be event-only, but an HTTP
+        ;; managed route owns a finite session budget. Without periodic writes,
+        ;; its HTTP adapter may not discover an idle client disconnect and the
+        ;; abandoned session may occupy a slot until another event arrives.
+        ;; Explicit caller choices still override this managed-route default.
+        validated-sse (sse/prepare-options!
+                       (merge {:keepalive-ms default-managed-keepalive-ms}
+                              sse-options))
         _ (when (not= 200 (:status validated-sse))
             (reject! :invalid-sse-status {:status (:status validated-sse)}))
         ;; A fixed HTTP length can truncate an indefinitely streamed body.
