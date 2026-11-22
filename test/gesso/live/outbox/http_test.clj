@@ -4094,3 +4094,139 @@
                  (stream/close! (:body healthy))
                  (when @worker ((:stop! @worker) 2000))
                  ((:close! route)))))))))))
+
+(deftest owned-shutdown-waits-for-recovery-and-pending-authorization-test
+  ;; Three distinct ownership boundaries must be respected in order:
+  ;; 1. A scheduled source-release retry can be physically blocked.
+  ;; 2. Two authorized GETs can be inside application authorization.
+  ;; 3. The route and listener may report a completed close pass while
+  ;;    those requests still hold pending-authorization reservations.
+  ;; Neither recovery-drain nor route-drain alone certifies provider safety.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           real-open flow/open-source-flow!
+           failed-first? (atom true)
+           retry-entered (promise)
+           release-retry (promise)
+           auth-entered (promise)
+           release-auth (promise)
+           auth-starts (atom 0)
+           provider-events (atom [])
+           failure (ex-info "unreleased SSE source before recovery"
+                            {:test :v2244})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source options]
+            (let [opened (real-open source options)
+                  real-close (:close! opened)]
+              (assoc opened :close!
+                     (fn []
+                       (if (compare-and-set! failed-first? true false)
+                         (throw failure)
+                         (do (deliver retry-entered true)
+                             @release-retry
+                             (real-close)))))))
+          ;; Keep independent event-collector release from masking the
+          ;; response owner's deliberately unresolved source close.
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 2
+                                 :max-pending-authorizations 2
+                                 :sse-options {:keepalive-ms 15000
+                                               :frame-write-timeout-ms 30000}
+                                 :authorize-subscription
+                                 (fn [req]
+                                   (when (:block-auth? req)
+                                     (when (= 2 (swap! auth-starts inc))
+                                       (deliver auth-entered true))
+                                     @release-auth)
+                                   scope)})
+                 normal-request {:uri "/live/events" :request-method :get}
+                 blocked-request (assoc normal-request :block-auth? true)
+                 response ((:handler route) normal-request)
+                 worker (atom nil)
+                 auth-futures (atom [])]
+             (try
+               (is (= 200 (:status response)))
+               (stream/close! (:body response))
+               (is (eventually #(= 1 ((:disconnected-count route)))))
+               (is (= 1 (:subscription-count (source/stats src))))
+               (reset! worker
+                       ((requiring-resolve
+                         'gesso.live.outbox.http-recovery/start-scheduled!)
+                        route {:poll-ms 10 :min-interval-ms 15000
+                               :max-attempts 1}))
+               (is (= true (deref retry-entered 4000 ::timeout))
+                   "Scheduled retry holds a physical source-close callback")
+               (reset! auth-futures
+                       [(future ((:handler route) blocked-request))
+                        (future ((:handler route) blocked-request))])
+               (is (= true (deref auth-entered 4000 ::timeout)))
+               (is (= 2 ((:pending-authorization-count route))))
+               (is (= {:status 503 :headers {}
+                       :body "Live authorization capacity reached"}
+                      ((:handler route) blocked-request))
+                   "Third pending GET is refused without running authorization")
+               (is (= 2 @auth-starts))
+               (is (= 1 ((:occupied-count route))))
+               (is (false? ((:drained? route))))
+               (let [shutdown ((requiring-resolve
+                                'gesso.live.outbox.http-recovery/prepare-owned-shutdown)
+                               @worker {:route route :drain-timeout-ms 0
+                                        :stop-listener!
+                                        (fn []
+                                          (swap! provider-events conj :listener-stop)
+                                          ;; Only route-drain can independently
+                                          ;; confirm *its* pending auth ledger.
+                                          {:outcome :drained})
+                                        :stop-host!
+                                        (fn []
+                                          (swap! provider-events conj :host-stop)
+                                          {:outcome :stopped})})]
+                 (is (= {:outcome :recovery-timed-out} ((:stop! shutdown))))
+                 (is (empty? @provider-events)
+                     "Blocked cleanup cannot permit listener/provider stop")
+                 (is (= :ready (get ((:status shutdown)) :shutdown)))
+                 (is (false? ((:closed? route))))
+                 (deliver release-retry true)
+                 (is (eventually #((:drained? @worker))))
+                 (is (zero? (:subscription-count (source/stats src))))
+                 (is (= 2 ((:pending-authorization-count route))))
+                 (is (= {:outcome :timed-out} ((:stop! shutdown)))
+                     "Drained recovery alone cannot permit provider stop")
+                 (is (= [:listener-stop] @provider-events))
+                 (is (true? ((:closed? route))))
+                 (is (false? ((:drained? route)))
+                     "Blocked authorization still owns the final drain fence")
+                 (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+                 (is (= 2 ((:pending-authorization-count route))))
+                 (is (= {:status 503 :headers {}
+                         :body "Live shutting down"}
+                        ((:handler route) normal-request)))
+                 (deliver release-auth true)
+                 (is (every? #(= {:status 503 :headers {}
+                                 :body "Live shutting down"}
+                                (deref % 4000 ::timeout))
+                             @auth-futures)
+                     "Late authorizations cannot create streams after shutdown")
+                 (is (zero? ((:pending-authorization-count route))))
+                 (is (zero? ((:occupied-count route))))
+                 (is (zero? (:active-consumer-count (source/stats src))))
+                 (is (= {:outcome :drained} ((:await-drained! route) 0)))
+                 (is (= :stopped (:outcome ((:stop! shutdown)))))
+                 (is (= [:listener-stop :listener-stop :host-stop]
+                        @provider-events))
+                 (is (= :stopped (:outcome ((:stop! shutdown)))))
+                 (is (= 1 (count (filter #{:host-stop} @provider-events)))
+                     "The confirmed provider stop must never be replayed"))
+               (finally
+                 (deliver release-retry true)
+                 (deliver release-auth true)
+                 (doseq [f @auth-futures] (future-cancel f))
+                 (when @worker ((:stop! @worker) 2000))
+                 ((:close! route))))))))))
+)
