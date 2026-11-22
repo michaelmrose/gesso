@@ -3844,3 +3844,114 @@
                (finally
                  (deliver release true)
                  ((:close! route)))))))))))
+
+(deftest sustained-scheduled-source-release-pressure-remains-bounded-test
+  ;; Five disconnected HTTP response owners retain five physical source
+  ;; interests when source release repeatedly fails. The scheduled controller
+  ;; must back off and rotate bounded retry batches without allocating more
+  ;; interests, freeing slots prematurely, or canceling a healthy peer. After
+  ;; the provider recovers, all five obligations must eventually be released.
+  (setup-host
+   {:max-active-consumers 6}
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           actual-open flow/open-source-flow!
+           next-id (atom 0)
+           allow-release? (atom false)
+           attempted (atom [])
+           failure (ex-info "physical release unavailable" {:test :v2242})]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [source options]
+            (let [opened (actual-open source options)
+                  id (swap! next-id inc)
+                  close! (:close! opened)]
+              (if (<= id 5)
+                (assoc opened :close!
+                       (fn []
+                         (swap! attempted conj id)
+                         (if @allow-release?
+                           (close!)
+                           (throw failure))))
+                opened)))
+          ;; As in the single-orphan regressions, suppress the collector's
+          ;; independent release hook so a failed physical close cannot be
+          ;; silently masked by another owner of the same source interest.
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :max-connections 6
+                                 :sse-options {:keepalive-ms 15000
+                                               :frame-write-timeout-ms 30000}
+                                 :authorize-subscription (constantly scope)})
+                 request {:uri "/live/events" :request-method :get}
+                 orphans (doall (repeatedly 5 #((:handler route) request)))
+                 healthy ((:handler route) request)
+                 worker (atom nil)]
+             (try
+               (is (= 6 @next-id))
+               (is (every? #(= 200 (:status %)) (conj orphans healthy)))
+               (doseq [response orphans] (stream/close! (:body response)))
+               (is (eventually #(and (= 5 ((:disconnected-count route)))
+                                     (= 1 ((:active-count route))))))
+               (is (= 6 ((:occupied-count route))))
+               (is (= 6 (:active-consumer-count (source/stats src))))
+               (is (= 6 (:subscription-count (source/stats src))))
+               (is (= {:status 503 :headers {}
+                       :body "Live connection capacity reached"}
+                      ((:handler route) request)))
+               (is (= 6 @next-id)
+                   "Capacity refusals must not create a seventh source flow")
+               (reset! worker
+                       ((requiring-resolve
+                         'gesso.live.outbox.http-recovery/start-scheduled!)
+                        route {:poll-ms 10 :min-interval-ms 50
+                               :max-failure-interval-ms 200
+                               :max-attempts 2}))
+               (is (eventually #(>= (:failure-count ((:stats @worker))) 2))
+                   "Repeated physical failures must remain observable")
+               (is (<= 2 (get-in ((:stats @worker))
+                                 [:controller :consecutive-failures])))
+               (is (>= (count (set (drop 5 @attempted))) 4)
+                   "Two scheduled batches must reach four distinct orphans")
+               (is (= 6 (:subscription-count (source/stats src)))
+                   "Unsuccessful retries cannot pretend source release")
+               (is (= 5 ((:disconnected-count route))))
+               (is (= 6 ((:occupied-count route))))
+               ;; Continue to sample under pressure, rather than asserting
+               ;; only before and after the scheduled retries.
+               (dotimes [_ 12]
+                 (Thread/sleep 25)
+                 (is (= 6 ((:occupied-count route))))
+                 (is (= 6 (:active-consumer-count (source/stats src)))))
+               (is (not (stream/closed? (:body healthy))))
+               (is (<= (count (set @attempted)) 5))
+               (is (pos? (count (set @attempted))))
+               (reset! allow-release? true)
+               (is (eventually #(and (zero? ((:disconnected-count route)))
+                                     (= 1 (:subscription-count
+                                           (source/stats src)))))
+                   "Bounded rotating batches must eventually clear all debt")
+               (is (= 1 ((:occupied-count route))))
+               (is (= 1 ((:active-count route))))
+               (is (not (stream/closed? (:body healthy))))
+               (is (= 0 (get-in ((:stats @worker))
+                                [:controller :consecutive-failures])))
+               (let [replacement ((:handler route) request)]
+                 (is (= 200 (:status replacement))
+                     "Authorized admission resumes when source slots return")
+                 (when (= 200 (:status replacement))
+                   (stream/close! (:body replacement))
+                   (is (eventually #(= 1 (:subscription-count
+                                           (source/stats src)))))))
+               (is (= :drained (:outcome ((:stop! @worker) 2000))))
+               (stream/close! (:body healthy))
+               (is (eventually #(zero? ((:occupied-count route)))))
+               (is (eventually #(zero? (:active-consumer-count
+                                       (source/stats src)))))
+               (finally
+                 (reset! allow-release? true)
+                 (when @worker ((:stop! @worker) 2000))
+                 ((:close! route)))))))))))
