@@ -206,3 +206,46 @@
                 (str phase " may not invent a successful lease transition")))
           (finally
             (Thread/interrupted)))))))
+
+(deftest interrupted-current-intent-query-preserves-unknown-and-thread-signal-test
+  ;; The same physical read gates pending acquisition, expired reclaim and
+  ;; construction of the active-lease transaction guard. An interrupted query
+  ;; is neither an observed missing row nor permission to issue a new lease.
+  (with-open [node (xtn/start-node {})]
+    (doseq [phase [:acquire :reclaim :fence]]
+      (let [id (random-uuid)
+            _ (pending! node id)
+            initial (claim id "initial-worker")
+            _ (when (not= phase :acquire)
+                (is (= :acquired
+                       (:status (acquisition/acquire-pending! node initial)))))
+            before (read-intent node id)
+            cause (InterruptedException. (str (name phase) " read interrupted"))
+            queries (atom 0)
+            request (claim id "next-worker")]
+        (try
+          (Thread/interrupted)
+          (let [caught (with-redefs [xt/q (fn [& _]
+                                            (swap! queries inc)
+                                            (throw cause))]
+                         (try
+                           (case phase
+                             :acquire (acquisition/acquire-pending! node request)
+                             :reclaim (acquisition/reclaim-expired! node request)
+                             :fence (acquisition/active-lease-guard-ops
+                                     node {:intent-id id
+                                           :lease-id (:lease-id initial)
+                                           :worker-id (:worker-id initial)}))
+                           (catch Throwable error error)))
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            (Thread/interrupted)
+            (is (identical? cause caught)
+                (str phase " must preserve original read failure"))
+            (is interrupted?
+                (str phase " must retain interrupt when XTDB query clears it"))
+            (is (= 1 @queries)
+                (str phase " must not retry failed physical read"))
+            (is (= before (read-intent node id))
+                (str phase " must not invent a lease or fence transition")))
+          (finally
+            (Thread/interrupted)))))))

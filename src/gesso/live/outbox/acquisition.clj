@@ -92,7 +92,16 @@
 
 (defn- current-intent!
   [node intent-id]
-  (let [rows (xt/q node [read-current-sql intent-id])]
+  (let [rows (try
+               (xt/q node [read-current-sql intent-id])
+               (catch InterruptedException cause
+                 ;; The current read is a physical XTDB boundary shared by
+                 ;; acquisition, reclaim and active-lease fencing. A failed
+                 ;; interruptible read is not evidence that an intent or its
+                 ;; lease is missing. Preserve both the exact exception and
+                 ;; the calling thread's cancellation signal.
+                 (restore-interrupt! cause)
+                 (throw cause)))]
     (when (> (count rows) 1)
       (reject! :ambiguous-current-row {:intent-id intent-id}))
     (first rows)))
