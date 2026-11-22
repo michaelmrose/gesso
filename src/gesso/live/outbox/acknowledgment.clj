@@ -151,6 +151,11 @@
                         :lease-id lease-id
                         :receipt-id (:receipt-id receipt)})
                 (catch Throwable cause
+                  ;; A physical transaction may have cleared the interrupted
+                  ;; flag before throwing. Preserve cancellation even while
+                  ;; retaining the exact exception and uncertain outcome.
+                  (when (instance? InterruptedException cause)
+                    (.interrupt (Thread/currentThread)))
                   (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data cause)))
                     {:status :contended :intent-id intent-id}
                     (throw cause)))))))))))

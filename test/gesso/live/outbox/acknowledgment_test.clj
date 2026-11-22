@@ -219,6 +219,44 @@
         (is (= (:receipt-id (first winners))
                (:gesso.live.outbox/dispatch-receipt-id (row node id))))))))
 
+(deftest interrupted-physical-acknowledgment-retains-uncertainty-and-thread-signal-test
+  ;; A trusted adapter has already reported acceptance when this guarded
+  ;; physical XTDB transaction begins. If it throws InterruptedException,
+  ;; there is no definitive commit result: the adapter must propagate the
+  ;; original error, not return :contended or fabricate :acknowledged.
+  ;; JVM cancellation must remain visible even if the physical operation
+  ;; cleared the caller's interrupted bit before throwing.
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (seed! node id)
+          lease-id (pending->leased! node id "worker")
+          submission (submit id lease-id "worker")
+          before (row node id)
+          cause (InterruptedException. "guarded acknowledgment interrupted")
+          attempts (atom 0)]
+      (try
+        (Thread/interrupted)
+        (let [caught (with-redefs [live.xtdb/execute-tx!
+                                   (fn [& _]
+                                     (swap! attempts inc)
+                                     (throw cause))]
+                       (try
+                         (acknowledgment/acknowledge-dispatch! node submission)
+                         (catch Throwable error error)))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? cause caught)
+              "Unknown physical XTDB outcome must retain the original error")
+          (is interrupted?
+              "Guarded acknowledgment interruption must retain JVM cancellation")
+          (is (= 1 @attempts) "Only one transaction attempt is permitted")
+          (is (= before (row node id))
+              "An interrupted transaction may not fabricate terminal state")
+          (is (= :leased (:gesso.live.outbox/status (row node id))))
+          (is (nil? (:gesso.live.outbox/dispatch-receipt-id (row node id)))))
+        (finally
+          (Thread/interrupted))))))
+
 (deftest unexpected-provider-errors-are-not-called-safe-rejections-test
   (with-open [node (xtn/start-node {})]
     (let [id (random-uuid)
