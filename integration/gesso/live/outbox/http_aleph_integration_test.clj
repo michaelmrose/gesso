@@ -134,7 +134,9 @@
           (is (eventually #(= 1 (:matched ((:stats (:capture server))))))
               "Closing source must drive Aleph's outbound last-frame write")
           (let [bridge (:bridge (first @(:responses server)))]
-            (is (= :succeeded (:write-outcome ((:status bridge)))))
+            (is (eventually #(= :succeeded
+                              (:write-outcome ((:status bridge)))))
+                "Await the actual Netty write future, not only frame capture")
             (is (= 1 ((:active-count (:guard server))))
                 "Final-write evidence alone cannot retire the source owner")
             ;; The test owns this producer and knows it has no outstanding
