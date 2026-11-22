@@ -5,6 +5,8 @@
             [gesso.live.core :as live]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.cycle :as cycle]
+            [gesso.live.outbox.delivery :as delivery]
+            [gesso.live.outbox.acknowledgment :as acknowledgment]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.source :as source]
             [manifold.stream :as s]
@@ -405,3 +407,87 @@
           (is (= 1 @calls))
           (finally
             (is (= :drained (:outcome (lifecycle/stop! handle 3000))))))))))
+
+(deftest failure-inspection-refuses-healthy-and-non-cycle-lifecycles-test
+  (is (= :invalid-handle
+         (invalid-reason #(lifecycle/inspect-failure! nil))))
+  (with-redefs [cycle/process-cycle!
+                (fn [_ _ _ _ opts]
+                  (summary (:worker-id opts) :observed-end nil))]
+    (let [handle (lifecycle/start! :unused {:source :fake} {} source-id
+                                   {:worker-id "healthy-inspection"
+                                    :poll-ms 3000})]
+      (try
+        (is (eventually #(= :idle (:status (lifecycle/status handle)))))
+        (is (= :not-failed-lifecycle
+               (invalid-reason #(lifecycle/inspect-failure! handle))))
+        (finally (lifecycle/stop! handle 3000)))))
+  (with-redefs [cycle/process-cycle!
+                (fn [& _]
+                  (throw (ex-info "unrelated failure"
+                                  {:error/type :gesso.live.outbox/invalid-cycle})))]
+    (let [handle (lifecycle/start! :unused {:source :fake} {} source-id
+                                   {:worker-id "generic-failure"
+                                    :poll-ms 3000})]
+      (try
+        (is (eventually #(= :failed (:status (lifecycle/status handle)))))
+        (is (= :failed (:outcome (lifecycle/stop! handle 3000))))
+        (is (= :not-cycle-interruption
+               (invalid-reason #(lifecycle/inspect-failure! handle))))
+        (finally (lifecycle/stop! handle 3000))))))
+
+(deftest failed-managed-cycle-inspects-its-bound-physical-acknowledgment-test
+  ;; A real asynchronous managed lifecycle physically leases and acknowledges
+  ;; one publication. The adapter loses its post-ack result. The lifecycle
+  ;; halts, preserving that *unverified* receipt; inspection uses the exact
+  ;; XTDB node/source owned by the failed lifecycle, not host-supplied IDs.
+  (with-open [node (xtn/start-node {})]
+    (let [id (intent-id 844)
+          receipt-id (random-uuid)
+          calls (atom 0)
+          _ (seed! node id)]
+      (with-redefs [delivery/dispatch-acquired!
+                    (fn [_ _ _ acquired _]
+                      (swap! calls inc)
+                      (let [ack (acknowledgment/acknowledge-dispatch!
+                                 node {:intent-id (:intent-id acquired)
+                                       :lease-id (:lease-id acquired)
+                                       :worker-id (:worker-id acquired)
+                                       :receipt {:receipt-id receipt-id
+                                                 :adapter :gesso.live/synchronous-source
+                                                 :result :accepted}})]
+                        (is (= :acknowledged (:status ack))))
+                      (throw (ex-info "ack reply unknown after physical commit"
+                                      {:error/type
+                                       :gesso.live.outbox/post-dispatch-ack-unknown
+                                       :intent-id (:intent-id acquired)
+                                       :lease-id (:lease-id acquired)
+                                       :receipt-id receipt-id
+                                       :dispatch/status :accepted
+                                       :acknowledgment/status :unknown})))]
+        (let [handle (lifecycle/start! node {:source :installed} {} source-id
+                                       {:worker-id "managed-recovery"
+                                        :poll-ms 10 :max-items 1})]
+          (try
+            (is (eventually #(= :failed (:status (lifecycle/status handle)))))
+            (is (= :failed (:outcome (lifecycle/stop! handle 3000))))
+            (let [before (lifecycle/status handle)
+                  before-row (row node id)
+                  result (lifecycle/inspect-failure! handle)]
+              (is (= :gesso.live.outbox/cycle-interrupted
+                     (get-in before [:failure :error/type])))
+              (is (= :unverified-post-dispatch-receipt
+                     (get-in before [:failure :in-flight :receipt-evidence])))
+              (is (= receipt-id
+                     (get-in before [:failure :in-flight :receipt-id])))
+              (is (= :matching-acknowledgment-recorded (:status result)))
+              (is (= id (:intent-id result)))
+              (is (= :dispatch-accepted (:observed-status result)))
+              (is (true? (:rescan-required? result)))
+              (is (not (contains? result :may-replay?)))
+              (is (= before (lifecycle/status handle)))
+              (is (= before-row (row node id)))
+              (is (= 0 (:total-dispatch-accepted before)))
+              (is (= 1 @calls))
+              (is (= result (lifecycle/inspect-failure! handle))))
+            (finally (lifecycle/stop! handle 3000))))))))

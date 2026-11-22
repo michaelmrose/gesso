@@ -20,7 +20,8 @@
    External sends can race with reclaimed leases; delivery is at least once
    compatible, not exactly once. No global cross-process leader is created."
   (:require [clojure.string :as str]
-            [gesso.live.outbox.cycle :as cycle])
+            [gesso.live.outbox.cycle :as cycle]
+            [gesso.live.outbox.reconciliation :as reconciliation])
   (:import [java.util.concurrent CountDownLatch TimeUnit]))
 
 (def ^:private allowed-options
@@ -29,7 +30,7 @@
 (def ^:private default-max-items 32)
 (def ^:private default-poll-ms 250)
 
-(defrecord Lifecycle [state stop-signal done thread])
+(defrecord Lifecycle [state stop-signal done thread node expected-source-id])
 
 (defn- reject! [reason data]
   (throw (ex-info "Invalid Live outbox lifecycle."
@@ -86,6 +87,35 @@
    A :stopping worker may still be inside a running physical operation."
   [handle]
   @(.-state ^Lifecycle (require-handle! handle)))
+
+(defn inspect-failure!
+  "Read-only physical observation of one stopped failed lifecycle's cycle debt.
+
+   Bind the read to the *original* XTDB provider and expected Live source of
+   this managed worker, not independently supplied source/lease credentials.
+   The scheduler must have exited its failed cycle before a recovery read is
+   allowed. A generic lifecycle failure is NOT an outbox cycle-interruption
+   report and cannot be interpreted as retained acquisition/dispatch debt.
+
+   The result of reconciliation/inspect! remains time-sensitive diagnostic
+   evidence only: it does not resume the lifecycle, grant lease authority,
+   replay a send, certify subscriber delivery or establish safe worker
+   restart. The owner still controls physical provider teardown and any
+   subsequent independently qualified recovery procedure."
+  [handle]
+  (require-handle! handle)
+  (let [snapshot (status handle)]
+    (when-not (= :failed (:status snapshot))
+      (reject! :not-failed-lifecycle {:status (:status snapshot)}))
+    (when-not (zero? (.getCount ^CountDownLatch (.-done ^Lifecycle handle)))
+      (reject! :failed-worker-not-finished {}))
+    (when-not (= :gesso.live.outbox/cycle-interrupted
+                 (get-in snapshot [:failure :error/type]))
+      (reject! :not-cycle-interruption
+               {:failure-type (get-in snapshot [:failure :error/type])}))
+    (reconciliation/inspect! (.-node ^Lifecycle handle)
+                             (.-expected-source-id ^Lifecycle handle)
+                             (:failure snapshot))))
 
 (defn- failure-report [error]
   (let [data (ex-data error)]
@@ -226,7 +256,8 @@
                         (fn [] (run-loop! node system ctx expected-source-id
                                           opts state stop-signal done))
                         (str "gesso-live-outbox-" (:worker-id opts)))
-        handle (->Lifecycle state stop-signal done thread)]
+        handle (->Lifecycle state stop-signal done thread
+                            node expected-source-id)]
     (.setDaemon thread true)
     (.start thread)
     handle))
