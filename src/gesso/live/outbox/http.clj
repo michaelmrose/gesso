@@ -141,6 +141,15 @@
     "keep-alive" "proxy-connection" "te" "trailer"
     "transfer-encoding" "upgrade" "x-accel-buffering"})
 
+(defn- source-capacity-refusal?
+  "Only source admission's typed refusal can be turned into HTTP overload.
+   Other failed startups, even if they happen during capacity pressure, must
+   retain their original error. Authorization is checked before this path."
+  [error]
+  (and (instance? clojure.lang.ExceptionInfo error)
+       (= :gesso.live.source/consumer-capacity-reached
+          (:reason (ex-data error)))))
+
 (defn- valid-scope? [subscription]
   (and (map? subscription)
        (= #{:topic :id} (set (keys subscription)))
@@ -172,7 +181,13 @@
    Ring request and decides whether the requester may subscribe to the exact
    returned scope. Nil denies with 403. Unknown paths are passed to the
    existing canonical Ring handler.
-   Non-GET requests to the SSE path receive 405. Managed EventSource routes
+   Non-GET requests to the SSE path receive 405. When an authorized GET
+   reaches a full shared Live source consumer budget, it receives HTTP 503
+   without a response stream. Its reserved starting slot is released; direct
+   source consumers retain their registrations. Authorization failures take
+   precedence, and other source/startup exceptions are not disguised as
+   overload. The client must reacquire through an authorized route later.
+   Managed EventSource routes
    require an HTTP 200 response status: another accepted transport status
    would register a Live interest but cannot establish EventSource delivery.
    A fixed Content-Length is also forbidden: EventSource is an indefinite
@@ -477,11 +492,17 @@
                               ;; unrelated startup is stalled outside.
                               (locking state
                                 (if (= :failed start-outcome)
-                                  (if (or (:closed? @state)
-                                          (live/closed? live-system))
+                                  (cond
+                                    (or (:closed? @state)
+                                        (live/closed? live-system))
                                     {:status 503 :headers {}
                                      :body "Live shutting down"}
-                                    (throw session-or-error))
+
+                                    (source-capacity-refusal? session-or-error)
+                                    {:status 503 :headers {}
+                                     :body "Live source capacity reached"}
+
+                                    :else (throw session-or-error))
                                   (let [session session-or-error
                                         key (random-uuid)
                                         ;; An unavailable session is canceled

@@ -43,22 +43,27 @@
                   :source-options {:coalesce-window-ms 0}
                   :dispatch-options {:threads 1 :queue-size 8 :on-overflow :throw}}})
 
-(defn- setup-host [f]
-  (let [ops (standard-operations)
-        render (render-context ops)]
-    (with-surfaced-application
-      {:request-board
-       [:main (rendered-operation-button render :request/claim
-                                         "/operations/request/claim")]}
-      (fn [{:keys [assembly]}]
-        (let [handler (fn [_]
-                        (g/html-response
-                         [:main (rendered-operation-button
-                                 render :request/claim
-                                 "/operations/request/claim")]))
-              started (host/start! assembly handler (config))]
-          (try (f started)
-               (finally (host/stop! started))))))))
+(defn- setup-host
+  ([f] (setup-host {} f))
+  ([source-options f]
+   (let [ops (standard-operations)
+         render (render-context ops)]
+     (with-surfaced-application
+       {:request-board
+        [:main (rendered-operation-button render :request/claim
+                                          "/operations/request/claim")]}
+       (fn [{:keys [assembly]}]
+         (let [handler (fn [_]
+                         (g/html-response
+                          [:main (rendered-operation-button
+                                  render :request/claim
+                                  "/operations/request/claim")]))
+               started (host/start!
+                        assembly handler
+                        (update-in (config) [:live-options :source-options]
+                                   merge source-options))]
+           (try (f started)
+                (finally (host/stop! started)))))))))
 
 (defn- eventually [pred]
   (loop [n 0]
@@ -2957,4 +2962,104 @@
                                {:uri "/live/events" :request-method :get}))))
            (is (zero? (:subscription-count (source/stats source))))
            (is (= :closed ((:close! route)))))
+         (finally ((:close! route))))))))
+
+(deftest real-http-source-consumer-capacity-is-authorized-and-recovers-test
+  ;; Unlike the managed route limit, this exhausts the underlying shared
+  ;; source budget with an unrelated direct tap. Ring must return a physical
+  ;; 503 only after authorization, without an SSE session or leaked slot.
+  (setup-host
+   {:max-active-consumers 1}
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           direct-tap (source/changes src)
+           authorized (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 3
+                           ;; Frequent physical writes detect closed loopback
+                           ;; readers; the generic default is 15 seconds.
+                           :sse-options {:keepalive-ms 25
+                                         :frame-write-timeout-ms 500}
+                           :authorize-subscription
+                           (fn [req]
+                             (when (= "Bearer allowed"
+                                      (get-in req [:headers "authorization"]))
+                               (swap! authorized inc)
+                               scope))})
+           server (start-http! (:handler route))
+           client (-> (HttpClient/newBuilder)
+                      (.version HttpClient$Version/HTTP_1_1)
+                      (.build))]
+       (try
+         (is (= 1 (:active-consumer-count (source/stats src))))
+         (let [denied (request client (:base server)
+                               "/live/events" "GET" nil)]
+           (with-open [body (.body denied)]
+             (is (= 403 (.statusCode denied)))
+             (is (= "Forbidden"
+                    (String. (.readAllBytes body) StandardCharsets/UTF_8)))))
+         (let [overload (request client (:base server)
+                                 "/live/events" "GET" "Bearer allowed")]
+           (with-open [body (.body overload)]
+             (is (= 503 (.statusCode overload)))
+             (is (= "Live source capacity reached"
+                    (String. (.readAllBytes body) StandardCharsets/UTF_8)))))
+         (is (= 1 @authorized))
+         (is (= 1 (:consumer-capacity-rejection-count (source/stats src))))
+         (is (= 1 (:active-consumer-count (source/stats src)))
+             "A refused SSE startup cannot disturb unrelated consumers")
+         (is (zero? (:subscription-count (source/stats src))))
+         (is (zero? ((:occupied-count route)))
+             "Source admission refusal returns its reserved HTTP slot")
+         (is (zero? ((:pending-authorization-count route))))
+         ;; The full source is still live and the direct tap keeps its place.
+         (stream/close! direct-tap)
+         (is (eventually #(zero? (:active-consumer-count
+                                 (source/stats src)))))
+         (let [admitted (request client (:base server)
+                                 "/live/events" "GET" "Bearer allowed")]
+           (with-open [body (.body admitted)]
+             (is (= 200 (.statusCode admitted)))
+             (is (eventually #(= 1 ((:active-count route)))))
+             (is (= 1 (:active-consumer-count (source/stats src))))
+             (source/emit! src {:topic :request
+                                :id "http-client-request"
+                                :change/kind :updated})
+             (with-open [reader (BufferedReader.
+                                (InputStreamReader. body StandardCharsets/UTF_8))]
+               (let [frame (frame-lines reader)]
+                 (is (vector? frame))
+                 (is (some #(= "event: live-update" %) frame)))))
+           (is (eventually #(zero? (:subscription-count
+                                   (source/stats src)))))
+           (is (eventually #(zero? ((:occupied-count route))))))
+         (is (= 2 @authorized))
+         (is (= 1 (:consumer-capacity-rejection-count (source/stats src))))
+         (finally
+           (stream/close! direct-tap)
+           ((:close! route))
+           ((:close! server))
+           (.close ^HttpClient client)))))))
+
+(deftest managed-route-only-translates-real-source-capacity-refusal-test
+  ;; An arbitrary startup failure is not a 503: it remains a failure with its
+  ;; original identity, and its reserved route slot is still released.
+  (setup-host
+   (fn [started]
+     (let [route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 1
+                           :authorize-subscription (constantly scope)})
+           unexpected (ex-info "cannot start source" {:reason :other/startup})]
+       (try
+         (with-redefs [live/start-sse! (fn [& _] (throw unexpected))]
+           (let [caught (try
+                          ((:handler route)
+                           {:uri "/live/events" :request-method :get})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+             (is (identical? unexpected caught))
+             (is (zero? ((:occupied-count route))))
+             (is (zero? ((:pending-authorization-count route))))))
          (finally ((:close! route))))))))
