@@ -129,6 +129,11 @@
    :task
    (dispatch-gesso-test! "browser" *command-line-args*)}
 
+  test:outbox:aleph
+  {:doc "Run opt-in real Aleph HTTP listener qualification; requires Aleph 0.9.11 and network/cached dependencies. Never silently skip."
+   :task (shell "clojure" "-M:aleph-integration" "-m"
+                "gesso.live.outbox.http-aleph-qualification-main")}
+
   test:outbox:browser:preflight
   {:doc "Check whether system Chromium can navigate to a local test page. This is NOT a browser convergence pass."
    :task (shell "clojure" "-M:outbox-browser" "-m" "gesso.live.outbox.browser-gate" "--preflight")}

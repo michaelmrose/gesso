@@ -57,6 +57,15 @@
    {pfeodrippe/recife
     {:mvn/version "0.22.0"}}}
 
+  ;; Explicit Aleph 0.9.11 qualification only. Do not add Aleph or its
+  ;; Netty resolution to ordinary JVM, CLJS, or browser builds. The
+  ;; integration/ tests fail if a real Aleph server cannot be started;
+  ;; they are not included by the :test alias alone.
+  :aleph-integration
+  {:extra-paths ["integration"]
+   :extra-deps
+   {aleph/aleph {:mvn/version "0.9.11"}}}
+
   ;; Opt-in Typed Clojure feasibility checks. Keep the checker, analyzer,
   ;; and runtime dependencies off ordinary Gesso JVM/CLJS classpaths.
   :typed
