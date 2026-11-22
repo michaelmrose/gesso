@@ -740,6 +740,93 @@
            (future-cancel pending)
            ((:close! route))))))))
 
+(deftest managed-route-bounds-get-requests-blocked-on-sse-admission-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           request {:uri "/live/events" :request-method :get}
+           called (atom 0)
+           entered (promise)
+           release (promise)
+           original-start live/start-sse!
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 2
+                           :max-pending-authorizations 1
+                           :authorize-subscription
+                           (fn [_] (swap! called inc) scope)})
+           first-request (atom nil)
+           second-request (atom nil)]
+       (try
+         ;; SSE start holds the route's admission monitor. A callback that
+         ;; already returned must keep its pending slot until session handoff,
+         ;; and overloaded GETs must not wait on the occupied monitor.
+         (with-redefs [live/start-sse!
+                       (fn [& args]
+                         (deliver entered true)
+                         @release
+                         (apply original-start args))]
+           (reset! first-request (future ((:handler route) request)))
+           (is (= true (deref entered 5000 ::timeout)))
+           (is (= 1 @called))
+           (is (= 1 ((:pending-authorization-count route)))
+               "A request awaiting SSE startup retains its reservation")
+           (is (= 0 ((:active-count route))))
+           (reset! second-request (future ((:handler route) request)))
+           (is (= {:status 503 :headers {}
+                   :body "Live authorization capacity reached"}
+                  (deref @second-request 2000 ::timeout))
+               "Over-capacity GET must fail without waiting for SSE startup")
+           (is (= 1 @called) "The excess GET must not invoke authorization")
+           (is (= 1 ((:pending-authorization-count route))))
+           (is (zero? (:subscription-count (source/stats src))))
+           (deliver release true)
+           (let [response (deref @first-request 10000 ::timeout)]
+             (is (= 200 (:status response)))
+             (is (zero? ((:pending-authorization-count route))))
+             (is (= 1 ((:active-count route))))
+             (stream/close! (:body response)))
+           ;; A broken implementation might admit a second stream after
+           ;; the blocked startup finishes; retire it before teardown.
+           (let [response (deref @second-request 10000 ::timeout)]
+             (when (= 200 (:status response))
+               (stream/close! (:body response))))
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src))))))
+         (finally
+           (deliver release true)
+           (when @first-request (future-cancel @first-request))
+           (when @second-request (future-cancel @second-request))
+           ((:close! route))))))))
+
+(deftest managed-route-releases-pending-slot-after-sse-start-exception-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           request {:uri "/live/events" :request-method :get}
+           expected (ex-info "synthetic SSE failure" {:phase :sse-start})
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-pending-authorizations 1
+                           :authorize-subscription (fn [_] scope)})]
+       (try
+         (with-redefs [live/start-sse! (fn [& _] (throw expected))]
+           (is (identical? expected
+                           (try ((:handler route) request)
+                                nil
+                                (catch clojure.lang.ExceptionInfo e e))))
+           (is (zero? ((:pending-authorization-count route)))
+               "SSE startup failure must release the pending slot")
+           (is (zero? ((:active-count route))))
+           (is (zero? (:subscription-count (source/stats src)))))
+         (let [response ((:handler route) request)]
+           (is (= 200 (:status response))
+               "The released slot permits a subsequent successful GET")
+           (stream/close! (:body response)))
+         (is (eventually #(zero? ((:active-count route)))))
+         (is (eventually #(zero? (:subscription-count (source/stats src)))))
+         (finally ((:close! route))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]
