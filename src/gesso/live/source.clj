@@ -86,6 +86,13 @@
   (or (:id options)
       (random-uuid)))
 
+(defn- restore-interrupt!
+  "A suppressed source callback or physical put interruption must preserve
+   the JVM thread's cancellation signal."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defn- call-safely
   [f & args]
   (when f
@@ -95,7 +102,8 @@
       ;; strand the coalescing timer. AssertionError and other Error subtypes
       ;; are not Exceptions, but are equally outside source delivery's trust
       ;; boundary when thrown by this optional hook.
-      (catch Throwable _
+      (catch Throwable error
+        (restore-interrupt! error)
         nil))))
 
 (defn closed?
@@ -280,6 +288,7 @@
         (track-tap-put-result! source tap-id stream invalidation put-result)
         true)
       (catch Throwable e
+        (restore-interrupt! e)
         (remove-tap-if-same! source tap-id stream)
         (s/close! stream)
         (record-put-error! source :broadcast-tap tap-id invalidation e)
@@ -346,6 +355,7 @@
         (track-subscription-put-result! source subscription-id stream invalidation put-result)
         true)
       (catch Throwable e
+        (restore-interrupt! e)
         (remove-subscription-if-same! source subscription-id stream)
         (s/close! stream)
         (record-put-error! source :indexed-subscription subscription-id invalidation e)
@@ -585,6 +595,7 @@
                    (try
                      (flush-cooldown! source k window-ms)
                      (catch Throwable e
+                       (restore-interrupt! e)
                        (record-error!
                         source
                         {:kind :coalesce-flush-error

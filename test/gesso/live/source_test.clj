@@ -811,6 +811,102 @@
       (finally
         (source/close! src)))))
 
+(deftest interrupted-source-put-retires-consumer-and-preserves-interrupt-test
+  ;; Both indexed and broadcast physical put boundaries catch external errors.
+  ;; A synchronous interrupted put still retires its stream, records the exact
+  ;; cause and preserves the caller's cancellation signal.
+  (doseq [[kind subscribe!]
+          [[:indexed #(source/subscribe % {:topic :request :id "req-1"})]
+           [:broadcast source/changes]]]
+    (let [src (source/create)
+          broken (subscribe! src)
+          healthy (source/subscribe src {:topic :request :id "req-1"})
+          original-put @#'gesso.live.source/put-consumer!
+          cause (InterruptedException. "put interrupted")]
+      (try
+        (Thread/interrupted)
+        (with-redefs-fn
+          {#'gesso.live.source/put-consumer!
+           (fn [target value]
+             (if (identical? target broken)
+               (throw cause)
+               (original-put target value)))}
+          (fn []
+            (let [result (source/emit! src invalidation-1)
+                  interrupted? (.isInterrupted (Thread/currentThread))]
+              (Thread/interrupted)
+              (is (= :emitted (:status result)))
+              (is (= 1 (:attempted result))
+                  "The healthy subscriber must still receive invalidation")
+              (is interrupted? (str kind " must restore thread interrupt")))))
+        (is (s/closed? broken) "Interrupted put must retire its stream")
+        (is (identical? cause (:error (last (source/errors src)))))
+        (is (= invalidation-1 (take-value healthy)))
+        (finally
+          (Thread/interrupted)
+          (source/close! src))))))
+
+(deftest interrupted-source-error-hook-restores-thread-flag-test
+  ;; Error-reporting is optional: its callback may fail, but must not erase an
+  ;; interrupt during a synchronous fanout on the publishing thread.
+  (let [src (source/create
+             {:on-error (fn [_]
+                          (throw (InterruptedException.
+                                  "source diagnostic interrupted")))})
+        broken (source/changes src)
+        healthy (source/subscribe src {:topic :request :id "req-1"})
+        original-put @#'gesso.live.source/put-consumer!]
+    (try
+      (Thread/interrupted)
+      (with-redefs-fn
+        {#'gesso.live.source/put-consumer!
+         (fn [target value]
+           (if (identical? target broken)
+             (throw (ex-info "put failed" {}))
+             (original-put target value)))}
+        (fn []
+          (let [result (source/emit! src invalidation-1)
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            (Thread/interrupted)
+            (is (= :emitted (:status result)))
+            (is (= 1 (:attempted result)))
+            (is interrupted? "Suppressed diagnostic interrupt must survive"))))
+      (is (s/closed? broken))
+      (is (= :put-error (:kind (last (source/errors src)))))
+      (is (= invalidation-1 (take-value healthy)))
+      (finally
+        (Thread/interrupted)
+        (source/close! src)))))
+
+(deftest interrupted-source-cooldown-reporter-sees-interrupt-test
+  ;; Scheduler exceptions are reported as failures instead of crashing its
+  ;; thread. Restore InterruptedException before invoking that reporter.
+  (let [reported (promise)
+        src (source/create
+             {:coalesce-window-ms 10
+              :on-error (fn [entry]
+                          (let [interrupted?
+                                (.isInterrupted (Thread/currentThread))]
+                            (Thread/interrupted)
+                            (deliver reported [entry interrupted?])))})
+        failure (InterruptedException. "coalesce flush interrupted")]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.source/flush-cooldown!
+         (fn [& _] (throw failure))}
+        (fn []
+          (is (= :emitted (:status (source/emit! src invalidation-1))))
+          (let [observed (deref reported timeout-ms ::timeout)]
+            (is (not= ::timeout observed) "Timer exception must be recorded")
+            (when (vector? observed)
+              (let [[entry interrupted?] observed]
+                (is (= :coalesce-flush-error (:kind entry)))
+                (is (identical? failure (:error entry)))
+                (is interrupted?
+                    "Reporter must observe restored scheduler interrupt"))))))
+      (finally
+        (source/close! src)))))
+
 (deftest synchronous-source-put-error-closes-consumer-stream-test
   ;; A thrown put! call must use the same terminal cleanup as an asynchronously
   ;; rejected or failed put. No abandoned open stream may outlive registration.
