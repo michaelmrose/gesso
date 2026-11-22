@@ -228,11 +228,14 @@
                            (get-in delivered [:acknowledgment :status])}
                           nil)))
         (when-not (accepted-delivery-result? acquired delivered)
-          ;; A positive label can conceal a mismatched receipt or unverified
-          ;; source acceptance. The physical send/ack may have happened; do
-          ;; not mark this lease as completed or schedule a second send.
+          ;; A positive label can conceal mismatched acknowledgment or source
+          ;; evidence. Preserve a matching *reported* receipt for physical
+          ;; reconciliation, but never treat it as committed or send again.
+          ;; Foreign intent/lease or missing receipt claims add no evidence.
           (interrupted! :delivery :invalid-delivery-result
-                        completed cursor in-flight
+                        completed cursor
+                        (merge in-flight
+                               (reported-post-dispatch-receipt acquired delivered))
                         {:source-acceptance :reported
                          :delivery-status (:status delivered)
                          :acknowledgment-status

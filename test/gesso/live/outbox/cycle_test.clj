@@ -969,3 +969,142 @@
             (str label " must not adopt a forged receipt"))
         (is (nil? (get-in details [:in-flight :receipt-evidence])))
         (is (= 1 @calls))))))
+
+(deftest invalid-positive-delivery-retains-matching-receipt-evidence-test
+  ;; A positive delivery label with contradictory acknowledgment or source
+  ;; evidence cannot certify completion. Nevertheless, its submitted receipt
+  ;; is needed to inspect XTDB. Carry ONLY the matching reported receipt and
+  ;; label it unverified; do not replay the potentially emitted invalidation.
+  (let [id (intent-id 22091)
+        lease (random-uuid)
+        receipt (random-uuid)
+        progression {:basis :candidate}
+        acquired {:intent-id id :lease-id lease :worker-id "worker"
+                  :status :acquired :progression progression}
+        valid {:status :dispatch-accepted :intent-id id :lease-id lease
+               :receipt-id receipt :progression progression
+               :source-result {:status :emitted-many :count 1
+                               :results [{:status :emitted}]}
+               :acknowledgment {:status :acknowledged :intent-id id
+                                :lease-id lease :receipt-id receipt}}
+        invalids [[:wrong-ack-receipt (assoc-in valid [:acknowledgment :receipt-id]
+                                                (random-uuid))]
+                  [:missing-ack (dissoc valid :acknowledgment)]
+                  [:invalid-source (assoc-in valid [:source-result :results 0 :status]
+                                             :rejected)]
+                  [:wrong-progression (assoc valid :progression {:basis :other})]]]
+    (doseq [[label outcome] invalids]
+      (let [dispatches (atom 0)
+            sweeps (atom 0)
+            failure (with-redefs [worker/acquire-sweep!
+                                  (fn [_ _]
+                                    (swap! sweeps inc)
+                                    {:attempted 1 :results [acquired]
+                                     :halt-reason :observed-end :next-after nil})
+                                  delivery/dispatch-acquired!
+                                  (fn [& _] (swap! dispatches inc) outcome)]
+                      (try
+                        (cycle/process-cycle! :node {:source ::source} {} source-id
+                                              {:worker-id "worker" :max-items 2})
+                        (catch clojure.lang.ExceptionInfo e e)))
+            data (ex-data failure)]
+        (is (= :gesso.live.outbox/cycle-interrupted (:error/type data))
+            (str label " must reject the false successful delivery"))
+        (is (= :invalid-delivery-result (:reason data)))
+        (is (= :delivery (:phase data)))
+        (is (= :reported (:source-acceptance data)))
+        (is (zero? (:completed-count data)))
+        (is (= id (get-in data [:in-flight :intent-id])))
+        (is (= lease (get-in data [:in-flight :lease-id])))
+        (is (= receipt (get-in data [:in-flight :receipt-id]))
+            (str label " must retain exact matching attempted receipt"))
+        (is (= :unverified-post-dispatch-receipt
+               (get-in data [:in-flight :receipt-evidence]))
+            (str label " must not certify its XTDB commit"))
+        (is (true? (:rescan-required? data)))
+        (is (= 1 @sweeps) "No next acquisition after uncertain send")
+        (is (= 1 @dispatches) "No implicit duplicate send")))))
+
+(deftest invalid-second-positive-delivery-retains-prefix-and-new-receipt-test
+  ;; After a completed earlier send, the next invalid success must preserve
+  ;; both known completed prefix and the *second* attempted receipt.
+  (let [a (intent-id 22092) b (intent-id 22093)
+        lease (random-uuid)
+        first-receipt (random-uuid)
+        second-receipt (random-uuid)
+        progression {:basis :lease}
+        page-calls (atom 0)
+        dispatch-calls (atom 0)
+        failure (with-redefs [worker/acquire-sweep!
+                              (fn [_ _]
+                                (let [id (if (= 1 (swap! page-calls inc)) a b)]
+                                  {:attempted 1
+                                   :results [{:intent-id id :status :acquired
+                                              :lease-id lease :worker-id "worker"
+                                              :progression progression}]
+                                   :halt-reason :page-budget :next-after id}))
+                              delivery/dispatch-acquired!
+                              (fn [_ _ _ claim _]
+                                (swap! dispatch-calls inc)
+                                {:status :dispatch-accepted
+                                 :intent-id (:intent-id claim)
+                                 :lease-id lease
+                                 :receipt-id (if (= a (:intent-id claim))
+                                               first-receipt second-receipt)
+                                 :progression progression
+                                 :source-result {:status :emitted-many :count 1
+                                                 :results [{:status :emitted}]}
+                                 :acknowledgment
+                                 (when (= a (:intent-id claim))
+                                   {:status :acknowledged :intent-id a
+                                    :lease-id lease :receipt-id first-receipt})})]
+                  (try
+                    (cycle/process-cycle! :node {:source ::source} {} source-id
+                                          {:worker-id "worker" :max-items 3})
+                    (catch clojure.lang.ExceptionInfo e e)))
+        data (ex-data failure)]
+    (is (= :gesso.live.outbox/cycle-interrupted (:error/type data)))
+    (is (= :invalid-delivery-result (:reason data)))
+    (is (= 1 (:completed-count data)))
+    (is (= a (:last-completed-cursor data)))
+    (is (= first-receipt (get-in data [:completed 0 :receipt-id])))
+    (is (= b (get-in data [:in-flight :intent-id])))
+    (is (= second-receipt (get-in data [:in-flight :receipt-id]))
+        "Preserve the failed second receipt, never substitute first receipt")
+    (is (= :unverified-post-dispatch-receipt
+           (get-in data [:in-flight :receipt-evidence])))
+    (is (= 2 @page-calls))
+    (is (= 2 @dispatch-calls))))
+
+(deftest invalid-positive-delivery-cannot-inject-foreign-receipt-test
+  ;; A forged adapter may report a plausible positive status but different
+  ;; lease/intent, or omit the receipt. Never copy that ID into the trusted
+  ;; in-flight recovery envelope.
+  (let [id (intent-id 22094)
+        lease (random-uuid)
+        receipt (random-uuid)
+        base {:status :dispatch-accepted :intent-id id :lease-id lease
+              :receipt-id receipt :progression {:basis :wrong}}
+        cases [[:foreign-intent (assoc base :intent-id (intent-id 22095))]
+               [:foreign-lease (assoc base :lease-id (random-uuid))]
+               [:missing-receipt (dissoc base :receipt-id)]]]
+    (doseq [[label outcome] cases]
+      (let [failure (with-redefs
+                      [worker/acquire-sweep!
+                       (fn [_ _] {:attempted 1
+                                  :results [{:status :acquired :intent-id id
+                                             :lease-id lease :worker-id "worker"
+                                             :progression {:basis :lease}}]
+                                  :halt-reason :observed-end :next-after nil})
+                       delivery/dispatch-acquired! (fn [& _] outcome)]
+                      (try
+                        (cycle/process-cycle! :node {:source ::source} {} source-id
+                                              {:worker-id "worker" :max-items 1})
+                        (catch clojure.lang.ExceptionInfo e e)))
+            in-flight (:in-flight (ex-data failure))]
+        (is (= :invalid-delivery-result (:reason (ex-data failure))))
+        (is (= id (:intent-id in-flight)))
+        (is (= lease (:lease-id in-flight)))
+        (is (nil? (:receipt-id in-flight))
+            (str label " cannot inject unrelated receipt evidence"))
+        (is (nil? (:receipt-evidence in-flight)))))))
