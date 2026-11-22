@@ -845,6 +845,96 @@
 ;; Canceller handoff and terminal cleanup
 ;; -----------------------------------------------------------------------------
 
+(deftest assertion-error-debug-hook-cannot-abort-source-backed-startup-test
+  ;; Diagnostic hooks may be application assertions that throw Error, not
+  ;; Exception. They must never interrupt startup or orphan the eager source
+  ;; registration behind a stream that never reached the HTTP handler.
+  (let [src (source/create)
+        seen (atom [])
+        trace (fn [entry]
+                (swap! seen conj (:event entry))
+                (throw (AssertionError. "trace assertion failed")))
+        started (atom nil)]
+    (try
+      (reset! started
+              (sse/start-source!
+               src {:subscription {:topic :request :id "v2164-1"}}
+               {:debug-fn trace :close-on-complete? false}))
+      (is (map? @started))
+      (is (= 200 (get-in @started [:response :status])))
+      (is (= 1 (:subscription-count (source/stats src))))
+      (is (contains? (set @seen) :gesso.live.sse/started))
+      (sse/cancel! @started)
+      (is (s/closed? (:stream @started)))
+      (is (eventually #(zero? (:subscription-count (source/stats src)))))
+      (is (contains? (set @seen) :gesso.live.sse/closed))
+      (finally
+        (when @started (sse/cancel! @started))
+        (source/close! src)))))
+
+(deftest assertion-error-terminal-hooks-do-not-interrupt-close-test
+  ;; A diagnostic on-error assertion must not suppress the on-close hook;
+  ;; an on-close assertion must not propagate to physical transport owners.
+  (let [failure (ex-info "producer failed" {:kind :producer})
+        event-failure (atom nil)
+        callbacks (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success fail]
+           (reset! event-failure fail)
+           (fn [] nil)))}
+      (fn []
+        (let [started (sse/start!
+                       (never-flow)
+                       {:on-error (fn [error _]
+                                    (swap! callbacks conj [:error error])
+                                    (throw (AssertionError. "on-error assertion")))
+                        :on-close (fn [entry]
+                                    (swap! callbacks conj [:close (:reason entry)])
+                                    (throw (AssertionError. "on-close assertion")))})]
+          (is (nil? (try (@event-failure failure) nil
+                         (catch Throwable e e)))
+              "Observational hooks must not escape the producer failure")
+          (is (= [[:error failure] [:close :error]] @callbacks))
+          (is (sse/closed? started))
+          (is (s/closed? (:stream started)))
+          (is (nil? (try (sse/cancel! started) nil
+                         (catch Throwable e e))))
+          (is (= 2 (count @callbacks))
+              "Repeated cancellation must not replay terminal hooks"))))))
+
+(deftest assertion-error-from-event-canceller-still-retires-keepalive-test
+  (let [cancelled (atom [])
+        diagnostics (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success _failure]
+           (fn []
+             (swap! cancelled conj :events)
+             (throw (AssertionError. "producer cancellation assertion")))))
+       #'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success _failure]
+           (fn [] (swap! cancelled conj :keepalive))))}
+      (fn []
+        (let [started (sse/start!
+                       (never-flow)
+                       {:keepalive-ms 1000
+                        :debug-fn (fn [entry]
+                                    (swap! diagnostics conj (:event entry))
+                                    (throw (AssertionError. "trace assertion")))})]
+          (is (nil? (try (sse/cancel! started) nil
+                         (catch Throwable e e)))
+              "Cleanup must isolate Error subtypes from producer cancellers")
+          (is (= [:events :keepalive] @cancelled))
+          (is (sse/closed? started))
+          (is (s/closed? (:stream started)))
+          (is (some #{:gesso.live.sse/physical-cancel-failed} @diagnostics))
+          (sse/cancel! started)
+          (is (= [:events :keepalive] @cancelled)))))))
+
 (deftest startup-stream-close-cancels-task-even-before-handle-installation-test
   ;; Stream closure can occur inside Missionary task registration, before the
   ;; returned canceller is stored in the transport. That task still belongs

@@ -42,12 +42,12 @@
    The data expression is inside the guard, so with debugging off it is not
    evaluated."
   [debug-fn event data]
-  ;; Debugging is observational: user-provided tracing failures must not
-  ;; alter stream startup, framing, delivery, or error/close handling.
+  ;; Debugging is observational: user-provided tracing failures, including
+  ;; Error subtypes, must not alter startup, framing or terminal cleanup.
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Exception _#
+       (catch Throwable _#
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -213,7 +213,7 @@
   (when f
     (try
       (apply f args)
-      (catch Exception _
+      (catch Throwable _
         nil))))
 
 (defn- once
@@ -226,13 +226,13 @@
 
 (defn- cancel-task-safely!
   "Cancellation is best-effort cleanup after SSE termination. A failing
-   producer canceller must not block cancellation of the other producer or
-   replace the already chosen terminal outcome."
+   producer canceller (including an Error subtype) must not prevent retiring
+   the other producer or replace the already chosen terminal outcome."
   [cancel! task debug-fn]
   (when cancel!
     (try
       (cancel!)
-      (catch Exception e
+      (catch Throwable e
         (when (instance? InterruptedException e)
           (.interrupt (Thread/currentThread)))
         (debug!
