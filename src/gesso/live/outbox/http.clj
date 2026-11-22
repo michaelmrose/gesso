@@ -73,7 +73,8 @@
 
 (defn wrap-authorized-sse
   "Return {:handler Ring-handler :close! callback :active-count callback
-           :pending-authorization-count callback :closed? callback}.
+           :pending-authorization-count callback :closed? callback
+           :drained? callback}.
 
    Requires a started concrete host, a fixed canonical :path (absolute URL
    path with no query string, repeated slash, or dot traversal segment), and
@@ -116,6 +117,11 @@
    startup; a late starter must cancel its stream at the final admission
    fence and cannot return HTTP 200 after shutdown. A starting session is
    charged against :max-connections before its source interest exists.
+   Since :close! can return while authorization/startup is still in flight,
+   :drained? reports the stronger lifecycle condition: the route is closed,
+   no authorization or startup is outstanding, and no session remains
+   registered. A completed :close! alone does not establish this condition.
+   The flag is observational, not an interrupt or a drain barrier.
    If the owning Live provider has already closed, return the same 503
    before application authorization or subscription admission. The provider
    check cannot replace the host's required ordered listener teardown.
@@ -388,4 +394,13 @@
      :close! close!
      :active-count (fn [] (count (:connections @state)))
      :pending-authorization-count (fn [] (:pending-authorizations @state))
-     :closed? (fn [] (:closed? @state))}))
+     :closed? (fn [] (:closed? @state))
+     :drained? (fn []
+                 ;; Inspect one atom snapshot: closure, in-flight requests,
+                 ;; starting sessions, and registered sessions must all agree.
+                 (let [{:keys [closed? connections starting
+                               pending-authorizations]} @state]
+                   (and closed?
+                        (zero? pending-authorizations)
+                        (zero? starting)
+                        (empty? connections))))}))

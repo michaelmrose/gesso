@@ -1147,6 +1147,48 @@
            (when @first-request (future-cancel @first-request))
            ((:close! route))))))))
 
+(deftest managed-route-drain-requires-closed-and-no-inflight-work-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           request {:uri "/live/events" :request-method :get}
+           entered (promise)
+           release (promise)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription
+                           (fn [_]
+                             (deliver entered true)
+                             @release
+                             scope)})
+           pending (atom nil)]
+       (try
+         (is (false? ((:drained? route)))
+             "An idle but open route is not shut down")
+         (reset! pending (future ((:handler route) request)))
+         (is (= true (deref entered 5000 ::timeout)))
+         (is (= 1 ((:pending-authorization-count route))))
+         (is (false? ((:drained? route))))
+         (is (= :closed ((:close! route)))
+             "Closing does not have to wait for application authorization")
+         (is (true? ((:closed? route))))
+         (is (false? ((:drained? route)))
+             "Closed must not mean a blocked authorization has finished")
+         (is (zero? ((:active-count route))))
+         (is (zero? (:subscription-count (source/stats src))))
+         (deliver release true)
+         (is (= {:status 503 :headers {} :body "Live shutting down"}
+                (deref @pending 5000 ::timeout)))
+         (is (zero? ((:pending-authorization-count route))))
+         (is (true? ((:drained? route)))
+             "The last pending request releases the route drain barrier")
+         (is (= :closed ((:close! route)))
+             "A drained route remains idempotently closed")
+         (finally
+           (deliver release true)
+           (when @pending (future-cancel @pending))
+           ((:close! route))))))))
+
 (deftest shutdown-fences-get-during-stalled-sse-startup-test
   ;; The SSE startup path holds the admission monitor. If it stalls, close!
   ;; must publish its closure before waiting for that monitor, preventing
@@ -1190,6 +1232,8 @@
                "Stalled startup owns its reservation until it exits")
            (is (= :closed (deref @closing 1500 ::timeout))
                "Route shutdown must not wait for blocked SSE startup")
+           (is (false? ((:drained? route)))
+               "A completed close! cannot claim that blocked startup drained")
            (deliver release true)
            (is (= {:status 503 :headers {} :body "Live shutting down"}
                   (deref @startup 10000 ::timeout))
@@ -1197,6 +1241,8 @@
            (is (= :closed (deref @closing 10000 ::timeout)))
            (is (zero? ((:pending-authorization-count route))))
            (is (zero? ((:active-count route))))
+           (is (true? ((:drained? route)))
+               "Late canceled startup must eventually complete route drain")
            (is (eventually #(zero? (:subscription-count (source/stats src))))))
          (finally
            (deliver release true)
