@@ -99,19 +99,59 @@
                          :source-acceptance :original-error/type
                          :delivery-status :acknowledgment-status]))))
 
-(defn- require-cycle-result! [result]
-  (when-not (and (map? result)
-                 (= :cycle-completed (:status result))
-                 (integer? (:processed result))
-                 (<= 0 (:processed result) 128)
-                 (integer? (:dispatch-accepted result))
-                 (<= 0 (:dispatch-accepted result) (:processed result))
-                 (#{:observed-end :page-budget} (:halt-reason result))
-                 (if (= :page-budget (:halt-reason result))
-                   (uuid? (:next-after result))
-                   (nil? (:next-after result))))
-    (reject! :invalid-cycle-result {:cycle-status (:status result)}))
-  result)
+(defn- advancing-cycle-ids?
+  "Cycle result identities must follow XTDB's unsigned UUID keyset order."
+  [after results]
+  (let [ids (mapv :intent-id results)
+        ordered (cond->> ids after (cons after))]
+    (and (every? uuid? ids)
+         (every? (fn [[left right]]
+                   (neg? (compare (str left) (str right))))
+                 (partition 2 1 ordered)))))
+
+(defn- require-cycle-result! [result requested-worker-id after max-items]
+  ;; The lifecycle publishes totals and resumes keyset pagination based on
+  ;; this result. A malformed successful cycle cannot certify progress or
+  ;; advance the cursor merely because it reports :cycle-completed.
+  (let [results (:results result)
+        n (when (vector? results) (count results))
+        counts (when (vector? results)
+                 (frequencies (map :acquisition-status results)))
+        dispatch-count (when (vector? results)
+                         (count (filter #(= :dispatch-accepted (:status %))
+                                        results)))
+        valid-entry? (fn [item]
+                       (and (map? item)
+                            (case (:acquisition-status item)
+                              (:acquired :reclaimed)
+                              (and (= :dispatch-accepted (:status item))
+                                   (uuid? (:lease-id item))
+                                   (uuid? (:receipt-id item))
+                                   (some? (:progression item)))
+                              (:contended :unavailable)
+                              (nil? (:status item))
+                              false)))]
+    (when-not
+     (and (map? result)
+          (= :cycle-completed (:status result))
+          (= requested-worker-id (:worker-id result))
+          (vector? results)
+          (<= n max-items)
+          (= n (:processed result))
+          (every? valid-entry? results)
+          (advancing-cycle-ids? after results)
+          (= dispatch-count (:dispatch-accepted result))
+          (= (get counts :acquired 0) (:acquired result))
+          (= (get counts :reclaimed 0) (:reclaimed result))
+          (= (get counts :contended 0) (:contended result))
+          (= (get counts :unavailable 0) (:unavailable result))
+          (#{:observed-end :page-budget} (:halt-reason result))
+          (if (= :page-budget (:halt-reason result))
+            (and (pos? n)
+                 (= (-> results peek :intent-id) (:next-after result)))
+            (nil? (:next-after result))))
+      (reject! :invalid-cycle-result {:cycle-status (:status result)}))
+    result))
 
 (defn- run-loop! [node system ctx expected-source-id opts state stop-signal done]
   (try
@@ -125,7 +165,8 @@
                                     :max-items (get opts :max-items default-max-items)}
                              cursor (assoc :after cursor))
                 result (require-cycle-result!
-                        (cycle/process-cycle! node system ctx expected-source-id cycle-opts))
+                        (cycle/process-cycle! node system ctx expected-source-id cycle-opts)
+                        (:worker-id opts) cursor (:max-items cycle-opts))
                 next-cursor (when (= :page-budget (:halt-reason result))
                               (:next-after result))]
             (swap! state (fn [s]

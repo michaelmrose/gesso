@@ -39,9 +39,15 @@
     (cond (pred) true
           (>= n 250) false
           :else (do (Thread/sleep 20) (recur (inc n))))))
-(defn- summary [halt after]
-  {:status :cycle-completed :processed 0 :dispatch-accepted 0
-   :halt-reason halt :next-after after :results []})
+(defn- summary [worker-id halt after]
+  (let [results (if (= :page-budget halt)
+                  [{:intent-id after :acquisition-status :contended
+                    :reason :lease-held}]
+                  [])]
+    {:status :cycle-completed :worker-id worker-id
+     :processed (count results) :dispatch-accepted 0
+     :acquired 0 :reclaimed 0 :contended (count results) :unavailable 0
+     :halt-reason halt :next-after after :results results}))
 (defn- invalid-reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e
                  (when (= :gesso.live.outbox/invalid-lifecycle
@@ -109,7 +115,7 @@
         calls (atom 0)
         worker-interrupted? (atom false)]
     (with-redefs [cycle/process-cycle!
-                  (fn [& _]
+                  (fn [_ _ _ _ opts]
                     (swap! calls inc)
                     (.countDown entered)
                     (try
@@ -117,7 +123,7 @@
                       (catch InterruptedException error
                         (reset! worker-interrupted? true)
                         (throw error)))
-                    (summary :observed-end nil))]
+                    (summary (:worker-id opts) :observed-end nil))]
       (let [handle (lifecycle/start! :unused {:source :fake} {} source-id
                                      {:worker-id "interrupted-stop" :poll-ms 10})]
         (try
@@ -153,14 +159,14 @@
         interrupted (atom false)
         sys {:source :fake}]
     (with-redefs [cycle/process-cycle!
-                  (fn [& _]
+                  (fn [_ _ _ _ opts]
                     (swap! calls inc)
                     (.countDown entered)
                     (try
                       (.await release)
                       (catch InterruptedException _
                         (reset! interrupted true)))
-                    (summary :observed-end nil))]
+                    (summary (:worker-id opts) :observed-end nil))]
       (let [handle (lifecycle/start! :unused sys {} source-id
                                      {:worker-id "blocked" :poll-ms 10})]
         (try
@@ -225,8 +231,8 @@
                     (let [n (count (swap! seen conj opts))]
                       (.countDown entered)
                       (if (= 1 n)
-                        (summary :page-budget cursor)
-                        (summary :observed-end nil))))]
+                        (summary (:worker-id opts) :page-budget cursor)
+                        (summary (:worker-id opts) :observed-end nil))))]
       (let [handle (lifecycle/start! :unused sys {} source-id
                                      {:worker-id "cursor-test" :poll-ms 10})]
         (try
@@ -258,7 +264,9 @@
 (deftest stop-input-and-handle-validated-test
   (is (= :invalid-handle (invalid-reason #(lifecycle/status nil))))
   (is (= :invalid-handle (invalid-reason #(lifecycle/stop! nil))))
-  (with-redefs [cycle/process-cycle! (fn [& _] (summary :observed-end nil))]
+  (with-redefs [cycle/process-cycle!
+                (fn [_ _ _ _ opts]
+                  (summary (:worker-id opts) :observed-end nil))]
     (let [h (lifecycle/start! :unused {:source :fake} {} source-id
                               {:worker-id "stop-options" :poll-ms 1000})]
       (try
@@ -302,3 +310,98 @@
             (finally
               (is (= :drained (:outcome (lifecycle/stop! handle 10000)))))))
         (finally (live/close! sys))))))
+
+(deftest inconsistent-cycle-completions-cannot-poison-scheduler-test
+  ;; A claimed :cycle-completed result is not authority to update durable
+  ;; progress counters or advance the scheduler's keyset cursor. Fail closed
+  ;; on inconsistent summaries, without scheduling another cycle.
+  (let [id (intent-id 991)
+        other (intent-id 992)
+        entry {:intent-id id :acquisition-status :contended
+               :reason :lease-held}
+        valid {:status :cycle-completed :worker-id "checked-worker"
+               :processed 1 :acquired 0 :reclaimed 0 :contended 1
+               :unavailable 0 :dispatch-accepted 0
+               :results [entry] :halt-reason :page-budget :next-after id}
+        cases [[:fabricated-count (assoc valid :processed 2)]
+               [:invented-dispatch (assoc valid :dispatch-accepted 1)]
+               [:invented-acquisition (assoc valid :acquired 1)]
+               [:omitted-count (dissoc valid :contended)]
+               [:wrong-worker (assoc valid :worker-id "another-worker")]
+               [:wrong-cursor (assoc valid :next-after other)]
+               [:missing-results (dissoc valid :results)]
+               [:wrong-entry-status (assoc-in valid [:results 0 :status]
+                                              :dispatch-accepted)]
+               [:missing-intent (assoc-in valid [:results 0 :intent-id] nil)]
+               [:duplicate-entry (-> valid
+                                     (assoc :results [entry entry]
+                                            :processed 2 :contended 2))]]]
+    (doseq [[label bogus] cases]
+      (let [entered (CountDownLatch. 1)
+            calls (atom 0)]
+        (with-redefs [cycle/process-cycle!
+                      (fn [& _]
+                        (swap! calls inc)
+                        (.countDown entered)
+                        bogus)]
+          (let [handle (lifecycle/start! :unused {:source :fake} {}
+                                         source-id
+                                         {:worker-id "checked-worker"
+                                          :poll-ms 3000 :max-items 2})]
+            (try
+              (is (.await entered 1500 TimeUnit/MILLISECONDS)
+                  (str label " must invoke cycle once"))
+              (is (eventually
+                   #(#{:failed :idle :stopped} (:status (lifecycle/status handle))))
+                  (str label " cycle must reach a terminal observation"))
+              (let [snapshot (lifecycle/status handle)]
+                (is (= :failed (:status snapshot))
+                    (str label " must fail closed, never report a successful cycle"))
+                (is (= :gesso.live.outbox/invalid-lifecycle
+                       (get-in snapshot [:failure :error/type]))
+                    (str label " must preserve the typed contract violation"))
+                (is (zero? (:cycles snapshot))
+                    (str label " must not increment cycle progress"))
+                (is (zero? (:total-dispatch-accepted snapshot))
+                    (str label " must not fabricate accepted delivery")))
+              (is (= 1 @calls)
+                  (str label " must never schedule a second cycle"))
+              (finally
+                (lifecycle/stop! handle 3000)))))))))
+
+(deftest valid-cycle-completion-accounts-for-the-actual-results-test
+  ;; Valid real-style outcomes remain schedulable, including mixed accepted
+  ;; delivery and contention. The scheduler must account only for outcomes
+  ;; described by the actual results vector.
+  (let [id (intent-id 993)
+        finished (CountDownLatch. 1)
+        calls (atom 0)
+        valid {:status :cycle-completed :worker-id "checked-worker"
+               :processed 1 :acquired 1 :reclaimed 0 :contended 0
+               :unavailable 0 :dispatch-accepted 1
+               :results [{:intent-id id :acquisition-status :acquired
+                          :status :dispatch-accepted :lease-id (random-uuid)
+                          :receipt-id (random-uuid)
+                          :progression {:basis :valid}}]
+               :halt-reason :observed-end :next-after nil}]
+    (with-redefs [cycle/process-cycle!
+                  (fn [& _]
+                    (swap! calls inc)
+                    (.countDown finished)
+                    valid)]
+      (let [handle (lifecycle/start! :unused {:source :fake} {} source-id
+                                     {:worker-id "checked-worker"
+                                      :poll-ms 3000 :max-items 2})]
+        (try
+          (is (.await finished 1500 TimeUnit/MILLISECONDS))
+          (is (eventually #(= 1 (:total-dispatch-accepted
+                                 (lifecycle/status handle)))))
+          (let [snapshot (lifecycle/status handle)]
+            (is (= 1 (:cycles snapshot)))
+            (is (= 1 (:total-processed snapshot)))
+            (is (= 1 (:total-dispatch-accepted snapshot)))
+            (is (= valid (:last-cycle snapshot)))
+            (is (= :idle (:status snapshot))))
+          (is (= 1 @calls))
+          (finally
+            (is (= :drained (:outcome (lifecycle/stop! handle 3000))))))))))
