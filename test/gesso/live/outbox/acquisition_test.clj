@@ -249,3 +249,66 @@
                 (str phase " must not invent a lease or fence transition")))
           (finally
             (Thread/interrupted)))))))
+
+(deftest malformed-current-row-result-cannot-invent-missing-intent-test
+  ;; A physical XTDB query returns a vector of rows, including [] when truly
+  ;; absent. Nil, a map or a sequence is a provider-contract failure, not a
+  ;; safe :unavailable/:missing or :missing-lease observation. This is shared
+  ;; by pending acquisition, expiration reclaim and lease guard construction.
+  (with-open [node (xtn/start-node {})]
+    (doseq [phase [:acquire :reclaim :fence]
+            response [nil {} '() (java.util.ArrayList.) [nil] [false]]]
+      (let [id (random-uuid)
+            _ (pending! node id)
+            original (read-intent node id)
+            physical-claims (atom 0)
+            reads (atom 0)
+            request (claim id "worker-a")
+            rejected (with-redefs [xt/q (fn [& _]
+                                          (swap! reads inc)
+                                          response)
+                                   live.xtdb/execute-tx!
+                                   (fn [& _]
+                                     (swap! physical-claims inc)
+                                     (throw (AssertionError.
+                                             "No CAS on malformed read")))]
+                       (try
+                         (case phase
+                           :acquire (acquisition/acquire-pending! node request)
+                           :reclaim (acquisition/reclaim-expired! node request)
+                           :fence (acquisition/active-lease-guard-ops
+                                   node (select-keys request
+                                                     [:intent-id :lease-id
+                                                      :worker-id])))
+                         (catch Throwable error error)))]
+        (is (instance? clojure.lang.ExceptionInfo rejected)
+            (str phase " invalid query container must be rejected"))
+        (is (= :gesso.live.outbox/invalid-acquisition
+               (:error/type (ex-data rejected))))
+        (is (= :invalid-physical-current-page
+               (:reason (ex-data rejected)))
+            (str phase " must not classify an unreadable row as missing"))
+        (is (= 1 @reads) "Never implicitly retry an indeterminate read")
+        (is (zero? @physical-claims)
+            "No physical lease acquisition follows malformed read")
+        (is (= original (read-intent node id))
+            "Durable state remains untouched after malformed query")))))
+
+(deftest current-row-query-accepts-real-xtdb-empty-vector-test
+  ;; A genuine empty query is still a safe missing-intent observation.
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (pending! node (random-uuid))
+          rows (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" id])
+          request (claim id "worker-a")]
+      (is (vector? rows))
+      (is (empty? rows))
+      (is (= {:status :unavailable :reason :missing :intent-id id}
+             (acquisition/acquire-pending! node request)))
+      (is (= {:status :unavailable :reason :missing :intent-id id}
+             (acquisition/reclaim-expired! node request)))
+      (let [error (try
+                    (acquisition/active-lease-guard-ops
+                     node (select-keys request [:intent-id :lease-id :worker-id]))
+                    (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :missing-lease (:reason (ex-data error))))))))

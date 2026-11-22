@@ -102,6 +102,14 @@
                  ;; the calling thread's cancellation signal.
                  (restore-interrupt! cause)
                  (throw cause)))]
+    ;; XTDB q returns a vector (including [] for an observed missing row).
+    ;; Nil, maps, sequences, and non-map entries do not establish that the
+    ;; intent is absent. Never turn a malformed physical read into a safe
+    ;; :unavailable/:missing result or an authoritative missing-lease fence.
+    (when-not (and (vector? rows) (every? map? rows))
+      (reject! :invalid-physical-current-page
+               {:intent-id intent-id
+                :physical-type (some-> rows class .getName)}))
     (when (> (count rows) 1)
       (reject! :ambiguous-current-row {:intent-id intent-id}))
     (first rows)))
