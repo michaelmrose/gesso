@@ -1929,6 +1929,64 @@
          (is (eventually #(zero? (:subscription-count (source/stats src)))))
          (finally ((:close! route))))))))
 
+(deftest late-startup-cancellation-failure-requires-explicit-close-retry-test
+  ;; A stalled SSE startup can finish after route close!. If its rejection
+  ;; rollback fails, the admission error handler must not immediately call
+  ;; cancel! again; retrying can be side-effectful and would conceal the
+  ;; still-unresolved first cancellation from :drained? and :occupied-count.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           original-start live/start-sse!
+           original-cancel live/cancel-sse!
+           failure (ex-info "SSE rollback failed once" {:test :v2161})
+           attempts (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events" :max-connections 1
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}
+           pending (atom nil)]
+       (try
+         (with-redefs [live/start-sse!
+                       (fn [& args]
+                         (deliver entered true)
+                         @release
+                         (apply original-start args))
+                       live/cancel-sse!
+                       (fn [session]
+                         (when (= 1 (swap! attempts inc))
+                           (throw failure))
+                         (original-cancel session))]
+           (reset! pending (future
+                             (try ((:handler route) request)
+                                  (catch Throwable e e))))
+           (is (= true (deref entered 5000 ::timeout)))
+           (is (= :closed ((:close! route))))
+           (deliver release true)
+           (is (identical? failure (deref @pending 10000 ::timeout)))
+           (is (= 1 @attempts)
+               "Rollback must not repeat its first failed cancellation")
+           (is (= 1 ((:occupied-count route)))
+               "Failed cancellation retains a charged session slot")
+           (is (false? ((:drained? route)))
+               "A failed rollback cannot certify source-safe shutdown")
+           (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+           (is (= 1 (:subscription-count (source/stats src)))
+               "The source interest remains until explicit retry")
+           (is (= :closed ((:close! route))))
+           (is (= 2 @attempts)
+               "Only a subsequent close! may retry the cancellation")
+           (is (zero? ((:occupied-count route))))
+           (is (true? ((:drained? route))))
+           (is (= {:outcome :drained} ((:await-drained! route) 0)))
+           (is (zero? (:subscription-count (source/stats src)))))
+         (finally
+           (deliver release true)
+           (when @pending (future-cancel @pending))
+           ((:close! route))))))))
+
 (deftest late-sse-rollback-retains-failed-cancellation-after-disconnect-test
   ;; close! may finish while a previously admitted SSE startup is blocked.
   ;; If that late stream closes and rollback cancellation fails, the route

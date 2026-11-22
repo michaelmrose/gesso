@@ -210,6 +210,9 @@
    Client-initiated disconnects also retain unresolved source-release work
    until the source interest closes or a close! retry succeeds.
    A completed :close! alone does not establish full quiescence.
+   An admission rollback makes one cancellation attempt. If it fails,
+   the tracked obligation is retried by a later explicit close!, not
+   immediately repeated by the admission error handler.
    :await-drained! takes a bounded timeout in milliseconds (0..120000),
    waits for the same terminal state without polling, and returns either
    {:outcome :drained} or {:outcome :timed-out}. It does NOT initiate close!,
@@ -464,7 +467,14 @@
                                      :body "Live shutting down"}
                                     (throw session-or-error))
                                   (let [session session-or-error
-                                        key (random-uuid)]
+                                        key (random-uuid)
+                                        ;; An unavailable session is canceled
+                                        ;; outside the registration-error path.
+                                        ;; If that cancellation itself throws,
+                                        ;; the cancellation helper has already
+                                        ;; retained the retry obligation; do
+                                        ;; not invoke it a second time here.
+                                        rollback-started? (volatile! false)]
                                     ;; Transfer one reserved startup slot
                                     ;; into its registered session atomically.
                                     ;; Otherwise :occupied-count transiently
@@ -537,6 +547,7 @@
                                         (if (or route-closed? provider-closed?
                                                 (stream/closed? (:stream session)))
                                           (do
+                                            (vreset! rollback-started? true)
                                             (cancel-registered-sse!
                                              state key session)
                                             {:status 503 :headers {}
@@ -549,13 +560,18 @@
                                         ;; Preserve a failed cancellation for
                                         ;; an explicit close! retry, and retain
                                         ;; the original error as the cause.
-                                        (try
-                                          (cancel-registered-sse! state key session)
-                                          (catch Throwable cancel-error
-                                            (when-not (identical? admission-error
-                                                                  cancel-error)
-                                              (.addSuppressed ^Throwable admission-error
-                                                              ^Throwable cancel-error))))
+                                        ;; A failed *first* rollback remains
+                                        ;; registered for an explicit close!
+                                        ;; retry. Only independent admission
+                                        ;; failures attempt cancellation here.
+                                        (when-not @rollback-started?
+                                          (try
+                                            (cancel-registered-sse! state key session)
+                                            (catch Throwable cancel-error
+                                              (when-not (identical? admission-error
+                                                                    cancel-error)
+                                                (.addSuppressed ^Throwable admission-error
+                                                                ^Throwable cancel-error)))))
                                         (throw admission-error)))))))
                             (finally
                               ;; Startup errors have no connection entry to
