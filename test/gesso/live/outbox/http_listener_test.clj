@@ -1,5 +1,6 @@
 (ns gesso.live.outbox.http-listener-test
   (:require [clojure.test :refer [deftest is]]
+            [manifold.stream]
             [gesso.live.outbox.http :as http]
             [gesso.live.outbox.http-listener :as listener])
   (:import [com.sun.net.httpserver HttpExchange HttpHandler HttpServer]
@@ -159,3 +160,192 @@
       (is (zero? ((:active-count owner))))
       (is (= {:outcome :drained} ((:stop! owner) 0)))
       (finally (deliver release true) (future-cancel worker)))))
+
+(deftest async-listener-retains-provider-after-handler-return-test
+  ;; A Ring response, an accepted frame and the producer's close are NOT
+  ;; evidence that the downstream asynchronous writer has finished.
+  (let [source (manifold.stream/stream 1)
+        terminal (atom nil)
+        rejected (atom 0)
+        owner (listener/prepare!
+               {:dispatch-async! (fn [_ terminal!]
+                                   (reset! terminal terminal!)
+                                   {:status 200 :headers {} :body source})
+                :max-in-flight 1
+                :on-rejected! (fn [_] (swap! rejected inc) :overloaded)
+                :stop-accept! (constantly {:outcome :stopped})})
+        ring-response ((:handle! owner) :first)]
+    (try
+      (is (= 200 (:status ring-response)))
+      (is (identical? source (:body ring-response)))
+      (is (= 1 ((:active-count owner)))
+          "Returning the Ring response does not release physical ownership")
+      (is (= :overloaded ((:handle! owner) :second)))
+      (is (= 1 ((:capacity-rejection-count owner))))
+      (is (= 1 @rejected))
+      (is (true? (deref (manifold.stream/put! source "frame") 1000 false)))
+      (manifold.stream/close! source)
+      (is (= 1 ((:active-count owner)))
+          "Source close is not downstream Netty write completion")
+      (is (= {:outcome :timed-out} ((:stop! owner) 0)))
+      (is (false? ((:drained? owner))))
+      (is (= :overloaded ((:handle! owner) :late)))
+      ((deref terminal))
+      ((deref terminal))
+      (is (= 0 ((:active-count owner)))
+          "The adapter's terminal signal is idempotent")
+      (is (zero? ((:uncertain-count owner))))
+      (is (= {:outcome :drained} ((:stop! owner) 0)))
+      (finally
+        (manifold.stream/close! source)
+        (when-let [finish @terminal] (finish))
+        ((:stop! owner) 1000)))))
+
+(deftest async-listener-dispatch-exception-keeps-uncertain-ownership-test
+  ;; If dispatch throws *after* initiating a writer, nobody can infer that
+  ;; writer is gone. A later physical terminal signal discharges the debt.
+  (let [terminal (atom nil)
+        failed (ex-info "dispatch raised after starting output" {:test :v2247})
+        owner (listener/prepare!
+               {:dispatch-async! (fn [_ terminal!]
+                                   (reset! terminal terminal!)
+                                   (throw failed))
+                :on-rejected! (constantly :closed)
+                :stop-accept! (constantly {:outcome :stopped})})]
+    (try
+      (is (identical? failed
+                      (try ((:handle! owner) :exchange)
+                           (catch Throwable error error))))
+      (is (= 1 ((:active-count owner))))
+      (is (= 1 ((:uncertain-count owner))))
+      (is (= {:outcome :timed-out} ((:stop! owner) 0)))
+      (is (= :closed ((:handle! owner) :late)))
+      (is (false? ((:drained? owner))))
+      ((deref terminal))
+      (is (zero? ((:uncertain-count owner))))
+      (is (zero? ((:active-count owner))))
+      (is (= {:outcome :drained} ((:stop! owner) 0)))
+      (finally
+        (when-let [finish @terminal] (finish))
+        ((:stop! owner) 1000)))))
+
+(deftest async-listener-bounds-concurrent-admission-test
+  ;; Lost terminal callbacks would otherwise retain memory and providers
+  ;; indefinitely. Refuse excess admissions at the outer transport owner.
+  (let [started (java.util.concurrent.CountDownLatch. 1)
+        terminals (atom [])
+        rejected (atom 0)
+        owner (listener/prepare!
+               {:dispatch-async! (fn [_ done!]
+                                   (swap! terminals conj done!)
+                                   :accepted)
+                :max-in-flight 5
+                :on-rejected! (fn [_] (swap! rejected inc) :refused)
+                :stop-accept! (constantly {:outcome :stopped})})
+        workers (doall (repeatedly 100
+                                 #(future (.await started)
+                                          ((:handle! owner) :request))))]
+    (try
+      (.countDown started)
+      (let [statuses (frequencies (map #(deref % 2000 :timeout) workers))]
+        (is (= 5 (get statuses :accepted 0)))
+        (is (= 95 (get statuses :refused 0)))
+        (is (= 100 (reduce + (vals statuses))))
+        (is (= 5 ((:active-count owner))))
+        (is (= 95 ((:capacity-rejection-count owner))))
+        (is (= 95 @rejected))
+        (is (= {:outcome :timed-out} ((:stop! owner) 0)))
+        (doseq [done! @terminals] (done!))
+        (is (= {:outcome :drained} ((:stop! owner) 1000)))
+        (is (zero? ((:active-count owner)))))
+      (finally
+        (.countDown started)
+        (doseq [done! @terminals] (done!))
+        (doseq [worker workers] (future-cancel worker))
+        ((:stop! owner) 1000)))))
+
+(deftest real-http-async-writer-completion-fences-provider-stop-test
+  ;; This tests the abstract async contract using a genuine JDK socket.
+  ;; The handler returns immediately, but its response writer runs on a
+  ;; different thread. Only that writer's final callback releases the host.
+  (let [entered (promise)
+        release (promise)
+        providers (atom 0)
+        server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)
+        executor (Executors/newCachedThreadPool)
+        async-tasks (atom [])
+        owner (listener/prepare!
+               {:dispatch-async!
+                (fn [^HttpExchange exchange done!]
+                  (swap! async-tasks conj
+                         (future
+                           (try
+                             (deliver entered true)
+                             @release
+                             (let [data (.getBytes "finished" StandardCharsets/UTF_8)]
+                               (.sendResponseHeaders exchange 200 (alength data))
+                               (with-open [out (.getResponseBody exchange)]
+                                 (.write out data)))
+                             (catch java.io.IOException _ nil)
+                             (finally
+                               (.close exchange)
+                               (done!)))))
+                  :submitted)
+                :max-in-flight 2
+                :on-rejected! (fn [^HttpExchange exchange] (.close exchange))
+                :stop-accept! (fn [] (.stop server 0) {:outcome :stopped})})
+        route {:close! (constantly :closed)
+               :await-drained! (constantly {:outcome :drained})}
+        shutdown (http/prepare-managed-http-shutdown
+                  {:route route
+                   :stop-listener! (fn [] ((:stop! owner) 0))
+                   :stop-host! (fn [] (swap! providers inc) {:outcome :stopped})
+                   :drain-timeout-ms 0})]
+    (.setExecutor server executor)
+    (.createContext server "/" (reify HttpHandler
+                                  (handle [_ exchange]
+                                    ((:handle! owner) exchange))))
+    (.start server)
+    (let [url (URI/create (str "http://127.0.0.1:"
+                               (.getPort (.getAddress server)) "/long"))
+          client (HttpClient/newHttpClient)
+          request (.build (HttpRequest/newBuilder url))
+          response (.sendAsync client request (HttpResponse$BodyHandlers/ofString))]
+      (try
+        (is (= true (deref entered 3000 :timeout)))
+        (is (= 1 ((:active-count owner))))
+        (is (= {:outcome :listener-timed-out} ((:stop! shutdown))))
+        (is (= 0 @providers)
+            "Provider stop cannot cross an outstanding async HTTP write")
+        (is (false? ((:drained? owner))))
+        (deliver release true)
+        (is (wait-until #((:drained? owner))))
+        (is (= :stopped (:outcome ((:stop! shutdown)))))
+        (is (= 1 @providers))
+        (is (= :stopped (:outcome ((:stop! shutdown)))))
+        (is (= 1 @providers))
+        (finally
+          (deliver release true)
+          (.cancel response true)
+          (doseq [task @async-tasks] (future-cancel task))
+          (.stop server 0)
+          (.shutdownNow executor))))))
+
+(deftest async-listener-invalid-plans-are-rejected-test
+  (let [mk (fn [extra]
+             (merge {:dispatch-async! (fn [_ done!] (done!) :ok)
+                     :on-rejected! (constantly :rejected)
+                     :stop-accept! (constantly {:outcome :stopped})}
+                    extra))]
+    (doseq [limit [nil 0 -1 65537 0.5 "five"]]
+      (is (= :invalid-in-flight-limit
+             (reason #(listener/prepare! (mk {:max-in-flight limit}))))))
+    (is (= :invalid-listener-plan
+           (reason #(listener/prepare!
+                     (assoc (mk {}) :dispatch! identity)))))
+    (is (= :invalid-listener-plan
+           (reason #(listener/prepare! (dissoc (mk {}) :on-rejected!)))))
+    (let [owner (listener/prepare! (mk {:max-in-flight 1}))]
+      (is (= :ok ((:handle! owner) :request)))
+      (is (zero? ((:active-count owner))))
+      (is (= {:outcome :drained} ((:stop! owner) 0))))))
