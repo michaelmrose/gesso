@@ -108,6 +108,13 @@ jobs:
           bb test:outbox:browser:readiness \
             2>&1 | tee target/outbox-browser/readiness.log
 
+      - name: Verify physical concurrent lease reclaim and stale late send
+        shell: bash
+        run: |
+          set -euo pipefail
+          clojure -M:test -n gesso.live.outbox.reclaim-send-race-test \
+            2>&1 | tee target/outbox-browser/reclaim-send-race.log
+
       - name: Require real Chromium EventSource/HTMX/DOM convergence
         shell: bash
         run: |
