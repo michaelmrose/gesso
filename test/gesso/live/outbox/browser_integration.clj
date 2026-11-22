@@ -38,7 +38,7 @@
            [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
            [java.io BufferedReader InputStreamReader]
            [java.nio.charset StandardCharsets]
-           [java.util.concurrent Executors]))
+           [java.util.concurrent Executors CountDownLatch TimeUnit]))
 
 (def ^:private subject "v2109-browser-request")
 (def ^:private panel-id "v2109-browser-panel")
@@ -233,6 +233,12 @@
               ;; test fault-control point. Closing it forces a native
               ;; EventSource disconnect without mocking the browser APIs.
               sse-responses (atom [])
+              ;; Hold only a subsequent SSE HTTP admission to make the
+              ;; disconnected-notice window deterministic. Neither Chromium
+              ;; EventSource nor the production Live source is mocked.
+              hold-reconnect? (atom false)
+              reconnect-entered (CountDownLatch. 1)
+              release-reconnect (CountDownLatch. 1)
               correlated-source (source/subscribe (:source sys) scope)
               route (http/wrap-authorized-sse
                      started {:path "/live/events"
@@ -250,10 +256,16 @@
               serve (fn [request]
                       (cond
                         (= "/live/events" (:uri request))
-                        (let [response ((:handler route) request)]
-                          (when (stream/stream? (:body response))
-                            (swap! sse-responses conj (:body response)))
-                          response)
+                        (do
+                          (when @hold-reconnect?
+                            (.countDown reconnect-entered)
+                            (when-not (.await release-reconnect
+                                              10 TimeUnit/SECONDS)
+                              (throw (ex-info "Timed out awaiting late-interest SSE admission" {}))))
+                          (let [response ((:handler route) request)]
+                            (when (stream/stream? (:body response))
+                              (swap! sse-responses conj (:body response)))
+                            response))
                         (contains? javascript (:uri request))
                         {:status 200 :headers js-headers
                          :body (get javascript (:uri request))}
@@ -395,17 +407,60 @@
                            (chromium/evaluate
                             page
                             "() => window.__v2109.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2109.listener === document.querySelector('[data-gesso-live-invalidation]')"))))
-                  ;; v2116: after proving two canonical refreshes over one
-                  ;; connection, intentionally retire only the *first* SSE
-                  ;; response. EventSource must reconnect to a newly admitted
-                  ;; Live subscription without remounting the stable root.
+                  ;; The next SSE connection is held OUTSIDE the admitted
+                  ;; subscription while a real XTDB mutation and its outbox
+                  ;; notice commit. This witnesses a lost advisory, not a
+                  ;; replayed message or fabricated client progression.
                   (let [disconnect-request-baseline (count @requests)
+                        messages-before-gap (long (chromium/evaluate
+                                                    page "() => window.__v2109.messages"))
                         original (first @sse-responses)]
                     (is (= 1 (count @sse-responses)))
                     (is (= 1 ((:active-count route))))
                     (is (some? original))
+                    (reset! hold-reconnect? true)
                     (stream/close! original)
                     (is (stream/closed? original))
+                    (is (.await reconnect-entered 6000 TimeUnit/MILLISECONDS)
+                        "Browser must attempt its real native SSE reconnection")
+                    (is (eventually #(zero? ((:active-count route))))
+                        "No subscribed browser can receive the gap notice")
+                    (let [gap-id (random-uuid)
+                          gap-plan (outbox/prepare!
+                                    {:intent-ids [gap-id] :source-id source-id
+                                     :operation :request/archive
+                                     :purpose :gesso.live/refresh}
+                                    [{:topic :request :id subject
+                                      :change/kind :updated}])]
+                      (xt/execute-tx node
+                                     (into (vec (:guard-ops gap-plan))
+                                           [[:put-docs :requests
+                                             {:xt/id subject :status :archived}]
+                                            (:tx-op gap-plan)]))
+                      (is (eventually
+                           #(= :dispatch-accepted
+                               (:gesso.live.outbox/status
+                                (first (stable-q node
+                                   ["SELECT * FROM gesso_live_outbox WHERE _id = ?"
+                                    gap-id])))))
+                          "A missing browser interest must not block durable outbox acknowledgment")
+                      (let [gap-event (deref (stream/take! correlated-source)
+                                              5000 ::no-gap-source-event)]
+                        (is (= subject (:id gap-event)))
+                        (is (some? (:progression gap-event))))
+                      (is (= messages-before-gap
+                             (long (chromium/evaluate
+                                    page "() => window.__v2109.messages")))
+                          "The disconnected browser did not observe the gap notice")
+                      (is (= "done"
+                             (chromium/evaluate page
+                              "() => document.getElementById('v2109-browser-panel')?.textContent"))
+                          "Without an authorized acquisition, the DOM remains stale"))
+                    ;; Release the NEW native EventSource request after the
+                    ;; old notice became terminal. Reconnection triggers an
+                    ;; initial authoritative GET, not replay of its basis.
+                    (reset! hold-reconnect? false)
+                    (.countDown release-reconnect)
                     (chromium/wait-for-js! page
                                            "() => window.__v2109.opens >= 2")
                     (is (eventually #(>= (count @sse-responses) 2)))
@@ -423,6 +478,13 @@
                                              [:headers progression.http/request-header-name]))
                               (drop disconnect-request-baseline @requests))
                         "The reconnect advisory refresh must not invent authority")
+                    (chromium/wait-for-js!
+                     page
+                     "() => document.getElementById('v2109-browser-panel')?.getAttribute('data-authoritative-status') === 'archived'")
+                    (is (= messages-before-gap
+                           (long (chromium/evaluate
+                                  page "() => window.__v2109.messages")))
+                        "Fresh state comes from reacquisition without a replayed SSE event")
                     ;; The deliberate disconnect may produce one HTMX-sourced
                     ;; EventSource.onerror console diagnostic. Classify just
                     ;; that expected error; keep unrelated browser failures
@@ -495,6 +557,7 @@
                 (is (= [] (chromium/evaluate page "() => window.__v2109.errors")))
                 (is (true? (chromium/assert-clean! context))))))
             (finally
+              (.countDown release-reconnect)
               (when-let [ctx @context*] (chromium/close-context! ctx))
               (when-let [br @harness*] (chromium/stop! br))
               (stream/close! correlated-source)
