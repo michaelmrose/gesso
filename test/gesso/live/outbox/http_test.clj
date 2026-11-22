@@ -827,6 +827,117 @@
          (is (eventually #(zero? (:subscription-count (source/stats src)))))
          (finally ((:close! route))))))))
 
+(deftest real-http-sse-active-capacity-returns-503-without-eviction-test
+  ;; A Ring-level status alone does not establish that a real HTTP adapter
+  ;; sends the overload status while keeping the first EventSource alive.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           authorized (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 1
+                           :authorize-subscription
+                           (fn [req]
+                             (when (= "Bearer allowed"
+                                      (get-in req [:headers "authorization"]))
+                               (swap! authorized inc)
+                               scope))})
+           server (start-http! (:handler route))
+           client (-> (HttpClient/newBuilder)
+                      (.version HttpClient$Version/HTTP_1_1)
+                      (.build))]
+       (try
+         (let [first-reply (request client (:base server)
+                                    "/live/events" "GET" "Bearer allowed")]
+           (with-open [first-body (.body first-reply)]
+             (is (= 200 (.statusCode first-reply)))
+             (is (eventually #(= 1 ((:active-count route)))))
+             (is (eventually #(= 1 (:subscription-count (source/stats src)))))
+             ;; Over capacity, a second authorized GET must be visibly
+             ;; rejected on the wire without replacing the first stream.
+             (let [overload (request client (:base server)
+                                     "/live/events" "GET" "Bearer allowed")]
+               (with-open [body (.body overload)]
+                 (is (= 503 (.statusCode overload)))
+                 (is (= "Live connection capacity reached"
+                        (String. (.readAllBytes body) StandardCharsets/UTF_8)))))
+             (is (= 2 @authorized))
+             (is (= 1 ((:active-count route))))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (is (zero? ((:pending-authorization-count route))))
+             ;; Never disclose capacity before checking requester authority.
+             (let [denied (request client (:base server)
+                                   "/live/events" "GET" nil)]
+               (with-open [body (.body denied)]
+                 (is (= 403 (.statusCode denied)))
+                 (is (= "Forbidden"
+                        (String. (.readAllBytes body) StandardCharsets/UTF_8)))))
+             (is (= 1 ((:active-count route))))
+             (is (= 1 (:subscription-count (source/stats src))))
+             ((:close! route))
+             (is (eventually #(zero? ((:active-count route)))))
+             (is (eventually #(zero? (:subscription-count (source/stats src)))))))
+         (finally
+           ((:close! route))
+           ((:close! server))
+           (.close ^HttpClient client)))))))
+
+(deftest real-http-sse-pending-authorization-capacity-returns-503-test
+  ;; Exercise admission pressure through actual HTTP threads while the
+  ;; application's first authorization callback is blocked. A second GET
+  ;; must return overload without entering the callback or source.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           authorized (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-pending-authorizations 1
+                           :authorize-subscription
+                           (fn [_]
+                             (swap! authorized inc)
+                             (deliver entered true)
+                             @release
+                             scope)})
+           server (start-http! (:handler route))
+           client (-> (HttpClient/newBuilder)
+                      (.version HttpClient$Version/HTTP_1_1)
+                      (.build))
+           pending (future (request client (:base server)
+                                    "/live/events" "GET" "Bearer allowed"))]
+       (try
+         (is (= true (deref entered 5000 ::timeout)))
+         (is (= 1 ((:pending-authorization-count route))))
+         (is (zero? (:subscription-count (source/stats src))))
+         (let [overload (request client (:base server)
+                                 "/live/events" "GET" "Bearer allowed")]
+           (with-open [body (.body overload)]
+             (is (= 503 (.statusCode overload)))
+             (is (= "Live authorization capacity reached"
+                    (String. (.readAllBytes body) StandardCharsets/UTF_8)))))
+         (is (= 1 @authorized) "Overload must not run authorization")
+         (is (= 1 ((:pending-authorization-count route))))
+         (is (zero? (:subscription-count (source/stats src))))
+         (deliver release true)
+         (let [first-reply (deref pending 10000 ::timeout)]
+           (is (not= ::timeout first-reply))
+           (when (not= ::timeout first-reply)
+             (with-open [body (.body first-reply)]
+               (is (= 200 (.statusCode first-reply)))
+               (is (eventually #(= 1 (:subscription-count (source/stats src)))))
+               ((:close! route))
+               (is (eventually #(zero? (:subscription-count (source/stats src))))))))
+         (is (zero? ((:pending-authorization-count route))))
+         (finally
+           (deliver release true)
+           (future-cancel pending)
+           ((:close! route))
+           ((:close! server))
+           (.close ^HttpClient client)))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]
