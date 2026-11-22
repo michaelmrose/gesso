@@ -514,3 +514,105 @@
             (is (= :leased (:gesso.live.outbox/status (row node id))))
             (finally (s/close! taps))))
         (finally (live/close! system))))))
+
+(deftest malformed-negative-ack-is-post-dispatch-unknown-test
+  ;; :contended and :unavailable can be trusted only with their exact
+  ;; returned shapes. Conflicting receipt/lease credentials or a fictional
+  ;; reason cannot establish a known negative after Live already emitted.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)
+          invalid [[:contended-with-reason
+                    {:status :contended :reason :not-leased}]
+                   [:contended-with-lease
+                    {:status :contended :lease-id (random-uuid)}]
+                   [:contended-with-receipt
+                    {:status :contended :receipt-id (random-uuid)}]
+                   [:unavailable-no-reason
+                    {:status :unavailable}]
+                   [:unavailable-unknown-reason
+                    {:status :unavailable :reason :arbitrary}]
+                   [:unavailable-with-lease
+                    {:status :unavailable :reason :missing
+                     :lease-id (random-uuid)}]
+                   [:unavailable-with-receipt
+                    {:status :unavailable :reason :not-leased
+                     :receipt-id (random-uuid)}]
+                   [:unavailable-with-worker
+                    {:status :unavailable :reason :not-leased
+                     :worker-id "different-worker"}]]]
+      (try
+        (doseq [[case-name malformed] invalid]
+          (let [id (random-uuid)
+                _ (seed! node id)
+                lease (acquire! node id)
+                tap (source/subscribe (:source system)
+                                      {:topic :request :id subject-id})
+                attempts (atom [])]
+            (try
+              (let [failure (with-redefs
+                              [acknowledgment/acknowledge-dispatch!
+                               (fn [_ submission]
+                                 (swap! attempts conj submission)
+                                 (assoc malformed :intent-id (:intent-id submission)))]
+                              (try
+                                (delivery/dispatch-acquired!
+                                 node system {} lease source-id)
+                                (catch Throwable e e)))
+                    data (when (instance? clojure.lang.ExceptionInfo failure)
+                           (ex-data failure))
+                    submitted (first @attempts)]
+                (is (instance? clojure.lang.ExceptionInfo failure)
+                    (str case-name " cannot be a known negative"))
+                (is (= :gesso.live.outbox/post-dispatch-ack-unknown
+                       (:error/type data)))
+                (is (= :invalid-acknowledgment-result (:reason data)))
+                (is (= :accepted (:dispatch/status data)))
+                (is (= :unknown (:acknowledgment/status data)))
+                (is (= id (:intent-id data)))
+                (is (= (:lease-id lease) (:lease-id data)))
+                (is (= (get-in submitted [:receipt :receipt-id])
+                       (:receipt-id data))
+                    "Reconciliation requires the submitted, not returned, receipt")
+                (is (= 1 (count @attempts)) "No automatic ack retry")
+                (is (= subject-id (:id (deref (s/take! tap) 1500 ::timeout)))
+                    "Live source accepted before the malformed ack result")
+                (is (= :leased (:gesso.live.outbox/status (row node id))))
+                (is (nil? (:gesso.live.outbox/dispatch-receipt-id (row node id)))))
+              (finally
+                (s/close! tap)))))
+        (finally
+          (live/close! system))))))
+
+(deftest canonical-negative-acknowledgment-results-still-remain-known-test
+  ;; Positive control: the actual adapter returns :contended with no reason,
+  ;; or :unavailable with either :missing or :not-leased. These still mean
+  ;; accepted source emission followed by an acknowledged rejection of the
+  ;; terminal state transition, NOT a successful delivery receipt.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)]
+      (try
+        (doseq [[status reason] [[:contended nil]
+                                 [:unavailable :missing]
+                                 [:unavailable :not-leased]]]
+          (let [id (random-uuid)
+                _ (seed! node id)
+                lease (acquire! node id)
+                tap (source/subscribe (:source system)
+                                      {:topic :request :id subject-id})]
+            (try
+              (let [outcome (with-redefs
+                              [acknowledgment/acknowledge-dispatch!
+                               (fn [_ submission]
+                                 (cond-> {:status status
+                                          :intent-id (:intent-id submission)}
+                                   reason (assoc :reason reason)))]
+                              (delivery/dispatch-acquired!
+                               node system {} lease source-id))]
+                (is (= :dispatched-unacknowledged (:status outcome)))
+                (is (= status (get-in outcome [:acknowledgment :status])))
+                (is (= reason (get-in outcome [:acknowledgment :reason])))
+                (is (= subject-id (:id (deref (s/take! tap) 1500 ::timeout))))
+                (is (= :leased (:gesso.live.outbox/status (row node id))))
+                (is (nil? (:gesso.live.outbox/dispatch-receipt-id (row node id)))))
+              (finally (s/close! tap)))))
+        (finally (live/close! system))))))

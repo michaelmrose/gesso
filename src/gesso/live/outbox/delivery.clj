@@ -144,13 +144,24 @@
    contradictory or unrecognized results are POST-DISPATCH uncertainty,
    never a successful terminal receipt or a safe pre-dispatch rejection."
   [ack intent-id lease-id receipt-id]
+  (let [known-negative?
+        (and (#{:contended :unavailable} (:status ack))
+             ;; Neither negative adapter result grants a lease or receipt.
+             ;; Returning credentials alongside a negative status is
+             ;; contradictory physical evidence, not a known rejection.
+             (not-any? #(contains? ack %)
+                       [:lease-id :receipt-id :worker-id])
+             (case (:status ack)
+               :contended (not (contains? ack :reason))
+               :unavailable (#{:missing :not-leased} (:reason ack))
+               false))]
   (when-not
    (and (map? ack)
         (= intent-id (:intent-id ack))
         (or (and (= :acknowledged (:status ack))
                  (= lease-id (:lease-id ack))
                  (= receipt-id (:receipt-id ack)))
-            (#{:contended :unavailable} (:status ack))))
+            known-negative?))
     (throw (ex-info
             "Live source accepted an invalidation but XTDB acknowledgment returned inconsistent evidence."
             {:error/type :gesso.live.outbox/post-dispatch-ack-unknown
@@ -161,7 +172,7 @@
              :dispatch/status :accepted
              :acknowledgment/status :unknown
              :reported-acknowledgment-status (:status ack)})))
-  ack)
+  ack))
 
 (defn dispatch-acquired!
   "Synchronously emit one acquired/reclaimed intent, then acknowledge it.
