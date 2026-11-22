@@ -100,6 +100,27 @@
       (reject! :invalid-worker-page {:page page :after after}))
     page))
 
+(defn- reported-acquisition-lease
+  "Preserve a *reported*, not physically certified, acquired lease when a
+   worker page is malformed. The cycle must fail before dispatch but provide
+   its owner the identity needed to inspect XTDB before retrying. A rejected
+   page with no single credible acquired lease gives no such evidence."
+  [page]
+  (let [results (when (map? page) (:results page))
+        claim (when (and (vector? results) (= 1 (count results)))
+                (first results))]
+    (when (and (map? claim)
+               (#{:acquired :reclaimed} (:status claim))
+               (uuid? (:intent-id claim))
+               (uuid? (:lease-id claim))
+               (string? (:worker-id claim))
+               (not (str/blank? (:worker-id claim))))
+      {:intent-id (:intent-id claim)
+       :lease-id (:lease-id claim)
+       :worker-id (:worker-id claim)
+       :acquisition-status (:status claim)
+       :evidence :unverified-worker-page})))
+
 (defn- accepted-delivery-result?
   "Confirm that reported source acceptance, physical receipt and the acquired
    lease agree before allowing a cycle to certify completed work. This checks
@@ -240,11 +261,22 @@
                                :page-size 1
                                :max-pages 1}
                         cursor (assoc :after cursor))
+            ;; Acquisition can fail without returning a page; in that case
+            ;; no particular lease is known. Validation can fail AFTER the
+            ;; adapter reports acquiring one, in which case retain its
+            ;; unverified identity as recovery evidence instead of dropping it.
+            raw-page (try
+                       (worker/acquire-sweep! node work-opts)
+                       (catch Throwable e
+                         (interrupted! :acquisition :acquisition-exception
+                                       completed cursor nil
+                                       {:original-error/type (:error/type (ex-data e))}
+                                       e)))
             page (try
-                   (validate-page! (worker/acquire-sweep! node work-opts) cursor)
+                   (validate-page! raw-page cursor)
                    (catch Throwable e
                      (interrupted! :acquisition :acquisition-exception
-                                   completed cursor nil
+                                   completed cursor (reported-acquisition-lease raw-page)
                                    {:original-error/type (:error/type (ex-data e))}
                                    e)))]
         (if (empty? (:results page))

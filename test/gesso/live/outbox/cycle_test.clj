@@ -636,3 +636,91 @@
         (is (= b (get-in data [:in-flight :intent-id])))))
     (is (= 2 @sweeps) "No third page after uncertainty")
     (is (= 2 @dispatches) "No duplicate physical send after mismatch")))
+
+(deftest malformed-worker-page-retains-reported-lease-for-reconciliation-test
+  ;; Acquisition happens before the worker returns its page. If the page
+  ;; cursor is malformed, rejecting it is necessary but a nil :in-flight
+  ;; would discard the acquired lease token needed for physical reconciliation.
+  (doseq [status [:acquired :reclaimed]
+          shape [:wrong-cursor :wrong-halt]]
+    (let [id (intent-id 915)
+          other (intent-id 916)
+          lease (random-uuid)
+          sends (atom 0)
+          page (cond-> {:attempted 1
+                        :results [{:intent-id id :status status
+                                   :lease-id lease :worker-id "w"}]
+                        :halt-reason :page-budget :next-after other}
+                 (= shape :wrong-halt)
+                 (assoc :halt-reason :observed-end))
+          failure (with-redefs [worker/acquire-sweep! (fn [_ _] page)
+                                delivery/dispatch-acquired!
+                                (fn [& _] (swap! sends inc))]
+                    (try
+                      (cycle/process-cycle! :node {:source ::source} {} source-id
+                                            {:worker-id "w" :max-items 1})
+                      (catch clojure.lang.ExceptionInfo e e)))
+          data (ex-data failure)]
+      (is (= :gesso.live.outbox/cycle-interrupted (:error/type data)))
+      (is (= :acquisition (:phase data)))
+      (is (= :acquisition-exception (:reason data)))
+      (is (= :invalid-worker-page (:reason (ex-data (.getCause failure)))))
+      (is (zero? (:completed-count data)))
+      (is (true? (:rescan-required? data)))
+      (is (= {:intent-id id :lease-id lease :worker-id "w"
+              :acquisition-status status
+              :evidence :unverified-worker-page}
+             (:in-flight data))
+          (str status " / " shape " must preserve reported lease evidence"))
+      (is (zero? @sends) "Malformed page must be refused before dispatch"))))
+
+(deftest malformed-second-worker-page-retains-prefix-and-reported-lease-test
+  (let [a (intent-id 918)
+        b (intent-id 919)
+        wrong (intent-id 920)
+        lease (random-uuid)
+        calls (atom 0)
+        sent (atom 0)
+        failure (with-redefs [worker/acquire-sweep!
+                              (fn [_ _]
+                                (if (= 1 (swap! calls inc))
+                                  {:attempted 1
+                                   :results [{:intent-id a :status :contended
+                                              :reason :lease-held}]
+                                   :halt-reason :page-budget :next-after a}
+                                  {:attempted 1
+                                   :results [{:intent-id b :status :acquired
+                                              :lease-id lease :worker-id "w"}]
+                                   :halt-reason :page-budget :next-after wrong}))
+                              delivery/dispatch-acquired!
+                              (fn [& _] (swap! sent inc))]
+                  (try
+                    (cycle/process-cycle! :node {:source ::source} {} source-id
+                                          {:worker-id "w" :max-items 3})
+                    (catch clojure.lang.ExceptionInfo e e)))
+        data (ex-data failure)]
+    (is (= :gesso.live.outbox/cycle-interrupted (:error/type data)))
+    (is (= 1 (:completed-count data)))
+    (is (= a (:last-completed-cursor data)))
+    (is (= a (get-in data [:completed 0 :intent-id])))
+    (is (= :contended (get-in data [:completed 0 :acquisition-status])))
+    (is (= b (get-in data [:in-flight :intent-id])))
+    (is (= lease (get-in data [:in-flight :lease-id])))
+    (is (= :unverified-worker-page (get-in data [:in-flight :evidence])))
+    (is (= 2 @calls) "No third acquisition after invalid second page")
+    (is (zero? @sent) "Malformed second page cannot dispatch")))
+
+(deftest malformed-unleased-worker-page-makes-no-false-lease-claim-test
+  (let [id (intent-id 921)
+        bad {:attempted 1
+             :results [{:intent-id id :status :contended
+                        :lease-id (random-uuid) :worker-id "w"}]
+             :halt-reason :page-budget :next-after (intent-id 922)}
+        error (with-redefs [worker/acquire-sweep! (fn [_ _] bad)]
+                (try
+                  (cycle/process-cycle! :node {:source ::source} {} source-id
+                                        {:worker-id "w" :max-items 1})
+                  (catch clojure.lang.ExceptionInfo e e)))]
+    (is (= :gesso.live.outbox/cycle-interrupted (:error/type (ex-data error))))
+    (is (nil? (:in-flight (ex-data error)))
+        "A contended page cannot fabricate successful lease evidence")))
