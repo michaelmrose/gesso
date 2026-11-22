@@ -207,3 +207,180 @@
              (:status (reconciliation/inspect! node source-id failure))))
       (is (= :dispatch-accepted
              (:gesso.live.outbox/status (physical-row node id)))))))
+
+(defn- committed-prefix [intent-id lease-id receipt-id]
+  {:intent-id intent-id
+   :acquisition-status :acquired
+   :status :dispatch-accepted
+   :lease-id lease-id
+   :receipt-id receipt-id
+   :progression {:basis :reported}})
+
+(defn- completed-envelope [completed claim]
+  (assoc (envelope claim)
+         :completed completed
+         :completed-count (count completed)
+         :last-completed-cursor (some-> completed peek :intent-id)))
+
+(deftest completed-prefix-validation-rejects-contradictions-before-physical-reads-test
+  (let [a (java.util.UUID/fromString "00000000-0000-0000-0000-000000000001")
+        b (java.util.UUID/fromString "00000000-0000-0000-0000-000000000002")
+        x (committed-prefix a (random-uuid) (random-uuid))
+        y (committed-prefix b (random-uuid) (random-uuid))
+        baseline (completed-envelope [x y] nil)]
+    (doseq [invalid [(assoc baseline :completed-count 1)
+                     (assoc baseline :completed [y x])
+                     (assoc baseline :completed [x x])
+                     (assoc baseline :last-completed-cursor a)
+                     (assoc baseline :completed (vec (repeat 129 x)))
+                     (assoc baseline :completed [42])
+                     (assoc baseline :completed [(dissoc x :receipt-id) y])
+                     (assoc baseline :completed [(assoc x :lease-id "bad") y])
+                     (assoc baseline :completed [(assoc x :status :unsent) y])
+                     (assoc baseline :completed [(assoc x :acquisition-status
+                                                        :contended) y])
+                     (assoc baseline :completed [(dissoc x :progression) y])
+                     (assoc baseline :completed :not-a-vector)]]
+      ;; :no-node would fail as a provider if validation performed a read.
+      (is (= :invalid-completed-prefix
+             (rejection :no-node source-id invalid))))))
+
+(deftest recorded-prefix-requires-matching-physical-receipts-test
+  (with-open [node (xtn/start-node {})]
+    (let [a (java.util.UUID/fromString "00000000-0000-0000-0000-000000000011")
+          b (java.util.UUID/fromString "00000000-0000-0000-0000-000000000012")
+          c (java.util.UUID/fromString "00000000-0000-0000-0000-000000000013")
+          _ (doseq [id [a b c]] (seed! node id))
+          ca (claim! node a "worker-a")
+          cb (claim! node b "worker-a")
+          r-a (random-uuid)
+          r-b (random-uuid)]
+      (doseq [[lease receipt] [[ca r-a] [cb r-b]]]
+        (is (= :acknowledged
+               (:status (acknowledgment/acknowledge-dispatch!
+                         node {:intent-id (:intent-id lease)
+                               :lease-id (:lease-id lease)
+                               :worker-id (:worker-id lease)
+                               :receipt {:receipt-id receipt
+                                         :adapter :gesso.live/synchronous-source
+                                         :result :accepted}})))))
+      (let [completed [(committed-prefix a (:lease-id ca) r-a)
+                       (committed-prefix b (:lease-id cb) r-b)]
+            report (completed-envelope completed nil)
+            result (reconciliation/inspect! node source-id report)]
+        (is (= :unidentified (:status result)))
+        (is (true? (:rescan-required? result)))
+        (is (= [a b] (mapv :intent-id (:completed-observations result))))
+        (is (= [:matching-acknowledgment-recorded
+                :matching-acknowledgment-recorded]
+               (mapv :status (:completed-observations result))))
+        (is (every? :observed-system-from (:completed-observations result)))
+        (is (not (contains? result :may-replay?)))
+        ;; Unlike a purely reported completion, a current physical state
+        ;; that changes after the send must no longer be certified as matching.
+        (let [row (physical-row node b)
+              modified (assoc (dissoc row :xt/system-from)
+                              :gesso.live.outbox/dispatch-receipt-id
+                              (random-uuid))]
+          (xt/execute-tx node [[:put-docs outbox/intent-table modified]])
+          (is (= [:matching-acknowledgment-recorded
+                  :different-acknowledgment-recorded]
+                 (mapv :status
+                       (:completed-observations
+                        (reconciliation/inspect! node source-id report))))))
+          (is (= :source-mismatch
+                 (rejection node "foreign/source" report)))
+        ;; A third row may exist without being part of the completed prefix;
+        ;; it must not be invented into the report.
+        (is (= 2 (count (:completed-observations result))))))))
+
+(deftest completed-prefix-reports-lost-and-nonterminal-physical-rows-test
+  (with-open [node (xtn/start-node {})]
+    (let [a (java.util.UUID/fromString "00000000-0000-0000-0000-000000000021")
+          b (java.util.UUID/fromString "00000000-0000-0000-0000-000000000022")
+          c (java.util.UUID/fromString "00000000-0000-0000-0000-000000000023")
+          _ (seed! node b)
+          _ (seed! node c)
+          lease-c (claim! node c "worker-c")
+          report (completed-envelope
+                  [(committed-prefix a (random-uuid) (random-uuid))
+                   (committed-prefix b (random-uuid) (random-uuid))
+                   (committed-prefix c (:lease-id lease-c) (random-uuid))]
+                  nil)
+          found (:completed-observations
+                 (reconciliation/inspect! node source-id report))]
+      (is (= [:missing :not-terminal :not-terminal]
+             (mapv :status found)))
+      (is (= [:pending :leased] (mapv :observed-status (rest found)))))))
+
+(deftest a-contended-prefix-is-not-a-dispatch-and-needs-no-provider-test
+  (let [a (java.util.UUID/fromString "00000000-0000-0000-0000-000000000031")
+        b (java.util.UUID/fromString "00000000-0000-0000-0000-000000000032")
+        completed [{:intent-id a :acquisition-status :contended}
+                   {:intent-id b :acquisition-status :unavailable
+                    :reason :not-leased}]
+        result (reconciliation/inspect! :no-node source-id
+                                        (completed-envelope completed nil))]
+    (is (= :unidentified (:status result)))
+    (is (= [{:intent-id a :status :no-dispatch-claim}
+            {:intent-id b :status :no-dispatch-claim}]
+           (:completed-observations result)))))
+
+(deftest real-cycle-failure-inspects-completed-prefix-and-in-flight-test
+  (with-open [node (xtn/start-node {})]
+    (let [a (java.util.UUID/fromString "00000000-0000-0000-0000-000000000041")
+          b (java.util.UUID/fromString "00000000-0000-0000-0000-000000000042")
+          _ (doseq [id [a b]] (seed! node id))
+          calls (atom 0)
+          failure
+          (with-redefs
+            [delivery/dispatch-acquired!
+             (fn [_ _ _ acquired _]
+               (swap! calls inc)
+               (let [receipt-id (random-uuid)
+                     ack (acknowledgment/acknowledge-dispatch!
+                          node {:intent-id (:intent-id acquired)
+                                :lease-id (:lease-id acquired)
+                                :worker-id (:worker-id acquired)
+                                :receipt {:receipt-id receipt-id
+                                          :adapter :gesso.live/synchronous-source
+                                          :result :accepted}})]
+                 (is (= :acknowledged (:status ack)))
+                 (if (= 1 @calls)
+                   {:intent-id (:intent-id acquired)
+                    :lease-id (:lease-id acquired)
+                    :receipt-id receipt-id
+                    :status :dispatch-accepted
+                    :progression (:progression acquired)
+                    :acknowledgment {:status :acknowledged
+                                     :intent-id (:intent-id acquired)
+                                     :lease-id (:lease-id acquired)
+                                     :receipt-id receipt-id}
+                    :source-result {:status :emitted-many :count 1
+                                    :results [{:status :emitted}]}}
+                   (throw
+                    (ex-info "second acknowledgment was recorded but reply lost"
+                             {:error/type :gesso.live.outbox/post-dispatch-ack-unknown
+                              :intent-id (:intent-id acquired)
+                              :lease-id (:lease-id acquired)
+                              :receipt-id receipt-id
+                              :dispatch/status :accepted
+                              :acknowledgment/status :unknown})))))]
+            (try
+              (cycle/process-cycle! node {:source :installed} {} source-id
+                                    {:worker-id "worker-a" :max-items 2})
+              (is false "second lost reply must stop the cycle")
+              nil
+              (catch clojure.lang.ExceptionInfo e (ex-data e))))
+          examined (reconciliation/inspect! node source-id failure)]
+      (is (= 2 @calls))
+      (is (= :gesso.live.outbox/cycle-interrupted (:error/type failure)))
+      (is (= 1 (:completed-count failure)))
+      (is (= a (get-in failure [:completed 0 :intent-id])))
+      (is (= b (get-in failure [:in-flight :intent-id])))
+      (is (= :matching-acknowledgment-recorded (:status examined)))
+      (is (= a (get-in examined [:completed-observations 0 :intent-id])))
+      (is (= :matching-acknowledgment-recorded
+             (get-in examined [:completed-observations 0 :status])))
+      (is (true? (:rescan-required? examined)))
+      (is (not (contains? examined :may-replay?))))))

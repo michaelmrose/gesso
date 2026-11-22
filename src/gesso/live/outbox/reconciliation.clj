@@ -106,32 +106,101 @@
         :matching-acknowledgment-recorded
         :else :other-receipt-recorded))))
 
-(defn inspect!
-  "Inspect one interrupted cycle's in-flight lease against current XTDB state.
+(def ^:private max-completed 128)
 
-   `failure` is the exception data from cycle/process-cycle! (or the
-   lifecycle's retained failure report); `expected-source-id` comes from
-   the installed trusted host, not from the report. No lease identity means
-   :unidentified without a physical query, requiring a full source rescan.
+(defn- require-completed!
+  "Validate the cycle's bounded completed prefix before reading ANY physical
+   row. A completed claim is a trusted cycle report, not an independently
+   authenticated transaction or proof of client delivery."
+  [failure]
+  (when (contains? failure :completed)
+    (let [completed (:completed failure)
+          ids (when (vector? completed) (mapv :intent-id completed))]
+      (when-not
+       (and (vector? completed)
+            (<= (count completed) max-completed)
+            (= (count completed) (:completed-count failure))
+            (every? uuid? ids)
+            (every? (fn [[a b]] (neg? (compare (str a) (str b))))
+                    (partition 2 1 ids))
+            (or (empty? ids)
+                (= (peek ids) (:last-completed-cursor failure)))
+            (every?
+             (fn [item]
+               (and (map? item)
+                    (case (:acquisition-status item)
+                      (:acquired :reclaimed)
+                      (and (= :dispatch-accepted (:status item))
+                           (uuid? (:lease-id item))
+                           (uuid? (:receipt-id item))
+                           (some? (:progression item)))
+                      (:contended :unavailable)
+                      (and (nil? (:status item))
+                           (not-any? #(contains? item %)
+                                     [:lease-id :receipt-id]))
+                      false)))
+             completed))
+        (reject! :invalid-completed-prefix {}))
+      completed)))
 
-   A matching terminal receipt requires exact lease/worker identity and a
-   correctly tagged, UUID *reported* receipt. It observes a current durable
-   acknowledgment row, NOT the originating source send or browser receipt.
-   Every return includes :rescan-required? true; none authorizes immediate
-   retry, replay, or resumption. Reclaimed leases and terminal receipts may
-   have changed again by the time the caller takes further action."
-  [node expected-source-id failure]
-  (let [claim (require-envelope! expected-source-id failure)]
-    (if (nil? claim)
-      {:status :unidentified :rescan-required? true}
-      (let [intent-id (:intent-id claim)
-            row (current-intent! node intent-id)]
+(defn- inspect-completed-entry!
+  [node expected-source-id entry]
+  (let [intent-id (:intent-id entry)]
+    (if (nil? (:status entry))
+      ;; A contended/unavailable acquisition did not produce a completed
+      ;; dispatch. Do not infer its current physical state or issue a read.
+      {:intent-id intent-id :status :no-dispatch-claim}
+      (let [row (current-intent! node intent-id)]
         (if (nil? row)
-          {:status :missing :intent-id intent-id
-           :rescan-required? true}
-          (let [row (require-row! row intent-id expected-source-id)]
-            {:status (disposition row claim)
-             :intent-id intent-id
-             :observed-status (:gesso.live.outbox/status row)
-             :observed-system-from (:xt/system-from row)
-             :rescan-required? true}))))))
+          {:intent-id intent-id :status :missing}
+          (let [row (require-row! row intent-id expected-source-id)
+                status (:gesso.live.outbox/status row)
+                matched? (and (= :dispatch-accepted status)
+                              (= (:lease-id entry)
+                                 (:gesso.live.outbox/lease-id row))
+                              (= (:receipt-id entry)
+                                 (:gesso.live.outbox/dispatch-receipt-id row)))]
+            {:intent-id intent-id
+             :status (cond
+                       matched? :matching-acknowledgment-recorded
+                       (= :dispatch-accepted status)
+                       :different-acknowledgment-recorded
+                       :else :not-terminal)
+             :observed-status status
+             :observed-system-from (:xt/system-from row)}))))))
+
+(defn inspect!
+  "Inspect the interrupted cycle's bounded completed prefix and in-flight
+   lease against CURRENT physical XTDB rows. Neither a completed cycle report
+   nor a matching stored acknowledgment establishes SSE/browser delivery.
+
+   When :completed is present, check every reported entry in UUID order.
+   The resulting :completed-observations are separate, non-atomic current-row
+   reads: even matching records cannot justify a release/replay decision.
+   :contended/:unavailable entries were not dispatch claims and are not read.
+
+   No in-flight identity yields :unidentified but may still provide physical
+   evidence of a previously completed prefix. The caller must independently
+   qualify any restart, full rescan, or lease reclaim after inspection."
+  [node expected-source-id failure]
+  (let [claim (require-envelope! expected-source-id failure)
+        completed (require-completed! failure)
+        observed (when (some? completed)
+                   (mapv #(inspect-completed-entry! node expected-source-id %)
+                         completed))
+        in-flight
+        (if (nil? claim)
+          {:status :unidentified :rescan-required? true}
+          (let [intent-id (:intent-id claim)
+                row (current-intent! node intent-id)]
+            (if (nil? row)
+              {:status :missing :intent-id intent-id
+               :rescan-required? true}
+              (let [row (require-row! row intent-id expected-source-id)]
+                {:status (disposition row claim)
+                 :intent-id intent-id
+                 :observed-status (:gesso.live.outbox/status row)
+                 :observed-system-from (:xt/system-from row)
+                 :rescan-required? true}))))]
+    (cond-> in-flight
+      (some? completed) (assoc :completed-observations observed))))
