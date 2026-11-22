@@ -4,6 +4,7 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.discovery :as discovery]
+            [gesso.live.outbox.worker :as worker]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
   (:import [java.time Instant]))
@@ -199,3 +200,86 @@
              (set (map :intent-id
                        (:candidates (discovery/discover-eligible!
                                      node {:source-id "other/installed-source"})))))))))
+
+(deftest interrupted-physical-discovery-query-preserves-unknown-and-thread-signal-test
+  ;; A failed XTDB read is an indeterminate discovery, not an empty page.
+  ;; Cancellation from an interrupted physical query must remain visible
+  ;; after the original exception escapes the discovery boundary.
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (seed-intents! node [{:id id :status :pending}])
+          cause (InterruptedException. "outbox discovery query interrupted")
+          queries (atom 0)]
+      (try
+        (Thread/interrupted)
+        (let [outcome (with-redefs [xt/q (fn [& _]
+                                          (swap! queries inc)
+                                          (throw cause))]
+                        (try
+                          (discovery/discover-eligible!
+                           node {:source-id "gesso/test-discovery"})
+                          (catch Throwable error error)))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? cause outcome)
+              "The original query interruption must not become an empty page")
+          (is interrupted? "The discovery read must retain JVM cancellation")
+          (is (= 1 @queries))
+          (is (= [{:intent-id id :action :acquire-pending}]
+                 (:candidates
+                  (discovery/discover-eligible!
+                   node {:source-id "gesso/test-discovery"})))
+              "Subsequent physical discovery must still see the durable row"))
+        (finally
+          (Thread/interrupted))))))
+
+(deftest interrupted-discovery-after-worker-lease-preserves-progress-and-signal-test
+  ;; The worker may already have committed one lease before XTDB fails on
+  ;; its second page. The failure cannot pretend the whole sweep ended or
+  ;; roll back the committed prefix. A fresh scan must find the other row.
+  (with-open [node (xtn/start-node {})]
+    (let [a (java.util.UUID/fromString "00000000-0000-0000-0000-000000000001")
+          b (java.util.UUID/fromString "00000000-0000-0000-0000-000000000002")
+          _ (seed-intents! node [{:id a :status :pending}
+                                 {:id b :status :pending}])
+          cause (InterruptedException. "second discovery page interrupted")
+          original-query xt/q
+          pages (atom 0)
+          opts {:source-id "gesso/test-discovery"
+                :worker-id "interrupted-page-worker"
+                :page-size 1 :max-pages 2}]
+      (try
+        (Thread/interrupted)
+        (let [outcome (with-redefs
+                        [xt/q (fn [& args]
+                                (let [query (second args)]
+                                  (if (and (= 3 (count args))
+                                           (vector? query)
+                                           (string? (first query))
+                                           (.startsWith ^String (first query)
+                                                        "SELECT _id")
+                                           (= 2 (swap! pages inc)))
+                                    (throw cause)
+                                    (apply original-query args))))]
+                        (try
+                          (worker/acquire-sweep! node opts)
+                          (catch Throwable error error)))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? cause outcome)
+              "Interrupted second page must not return a completed sweep")
+          (is interrupted? "An interrupted paged sweep retains JVM cancellation")
+          (is (= 2 @pages))
+          (let [current (fn [id]
+                          (first (xt/q node
+                                       ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id])))]
+            (is (= :leased (:gesso.live.outbox/status (current a)))
+                "First page acquisition is already committed")
+            (is (= :pending (:gesso.live.outbox/status (current b)))
+                "Second page must not be falsely acquired"))
+          (let [rescan (worker/acquire-sweep! node opts)]
+            (is (= 1 (:attempted rescan)))
+            (is (= 1 (:acquired rescan)))
+            (is (= b (-> rescan :results first :intent-id)))))
+        (finally
+          (Thread/interrupted))))))

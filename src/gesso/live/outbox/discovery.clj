@@ -111,7 +111,14 @@
   ([node opts]
    (validate-options! opts)
    (let [limit (get opts :limit default-page-size)
-         rows (xt/q node (into [(query-sql opts)] (query-args opts)))
+         rows (try
+                (xt/q node (into [(query-sql opts)] (query-args opts)))
+                (catch InterruptedException cause
+                  ;; A failed provider query does not establish that the
+                  ;; queue is empty. Keep the exact cause and restore the
+                  ;; interrupt signal that the physical read may have cleared.
+                  (.interrupt (Thread/currentThread))
+                  (throw cause)))
          has-more? (> (count rows) limit)
          candidates (mapv #(candidate! (:source-id opts) %) (take limit rows))]
      (when-not (= (count candidates)
