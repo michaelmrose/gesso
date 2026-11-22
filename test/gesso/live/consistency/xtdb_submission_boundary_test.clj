@@ -68,6 +68,119 @@
     (is (= [] (:events report)))
     (is (not (contains? report :error)))))
 
+(deftest interrupted-capture-thunk-retains-report-and-caller-interrupt-test
+  ;; Capture reports a thrown operation instead of rethrowing it. An
+  ;; InterruptedException from the thunk must nevertheless remain observable
+  ;; as JVM cancellation state, and capture's dynamic session must unwind.
+  (let [interruption (InterruptedException. "capture interrupted")]
+    (try
+      (Thread/interrupted)
+      (let [report (capture #(throw interruption))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (assert-diagnostic-only report)
+        (is (= :threw (:outcome report)))
+        (is (identical? interruption (:error report)))
+        (is (empty? (:events report)))
+        (is interrupted? "The diagnostic report must not erase cancellation")
+        (is (= :returned (:outcome (capture (constantly :healthy))))
+            "Capture must disable its dynamic session after interruption"))
+      (finally
+        (Thread/interrupted)))))
+
+(deftest interrupted-xtdb-api-retains-exact-error-and-thread-flag-test
+  ;; The bound XTDB API is physical and may throw after a blocking operation
+  ;; cleared the interrupted flag. Preserve that signal while rethrowing the
+  ;; exact exception, rather than fabricating a transaction outcome.
+  (doseq [[api seam invoke]
+          [[:submit '*submit-tx* #(live/submit-tx! :connection source-ops)]
+           [:execute '*execute-tx* #(live/execute-tx! :connection source-ops)]]]
+    (let [interruption (InterruptedException. (str (name api) " interrupted"))]
+      (try
+        (Thread/interrupted)
+        (let [caught (with-seams {seam (fn [& _] (throw interruption))}
+                       (fn []
+                         (try (invoke)
+                              (catch Throwable error error))))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? interruption caught)
+              (str api " must preserve the original API exception"))
+          (is interrupted? (str api " must restore JVM cancellation")))
+        (finally
+          (Thread/interrupted))))))
+
+(deftest interrupted-xtdb-success-diagnostic-preserves-returned-result-test
+  ;; Both start and success events are observational: a diagnostic must
+  ;; neither prevent the physical API call nor turn a returned result into
+  ;; a synthetic error. Interrupt state is a separate JVM obligation.
+  (doseq [[api seam expected-result invoke events]
+          [[:submit '*submit-tx* {:tx-id 904}
+            #(live/submit-tx! :connection source-ops %)
+            [:gesso.live.xtdb/submit-tx-started
+             :gesso.live.xtdb/submit-tx-succeeded]]
+           [:execute '*execute-tx* (transaction-key 905)
+            #(live/execute-tx! :connection source-ops %)
+            [:gesso.live.xtdb/execute-tx-started
+             :gesso.live.xtdb/execute-tx-succeeded]]]
+          target events]
+    (let [calls (atom 0)
+          reported (atom [])]
+      (try
+        (Thread/interrupted)
+        (let [outcome (with-seams
+                        {seam (fn [& _]
+                                (swap! calls inc)
+                                expected-result)}
+                        (fn []
+                          (invoke {:debug-fn
+                                   (fn [{:keys [event]}]
+                                     (swap! reported conj event)
+                                     (when (= target event)
+                                       (throw (InterruptedException.
+                                               "diagnostic interrupted"))))})))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? expected-result (:tx-result outcome))
+              (str api " must return its actual physical result"))
+          (is (= 1 @calls) "A debug failure must not cause a duplicate write")
+          (is (= events @reported))
+          (is interrupted? (str api " " target " lost interrupt state")))
+        (finally
+          (Thread/interrupted))))))
+
+(deftest interrupted-xtdb-failure-diagnostic-preserves-physical-error-test
+  ;; A failed trace following a failed XTDB call cannot replace the actual
+  ;; storage error; the trace's interruption must nevertheless survive.
+  (doseq [[api seam invoke failed-event]
+          [[:submit '*submit-tx* #(live/submit-tx! :connection source-ops %)
+            :gesso.live.xtdb/submit-tx-failed]
+           [:execute '*execute-tx* #(live/execute-tx! :connection source-ops %)
+            :gesso.live.xtdb/execute-tx-failed]]]
+    (let [physical-error (ex-info "physical XTDB failure" {:api api})
+          events (atom [])]
+      (try
+        (Thread/interrupted)
+        (let [caught (with-seams
+                       {seam (fn [& _] (throw physical-error))}
+                       (fn []
+                         (try
+                           (invoke {:debug-fn
+                                    (fn [{:keys [event]}]
+                                      (swap! events conj event)
+                                      (when (= event failed-event)
+                                        (throw (InterruptedException.
+                                                "error trace interrupted"))))})
+                           (catch Throwable error error))))
+              interrupted? (.isInterrupted (Thread/currentThread))]
+          (Thread/interrupted)
+          (is (identical? physical-error caught)
+              (str api " must not replace the physical error"))
+          (is (= failed-event (last @events)))
+          (is interrupted? (str api " failure trace erased interruption")))
+        (finally
+          (Thread/interrupted))))))
+
 (deftest submit-captures-exact-operations-and-filtered-options-test
   (let [observed (atom nil)
         options {:database :xtdb :metadata {:request-id "123"}

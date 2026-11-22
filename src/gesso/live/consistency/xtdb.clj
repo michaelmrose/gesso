@@ -80,6 +80,13 @@
   :gesso.live.consistency.xtdb/adapter-submission-capture)
 (def submission-capture-version 1)
 
+(defn- restore-interrupt!
+  "An InterruptedException caught at an XTDB adapter boundary must retain
+   the JVM caller's cancellation signal even when returned as diagnostics."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defn capture-tx-api-calls!
   "Execute a zero-argument thunk while capturing THIS adapter's actual calls to
    its bound XTDB submit-tx/execute-tx functions, including the exact tx-ops
@@ -114,6 +121,7 @@
                     (try
                       {:outcome :returned :result (thunk)}
                       (catch Throwable e
+                        (restore-interrupt! e)
                         {:outcome :threw :error e})
                       (finally (reset! active false))))]
     (merge {:type submission-capture-type
@@ -134,7 +142,9 @@
       ;; The diagnostic must not change the transaction's outcome. In practice
       ;; ordinary persistent-vector swap! cannot fail except for resource issues.
       (try (swap! events conj event)
-           (catch Throwable _ nil)))))
+           (catch Throwable error
+             (restore-interrupt! error)
+             nil)))))
 
 (defn- invoke-xtdb-api! [api operation connectable tx-ops tx-options]
   ;; Capture immediately adjacent to the *actual* adapter API invocation, not
@@ -154,6 +164,7 @@
                                :tx-result result}))
         result)
       (catch Throwable e
+        (restore-interrupt! e)
         (when capture?
           (capture-api-event! {:call-id call-id :api api :phase :threw
                                :exception-class (.getName (class e))}))
@@ -176,7 +187,8 @@
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Throwable _#
+       (catch Throwable error#
+         (restore-interrupt! error#)
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -2586,6 +2598,7 @@
            progression-value
            (assoc :progression progression-value)))
        (catch Throwable e
+         (restore-interrupt! e)
          (debug!
           debug-fn
           (if (post-submit-result-failure? e)
@@ -2675,6 +2688,7 @@
            progression-value
            (assoc :progression progression-value)))
        (catch Throwable e
+         (restore-interrupt! e)
          (debug!
           debug-fn
           (if (post-execute-result-failure? e)
