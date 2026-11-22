@@ -845,6 +845,114 @@
 ;; Canceller handoff and terminal cleanup
 ;; -----------------------------------------------------------------------------
 
+(deftest interrupting-debug-hook-restores-caller-interrupt-test
+  ;; A diagnostic callback can throw InterruptedException after consuming the
+  ;; interrupt bit (e.g. from Thread/sleep). Ignoring the callback error must
+  ;; preserve the cancellation signal for the invoking executor.
+  (Thread/interrupted)
+  (let [hook-calls (atom 0)
+        started (atom nil)]
+    (try
+      (reset! started
+              (sse/start! (never-flow)
+                          {:debug-fn (fn [_]
+                                       (swap! hook-calls inc)
+                                       (throw (InterruptedException.
+                                               "diagnostic interrupted")))
+                           :close-on-complete? false}))
+      ;; clojure.test's Ref-backed assertion counters can themselves consume
+      ;; a set interrupt during reporting. Snapshot it before any (is ...).
+      (let [interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (pos? @hook-calls))
+        (is interrupted?
+            "An isolated diagnostic InterruptedException restores the flag"))
+      (finally
+        (Thread/interrupted)
+        (when @started (sse/cancel! @started))
+        (Thread/interrupted)))))
+
+(deftest interrupting-terminal-hooks-restore-caller-interrupt-test
+  ;; Error and close callbacks have separate guarded boundaries. Neither is
+  ;; permitted to consume an executor interrupt signal while being ignored.
+  (doseq [kind [:on-error :on-close]]
+    (Thread/interrupted)
+    (let [calls (atom 0)
+          hook (fn [_ & _]
+                 (swap! calls inc)
+                 (throw (InterruptedException.
+                         (str kind " callback interrupted"))))
+          source-error (ex-info "producer construction failed" {})]
+      (try
+        (if (= kind :on-error)
+          (with-redefs [sse/write-events-task
+                        (fn [_ _ _] (throw source-error))]
+            (let [started (sse/start! (never-flow) {:on-error hook})
+                  interrupted? (.isInterrupted (Thread/currentThread))]
+              (Thread/interrupted)
+              (is (sse/closed? started))
+              (is (= 1 @calls))
+              (is interrupted?)
+              (sse/cancel! started)))
+          (let [started (sse/start! (never-flow) {:on-close hook})]
+            (sse/cancel! started)
+            (let [interrupted? (.isInterrupted (Thread/currentThread))]
+              (Thread/interrupted)
+              (is (sse/closed? started))
+              (is (= 1 @calls))
+              (is interrupted?))))
+        (finally
+          (Thread/interrupted))))))
+
+(deftest interrupted-source-cleanup-preserves-primary-error-and-interrupt-test
+  ;; Both transport cancel and eager source release can fail with an
+  ;; InterruptedException *after* a separate startup/handoff error. Keep the
+  ;; original diagnosis primary and retain the thread's cancellation signal.
+  (doseq [case-name [:startup-failed :handoff-failed]]
+    (Thread/interrupted)
+    (let [startup-error (ex-info "SSE failed" {:case case-name})
+          cancel-error (InterruptedException. "cancel was interrupted")
+          release-error (InterruptedException. "source release interrupted")
+          releases (atom 0)
+          cancels (atom 0)]
+      (try
+        (with-redefs [flow/open-source-flow!
+                      (fn [_ _]
+                        {:flow nil
+                         :close! (fn []
+                                   (swap! releases inc)
+                                   (throw release-error))})
+                      sse/start!
+                      (fn [_ _]
+                        (if (= :startup-failed case-name)
+                          (throw startup-error)
+                          {:stream :partial-stream
+                           :closed? (atom false)
+                           :cancel! (fn []
+                                      (swap! cancels inc)
+                                      (throw cancel-error))}))
+                      sse/register-source-release!
+                      (fn [_ _] (throw startup-error))]
+          (let [caught (try
+                         (sse/start-source! :source
+                                            {:subscription {:topic :request
+                                                            :id "v2166"}}
+                                            nil)
+                         (catch Throwable error error))
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            (Thread/interrupted)
+            (is (identical? startup-error caught))
+            (is (= (if (= :handoff-failed case-name)
+                     [cancel-error release-error]
+                     [release-error])
+                   (vec (.getSuppressed ^Throwable caught))))
+            (is (= 1 @releases))
+            (is (= (if (= :handoff-failed case-name) 1 0) @cancels))
+            (is interrupted?
+                "Suppressed source cleanup interruption must remain visible")))
+        (finally
+          (Thread/interrupted))))))
+
 (deftest assertion-error-debug-hook-cannot-abort-source-backed-startup-test
   ;; Diagnostic hooks may be application assertions that throw Error, not
   ;; Exception. They must never interrupt startup or orphan the eager source

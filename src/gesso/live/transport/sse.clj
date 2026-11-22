@@ -36,6 +36,13 @@
 ;; Debug
 ;; -----------------------------------------------------------------------------
 
+(defn- restore-interrupt!
+  "A swallowed or suppressed InterruptedException must not erase the JVM
+   interrupt flag. The callback may already have cleared it while blocking."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defmacro ^:private debug!
   "Emit a debug event only when debug-fn is truthy.
 
@@ -47,7 +54,8 @@
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Throwable _#
+       (catch Throwable error#
+         (restore-interrupt! error#)
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -213,7 +221,8 @@
   (when f
     (try
       (apply f args)
-      (catch Throwable _
+      (catch Throwable error
+        (restore-interrupt! error)
         nil))))
 
 (defn- once
@@ -767,17 +776,21 @@
         ;; transport must not keep emitting events or keepalive frames when
         ;; callback registration fails: retire its producers and response.
         ;; The eager source registration is owned separately, so attempt its
-        ;; release even when transport cancellation throws.
+        ;; release even when transport cancellation throws. A swallowed
+        ;; cleanup interruption must remain visible to the calling executor.
+        (restore-interrupt! startup-error)
         (when-let [started @started-ref]
           (try
             ((:cancel! started))
             (catch Throwable cancel-error
+              (restore-interrupt! cancel-error)
               (when-not (identical? startup-error cancel-error)
                 (.addSuppressed ^Throwable startup-error
                                 ^Throwable cancel-error)))))
         (try
           (release-flow!)
           (catch Throwable release-error
+            (restore-interrupt! release-error)
             (when-not (identical? startup-error release-error)
               (.addSuppressed ^Throwable startup-error
                               ^Throwable release-error))))
