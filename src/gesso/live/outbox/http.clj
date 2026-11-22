@@ -44,19 +44,53 @@
       (reject! :incomplete-sse-source-release {}))))
 
 (defn- occupied-sse-slots
-  "Count physical and unresolved sessions charged against route capacity.
+  "Count starting reservations and retained sessions in constant time.
 
-   A disconnected response may still hold an eager Live source subscription.
-   Such unresolved cleanup must not free a connection slot: otherwise a
-   client can reconnect repeatedly to exceed :max-connections while its
-   prior source interests remain registered. Duplicate keys across the
-   active and cleanup registries represent one session, not two."
-  [{:keys [connections starting retry-cancellations disconnect-cleanups]}]
-  (+ starting (count (merge connections
-                            retry-cancellations disconnect-cleanups))))
+   The occupied-session set is maintained at each admission and cleanup
+   transition. Building a union of the full connection/retry registries on
+   every GET would allocate and scan O(active connections) entries even when
+   all other admission decisions are constant-time."
+  [{:keys [starting occupied-session-ids]}]
+  (+ starting (count occupied-session-ids)))
+
+(defn- retire-untracked-session [state key]
+  ;; Cleanup callbacks may arrive before or during cancellation. Retire an
+  ;; occupied slot only after NO owner of that session remains, including a
+  ;; cancellation that is still executing after its close hooks have fired.
+  (if (or (contains? (:connections state) key)
+          (contains? (:retry-cancellations state) key)
+          (contains? (:disconnect-cleanups state) key)
+          (contains? (:cancelling-session-ids state) key))
+    state
+    (update state :occupied-session-ids disj key)))
+
+(defn- cancel-registered-sse! [state key session]
+  ;; Hold the capacity slot while cancel! executes: the physical response and
+  ;; source tap may close *before* the cancel callback returns or throws.
+  (swap! state update :cancelling-session-ids conj key)
+  (try
+    (cancel-physical-sse! session)
+    (swap! state
+           (fn [s]
+             (-> s
+                 (update :connections dissoc key)
+                 (update :retry-cancellations dissoc key)
+                 (update :disconnect-cleanups dissoc key)
+                 (update :cancelling-session-ids disj key)
+                 (retire-untracked-session key))))
+    (catch Throwable e
+      ;; The stream-close callback may already have removed the connection.
+      ;; Preserve a durable retry and keep this session's occupied slot.
+      (swap! state
+             (fn [s]
+               (-> s
+                   (assoc-in [:retry-cancellations key] session)
+                   (update :cancelling-session-ids disj key))))
+      (throw e))))
 
 (defn- drained-state? [{:keys [closed? close-completed? connections starting
                               retry-cancellations disconnect-cleanups
+                              cancelling-session-ids occupied-session-ids
                               pending-authorizations]}]
   ;; A disconnect hook can remove the last connection while close! is still
   ;; inside live/cancel-sse!. Do not declare provider-safe quiescence until
@@ -65,7 +99,9 @@
        (zero? pending-authorizations)
        (zero? starting)
        (empty? connections) (empty? retry-cancellations)
-       (empty? disconnect-cleanups)))
+       (empty? disconnect-cleanups)
+       (empty? cancelling-session-ids)
+       (empty? occupied-session-ids)))
 
 (defn- reserve-pending-authorization! [state live-system limit]
   ;; Session construction and close! hold the state monitor. A fresh GET must
@@ -158,8 +194,11 @@
    Unresolved disconnect and failed-cancellation cleanup obligations also
    retain capacity until source release is confirmed, even when the HTTP
    response is already closed. :active-count reports current HTTP sessions;
-   :occupied-count additionally includes in-flight starters and unreleased
-   cleanup obligations (counting each session once).
+   :occupied-count additionally includes in-flight starters, cancellation
+   operations, and unreleased cleanup obligations (counting each session once).
+   Slot accounting is constant-time regardless of how many active SSE sessions
+   are registered. A slot remains occupied until all session cleanup owners
+   have relinquished it.
    Since :close! can return while authorization/startup is still in flight,
    :drained? reports the stronger lifecycle condition: route close! has
    completed its cancellation pass successfully, no authorization or startup
@@ -289,7 +328,8 @@
         live-system (:gesso.live/system started)
         state (atom {:closed? false :close-completed? false
                      :connections {} :retry-cancellations {}
-                     :disconnect-cleanups {} :starting 0
+                     :disconnect-cleanups {} :cancelling-session-ids #{}
+                     :occupied-session-ids #{} :starting 0
                      :pending-authorizations 0})
         drained-signal (promise)
         _ (add-watch state ::drain
@@ -314,18 +354,9 @@
                          (reduce-kv
                           (fn [failures key session]
                             (try
-                              (cancel-physical-sse! session)
-                              (swap! state
-                                     (fn [s] (-> s
-                                                 (update :connections dissoc key)
-                                                 (update :retry-cancellations dissoc key)
-                                                 (update :disconnect-cleanups dissoc key))))
+                              (cancel-registered-sse! state key session)
                               failures
                               (catch Throwable e
-                                ;; Keep the obligation even when the stream's
-                                ;; on-closed callback removed the connection.
-                                (swap! state assoc-in
-                                       [:retry-cancellations key] session)
                                 (conj failures e))))
                           []
                           (merge (:connections @state)
@@ -444,7 +475,9 @@
                                              (-> s
                                                  (update :starting dec)
                                                  (assoc-in [:connections key]
-                                                           session))))
+                                                           session)
+                                                 (update :occupied-session-ids
+                                                         conj key))))
                                     (vreset! startup-slot? false)
                                     (try
                                       ;; A disconnected HTTP stream may leave
@@ -455,8 +488,13 @@
                                       (when-let [on-source-closed!
                                                  (:source-on-closed! session)]
                                         (on-source-closed!
-                                         #(swap! state update
-                                                 :disconnect-cleanups dissoc key)))
+                                         #(swap! state
+                                                 (fn [s]
+                                                   (-> s
+                                                       (update :disconnect-cleanups
+                                                               dissoc key)
+                                                       (retire-untracked-session
+                                                        key))))))
                                       (stream/on-closed
                                        (:stream session)
                                        (fn []
@@ -478,9 +516,18 @@
                                              ;; clear an obligation added later.
                                              ;; Recheck *after* publication.
                                              (when (true? (source-closed?))
-                                               (swap! state update
-                                                      :disconnect-cleanups dissoc key)))
-                                           (swap! state update :connections dissoc key))))
+                                               (swap! state
+                                                      (fn [s]
+                                                        (-> s
+                                                            (update :disconnect-cleanups
+                                                                    dissoc key)
+                                                            (retire-untracked-session
+                                                             key))))))
+                                           (swap! state
+                                                  (fn [s]
+                                                    (-> s
+                                                        (update :connections dissoc key)
+                                                        (retire-untracked-session key)))))))
                                       ;; The route may have closed *while*
                                       ;; startup was running without the lock.
                                       ;; Never hand back an admitted 200 in
@@ -490,8 +537,8 @@
                                         (if (or route-closed? provider-closed?
                                                 (stream/closed? (:stream session)))
                                           (do
-                                            (cancel-physical-sse! session)
-                                            (swap! state update :connections dissoc key)
+                                            (cancel-registered-sse!
+                                             state key session)
                                             {:status 503 :headers {}
                                              :body (if (or route-closed?
                                                            provider-closed?)
@@ -503,14 +550,8 @@
                                         ;; an explicit close! retry, and retain
                                         ;; the original error as the cause.
                                         (try
-                                          (cancel-physical-sse! session)
-                                          (swap! state update :connections dissoc key)
+                                          (cancel-registered-sse! state key session)
                                           (catch Throwable cancel-error
-                                            ;; A rollback stream can close
-                                            ;; before its provider cleanup
-                                            ;; fails. Keep it for route close!.
-                                            (swap! state assoc-in
-                                                   [:retry-cancellations key] session)
                                             (when-not (identical? admission-error
                                                                   cancel-error)
                                               (.addSuppressed ^Throwable admission-error

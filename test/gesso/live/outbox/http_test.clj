@@ -2029,6 +2029,50 @@
          (is (eventually #(zero? (:subscription-count (source/stats src)))))
          (finally ((:close! route))))))))
 
+(deftest occupied-capacity-survives-closed-stream-with-blocked-cancellation-test
+  ;; Closing the SSE response and its eager source triggers callbacks that
+  ;; remove both connection and disconnect-cleanup entries *before* the
+  ;; external cancel operation returns. Its occupied slot cannot disappear
+  ;; until the cancellation callback has completed (or retained a retry).
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events" :max-connections 1
+                           :authorize-subscription (constantly scope)})
+           response ((:handler route)
+                     {:uri "/live/events" :request-method :get})
+           entered (promise)
+           release (promise)
+           real-cancel live/cancel-sse!
+           closing (atom nil)]
+       (try
+         (is (= 200 (:status response)))
+         (is (= 1 ((:occupied-count route))))
+         (with-redefs [live/cancel-sse!
+                       (fn [session]
+                         (real-cancel session)
+                         (deliver entered true)
+                         @release)]
+           (reset! closing (future ((:close! route))))
+           (is (= true (deref entered 5000 ::timeout)))
+           (is (stream/closed? (:body response)))
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src)))))
+           (is (= 1 ((:occupied-count route)))
+               "Cancellation must retain its slot after both close hooks")
+           (is (false? ((:drained? route))))
+           (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+           (deliver release true)
+           (is (= :closed (deref @closing 5000 ::timeout)))
+           (is (= 0 ((:occupied-count route))))
+           (is (true? ((:drained? route))))
+           (is (= {:outcome :drained} ((:await-drained! route) 0))))
+         (finally
+           (deliver release true)
+           (when @closing (future-cancel @closing))
+           ((:close! route))))))))
+
 (deftest route-drain-waits-for-close-cancellation-completion-test
   ;; A stream may close and synchronously unregister itself before the
   ;; caller's cancellation operation returns. The route must not claim
