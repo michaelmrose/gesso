@@ -180,7 +180,22 @@
           (try
             (close! resource)
             (catch Throwable close-error
-              (.addSuppressed ^Throwable registration-error close-error)))
+              (.addSuppressed ^Throwable registration-error close-error)
+              ;; Registration failed AFTER allocation, and immediate
+              ;; compensation failed too. Without a journal entry the host
+              ;; can declare rollback drained and close older dependencies
+              ;; while this physical resource is still live. Preserve its
+              ;; cleanup as the newest obligation, ahead of prior resources,
+              ;; and let checked startup expose a retryable fence on failure.
+              (swap! (.-state ^StartupCleanup cleanup)
+                     update :remaining conj
+                     {:module-id module-id
+                      :resource-id resource-id
+                      :scope-token token
+                      :ownership (if (= phase :init) :init :partial)
+                      :stop (fn [_] (close! resource))
+                      :system nil})
+              (restore-interrupt! close-error)))
           (throw registration-error))))))
 
 (defn acquire-init-resource!

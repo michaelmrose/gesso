@@ -1018,3 +1018,99 @@
           (is (= 2 @attempts))))
       (finally
         (Thread/interrupted)))))
+
+(deftest failed-registration-compensation-retains-retryable-cleanup-test
+  ;; A duplicate registration fails AFTER allocating the second resource.
+  ;; If immediate compensation also fails, that resource must become the
+  ;; *first* retryable journal entry. Reporting rollback :drained while it is
+  ;; still open would incorrectly authorize teardown of its dependencies.
+  (let [events (atom [])
+        attempts (atom 0)
+        compensation-error (ex-info "second resource still open" {:resource :second})
+        dependency {:biff.core/id :fixture/dependency
+                    :biff.core/start (fn [s]
+                                       (swap! events conj :dependency-start)
+                                       s)
+                    :biff.core/stop (fn [_]
+                                      (swap! events conj :dependency-stop))}
+        duplicate {:biff.core/id :fixture/duplicate-module
+                   :biff.core/start
+                   (fn [_]
+                     (managed/acquire-startup-resource!
+                      :fixture/resource
+                      (fn [] (swap! events conj :first-acquire) :first)
+                      (fn [_] (swap! events conj :first-close)))
+                     (managed/acquire-startup-resource!
+                      :fixture/resource
+                      (fn [] (swap! events conj :second-acquire) :second)
+                      (fn [_]
+                        (swap! events conj :second-close)
+                        (when (< (swap! attempts inc) 3)
+                          (throw compensation-error)))))
+                   :biff.core/stop (fn [_] (swap! events conj :unexpected-stop))}
+        failure (thrown-startup #(start-checked-fixture! [dependency duplicate]))
+        details (ex-data failure)
+        original (.getCause ^Throwable failure)
+        handle (:cleanup/handle details)]
+    (is (= :duplicate-owned-resource (:reason (ex-data original))))
+    (is (= [compensation-error]
+           (vec (.getSuppressed ^Throwable original)))
+        "The first failed physical close must remain attached to the cause")
+    (is (= :blocked (:rollback/status details))
+        "Unclosed compensation cannot be falsely reported as drained")
+    (is (= :fixture/duplicate-module (:rollback/blocked-module-id details)))
+    (is (= :fixture/resource (:rollback/blocked-resource-id details)))
+    (is (= [:fixture/dependency :fixture/duplicate-module
+            :fixture/duplicate-module]
+           (:rollback/remaining-module-ids details))
+        "Both registered and failed-compensation resource obligations remain")
+    (is (= [:dependency-start :first-acquire :second-acquire
+            :second-close :second-close]
+           @events)
+        "Unreleased second resource fences the first and its dependency")
+    (is (some? handle) "Physical compensation needs explicit retry authority")
+    (when handle
+      (is (= :drained (:status (managed/retry-startup-cleanup! handle))))
+      (is (= [:dependency-start :first-acquire :second-acquire
+              :second-close :second-close :second-close
+              :first-close :dependency-stop]
+             @events)
+          "Successful retry releases new resource before earlier providers")
+      (is (= 3 @attempts)))))
+
+(deftest interrupted-failed-registration-compensation-preserves-flag-test
+  ;; A compensating close can fail with InterruptedException after clearing
+  ;; the caller's interrupt bit. Startup's primary error is the duplicate
+  ;; registration, but that suppressed cancellation must still be preserved.
+  (let [events (atom [])
+        attempts (atom 0)
+        interruption (InterruptedException. "compensation interrupted")
+        duplicate {:biff.core/id :fixture/duplicate-module
+                   :biff.core/start
+                   (fn [_]
+                     (managed/acquire-startup-resource!
+                      :fixture/resource
+                      (fn [] (swap! events conj :first-acquire) :first)
+                      (fn [_] (swap! events conj :first-close)))
+                     (managed/acquire-startup-resource!
+                      :fixture/resource
+                      (fn [] (swap! events conj :second-acquire) :second)
+                      (fn [_]
+                        (swap! events conj :second-close)
+                        (when (= 1 (swap! attempts inc))
+                          (throw interruption)))))
+                   :biff.core/stop (fn [_] (swap! events conj :unexpected-stop))}]
+    (try
+      (Thread/interrupted)
+      (let [failure (thrown-startup #(start-checked-fixture! [duplicate]))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (= :drained (:rollback/status (ex-data failure))))
+        (is (= :duplicate-owned-resource (:reason (ex-data (.getCause failure)))))
+        (is (= [interruption] (vec (.getSuppressed ^Throwable (.getCause failure)))))
+        (is (= [:first-acquire :second-acquire :second-close
+                :second-close :first-close] @events))
+        (is (= 2 @attempts))
+        (is interrupted? "Suppressed physical cancellation must retain interrupt"))
+      (finally
+        (Thread/interrupted)))))
