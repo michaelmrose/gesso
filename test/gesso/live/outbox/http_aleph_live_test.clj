@@ -198,3 +198,110 @@
         (deliver release-cancel true)
         (.shutdownNow pool)
         (.finishAndReleaseAll ch)))))
+
+(deftest recovered-route-reconciles-without-repeating-cancellation-test
+  ;; Source closure can precede return from a route-owned physical callback.
+  ;; Reconciliation is evidence-only, including after route close! succeeds.
+  (let [ch (EmbeddedChannel.)
+        pool (Executors/newSingleThreadExecutor)
+        body (stream/stream 1)
+        source-closed? (atom false)
+        route-released? (atom false)
+        cancel-calls (atom 0)
+        terminal-count (atom 0)
+        bridge (terminal/prepare! #(swap! terminal-count inc))
+        session (assoc (session body
+                                (fn [] (swap! cancel-calls inc))
+                                #(deref source-closed?))
+                       :route-released? #(deref route-released?))
+        hook (owned/attach! {:channel ch :executor pool
+                             :session session :bridge bridge})]
+    (try
+      (is (= :waiting-channel ((:reconcile! hook))))
+      (.close ch)
+      (.runPendingTasks ch)
+      ;; The close handler may have called cancel once, but not completed it.
+      (is (eventually #(pos? @cancel-calls)))
+      (is (= :waiting-response ((:reconcile! hook))))
+      (stream/close! body)
+      (is (= :waiting-source ((:reconcile! hook))))
+      (reset! source-closed? true)
+      (is (= :waiting-route ((:reconcile! hook))))
+      (is (zero? @terminal-count))
+      (let [before @cancel-calls]
+        (reset! route-released? true)
+        (is (= :released ((:reconcile! hook))))
+        (is (= :released ((:reconcile! hook))))
+        (is (= before @cancel-calls)
+            "Evidence-only reconciliation must not call cancel again"))
+      (is (= 1 @terminal-count))
+      (is (true? (:released? ((:status hook)))))
+      (finally
+        (.close ch) (.shutdownNow pool) (.finishAndReleaseAll ch)))))
+
+(deftest reconciler-rotates-bounded-passes-and-preserves-failed-evidence-test
+  (let [registry (owned/prepare-reconciler! {:max-pending 3 :max-per-step 2})
+        ready (atom false)
+        attempted (atom [])
+        failed (ex-info "unavailable terminal callback" {:test :v2257})
+        first-hook {:status (constantly {})
+                    :reconcile! (fn [] (swap! attempted conj :first)
+                                  (if @ready :released :waiting-route))}
+        second-hook {:status (constantly {})
+                     :reconcile! (fn [] (swap! attempted conj :second)
+                                   (throw failed))}
+        third-hook {:status (constantly {})
+                    :reconcile! (fn [] (swap! attempted conj :third)
+                                  :released)}]
+    ((:register! registry) first-hook)
+    ((:register! registry) second-hook)
+    ((:register! registry) third-hook)
+    (is (= :reconciler-capacity
+           (failure-reason #((:register! registry) first-hook))))
+    (let [r ((:after-step! registry) {:outcome :failed})]
+      (is (= 2 (:attempted r)))
+      (is (<= 2 (:remaining r) 3))
+      (is (<= 0 (:reconciled r) 1)))
+    (let [r ((:after-step! registry) {:outcome :attempted})]
+      (is (= 2 (:attempted r)))
+      (is (<= 0 (:reconciled r) 1))
+      (is (<= (:remaining r) 2)))
+    (is (pos? (:errors ((:stats registry))))
+        "A bad hook must not prevent a later hook from completing")
+    (reset! ready true)
+    (dotimes [_ 5] ((:after-step! registry) {:outcome :idle}))
+    (is (= 1 ((:pending-count registry))))
+    (is (pos? (:reconciled ((:stats registry)))))
+    (is (identical? failed (:last-error ((:stats registry)))))))
+
+(deftest reconciler-refuses-invalid-plans-and-hooks-test
+  (is (= :invalid-reconciler-options
+         (failure-reason #(owned/prepare-reconciler! {:extra 1}))))
+  (doseq [opts [{:max-pending 0} {:max-pending 4097}
+                {:max-per-step 0} {:max-per-step 65}]]
+    (is (= :invalid-reconciler-limit
+           (failure-reason #(owned/prepare-reconciler! opts)))))
+  (let [registry (owned/prepare-reconciler! {:max-pending 1})]
+    (is (= :invalid-reconciliation-hook
+           (failure-reason #((:register! registry) {}))))
+    (is (instance? java.util.UUID
+                   ((:register! registry)
+                    {:status (constantly {})
+                     :reconcile! (constantly :waiting-channel)})))
+    (is (= :reconciler-capacity
+           (failure-reason
+            #((:register! registry) {:status (constantly {})
+                                     :reconcile! (constantly :released)}))))
+    (is (= {:attempted 1 :reconciled 0 :remaining 1}
+           ((:after-step! registry) {:outcome :idle})))))
+
+(deftest reconciler-refuses-untrusted-success-outcome-test
+  (let [registry (owned/prepare-reconciler!)
+        bad (owned/prepare-reconciler!)]
+    ((:register! registry) {:status (constantly {})
+                            :reconcile! (constantly :unknown)})
+    (is (= {:attempted 1 :reconciled 0 :remaining 1}
+           ((:after-step! registry) {:outcome :attempted})))
+    (is (= :invalid-reconciliation-result
+           (:reason (ex-data (:last-error ((:stats registry)))))))
+    (is (= 1 ((:pending-count registry))))))

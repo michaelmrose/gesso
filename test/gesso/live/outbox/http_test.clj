@@ -4433,3 +4433,27 @@
                  (reset! fail-release? false)
                  ((:close! route))))))))))
 )
+
+(deftest authorized-session-route-release-evidence-fences-netty-reconciliation-test
+  (setup-host
+   (fn [started]
+     (let [owned (atom nil)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)
+                           :on-session-admitted!
+                           (fn [_ session] (reset! owned session))})
+           request {:uri "/live/events" :request-method :get}
+           response ((:handler route) request)]
+       (try
+         (is (= 200 (:status response)))
+         (is (fn? (:route-released? @owned)))
+         (is (false? ((:route-released? @owned)))
+             "A source-backed stream initially owns a route slot")
+         (is (= 1 ((:occupied-count route))))
+         ((:cancel! @owned))
+         (is (true? ((:route-released? @owned)))
+             "Ledger completion, not merely stream closure, admits transport completion")
+         (is (= 0 ((:occupied-count route))))
+         (is (= :already-released ((:cancel! @owned))))
+         (finally ((:close! route))))))))

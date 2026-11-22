@@ -166,7 +166,13 @@
    One executor thread is
    owned by this handle, and only one step! runs at a time. Cleanup errors
    are retained in bounded diagnostics; a failed tick must not cancel future
-   ticks. :last-outcome describes the most recent scheduler tick, while
+   ticks. Optional trusted :after-step! runs on the same scheduler thread
+   after EVERY step (including a failed physical retry), for bounded,
+   evidence-only completion of listener obligations. Its failures are
+   separately recorded and do not stop future scheduled ticks. The callback
+   is included in the scheduler's stop/drain barrier, so the host must stop
+   this handle before retiring the route or its providers.
+   :last-outcome describes the most recent scheduler tick, while
    :last-physical-outcome retains the most recent attempted cleanup or error
    across intervening deferred/idle ticks. :last-error is historical, not a
    claim that cleanup is still failing; consult :consecutive-failures and the
@@ -181,17 +187,25 @@
   [route options]
   (when-not (and (map? options)
                  (every? #{:poll-ms :min-interval-ms :max-attempts
-                             :max-failure-interval-ms}
+                             :max-failure-interval-ms :after-step!}
                          (keys options)))
     (reject! :invalid-scheduled-options))
-  (let [poll-ms (get options :poll-ms default-poll-ms)]
+  (let [poll-ms (get options :poll-ms default-poll-ms)
+        after-step! (:after-step! options)]
+    (when (and (contains? options :after-step!)
+               (not (fn? after-step!)))
+      (reject! :invalid-after-step))
     (when-not (and (integer? poll-ms) (<= 10 poll-ms 120000))
       (reject! :invalid-poll-ms))
-    (let [controller (prepare! route (dissoc options :poll-ms))
+    (let [controller (prepare! route (dissoc options :poll-ms :after-step!))
           stopping? (atom false)
           observations (atom {:tick-count 0 :failure-count 0
                               :last-outcome nil :last-physical-outcome nil
-                              :last-error nil})
+                              :last-error nil
+                              :reconciliation-count 0
+                              :reconciliation-failure-count 0
+                              :last-reconciliation-outcome nil
+                              :last-reconciliation-error nil})
           factory (reify ThreadFactory
                     (newThread [_ runnable]
                       (doto (Thread. ^Runnable runnable
@@ -202,27 +216,49 @@
                  (run [_]
                    (when-not @stopping?
                      (swap! observations update :tick-count inc)
-                     (try
-                       (let [result ((:step! controller))]
-                         (swap! observations
-                                (fn [snapshot]
-                                  (cond-> (assoc snapshot :last-outcome result)
-                                    (= :attempted (:outcome result))
-                                    (assoc :last-physical-outcome result)))))
-                       (catch Throwable error
-                         ;; Schedule-with-fixed-delay otherwise silently
-                         ;; suppresses every future run after an exception.
-                         ;; Preserve one failure for the trusted host owner.
-                         (swap! observations
-                                (fn [s]
-                                  (-> s
-                                      (update :failure-count inc)
-                                      (assoc :last-outcome {:outcome :failed}
-                                             :last-physical-outcome
-                                             {:outcome :failed}
-                                             :last-error error))))
-                         (when (instance? InterruptedException error)
-                           (.interrupt (Thread/currentThread))))))))]
+                     (let [result
+                           (try
+                             (let [result ((:step! controller))]
+                               (swap! observations
+                                      (fn [snapshot]
+                                        (cond-> (assoc snapshot :last-outcome result)
+                                          (= :attempted (:outcome result))
+                                          (assoc :last-physical-outcome result))))
+                               result)
+                             (catch Throwable error
+                               ;; Failed physical batches may have reclaimed
+                               ;; other sessions. Reconciliation still runs,
+                               ;; but never declares a failed route safe.
+                               (swap! observations
+                                      (fn [s]
+                                        (-> s
+                                            (update :failure-count inc)
+                                            (assoc :last-outcome {:outcome :failed}
+                                                   :last-physical-outcome
+                                                   {:outcome :failed}
+                                                   :last-error error))))
+                               (when (instance? InterruptedException error)
+                                 (.interrupt (Thread/currentThread)))
+                               {:outcome :failed}))]
+                       (when after-step!
+                         (try
+                           (let [report (after-step! result)]
+                             (swap! observations
+                                    (fn [s] (-> s
+                                                (update :reconciliation-count inc)
+                                                (assoc :last-reconciliation-outcome
+                                                       report
+                                                       :last-reconciliation-error
+                                                       (:last-reconciliation-error s))))))
+                           (catch Throwable error
+                             (swap! observations
+                                    (fn [s] (-> s
+                                                (update :reconciliation-failure-count
+                                                        inc)
+                                                (assoc :last-reconciliation-error
+                                                       error))))
+                             (when (instance? InterruptedException error)
+                               (.interrupt (Thread/currentThread))))))))))]
       (.setRemoveOnCancelPolicy executor true)
       (.setContinueExistingPeriodicTasksAfterShutdownPolicy executor false)
       (let [scheduled (.scheduleWithFixedDelay

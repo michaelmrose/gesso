@@ -416,3 +416,73 @@
            (step!)))
     (is (= [0 100 200] @calls))
     (is (zero? @pending))))
+
+(deftest scheduler-post-step-reconciliation-survives-physical-and-reconcile-failures-test
+  (let [pending (atom 1)
+        calls (atom [])
+        closed? (atom false)
+        physical-error (ex-info "physical tap retained" {:test :v2257})
+        fail-physical (atom physical-error)
+        callback-error (ex-info "temporary hook failure" {:test :v2257})
+        fail-callback? (atom true)
+        reports (atom [])
+        controller (recovery/start-scheduled!
+                    (fake-route pending calls closed? fail-physical)
+                    {:poll-ms 10 :min-interval-ms 20 :max-attempts 1
+                     :after-step! (fn [step]
+                                    (swap! reports conj (:outcome step))
+                                    (when (and @fail-callback?
+                                               (= :failed (:outcome step)))
+                                      (throw callback-error))
+                                    {:outcome :checked})})]
+    (try
+      (is (await-condition #(and (pos? (:failure-count ((:stats controller))))
+                                 (pos? (:reconciliation-failure-count
+                                        ((:stats controller)))))))
+      (is (identical? callback-error
+                      (:last-reconciliation-error ((:stats controller)))))
+      (is (= 1 @pending))
+      (reset! fail-callback? false)
+      (reset! fail-physical nil)
+      (is (await-condition #(and (zero? @pending)
+                                 (some #{:attempted} @reports)
+                                 (pos? (:reconciliation-count
+                                        ((:stats controller)))))))
+      (is (= {:outcome :checked}
+             (:last-reconciliation-outcome ((:stats controller)))))
+      (is (identical? callback-error
+                      (:last-reconciliation-error ((:stats controller)))))
+      (is (= :drained (:outcome ((:stop! controller) 2000))))
+      (finally ((:stop! controller) 2000)))))
+
+(defn- recovery-reason [f]
+  (try (f) nil
+       (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+
+(deftest scheduled-reconciliation-is-validated-and-drained-before-shutdown-test
+  (let [pending (atom 0)
+        calls (atom [])
+        closed? (atom false)
+        callback-entered (promise)
+        callback-release (promise)]
+    (is (= :invalid-after-step
+           (recovery-reason #(recovery/start-scheduled!
+                     (fake-route pending calls closed? (atom nil))
+                     {:after-step! :not-a-function}))))
+    (let [controller (recovery/start-scheduled!
+                      (fake-route pending calls closed? (atom nil))
+                      {:poll-ms 10 :after-step!
+                       (fn [_]
+                         (deliver callback-entered true)
+                         @callback-release
+                         {:outcome :reconciled})})]
+      (try
+        (is (= true (deref callback-entered 2000 false)))
+        (is (= {:outcome :timed-out} ((:stop! controller) 0))
+            "A blocked reconciliation must fence route/provider shutdown")
+        (deliver callback-release true)
+        (is (= {:outcome :drained} ((:stop! controller) 2000)))
+        (is (= :drained ((:status controller))))
+        (finally
+          (deliver callback-release true)
+          ((:stop! controller) 2000))))))

@@ -155,3 +155,35 @@ ownership drain. This new test is **not qualified** until the corresponding
 v2255 GitHub Actions run succeeds. As before, the host must call ordered
 route/listener/host shutdown; this hook does not automatically select Aleph
 or cover unrelated application-owned asynchronous continuations.
+
+## Bounded route-to-transport reconciliation (v2257)
+
+A managed authorized SSE session now provides `:route-released?`: the route
+ledger reports true only after **all** source-release callbacks for that
+session have returned and its occupied slot has been retired. Closing the
+stream or eager source tap alone does not satisfy this condition.
+
+The Aleph disconnect hook (`http-aleph-live/attach!`) provides an additional,
+**evidence-only** `:reconcile!` callback. After the Netty channel is known
+closed, it checks the physical response stream, eager source tap and (for a
+managed route) `:route-released?`, then emits the final Netty/producer terminal
+evidence. It does **not** call `:cancel!` or replay a source release. Pending
+conditions return explicit `:waiting-*` results and retain ownership.
+
+`http-aleph-live/prepare-reconciler!` is an optional host-owned registry of
+these callbacks, bounded by `:max-pending` (1..4096, default 1024), with a
+rotating, `:max-per-step`-bounded pass (1..64, default 16). Register the hook
+before returning the admitted Ring response. Pass the registry's `:after-step!`
+to `http-recovery/start-scheduled!`. The scheduler runs it after every route
+recovery step **on its existing single worker thread**, including failed and
+idle steps. Callback errors retain the obligation, record bounded diagnostics,
+and cannot suppress later ticks. Scheduler drain precedes route/listener/
+provider shutdown; a timed-out drain must never be promoted to success.
+
+The v2257 real-Aleph recovery scenario retains a real indexed source interest,
+keeps a healthy SSE peer active, then verifies that the scheduled route
+release automatically reconciles the dead channel's terminal ownership **with
+no manual call to the session's `:retry!`**. This is an opt-in adapter/host
+composition, not automatic framework-wide Aleph listener installation, and it
+does not prove arbitrary application continuations have ceased. Qualification
+requires a successful strict GitHub Actions run on the final revision.

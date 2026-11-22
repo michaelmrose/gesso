@@ -241,7 +241,11 @@
    handing the HTTP 200 stream to the server. The provided session's
    :cancel! is a route-owned cancellation handle: it serializes with
    route shutdown, retains the connection slot on failed source release,
-   and participates in :retry-disconnected! and ordered :close!. The callback
+   and participates in :retry-disconnected! and ordered :close!. The supplied
+   :route-released? returns true only after its slot is fully retired,
+   including a completed physical cancellation callback. After a scheduled
+   recovery, the Aleph owner may use that evidence to retire its independent
+   writer obligation WITHOUT repeating :cancel!. The callback
    MUST only register bounded asynchronous adapter hooks; it cannot
    block indefinitely or claim an independent physical source owner.
    Failure to install the hook rolls the session back under the same
@@ -725,7 +729,16 @@
 
                                                             :else
                                                             (cancel-registered-sse!
-                                                             state key session)))))))
+                                                             state key session))))
+                                                      :route-released?
+                                                      (fn []
+                                                        ;; The capacity ledger retires only
+                                                        ;; after physical cancellation has
+                                                        ;; completed. Source-close alone is
+                                                        ;; not an ownership handoff.
+                                                        (not (contains?
+                                                              (:occupied-session-ids @state)
+                                                              key))))))
                                             ;; A hook may synchronously
                                             ;; observe an already-dead channel
                                             ;; or invoke cancellation itself.

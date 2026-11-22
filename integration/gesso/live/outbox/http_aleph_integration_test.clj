@@ -657,6 +657,8 @@
                  pool (java.util.concurrent.Executors/newFixedThreadPool 2)
                  server (atom nil)
                  admitted (atom {})
+                 reconciler (aleph-live/prepare-reconciler!
+                             {:max-pending 4 :max-per-step 2})
                  stopped? (atom false)
                  scheduler (atom nil)
                  shutdown (atom nil)
@@ -675,6 +677,7 @@
                                      hook (aleph-live/attach!
                                            {:channel ch :session owned-session
                                             :bridge bridge :executor pool})]
+                                 ((:register! reconciler) hook)
                                  (swap! admitted assoc (:query-string request)
                                         {:bridge bridge :hook hook
                                          :channel ch :session owned-session})))})
@@ -774,7 +777,8 @@
                  (reset! scheduler
                          (recovery/start-scheduled!
                           route {:poll-ms 20 :min-interval-ms 30
-                                 :max-attempts 1 :max-failure-interval-ms 100}))
+                                 :max-attempts 1 :max-failure-interval-ms 100
+                                 :after-step! (:after-step! reconciler)}))
                  (is (eventually #(pos? (:failure-count ((:stats @scheduler)))))
                      "Real route-owned scheduler observes physical release failures")
                  (is (= 2 ((:occupied-count route))))
@@ -792,12 +796,17 @@
                      "Scheduled retry releases the failed route slot")
                  (is (pos? (get-in ((:stats @scheduler))
                                    [:last-physical-outcome :recovered] 0)))
-                 (is (= 2 ((:active-count guard)))
-                     "The Aleph terminal obligation is separate from route recovery")
-                 (is (= :released
-                        ((:retry! (:hook (get @admitted "client=bad")))))
-                     "Reconcile confirmed route release with the dead Netty channel")
-                 (is (eventually #(= 1 ((:active-count guard)))))
+                 (is (eventually #(and (= 1 ((:active-count guard)))
+                                      (:released?
+                                       ((:status
+                                         (get-in @admitted ["client=bad" :hook]))))
+                                      (= 1 ((:pending-count reconciler)))))
+                     "Scheduler automatically reconciles only AFTER route release")
+                 (is (pos? (:reconciled ((:stats reconciler)))))
+                 (is (pos? (:reconciliation-count ((:stats @scheduler)))))
+                 (is (= 1 (:release-attempts
+                           ((:status (get-in @admitted ["client=bad" :hook])))))
+                     "Evidence-only reconciliation must not repeat cancellation")
                  (is (true? (:terminal?
                              ((:status (get-in @admitted ["client=bad" :bridge]))))))
                  (is (= 1 ((:occupied-count route))))
@@ -815,6 +824,8 @@
                                   (zero? (:subscription-count (source/stats src)))
                                   (zero? ((:active-count guard))))))
                  (is (= 0 (:pending ((:stats observer)))))
+                 (is (eventually #(zero? ((:pending-count reconciler))))
+                     "Completed physical session hooks cannot leak in the registry")
                  (reset! shutdown
                          (recovery/prepare-owned-shutdown
                           @scheduler
