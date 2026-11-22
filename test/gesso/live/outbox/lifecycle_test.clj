@@ -382,7 +382,8 @@
                :processed 1 :acquired 1 :reclaimed 0 :contended 0
                :unavailable 0 :dispatch-accepted 1
                :results [{:intent-id id :acquisition-status :acquired
-                          :status :dispatch-accepted :lease-id (random-uuid)
+                          :status :dispatch-accepted :worker-id "checked-worker"
+                          :lease-id (random-uuid)
                           :receipt-id (random-uuid)
                           :progression {:basis :valid}}]
                :halt-reason :observed-end :next-after nil}]
@@ -838,3 +839,50 @@
              (invalid-reason #(lifecycle/restart-with-redelivery!
                                old {:worker-id "not-a-replay"}))))
       (is (= :dispatch-accepted (:gesso.live.outbox/status (row node id)))))))
+
+(deftest foreign-or-missing-completed-owner-cannot-advance-lifecycle-test
+  ;; A normal (non-failed) cycle completion is another trust boundary:
+  ;; reported acknowledgments cannot advance the scheduler's counters or
+  ;; cursor if their owner differs from its installed worker. Unlike a
+  ;; failure report, no later reconciliation is attempted before accounting.
+  (let [id (intent-id 994)
+        good {:status :cycle-completed :worker-id "checked-worker"
+              :processed 1 :acquired 1 :reclaimed 0 :contended 0
+              :unavailable 0 :dispatch-accepted 1
+              :results [{:intent-id id :acquisition-status :acquired
+                         :status :dispatch-accepted
+                         :worker-id "checked-worker"
+                         :lease-id (random-uuid) :receipt-id (random-uuid)
+                         :progression {:basis :mock-ack}}]
+              :halt-reason :page-budget :next-after id}
+        cases [[:foreign-worker (assoc-in good [:results 0 :worker-id]
+                                          "foreign-worker")]
+               [:missing-worker (update good :results
+                                        #(mapv (fn [r] (dissoc r :worker-id)) %))]
+               [:blank-worker (assoc-in good [:results 0 :worker-id] " ")]
+               [:missing-lease (update good :results
+                                       #(mapv (fn [r] (dissoc r :lease-id)) %))]]]
+    (doseq [[label report] cases]
+      (let [entered (CountDownLatch. 1)
+            calls (atom 0)]
+        (with-redefs [cycle/process-cycle!
+                      (fn [& _]
+                        (swap! calls inc)
+                        (.countDown entered)
+                        report)]
+          (let [handle (lifecycle/start! :unused {:source :fake} {} source-id
+                                         {:worker-id "checked-worker"
+                                          :poll-ms 3000 :max-items 2})]
+            (try
+              (is (.await entered 1500 TimeUnit/MILLISECONDS) (str label))
+              (is (eventually #(= :failed (:status (lifecycle/status handle))))
+                  (str label " must halt accounting"))
+              (let [state (lifecycle/status handle)]
+                (is (= :gesso.live.outbox/invalid-lifecycle
+                       (get-in state [:failure :error/type])) (str label))
+                (is (zero? (:cycles state)) (str label))
+                (is (zero? (:total-processed state)) (str label))
+                (is (zero? (:total-dispatch-accepted state)) (str label))
+                (is (nil? (:last-cycle state)) (str label)))
+              (is (= 1 @calls) (str label " cannot run another cycle"))
+              (finally (lifecycle/stop! handle 3000)))))))))

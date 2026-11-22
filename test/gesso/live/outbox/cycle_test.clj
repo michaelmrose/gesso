@@ -1108,3 +1108,52 @@
         (is (nil? (:receipt-id in-flight))
             (str label " cannot inject unrelated receipt evidence"))
         (is (nil? (:receipt-evidence in-flight)))))))
+
+(deftest foreign-owned-physical-lease-cannot-cross-cycle-dispatch-test
+  ;; Real XTDB owns a valid acquired lease, but the mocked worker's page
+  ;; claims it was acquired by someone OTHER than this installed cycle.
+  ;; Even if the lease/receipt could subsequently pass lower-level guards,
+  ;; a framework mismatch must not initiate an externally visible send.
+  (with-open [node (xtn/start-node {})]
+    (let [id (intent-id 960)
+          lease-id (random-uuid)
+          system (make-system)
+          now (java.time.Instant/now)
+          sent (atom 0)]
+      (try
+        (seed! node [id])
+        (let [foreign (acquisition/acquire-pending!
+                       node {:intent-id id :lease-id lease-id
+                             :worker-id "other-worker" :source-id source-id
+                             :now now :lease-until (.plusSeconds now 60)})
+              before (physical-row node id)
+              cases [[:foreign-owner foreign]
+                     [:missing-owner (dissoc foreign :worker-id)]
+                     [:invalid-lease (assoc foreign :lease-id "not-a-uuid")]]]
+          (is (= :acquired (:status foreign)))
+          (doseq [[label candidate] cases]
+            (let [page {:results [candidate] :attempted 1
+                        :halt-reason :observed-end :next-after nil}
+                  failure (with-redefs
+                            [worker/acquire-sweep! (fn [_ _] page)
+                             delivery/dispatch-acquired!
+                             (fn [& _] (swap! sent inc)
+                               (throw (ex-info "Unexpected external dispatch" {})))]
+                            (try
+                              (cycle/process-cycle! node system {} source-id
+                                                    {:worker-id "installed-worker"
+                                                     :max-items 1})
+                              (catch clojure.lang.ExceptionInfo e e)))]
+              (is (instance? clojure.lang.ExceptionInfo failure) (str label))
+              (is (= :gesso.live.outbox/cycle-interrupted
+                     (:error/type (ex-data failure))) (str label))
+              (is (= :acquisition (:phase (ex-data failure))) (str label))
+              (is (= :acquisition-exception (:reason (ex-data failure)))
+                  (str label))
+              (is (= :invalid-worker-page
+                     (:reason (ex-data (.getCause failure)))) (str label))
+              (is (zero? (:completed-count (ex-data failure))) (str label))
+              (is (zero? @sent) (str label " must not emit"))
+              (is (= before (physical-row node id))
+                  (str label " must not modify the physical lease")))))
+        (finally (live/close! system))))))

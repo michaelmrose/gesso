@@ -76,7 +76,7 @@
             cause)))
 
 (defn- validate-page!
-  [page after]
+  [page after expected-worker-id]
   ;; A worker page is an advisory result, not a free-standing cursor claim.
   ;; Check its single identity against the incoming cursor and require the
   ;; continuation to name that SAME identity, before source dispatch. XTDB
@@ -93,6 +93,15 @@
                        (and (uuid? intent-id)
                             (or (nil? after)
                                 (neg? (compare (str after) (str intent-id))))))
+                   ;; A worker page is only an advisory report. In particular
+                   ;; a purported acquired lease owned by a DIFFERENT worker
+                   ;; must never reach the externally visible Live source.
+                   (every? (fn [item]
+                             (if (#{:acquired :reclaimed} (:status item))
+                               (and (= expected-worker-id (:worker-id item))
+                                    (uuid? (:lease-id item)))
+                               true))
+                           results)
                    (if (= :page-budget (:halt-reason page))
                      (and (= 1 (:attempted page))
                           (= intent-id (:next-after page)))
@@ -321,7 +330,7 @@
                                        {:original-error/type (:error/type (ex-data e))}
                                        e)))
             page (try
-                   (validate-page! raw-page cursor)
+                   (validate-page! raw-page cursor worker-id)
                    (catch Throwable e
                      (interrupted! :acquisition :acquisition-exception
                                    completed cursor (reported-acquisition-lease raw-page)

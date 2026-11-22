@@ -156,6 +156,9 @@
                             (case (:acquisition-status item)
                               (:acquired :reclaimed)
                               (and (= :dispatch-accepted (:status item))
+                                   ;; Completion may update counters and the
+                                   ;; scheduler cursor only for THIS worker.
+                                   (= requested-worker-id (:worker-id item))
                                    (uuid? (:lease-id item))
                                    (uuid? (:receipt-id item))
                                    (some? (:progression item)))

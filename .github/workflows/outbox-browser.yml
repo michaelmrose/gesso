@@ -125,6 +125,10 @@ jobs:
             2>&1 | tee target/outbox-browser/cycle-owner.log
           clojure -M:test -n gesso.live.outbox.acquisition-recovery-test \
             2>&1 | tee target/outbox-browser/acquisition-recovery.log
+          # A normal completed cycle must bind accepted outcomes to its
+          # installed worker BEFORE updating lifecycle counters or cursors.
+          timeout 150s clojure -M:test -n gesso.live.outbox.lifecycle-test \
+            2>&1 | tee target/outbox-browser/lifecycle-owner.log
 
       - name: Require real Chromium EventSource/HTMX/DOM convergence
         shell: bash
