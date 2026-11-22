@@ -29,9 +29,13 @@
 (def ^:private default-managed-keepalive-ms 15000)
 (def ^:private default-max-pending-authorizations 1024)
 
-(defn- drained-state? [{:keys [closed? connections starting
+(defn- drained-state? [{:keys [closed? close-completed? connections starting
                               pending-authorizations]}]
-  (and closed? (zero? pending-authorizations)
+  ;; A disconnect hook can remove the last connection while close! is still
+  ;; inside live/cancel-sse!. Do not declare provider-safe quiescence until
+  ;; the ordered route cancellation pass itself has returned successfully.
+  (and closed? close-completed?
+       (zero? pending-authorizations)
        (zero? starting) (empty? connections)))
 
 (defn- reserve-pending-authorization! [state live-system limit]
@@ -123,9 +127,12 @@
    fence and cannot return HTTP 200 after shutdown. A starting session is
    charged against :max-connections before its source interest exists.
    Since :close! can return while authorization/startup is still in flight,
-   :drained? reports the stronger lifecycle condition: the route is closed,
-   no authorization or startup is outstanding, and no session remains
-   registered. A completed :close! alone does not establish this condition.
+   :drained? reports the stronger lifecycle condition: route close! has
+   completed its cancellation pass successfully, no authorization or startup
+   is outstanding, and no session remains registered. A stream disconnect
+   callback can remove a connection *before* its cancellation finishes, so
+   an empty connection registry alone does not establish safe drain.
+   A completed :close! alone does not establish full quiescence.
    :await-drained! takes a bounded timeout in milliseconds (0..120000),
    waits for the same terminal state without polling, and returns either
    {:outcome :drained} or {:outcome :timed-out}. It does NOT initiate close!,
@@ -242,7 +249,8 @@
             (reject! :duplicate-sse-header {:header field}))
         base-handler (:biff.ring/handler started)
         live-system (:gesso.live/system started)
-        state (atom {:closed? false :connections {} :starting 0
+        state (atom {:closed? false :close-completed? false
+                     :connections {} :starting 0
                      :pending-authorizations 0})
         drained-signal (promise)
         _ (add-watch state ::drain
@@ -282,6 +290,11 @@
                            (.addSuppressed ^Throwable failure
                                            ^Throwable additional)))
                        (throw failure))
+                     ;; Mark completion after *all* cancellation callbacks
+                     ;; have returned, not merely after a stream's on-closed
+                     ;; handler removed the last registry entry. A failed
+                     ;; pass stays incomplete until a successful retry.
+                     (swap! state assoc :close-completed? true)
                      :closed)))
         handler
         (fn [request]

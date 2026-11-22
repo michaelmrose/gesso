@@ -1610,6 +1610,54 @@
            (when @waiter (future-cancel @waiter))
            ((:close! route))))))))
 
+(deftest route-drain-waits-for-close-cancellation-completion-test
+  ;; A stream may close and synchronously unregister itself before the
+  ;; caller's cancellation operation returns. The route must not claim
+  ;; quiescence or wake drain waiters until close! finishes its own pass.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           response ((:handler route)
+                     {:uri "/live/events" :request-method :get})
+           entered (promise)
+           release (promise)
+           original-cancel live/cancel-sse!
+           closing (atom nil)]
+       (try
+         (is (= 200 (:status response)))
+         (is (= 1 ((:active-count route))))
+         (with-redefs [live/cancel-sse!
+                       (fn [session]
+                         ;; Simulate an adapter's close notification before
+                         ;; the cancellation operation itself is finished.
+                         (stream/close! (:stream session))
+                         (deliver entered true)
+                         @release
+                         (original-cancel session))]
+           (reset! closing (future ((:close! route))))
+           (is (= true (deref entered 5000 ::timeout)))
+           (is (eventually #(zero? ((:active-count route))))
+               "The disconnect hook has already removed the last session")
+           (is (true? ((:closed? route))))
+           (is (false? ((:drained? route)))
+               "Registry emptiness must not certify unfinished cancellation")
+           (is (= {:outcome :timed-out} ((:await-drained! route) 20))
+               "Drain wait must remain pending during cancellation")
+           (is (not (realized? @closing)))
+           (deliver release true)
+           (is (= :closed (deref @closing 5000 ::timeout)))
+           (is (true? ((:drained? route))))
+           (is (= {:outcome :drained} ((:await-drained! route) 0)))
+           (is (eventually #(zero? (:subscription-count
+                                   (source/stats src))))))
+         (finally
+           (deliver release true)
+           (when @closing (future-cancel @closing))
+           ((:close! route))))))))
+
 (deftest managed-route-await-drain-requires-last-active-session-test
   (setup-host
    (fn [started]
