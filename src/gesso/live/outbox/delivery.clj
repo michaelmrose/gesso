@@ -165,6 +165,11 @@
           ack (try
                 (acknowledgment/acknowledge-dispatch! node fenced)
                 (catch Throwable e
+                  ;; An interrupted physical acknowledgment has no known
+                  ;; terminal outcome. Preserve JVM cancellation while
+                  ;; reporting POST-DISPATCH uncertainty, not a safe retry.
+                  (when (instance? InterruptedException e)
+                    (.interrupt (Thread/currentThread)))
                   (throw (ex-info "Live source accepted an invalidation before XTDB acknowledgment failed."
                                   {:error/type :gesso.live.outbox/post-dispatch-ack-unknown
                                    :intent-id intent-id

@@ -193,6 +193,50 @@
           (s/close! tap))
         (finally (live/close! system))))))
 
+(deftest interrupted-post-acceptance-ack-preserves-uncertainty-and-interrupt-test
+  ;; An actual Live source acceptance precedes the acknowledgement call.
+  ;; An interrupted physical ack is unknowable: neither reinterpret it as a
+  ;; rejected dispatch nor erase the caller's JVM cancellation signal while
+  ;; wrapping the exact failure in the post-dispatch-unknown envelope.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system) id (random-uuid)]
+      (try
+        (seed! node id)
+        (let [tap (source/subscribe (:source system)
+                                    {:topic :request :id subject-id})
+              lease (acquire! node id)
+              original (InterruptedException. "acknowledgment interrupted")]
+          (try
+            (Thread/interrupted)
+            (let [failure
+                  (with-redefs [acknowledgment/acknowledge-dispatch!
+                                (fn [_ _] (throw original))]
+                    (try
+                      (delivery/dispatch-acquired!
+                       node system {} lease source-id)
+                      (catch Throwable error error)))
+                  interrupted? (.isInterrupted (Thread/currentThread))]
+              (Thread/interrupted)
+              (is (instance? clojure.lang.ExceptionInfo failure))
+              (is (= :gesso.live.outbox/post-dispatch-ack-unknown
+                     (:error/type (ex-data failure))))
+              (is (= :accepted (:dispatch/status (ex-data failure))))
+              (is (= :unknown (:acknowledgment/status (ex-data failure))))
+              (is (identical? original (.getCause ^Throwable failure)))
+              (is interrupted?
+                  "An ack interruption must remain observable after wrapping")
+              (is (= subject-id (:id (deref (s/take! tap)
+                                              1500 ::timeout))))
+              (is (= :leased (:gesso.live.outbox/status (row node id))))
+              (is (nil? (:gesso.live.outbox/dispatch-receipt-id
+                         (row node id)))))
+            (finally
+              (Thread/interrupted)
+              (s/close! tap))))
+        (finally
+          (Thread/interrupted)
+          (live/close! system))))))
+
 (deftest unknown-post-acceptance-ack-outcome-has-explicit-classification-test
   (with-open [node (xtn/start-node {})]
     (let [system (create-system) id (random-uuid)]
