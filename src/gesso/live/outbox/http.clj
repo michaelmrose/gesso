@@ -30,13 +30,14 @@
 (def ^:private default-max-pending-authorizations 1024)
 
 (defn- drained-state? [{:keys [closed? close-completed? connections starting
-                              pending-authorizations]}]
+                              retry-cancellations pending-authorizations]}]
   ;; A disconnect hook can remove the last connection while close! is still
   ;; inside live/cancel-sse!. Do not declare provider-safe quiescence until
   ;; the ordered route cancellation pass itself has returned successfully.
   (and closed? close-completed?
        (zero? pending-authorizations)
-       (zero? starting) (empty? connections)))
+       (zero? starting)
+       (empty? connections) (empty? retry-cancellations)))
 
 (defn- reserve-pending-authorization! [state live-system limit]
   ;; Session construction and close! hold the state monitor. A fresh GET must
@@ -129,9 +130,10 @@
    Since :close! can return while authorization/startup is still in flight,
    :drained? reports the stronger lifecycle condition: route close! has
    completed its cancellation pass successfully, no authorization or startup
-   is outstanding, and no session remains registered. A stream disconnect
-   callback can remove a connection *before* its cancellation finishes, so
-   an empty connection registry alone does not establish safe drain.
+   is outstanding, and neither a session nor a failed-cancellation retry
+   remains registered. A stream disconnect callback can remove a connection
+   *before* its cancellation finishes; a cancellation that then throws must
+   preserve a separate retry obligation despite that disconnect.
    A completed :close! alone does not establish full quiescence.
    :await-drained! takes a bounded timeout in milliseconds (0..120000),
    waits for the same terminal state without polling, and returns either
@@ -250,7 +252,7 @@
         base-handler (:biff.ring/handler started)
         live-system (:gesso.live/system started)
         state (atom {:closed? false :close-completed? false
-                     :connections {} :starting 0
+                     :connections {} :retry-cancellations {} :starting 0
                      :pending-authorizations 0})
         drained-signal (promise)
         _ (add-watch state ::drain
@@ -267,20 +269,29 @@
                  ;; Thus shutdown does not await a stalled SSE startup.
                  (swap! state assoc :closed? true)
                  (locking state
-                   ;; Retain failures in :connections so a later close! can
-                   ;; retry them even if cancellation aborted before the
-                   ;; stream closed.
+                   ;; Disconnect hooks may clear :connections *during* a
+                   ;; failed cancellation. Track failed attempts separately
+                   ;; so a later close! can retry even an already-closed
+                   ;; stream whose provider cleanup may be incomplete.
                    (let [failures
                          (reduce-kv
                           (fn [failures key session]
                             (try
                               (live/cancel-sse! session)
-                              (swap! state update :connections dissoc key)
+                              (swap! state
+                                     (fn [s] (-> s
+                                                 (update :connections dissoc key)
+                                                 (update :retry-cancellations dissoc key))))
                               failures
                               (catch Throwable e
+                                ;; Keep the obligation even when the stream's
+                                ;; on-closed callback removed the connection.
+                                (swap! state assoc-in
+                                       [:retry-cancellations key] session)
                                 (conj failures e))))
                           []
-                          (:connections @state))]
+                          (merge (:connections @state)
+                                 (:retry-cancellations @state)))]
                      ;; Never abandon later sessions because an earlier
                      ;; cancellation failed. Preserve the original error
                      ;; identity and report additional failures as suppressed.
@@ -413,6 +424,11 @@
                                           (live/cancel-sse! session)
                                           (swap! state update :connections dissoc key)
                                           (catch Throwable cancel-error
+                                            ;; A rollback stream can close
+                                            ;; before its provider cleanup
+                                            ;; fails. Keep it for route close!.
+                                            (swap! state assoc-in
+                                                   [:retry-cancellations key] session)
                                             (when-not (identical? admission-error
                                                                   cancel-error)
                                               (.addSuppressed ^Throwable admission-error

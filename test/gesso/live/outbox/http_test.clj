@@ -1610,6 +1610,106 @@
            (when @waiter (future-cancel @waiter))
            ((:close! route))))))))
 
+(deftest late-sse-rollback-retains-failed-cancellation-after-disconnect-test
+  ;; close! may finish while a previously admitted SSE startup is blocked.
+  ;; If that late stream closes and rollback cancellation fails, the route
+  ;; must not report drain after its startup reservation is released.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           entered (promise)
+           release (promise)
+           original-start live/start-sse!
+           original-cancel live/cancel-sse!
+           fail (ex-info "Late SSE cancellation failed" {:test :v2154})
+           calls (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}
+           pending (atom nil)]
+       (try
+         (with-redefs [live/start-sse!
+                       (fn [& args]
+                         (deliver entered true)
+                         @release
+                         (apply original-start args))
+                       live/cancel-sse!
+                       (fn [session]
+                         (swap! calls inc)
+                         (stream/close! (:stream session))
+                         (throw fail))]
+           (reset! pending (future
+                             (try ((:handler route) request)
+                                  (catch Throwable e e))))
+           (is (= true (deref entered 5000 ::timeout)))
+           (is (= :closed ((:close! route))))
+           (is (false? ((:drained? route)))
+               "A late starter still owns an outstanding reservation")
+           (deliver release true)
+           (is (identical? fail (deref @pending 10000 ::timeout)))
+           (is (pos? @calls) "Late rollback attempted cancellation")
+           (is (zero? ((:active-count route)))
+               "The disconnect hook removed the active entry")
+           (is (false? ((:drained? route)))
+               "Failed late rollback must remain a retry obligation")
+           (is (= {:outcome :timed-out} ((:await-drained! route) 0))))
+         ;; The original cancellation function is now restored. The next
+         ;; route close must still find the failed, disconnected session.
+         (is (= :closed ((:close! route))))
+         (is (true? ((:drained? route))))
+         (is (= {:outcome :drained} ((:await-drained! route) 0)))
+         (is (eventually #(zero? (:subscription-count (source/stats src)))))
+         (finally
+           (deliver release true)
+           (when @pending (future-cancel @pending))
+           ((:close! route))))))))
+
+(deftest route-retries-cancellation-failed-after-disconnect-hook-test
+  ;; Closing a stream invokes its on-closed hook and removes the active
+  ;; registry entry. If cancellation THEN fails, the route must retain a
+  ;; separate retry obligation and cannot certify provider-safe drain.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           response ((:handler route)
+                     {:uri "/live/events" :request-method :get})
+           failure (ex-info "Cancellation failed after stream closed"
+                            {:test :v2154})
+           attempts (atom 0)
+           original-cancel live/cancel-sse!]
+       (try
+         (is (= 200 (:status response)))
+         (is (= 1 ((:active-count route))))
+         (with-redefs [live/cancel-sse!
+                       (fn [session]
+                         (if (= 1 (swap! attempts inc))
+                           (do
+                             ;; The close hook removes :connections first.
+                             (stream/close! (:stream session))
+                             (throw failure))
+                           (original-cancel session)))]
+           (is (identical? failure
+                           (try ((:close! route))
+                                (catch Throwable error error))))
+           (is (true? ((:closed? route))))
+           (is (zero? ((:active-count route)))
+               "The disconnect hook removed the active connection")
+           (is (false? ((:drained? route)))
+               "Failed cancellation remains an outstanding cleanup obligation")
+           (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+           (is (= :closed ((:close! route)))
+               "Retry must reattempt cancellation even after disconnect")
+           (is (= 2 @attempts)
+               "A lost cancellation cannot silently become a successful retry")
+           (is (true? ((:drained? route))))
+           (is (= {:outcome :drained} ((:await-drained! route) 0))))
+         (is (eventually #(zero? (:subscription-count (source/stats src)))))
+         (finally ((:close! route))))))))
+
 (deftest route-drain-waits-for-close-cancellation-completion-test
   ;; A stream may close and synchronously unregister itself before the
   ;; caller's cancellation operation returns. The route must not claim
