@@ -3063,3 +3063,102 @@
              (is (zero? ((:occupied-count route))))
              (is (zero? ((:pending-authorization-count route))))))
          (finally ((:close! route))))))))
+
+(deftest stalled-sse-keepalive-retires-route-slot-and-source-interest-test
+  ;; A live HTTP route must recover capacity when a producer is abandoned
+  ;; before the Ring body is consumed by an HTTP adapter. This exercises
+  ;; the actual Manifold write timeout, not a simulated stream close.
+  ;; The timeout is an unknown delivery outcome, never a claim that the
+  ;; browser did or did not receive the missing keepalive frame.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           observed-closes (atom [])
+           closed-event (promise)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 1
+                           :sse-options {:keepalive-ms 15
+                                         :frame-write-timeout-ms 750
+                                         :on-close #(do (swap! observed-closes conj %)
+                                                        (deliver closed-event %))}
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}]
+       (try
+         (let [first-response ((:handler route) request)]
+           (is (= 200 (:status first-response)))
+           (is (= 1 ((:occupied-count route))))
+           (is (= 1 (:subscription-count (source/stats src))))
+           (is (= {:status 503 :headers {}
+                   :body "Live connection capacity reached"}
+                  ((:handler route) request))
+               "A stalled session must still occupy its admission slot")
+           ;; Deliberately do not read or close the first response body.
+           ;; Its keepalive put! must time out and retire both owners.
+           (is (= :keepalive-error
+                  (:reason (deref closed-event 3000 ::timeout)))
+               "An unread body must reach its write deadline promptly")
+           (is (stream/closed? (:body first-response))
+               "The terminal callback must own physical stream retirement")
+           (is (eventually #(zero? ((:occupied-count route))))
+               "Stream closure must release the route connection slot")
+           (is (eventually #(zero? (:subscription-count (source/stats src))))
+               "Stream closure must release the eager source registration")
+           (is (not ((:closed? route)))
+               "Only the abandoned session, not its route, is retired")
+           (is (= :keepalive-error (:reason (first @observed-closes)))
+               (str "Unexpected SSE close: " (pr-str @observed-closes)))
+           (is (= :gesso.live.sse/frame-write-unknown
+                  (:error/type (ex-data (:error (first @observed-closes)))))
+               "Timeout must be an explicit unknown write outcome"))
+         (let [next-response ((:handler route) request)]
+           (is (= 200 (:status next-response))
+               "Capacity must recover for a new authorized admission")
+           (is (= 1 ((:occupied-count route))))
+           (when (= 200 (:status next-response))
+             (is (= 1 (:subscription-count (source/stats src))))
+             ;; The second connection is healthy while its body is read.
+             (is (= ": ping\n\n"
+                    (deref (stream/take! (:body next-response)) 1000 ::timeout)))
+             (is (not (stream/closed? (:body next-response))))
+             (stream/close! (:body next-response))
+             (is (eventually #(zero? ((:occupied-count route)))))
+             (is (eventually #(zero? (:subscription-count (source/stats src)))))))
+         (finally ((:close! route))))))))
+
+(deftest concurrent-route-shutdown-retires-stalled-sse-writers-test
+  ;; A caller must be able to shut down the route without waiting for the
+  ;; per-frame timeout of unread HTTP response streams. Each source interest
+  ;; and admission slot must be retired before the route claims drain.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-connections 2
+                           :sse-options {:keepalive-ms 15
+                                         :frame-write-timeout-ms 5000}
+                           :authorize-subscription (constantly scope)})
+           request {:uri "/live/events" :request-method :get}
+           first-response ((:handler route) request)
+           second-response ((:handler route) request)]
+       (try
+         (is (= [200 200]
+                [(:status first-response) (:status second-response)]))
+         (is (= 2 ((:occupied-count route))))
+         (is (= 2 (:subscription-count (source/stats src))))
+         (Thread/sleep 50)
+         (let [closing (future ((:close! route)))]
+           (try
+             (is (= :closed (deref closing 2000 ::timeout))
+                 "Route cancellation must not await pending frame deadlines")
+             (is (= {:outcome :drained} ((:await-drained! route) 500)))
+             (is (true? ((:drained? route))))
+             (is (stream/closed? (:body first-response)))
+             (is (stream/closed? (:body second-response)))
+             (is (zero? ((:occupied-count route))))
+             (is (zero? (:subscription-count (source/stats src))))
+             (is (= {:status 503 :headers {} :body "Live shutting down"}
+                    ((:handler route) request)))
+             (finally (future-cancel closing))))
+         (finally ((:close! route))))))))
