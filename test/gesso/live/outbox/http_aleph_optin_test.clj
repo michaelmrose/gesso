@@ -41,4 +41,6 @@
     (is (not (re-find #"(?m)^\s*continue-on-error\s*:\s*true\b" workflow)))
     (is (not (str/includes? workflow "|| true")))
     (is (str/includes? workflow "- 'integration/gesso/live/outbox/http_aleph*'"))
-    (is (str/includes? workflow "- 'src/gesso/live/outbox/http_listener.clj'"))))
+    (is (str/includes? workflow "- 'src/gesso/live/outbox/http_listener.clj'"))
+    (is (str/includes? workflow "- 'src/gesso/live/outbox/http_aleph_live.clj'"))
+    (is (str/includes? workflow "- 'test/gesso/live/outbox/http_aleph_live_test.clj'"))))

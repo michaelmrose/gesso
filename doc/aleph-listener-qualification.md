@@ -70,6 +70,26 @@ neither the listener nor the per-channel pending registry leaks ownership.
 **This added case needs a separate successful workflow run on v2252**;
 a passed v2251 run does not validate the new test.
 
+## Automatic source-backed disconnect cleanup (v2254)
+
+`gesso.live.outbox.http-aleph-live/attach!` accepts a **real, already-authorized**
+source-backed SSE session, the Aleph request's Netty channel, its per-response
+terminal bridge, and a host-managed executor. It waits for the physical
+channel's close future before scheduling the session's actual cancellation
+**outside the Netty event loop**. The callback verifies the SSE response body
+and eager source subscription have both closed before discharging the bridge.
+Errors and rejected executor scheduling remain explicit, manually retryable
+debt. A live channel is never canceled by merely registering this hook.
+
+A strict Aleph HTTP/1 test now exercises an actual Gesso source-backed SSE
+subscription, receives a source-generated frame, resets the client socket,
+and checks automatic tap release and listener drain **without test-supplied
+completion callbacks**. This test is unqualified until the v2254 workflow
+actually passes. The helper is still opt-in and does not automatically
+wrap Gesso's authorized Ring route. Source-backed cancel! returning plus tap
+and response closure is not a blanket guarantee for arbitrary application
+owned asynchronous continuations; those require their own completion proof.
+
 ## What the first gate exercises
 
 The `integration/gesso/live/outbox/http_aleph_integration_test.clj` harness

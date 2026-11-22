@@ -13,6 +13,8 @@ on:
       - bb.edn
       - 'integration/gesso/live/outbox/http_aleph*'
       - 'src/gesso/live/outbox/http_aleph_pipeline.clj'
+      - 'src/gesso/live/outbox/http_aleph_live.clj'
+      - 'test/gesso/live/outbox/http_aleph_live_test.clj'
       - 'src/gesso/live/outbox/http_netty_terminal.clj'
       - 'src/gesso/live/outbox/http_listener.clj'
       - 'test/gesso/live/outbox/http_aleph_optin_test.clj'

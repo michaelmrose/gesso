@@ -10,6 +10,9 @@
             [clojure.test :refer [deftest is]]
             [gesso.live.outbox.http :as http]
             [gesso.live.outbox.http-aleph-pipeline :as capture]
+            [gesso.live.outbox.http-aleph-live :as aleph-live]
+            [gesso.live.source :as source]
+            [gesso.live.transport.sse :as sse]
             [gesso.live.outbox.http-listener :as listener]
             [gesso.live.outbox.http-netty-terminal :as terminal]
             [manifold.stream :as stream])
@@ -329,3 +332,97 @@
         (.close socket)
         (stream/close! source)
         ((:stop! server))))))
+
+(deftest real-aleph-http1-disconnect-releases-actual-gesso-source-automatically-test
+  ;; Unlike the prior pure-transport disconnect test, this test requires the
+  ;; real source-backed SSE :cancel! returned by Gesso Live. No test code
+  ;; invokes bridge/producer-ceased!, writer-aborted!, or source cancellation.
+  ;; The Aleph channel close future invokes the new off-eventloop handoff.
+  (let [src (source/create {:max-active-consumers 2})
+        executor (java.util.concurrent.Executors/newSingleThreadExecutor)
+        capture (capture/prepare!)
+        server-ref (atom nil)
+        owned-session (promise)
+        guard (listener/prepare!
+               {:dispatch-async!
+                (fn [request terminal!]
+                  (let [session (sse/start-source!
+                                 src {:subscription {:topic :request :id "v2254"}}
+                                 {:keepalive-ms 15000
+                                  :frame-write-timeout-ms 30000})
+                        bridge (terminal/prepare! terminal!)
+                        ch (:aleph/channel request)]
+                    ((:register-response! capture) ch bridge)
+                    (let [release (aleph-live/attach!
+                                   {:channel ch :session session :bridge bridge
+                                    :executor executor})]
+                      (deliver owned-session {:session session :bridge bridge
+                                              :release release :channel ch})
+                      (:response session))))
+                :max-in-flight 2
+                :on-rejected! (constantly {:status 503 :headers {} :body "overloaded"})
+                :stop-accept! (fn []
+                                (.close ^Closeable @server-ref)
+                                {:outcome :stopped})})
+        socket (java.net.Socket.)]
+    (try
+      (reset! server-ref
+              (aleph/start-server (:handle! guard)
+                                  {:port 0 :http-versions [:http1]
+                                   :transport :nio :shutdown-timeout 0
+                                   :http1-pipeline-transform
+                                   (:http1-pipeline-transform capture)}))
+      (.connect socket
+                (java.net.InetSocketAddress.
+                 "127.0.0.1" (aleph-netty/port @server-ref))
+                2000)
+      (.setSoTimeout socket 5000)
+      (.write (.getOutputStream socket)
+              (.getBytes (str "GET /live/events HTTP/1.1\r\n"
+                              "Host: 127.0.0.1\r\n"
+                              "Connection: keep-alive\r\n\r\n")
+                         StandardCharsets/US_ASCII))
+      (.flush (.getOutputStream socket))
+      (let [reader (java.io.BufferedReader.
+                    (java.io.InputStreamReader.
+                     (.getInputStream socket) StandardCharsets/UTF_8))]
+        (is (re-find #"^HTTP/1\.1 200 " (or (.readLine reader) "")))
+        (loop []
+          (let [line (.readLine reader)]
+            (when-not line (throw (ex-info "Lost response headers" {})))
+            (when (seq line) (recur))))
+        (let [{:keys [session bridge release channel]}
+              (deref owned-session 5000 ::timeout)]
+          (is (map? session))
+          (is (eventually #(= 1 (:subscription-count (source/stats src)))))
+          (is (false? (:released? ((:status release)))))
+          (is (= 1 ((:active-count guard))))
+          (source/emit! src {:topic :request :id "v2254"
+                             :change/kind :updated})
+          (is (loop [n 0]
+                (cond (> n 30) false
+                      :else (let [line (.readLine reader)]
+                              (cond (nil? line) false
+                                    (= "event: live-update" line) true
+                                    :else (recur (inc n))))))
+              "Receive an SSE frame produced from the real Gesso source")
+          ;; No manual cancellation or evidence notification follows.
+          (.setSoLinger socket true 0)
+          (.close socket)
+          (is (eventually #(.isDone (.closeFuture channel))))
+          (is (eventually #(:released? ((:status release)))))
+          (is (= 1 (:release-attempts ((:status release)))))
+          (is (nil? (:last-error ((:status release)))))
+          (is (stream/closed? (:stream session)))
+          (is (true? ((:source-closed? session))))
+          (is (eventually #(zero? (:subscription-count (source/stats src)))))
+          (is (eventually #(zero? ((:active-count guard)))))
+          (is (true? (:terminal? ((:status bridge)))))
+          (is (= {:outcome :drained} ((:stop! guard) 2000)))
+          (is (= 0 (:pending ((:stats capture)))))))
+      (finally
+        (.close socket)
+        (when-let [server @server-ref]
+          (try (.close ^Closeable server) (catch Throwable _ nil)))
+        (source/close! src)
+        (.shutdownNow executor)))))
