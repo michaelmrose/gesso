@@ -80,7 +80,9 @@
    :on-close nil
    :close-on-complete? true
    :keepalive-ms nil
-   :keepalive-comment "ping"})
+   :keepalive-comment "ping"
+   ;; A stalled HTTP reader must not hold a source interest indefinitely.
+   :frame-write-timeout-ms 60000})
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -214,6 +216,13 @@
     (require-map-or-nil-option! options' :headers)
     (require-header-fields! options')
     (require-positive-int-option! options' :keepalive-ms)
+    ;; A bounded response-write deadline is mandatory even for custom source
+    ;; flows. Explicit nil would silently restore an unbounded pending put.
+    (let [timeout (:frame-write-timeout-ms options')]
+      (when-not (and (integer? timeout)
+                     (<= 1 timeout 300000))
+        (throw (ex "gesso.live SSE :frame-write-timeout-ms must be an integer (1..300000)."
+                   {:frame-write-timeout-ms timeout}))))
     options'))
 
 (defn- call-safely
@@ -462,7 +471,22 @@
        {:frame-size (count frame)
         :at (now-ms)})
 
-      (let [accepted? (m/? (deferred-task (s/put! out frame)))]
+      (let [timed-out (Object.)
+            pending (s/put! out frame)
+            ;; Timeout the actual deferred, including an unbuffered put that
+            ;; may otherwise be unresolved for the HTTP connection lifetime.
+            ;; A timeout is an UNKNOWN write outcome, not proof no bytes got
+            ;; through: cancel/close the stream and require fresh acquisition.
+            _ (d/timeout! pending (:frame-write-timeout-ms options) timed-out)
+            accepted? (m/? (deferred-task pending))]
+        (when (identical? timed-out accepted?)
+          (debug! debug-fn :gesso.live.sse/frame-write-timed-out
+                  {:frame-size (count frame) :at (now-ms)})
+          (throw
+           (ex "gesso.live SSE frame write timed out."
+               {:error/type :gesso.live.sse/frame-write-unknown
+                :frame-size (count frame)
+                :timeout-ms (:frame-write-timeout-ms options)})))
         (if accepted?
           (do
             (debug!
@@ -568,7 +592,12 @@
      :on-close
      :close-on-complete?
      :keepalive-ms
-     :keepalive-comment"
+     :keepalive-comment
+     :frame-write-timeout-ms
+       Positive integer 1..300000 (default 60000); if a frame or keepalive
+       cannot be written before the deadline, the SSE transport fails closed.
+       Such a timeout is an uncertain physical write, not proof of delivery
+       or non-delivery; browser refresh must reacquire on reconnect."
   ([live-events]
    (start! live-events nil))
   ([live-events options]

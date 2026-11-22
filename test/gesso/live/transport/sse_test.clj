@@ -1896,3 +1896,107 @@
                 "downstream close must release unobserved authorized interest"))))
       (finally
         (source/close! src)))))
+
+
+(deftest frame-write-timeout-options-reject-unbounded-deadlines-test
+  ;; This must fail before source-backed startup installs an interest.
+  (is (= 60000 (:frame-write-timeout-ms (sse/prepare-options! nil))))
+  (doseq [bad [nil 0 -1 300001 "never" 1.5]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #":frame-write-timeout-ms must be an integer"
+         (sse/prepare-options! {:frame-write-timeout-ms bad}))))
+  (let [src (source/create)]
+    (try
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #":frame-write-timeout-ms must be an integer"
+           (sse/start-source! src {:subscription {:topic :request :id "req-1"}}
+                              {:frame-write-timeout-ms nil})))
+      (is (zero? (:subscription-count (source/stats src)))
+          "Rejected SSE deadline cannot install a Live interest")
+      (finally (source/close! src)))))
+
+(deftest unanswered-physical-frame-put-times-out-with-explicit-unknown-outcome-test
+  (let [out (s/stream)
+        runner (start-task (sse/put-frame-task out "frame\n\n"
+                                               {:frame-write-timeout-ms 55}))]
+    (try
+      (let [result (task-result runner)
+            error (:error result)]
+        (is (= :failure (:status result)))
+        (is (= :gesso.live.sse/frame-write-unknown
+               (:error/type (ex-data error))))
+        (is (= 55 (:timeout-ms (ex-data error))))
+        (is (= "gesso.live SSE frame write timed out."
+               (some-> error ex-message))))
+      (finally (s/close! out)))))
+
+(deftest stalled-http-reader-closes-transport-and-reports-uncertain-write-test
+  (let [closed (promise)
+        reported (atom [])
+        started (sse/start! (m/seed [live-event])
+                            {:frame-write-timeout-ms 60
+                             :on-error (fn [error _] (swap! reported conj error))
+                             :on-close #(deliver closed %)})]
+    (try
+      ;; Deliberately never read from the response body.
+      (let [entry (deref closed 2500 ::timeout)]
+        (is (map? entry))
+        (is (= :error (:reason entry)))
+        (is (= :gesso.live.sse/frame-write-unknown
+               (:error/type (ex-data (:error entry)))))
+        (is (sse/closed? started))
+        (is (s/closed? (:stream started)))
+        (is (= 1 (count @reported)))
+        (is (identical? (first @reported) (:error entry))))
+      (finally (sse/cancel! started)))))
+
+(deftest blocked-keepalive-write-also-retires-idle-sse-response-test
+  (let [closed (promise)
+        started (sse/start! (never-flow)
+                            {:keepalive-ms 10
+                             :frame-write-timeout-ms 70
+                             :on-close #(deliver closed %)})]
+    (try
+      ;; A keepalive must not be able to hold an idle response indefinitely.
+      (let [entry (deref closed 2500 ::timeout)]
+        (is (map? entry))
+        (is (= :keepalive-error (:reason entry)))
+        (is (= :gesso.live.sse/frame-write-unknown
+               (:error/type (ex-data (:error entry)))))
+        (is (sse/closed? started))
+        (is (s/closed? (:stream started))))
+      (finally (sse/cancel! started)))))
+
+(deftest source-backed-frame-write-timeout-releases-eager-interest-test
+  (let [src (source/create)
+        started (sse/start-source! src
+                                   {:subscription {:topic :request :id "req-1"}}
+                                   {:frame-write-timeout-ms 80})]
+    (try
+      (is (= 1 (:subscription-count (source/stats src))))
+      (source/emit! src request-invalidation)
+      ;; Do not read the response body. Timeout must release both the body
+      ;; and the eager source subscription; response close alone is not enough.
+      (is (eventually #(sse/closed? started)))
+      (is (s/closed? (:stream started)))
+      (is (eventually #(true? ((:source-closed? started)))))
+      (is (zero? (:subscription-count (source/stats src))))
+      (finally
+        (sse/cancel! started)
+        (source/close! src)))))
+
+(deftest timely-frame-read-does-not-trigger-deadline-or-close-live-connection-test
+  (let [closed (promise)
+        started (sse/start! (never-flow)
+                            {:frame-write-timeout-ms 90
+                             :keepalive-ms 20
+                             :on-close #(deliver closed %)})]
+    (try
+      (is (= ": ping\n\n" (take-value (:stream started))))
+      ;; The next keepalive may block; cancel before the second deadline.
+      (is (not (sse/closed? started)))
+      (sse/cancel! started)
+      (is (= :cancelled (:reason (deref closed timeout-ms ::timeout))))
+      (finally (sse/cancel! started)))))

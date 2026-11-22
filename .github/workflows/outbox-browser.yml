@@ -144,6 +144,13 @@ jobs:
           clojure -M:test -n gesso.live.outbox.recovery-audit-test \
             2>&1 | tee target/outbox-browser/recovery-audit.log
 
+      - name: Verify bounded SSE frame writes and source release
+        shell: bash
+        run: |
+          set -euo pipefail
+          clojure -M:test -n gesso.live.transport.sse-test \
+            2>&1 | tee target/outbox-browser/sse-write-timeout.log
+
       - name: Require real Chromium EventSource/HTMX/DOM convergence
         shell: bash
         run: |
