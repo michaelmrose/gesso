@@ -402,7 +402,14 @@
                      ;; Keep initialized resources alive if a provider's
                      ;; stop refuses to drain. Retrying Biff stop remains the
                      ;; host's responsibility under the native Biff contract.
-                     (native-stop)
+                     (try
+                       (native-stop)
+                       (catch InterruptedException error
+                         ;; The provider stop may have cleared the caller's
+                         ;; interrupt flag before throwing. It has NOT drained:
+                         ;; retain init resources and allow explicit retry.
+                         (restore-interrupt! error)
+                         (throw error)))
                      (reset! native-stopped? true))
                    (let [{:keys [status blocked-module-id blocked-resource-id
                                  cause]} (cleanup-started! cleanup)]

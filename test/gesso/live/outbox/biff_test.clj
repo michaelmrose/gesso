@@ -1114,3 +1114,56 @@
         (is interrupted? "Suppressed physical cancellation must retain interrupt"))
       (finally
         (Thread/interrupted)))))
+
+(deftest interrupted-native-provider-stop-preserves-retry-and-init-fence-test
+  ;; The native Biff stop chain is attempted BEFORE tracked init-resource
+  ;; teardown. A physical provider stop may throw InterruptedException after
+  ;; clearing the calling thread's flag. Keep its exact error and cancellation
+  ;; signal; do not close its dependent init resource until a later retry.
+  (let [events (atom [])
+        attempts (atom 0)
+        interruption (InterruptedException. "native provider stop interrupted")
+        init {:biff.core/id :fixture/init
+              managed/init-policy-key :tracked
+              :biff.core/init
+              (fn [_]
+                (managed/acquire-init-resource!
+                 :fixture/resource
+                 (fn [] (swap! events conj :init-acquire) :resource)
+                 (fn [_] (swap! events conj :init-close)))
+                {})
+              :biff.core/start identity}
+        provider {:biff.core/id :fixture/provider
+                  :biff.core/start
+                  (fn [s]
+                    (assoc s :xtdb/connectable :fake
+                           :gesso.live/system
+                           {:source :fake :closed? (atom false)}))
+                  :biff.core/stop
+                  (fn [_]
+                    (swap! events conj :provider-stop)
+                    (when (= 1 (swap! attempts inc))
+                      (throw interruption)))}]
+    (with-redefs [lifecycle/start! (fn [& _] :worker)
+                  lifecycle/stop! (fn [& _]
+                                    (swap! events conj :worker-stop)
+                                    {:outcome :drained})]
+      (let [running (start-checked-fixture! [init provider])]
+        (try
+          (Thread/interrupted)
+          (let [failure (try (biff/stop running)
+                             (catch Throwable error error))
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            (Thread/interrupted)
+            (is (identical? interruption failure)
+                "Native stop must preserve the actual physical exception")
+            (is interrupted?
+                "Native stop interruption must remain visible to caller")
+            (is (= [:init-acquire :worker-stop :provider-stop] @events)
+                "Interrupted provider stop must fence init cleanup"))
+          (biff/stop running)
+          (is (= :init-close (last @events))
+              "Explicit retry must eventually close the init resource")
+          (is (= 2 @attempts))
+          (finally
+            (Thread/interrupted)))))))
