@@ -261,6 +261,139 @@
       (finally
         (close d)))))
 
+(deftest interrupted-async-job-is-visible-to-dispatcher-error-hook-test
+  ;; An InterruptedException raised by user work clears the worker interrupt
+  ;; bit if the work was blocked. Recording that error must restore the signal
+  ;; before notifying its error hook, without abandoning later queued work.
+  (let [cause (InterruptedException. "job interrupted")
+        observed (promise)
+        next-job (promise)
+        d (dispatch/create
+           {:threads 1 :queue-size 4
+            :on-error (fn [error _entry]
+                        (let [interrupted?
+                              (.isInterrupted (Thread/currentThread))]
+                          (Thread/interrupted)
+                          (deliver observed [error interrupted?])))})]
+    (try
+      (is (= :submitted
+             (:status (dispatch/submit! d {:run #(throw cause)}))))
+      (let [result (promise-value observed)]
+        (is (not= ::timeout result))
+        (when (vector? result)
+          (is (identical? cause (first result)))
+          (is (true? (second result))
+              "Error hooks must observe the interrupted job's signal")))
+      (dispatch/submit! d {:run #(deliver next-job :ran)})
+      (is (= :ran (promise-value next-job))
+          "Interrupted work must not permanently strand a healthy worker")
+      (is (identical? cause (:error (first (dispatch/errors d)))))
+      (finally
+        (close d)))))
+
+(deftest interrupted-dispatcher-error-hook-preserves-signal-for-job-hook-test
+  ;; A suppressed dispatcher-level error hook must not hide its interruption
+  ;; from the independent job-level error reporter running on that thread.
+  (let [cause (RuntimeException. "ordinary job failure")
+        observed (promise)
+        follow-up (promise)
+        d (dispatch/create
+           {:threads 1 :queue-size 4
+            :on-error (fn [_ _]
+                        (throw (InterruptedException.
+                                "dispatcher error hook interrupted")))})]
+    (try
+      (dispatch/submit!
+       d {:run #(throw cause)
+          :on-error (fn [error _entry]
+                      (let [interrupted?
+                            (.isInterrupted (Thread/currentThread))]
+                        (Thread/interrupted)
+                        (deliver observed [error interrupted?])))})
+      (let [result (promise-value observed)]
+        (is (not= ::timeout result))
+        (when (vector? result)
+          (is (identical? cause (first result)))
+          (is (true? (second result))
+              "Swallowed hook interrupts must reach the following hook")))
+      (dispatch/submit! d {:run #(deliver follow-up :ran)})
+      (is (= :ran (promise-value follow-up)))
+      (is (identical? cause (:error (first (dispatch/errors d)))))
+      (finally
+        (close d)))))
+
+(deftest interrupted-overflow-drop-hook-preserves-submitter-interrupt-test
+  ;; Overflow reporting is intentionally best-effort. An interrupted on-drop
+  ;; hook must not change :dropped into a false submission exception, but it
+  ;; must retain the caller's interrupt flag.
+  (let [started (CountDownLatch. 1)
+        release-running (CountDownLatch. 1)
+        next-job (promise)
+        d (dispatch/create {:threads 1 :queue-size 1 :on-overflow :drop})]
+    (try
+      (dispatch/submit! d {:run #(do (release started)
+                                    (await-latch release-running))})
+      (is (await-latch started))
+      (dispatch/submit! d {:run #(deliver next-job :ran)})
+      (Thread/interrupted)
+      (let [result (dispatch/submit!
+                    d {:run #(throw (AssertionError. "must be dropped"))
+                       :on-drop (fn [_]
+                                  (throw (InterruptedException.
+                                          "drop callback interrupted")))})
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (= :dropped (:status result)))
+        (is (= :queue-full (:reason result)))
+        (is interrupted? "A swallowed drop-hook interrupt must survive"))
+      (release release-running)
+      (is (= :ran (promise-value next-job)))
+      (finally
+        (Thread/interrupted)
+        (release release-running)
+        (close d)))))
+
+(deftest interrupted-shutdown-drop-hook-preserves-close-and-interrupt-test
+  ;; Closing retires queued work and invokes its on-drop hook *before* joining
+  ;; workers. An interrupted callback must not make the subsequent join throw
+  ;; or prevent close! from finishing its already-committed cleanup.
+  (let [started (CountDownLatch. 1)
+        release-running (CountDownLatch. 1)
+        dropped (promise)
+        d (dispatch/create {:threads 1 :queue-size 1})]
+    (try
+      ;; Deliberately keep the worker alive through shutdown interruption.
+      ;; Otherwise Thread.join may return without an interruptible wait.
+      (dispatch/submit! d {:run #(do (release started)
+                                    (loop []
+                                      (when-not (try
+                                                  (.await release-running
+                                                          50 TimeUnit/MILLISECONDS)
+                                                  (catch InterruptedException _
+                                                    false))
+                                        (recur))))})
+      (is (await-latch started))
+      (dispatch/submit! d {:run (fn [] :must-not-run)
+                           :on-drop (fn [info]
+                                      (deliver dropped info)
+                                      (throw (InterruptedException.
+                                              "shutdown callback interrupted")))})
+      (Thread/interrupted)
+      (let [outcome (try
+                      (dispatch/close! d)
+                      (catch Throwable e e))
+            interrupted? (.isInterrupted (Thread/currentThread))]
+        (Thread/interrupted)
+        (is (= :closed outcome)
+            "An interrupted drop hook must not abort worker shutdown")
+        (is interrupted? "Shutdown must retain the caller interrupt signal")
+        (is (= :dispatcher-closed (:reason (promise-value dropped))))
+        (is (dispatch/closed? d)))
+      (finally
+        (Thread/interrupted)
+        (release release-running)
+        (close d)))))
+
 (deftest clear-errors-clears-recorded-errors-test
   (let [p (promise)
         d (dispatch/create {:threads 1

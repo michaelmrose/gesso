@@ -63,6 +63,13 @@
   []
   (System/currentTimeMillis))
 
+(defn- restore-interrupt!
+  "A handled InterruptedException must preserve the caller's JVM cancellation
+   signal, even when optional hooks are deliberately best-effort."
+  [error]
+  (when (instance? InterruptedException error)
+    (.interrupt (Thread/currentThread))))
+
 (defn- call-safely
   [f & args]
   (when f
@@ -71,7 +78,8 @@
       ;; External error/drop hooks must never kill a worker or turn an
       ;; already-accepted submission into an apparent failure. Application
       ;; assertions may throw Error rather than Exception.
-      (catch Throwable _
+      (catch Throwable error
+        (restore-interrupt! error)
         nil))))
 
 (defn- normalize-job
@@ -227,6 +235,10 @@
   (try
     ((:run job))
     (catch Throwable e
+      ;; An interrupted job may have cleared its own thread's interrupt bit
+      ;; before throwing. Error hooks must see that signal even though job
+      ;; failures are recorded rather than escaping the bounded worker.
+      (restore-interrupt! e)
       (record-error! dispatcher job e))))
 
 (defn- run-queue-item!
@@ -377,9 +389,22 @@
       ;; a worker's shutdown path may itself wait for a drop notification.
       (doseq [job dropped-jobs]
         (notify-drop! job :dispatcher-closed))
-      (doseq [^Thread worker (:workers dispatcher)]
-        (when-not (identical? caller worker)
-          (.join worker close-timeout-ms)))))
+      ;; Best-effort drop hooks can restore InterruptedException on this
+      ;; caller. Temporarily clear that signal while joining the already
+      ;; interrupted workers, then restore it even if a join is interrupted.
+      ;; Otherwise a callback interruption aborts close! with a partially
+      ;; joined worker set despite the dispatcher already being closed.
+      (let [restore? (volatile! (Thread/interrupted))]
+        (try
+          (doseq [^Thread worker (:workers dispatcher)]
+            (when-not (identical? caller worker)
+              (try
+                (.join worker close-timeout-ms)
+                (catch InterruptedException _
+                  (vreset! restore? true)))))
+          (finally
+            (when @restore?
+              (.interrupt caller)))))))
   :closed)
 
 (defn stats
