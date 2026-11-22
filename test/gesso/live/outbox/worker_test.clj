@@ -538,3 +538,148 @@
     (is (= (:lease-id @submitted) (:lease-id evidence)))
     (is (not= forged (:lease-id evidence)))
     (is (= :unverified-acquisition-attempt (:evidence evidence)))))
+
+(defn- keyset-id [n]
+  (java.util.UUID/fromString
+   (format "00000000-0000-0000-0000-%012d" (long n))))
+
+(defn- physically-confirmed-test-lease [claim]
+  (assoc (select-keys claim [:intent-id :worker-id :lease-id :lease-until])
+         :status :acquired))
+
+(deftest later-cas-failure-preserves-verified-prefix-test
+  ;; The first physical lease can commit before a second CAS fails.  Preserve
+  ;; the verified prefix and its last safe keyset identity while retaining the
+  ;; second (unverified) attempt token for DB reconciliation.
+  (doseq [same-page? [true false]]
+    (let [a (keyset-id 4001) b (keyset-id 4002)
+          calls (atom [])
+          reads (atom [])
+          cause (ex-info "second CAS outcome unknown" {:physical :unknown})
+          discover (fn [_ request]
+                     (swap! reads conj (:after request))
+                     (if same-page?
+                       {:candidates [{:intent-id a :action :acquire-pending}
+                                     {:intent-id b :action :acquire-pending}]
+                        :has-more? false :next-after nil}
+                       (if (:after request)
+                         {:candidates [{:intent-id b :action :acquire-pending}]
+                          :has-more? false :next-after nil}
+                         {:candidates [{:intent-id a :action :acquire-pending}]
+                          :has-more? true :next-after a})))
+          physical (fn [_ claim]
+                     (swap! calls conj claim)
+                     (if (= a (:intent-id claim))
+                       (physically-confirmed-test-lease claim)
+                       (throw cause)))
+          failure (with-redefs [discovery/discover-eligible! discover
+                                acquisition/acquire-pending! physical]
+                    (try
+                      (worker/acquire-sweep! :node
+                                             {:worker-id "worker-a"
+                                              :source-id "gesso/test-worker"
+                                              :page-size (if same-page? 2 1)
+                                              :max-pages 2})
+                      (catch Throwable error error)))
+          data (ex-data failure)
+          first-claim (first @calls)
+          uncertain (second @calls)]
+      (is (instance? clojure.lang.ExceptionInfo failure))
+      (is (identical? cause (.getCause ^Throwable (.getCause ^Throwable failure)))
+          "Keep the original physical CAS failure in the cause chain")
+      (is (= :unknown (:physical data)))
+      (is (true? (:rescan-required? data)))
+      (is (= 1 (:completed-count data)))
+      (is (= a (:last-completed-cursor data)))
+      (is (= a (get-in data [:completed 0 :intent-id])))
+      (is (= :acquired (get-in data [:completed 0 :status])))
+      (is (= (:lease-id first-claim)
+             (get-in data [:completed 0 :lease-id])))
+      (is (= (:lease-id uncertain)
+             (get-in data [:unverified-lease :lease-id])))
+      (is (= b (get-in data [:unverified-lease :intent-id])))
+      (is (= :unverified-acquisition-attempt
+             (get-in data [:unverified-lease :evidence])))
+      (is (= [a b] (mapv :intent-id @calls)))
+      (is (= (if same-page? [nil] [nil a]) @reads)))))
+
+(deftest discovery-failure-after-verified-lease-preserves-prefix-test
+  ;; Discovery may throw before the next page exists. That is not a new
+  ;; acquisition attempt, but the earlier lease is still physically held.
+  (let [a (keyset-id 4051)
+        physical-claims (atom [])
+        discover-count (atom 0)
+        cause (ex-info "next discovery interrupted" {:read :failed})
+        failure (with-redefs
+                 [discovery/discover-eligible!
+                  (fn [_ _]
+                    (if (= 1 (swap! discover-count inc))
+                      {:candidates [{:intent-id a :action :acquire-pending}]
+                       :has-more? true :next-after a}
+                      (throw cause)))
+                  acquisition/acquire-pending!
+                  (fn [_ claim]
+                    (swap! physical-claims conj claim)
+                    (physically-confirmed-test-lease claim))]
+                  (try
+                    (worker/acquire-sweep! :node {:worker-id "worker-a"
+                                                   :source-id "gesso/test-worker"
+                                                   :page-size 1 :max-pages 2})
+                    (catch Throwable error error)))
+        data (ex-data failure)]
+    (is (instance? clojure.lang.ExceptionInfo failure))
+    (is (identical? cause (.getCause ^Throwable failure)))
+    (is (= :failed (:read data)))
+    (is (= 1 (:completed-count data)))
+    (is (= a (:last-completed-cursor data)))
+    (is (= a (get-in data [:completed 0 :intent-id])))
+    (is (= (:lease-id (first @physical-claims))
+           (get-in data [:completed 0 :lease-id])))
+    (is (true? (:rescan-required? data)))
+    (is (nil? (:unverified-lease data))
+        "A failed discovery cannot invent a new submitted lease")
+    (is (= 2 @discover-count))
+    (is (= 1 (count @physical-claims)))))
+
+(deftest physical-xtdb-prefix-corresponds-to-actual-leased-row-test
+  ;; The completed prefix must reflect an actual physically installed XTDB
+  ;; lease rather than merely a mock acknowledgment of acquisition.
+  (with-open [node (xtn/start-node {})]
+    (let [a (keyset-id 4071) b (keyset-id 4072)
+          _ (seed! node [{:id a :status :pending} {:id b :status :pending}])
+          acquired (atom [])
+          real-acquire acquisition/acquire-pending!
+          error (ex-info "second physical transaction not submitted"
+                         {:cause-code :outbox-simulated-crash})
+          failure (with-redefs
+                   [discovery/discover-eligible!
+                    (fn [_ _]
+                      {:candidates [{:intent-id a :action :acquire-pending}
+                                    {:intent-id b :action :acquire-pending}]
+                       :has-more? false :next-after nil})
+                    acquisition/acquire-pending!
+                    (fn [n claim]
+                      (swap! acquired conj claim)
+                      (if (= (:intent-id claim) a)
+                        (real-acquire n claim)
+                        (throw error)))]
+                   (try
+                     (worker/acquire-sweep! node
+                                            {:worker-id "worker-real"
+                                             :source-id "gesso/test-worker"
+                                             :page-size 2 :max-pages 1})
+                     (catch Throwable failure failure)))
+          details (ex-data failure)
+          committed (row node a)
+          pending (row node b)]
+      (is (instance? clojure.lang.ExceptionInfo failure))
+      (is (= a (:last-completed-cursor details)))
+      (is (= a (get-in details [:completed 0 :intent-id])))
+      (is (= (:gesso.live.outbox/lease-id committed)
+             (get-in details [:completed 0 :lease-id])))
+      (is (= :leased (:gesso.live.outbox/status committed)))
+      (is (= :pending (:gesso.live.outbox/status pending)))
+      (is (= (:lease-id (second @acquired))
+             (get-in details [:unverified-lease :lease-id])))
+      (is (= 1 (:completed-count details)))
+      (is (true? (:rescan-required? details))))))

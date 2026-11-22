@@ -266,8 +266,16 @@
                           (catch Throwable error error)))
               interrupted? (.isInterrupted (Thread/currentThread))]
           (Thread/interrupted)
-          (is (identical? cause outcome)
-              "Interrupted second page must not return a completed sweep")
+          (is (instance? clojure.lang.ExceptionInfo outcome)
+              "Interrupted second page must throw a reconciliation envelope")
+          (is (identical? cause (.getCause ^Throwable outcome))
+              "The original physical interruption remains the direct cause")
+          (is (= 1 (:completed-count (ex-data outcome)))
+              "The first committed acquisition must remain visible")
+          (is (= a (:last-completed-cursor (ex-data outcome)))
+              "The cursor must name the last verified acquisition")
+          (is (= a (get-in (ex-data outcome) [:completed 0 :intent-id])))
+          (is (true? (:rescan-required? (ex-data outcome))))
           (is interrupted? "An interrupted paged sweep retains JVM cancellation")
           (is (= 2 @pages))
           (let [current (fn [id]

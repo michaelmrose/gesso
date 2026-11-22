@@ -171,6 +171,24 @@
                               (update :reason #(or % :acquisition-exception)))
                           cause)))))))
 
+(defn- propagate-sweep-failure!
+  "Expose an already verified acquisition prefix when a later operation
+   fails. This records physical outcomes observed before the failure; it
+   does not certify the uncertain current CAS or authorize replay. Preserve
+   the existing single-attempt error/cause contract when no prefix exists."
+  [cause completed]
+  (when (instance? InterruptedException cause)
+    (.interrupt (Thread/currentThread)))
+  (if (seq completed)
+    (throw (ex-info "Outbox worker sweep interrupted after verified acquisitions; reconcile XTDB."
+                    (assoc (or (ex-data cause) {})
+                           :completed completed
+                           :completed-count (count completed)
+                           :last-completed-cursor (:intent-id (peek completed))
+                           :rescan-required? true)
+                    cause))
+    (throw cause)))
+
 (defn acquire-sweep!
   "Discover and attempt to acquire a finite number of current outbox intents.
 
@@ -188,7 +206,11 @@
    :observed-end is NOT proof that the queue is empty across time.
 
    Any unexpected exception propagates, potentially AFTER earlier physical
-   claims committed. The caller must rescan the database to reconcile an
+   claims committed. On failure with an already verified prefix, ex-data
+   carries :completed, :completed-count, :last-completed-cursor and
+   :rescan-required? alongside the failed attempted lease (when known).
+   These are recovery observations, NOT permission to dispatch or resume
+   blindly. The caller must rescan the database to reconcile an
    interrupted/indeterminate sweep rather than blindly resubmit effects.
    Neither receipt processing nor lease acknowledgment is implemented here."
   [node opts]
@@ -203,11 +225,22 @@
            results []]
       (let [request (cond-> {:limit page-size :source-id source-id}
                       after (assoc :after after))
-            page (validate-discovery-page!
-                  request (discovery/discover-eligible! node request))
-            claimed (mapv #(attempt! node worker-id source-id lease-millis %)
-                          (:candidates page))
-            results' (into results claimed)
+            page (try
+                   (validate-discovery-page!
+                    request (discovery/discover-eligible! node request))
+                   (catch Throwable cause
+                     (propagate-sweep-failure! cause results)))
+            ;; Do not build this page with mapv: a later failed CAS would
+            ;; discard earlier physical acquisitions on the same page.
+            results' (reduce
+                      (fn [verified candidate]
+                        (let [outcome (try
+                                        (attempt! node worker-id source-id
+                                                  lease-millis candidate)
+                                        (catch Throwable cause
+                                          (propagate-sweep-failure! cause verified)))]
+                          (conj verified outcome)))
+                      results (:candidates page))
             count' (inc page-count)
             more? (:has-more? page)
             next-after (:next-after page)]
