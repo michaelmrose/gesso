@@ -44,6 +44,7 @@
   {:id nil
    :coalesce-window-ms nil
    :max-recorded-errors 256
+   :max-active-coalesce-scopes 4096
    :on-error nil})
 
 ;; -----------------------------------------------------------------------------
@@ -75,7 +76,8 @@
   ;; unbounded history or defer a failure until diagnostic recording.
   (assoc (compact-map
           (select-keys options [:id :coalesce-window-ms :on-error]))
-         :max-recorded-errors (:max-recorded-errors options)))
+         :max-recorded-errors (:max-recorded-errors options)
+         :max-active-coalesce-scopes (:max-active-coalesce-scopes options)))
 
 (defn- validate-options!
   [options]
@@ -412,6 +414,14 @@
        entries, including invalidations/throwables from failed puts. Zero
        disables object retention while :on-error and lifetime counts remain.
 
+     :max-active-coalesce-scopes
+       Optional integer 0..65536 (default 4096). Bounds the number of
+       distinct per-scope cooldown timers and pending coalesced values. If
+       the limit is reached, a NEW scope bypasses coalescing and emits its
+       notification immediately without dropping its progression requirement.
+       An already tracked scope still receives leading/trailing coalescing.
+       Zero bypasses all coalescing even when a window is configured.
+
      :on-error
        Optional function called for every source error, even if its record is
        evicted from the bounded history.
@@ -427,6 +437,7 @@
       :created-at (now-ms)
       :coalesce-window-ms (:coalesce-window-ms options')
       :max-recorded-errors (:max-recorded-errors options')
+      :max-active-coalesce-scopes (:max-active-coalesce-scopes options')
       :on-error (:on-error options')
       :closed? (atom false)
 
@@ -454,6 +465,7 @@
       :leading-count (LongAdder.)
       :trailing-count (LongAdder.)
       :suppressed-count (LongAdder.)
+      :coalesce-bypass-count (LongAdder.)
       :errors (atom {:retained [] :total 0 :evicted 0})})))
 
 (defn close!
@@ -513,6 +525,8 @@
      :leading-count (.sum ^LongAdder (:leading-count source))
      :trailing-count (.sum ^LongAdder (:trailing-count source))
      :suppressed-count (.sum ^LongAdder (:suppressed-count source))
+     :coalesce-bypass-count (.sum ^LongAdder (:coalesce-bypass-count source))
+     :max-active-coalesce-scopes (:max-active-coalesce-scopes source)
      :error-count (count (:retained @(:errors source)))
      :total-error-count (:total @(:errors source))
      :evicted-error-count (:evicted @(:errors source))
@@ -673,17 +687,38 @@
           ;; The initial open check in emit! alone can race with validation.
           (ensure-open! source)
           (.increment ^LongAdder (:accepted-count source))
-          (if (nil? (.putIfAbsent ^ConcurrentHashMap (:cooldowns source) k Boolean/TRUE))
-            :leading
-            (do
-              (let [pending-map ^ConcurrentHashMap (:pending source)
-                    pending (.get pending-map k)
-                    coalesced (if pending
-                                (coalesce-pending-invalidation pending invalidation)
-                                invalidation)]
-                (.put pending-map k coalesced))
-              :suppressed)))]
+          (let [cooldowns ^ConcurrentHashMap (:cooldowns source)]
+            (cond
+              (.containsKey cooldowns k)
+              (do
+                (let [pending-map ^ConcurrentHashMap (:pending source)
+                      pending (.get pending-map k)
+                      coalesced (if pending
+                                  (coalesce-pending-invalidation pending invalidation)
+                                  invalidation)]
+                  (.put pending-map k coalesced))
+                :suppressed)
+
+              ;; This decision and cooldown admission are serialized with
+              ;; concurrent emitters, timer expiry, and source close!. No
+              ;; rejected notification disappears: a new untracked scope
+              ;; falls back to immediate physical source fanout.
+              (>= (.size cooldowns) (:max-active-coalesce-scopes source))
+              :capacity-bypass
+
+              :else
+              (do
+                (.put cooldowns k Boolean/TRUE)
+                :leading))))]
     (case action
+      :capacity-bypass
+      (do
+        (.increment ^LongAdder (:coalesce-bypass-count source))
+        (assoc (deliver-now! source invalidation)
+               :status :emitted
+               :coalescing :capacity-bypass
+               :coalesced? false))
+
       :leading
       (do
         (.increment ^LongAdder (:leading-count source))

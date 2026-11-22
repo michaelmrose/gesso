@@ -180,6 +180,7 @@
    [:id {:optional true} any?]
    [:coalesce-window-ms {:optional true} Milliseconds]
    [:max-recorded-errors {:optional true} [:int {:min 0 :max 4096}]]
+   [:max-active-coalesce-scopes {:optional true} [:int {:min 0 :max 65536}]]
    [:on-error {:optional true} fn?]])
 
 (def OverflowPolicy

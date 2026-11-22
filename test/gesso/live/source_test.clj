@@ -1022,3 +1022,105 @@
     (try
       (is (= 256 (:max-recorded-errors (source/stats src))))
       (finally (source/close! src)))))
+
+(deftest coalescing-scope-cap-bypasses-new-scopes-without-dropping-notices-test
+  ;; A large unique-scope burst cannot allocate unbounded cooldowns/timers.
+  ;; Capacity bypass preserves immediate source delivery including progression.
+  (let [src (source/create {:coalesce-window-ms 30000
+                            :max-active-coalesce-scopes 2})
+        tap (source/changes src)
+        a (assoc invalidation-1 :marker :a)
+        b (assoc invalidation-2 :marker :b)
+        c (assoc invalidation-1 :id "req-overflow" :marker :c
+                 :progression requirement-a)
+        d (assoc c :marker :d :progression requirement-b)]
+    (try
+      (is (= :leading (:coalescing (source/emit! src a))))
+      (is (= :leading (:coalescing (source/emit! src b))))
+      (is (= :capacity-bypass (:coalescing (source/emit! src c))))
+      (is (= :capacity-bypass (:coalescing (source/emit! src d))))
+      (is (= :queued (:status (source/emit! src (assoc a :marker :pending)))))
+      (is (= [a b c d] (repeatedly 4 #(take-value tap))))
+      (let [stats (source/stats src)]
+        (is (= 2 (:max-active-coalesce-scopes stats)))
+        (is (= 2 (:scheduled-count stats)))
+        (is (= 1 (:pending-count stats)))
+        (is (= 2 (:coalesce-bypass-count stats)))
+        (is (= 5 (:accepted-count stats)))
+        (is (= 4 (:fanout-count stats)))
+        (is (= 1 (:suppressed-count stats))))
+      ;; The unchanged progression requirement from each bypass is carried
+      ;; by the physical invalidation, not collapsed or silently discarded.
+      (is (= #{basis-a} (progression/required-bases (:progression c))))
+      (is (= #{basis-b} (progression/required-bases (:progression d))))
+      (finally (source/close! src)))))
+
+(deftest coalescing-capacity-reopens-after-scope-timer-retires-test
+  (let [src (source/create {:coalesce-window-ms 100
+                            :max-active-coalesce-scopes 1})
+        first-scope invalidation-1
+        next-scope invalidation-2]
+    (try
+      (is (= :leading (:coalescing (source/emit! src first-scope))))
+      (is (= :capacity-bypass (:coalescing (source/emit! src next-scope))))
+      (is (= :capacity-bypass (:coalescing (source/emit! src next-scope))))
+      (is (= 1 (:scheduled-count (source/stats src))))
+      (is (loop [n 0]
+            (cond (zero? (:scheduled-count (source/stats src))) true
+                  (>= n 200) false
+                  :else (do (Thread/sleep 10) (recur (inc n)))))
+          "An expired cooldown must free capacity for another scope")
+      (is (= :leading (:coalescing (source/emit! src next-scope))))
+      (is (= :queued (:status (source/emit! src next-scope))))
+      (is (= 2 (:coalesce-bypass-count (source/stats src))))
+      (is (= 1 (:scheduled-count (source/stats src))))
+      (finally (source/close! src)))))
+
+(deftest zero-coalesce-cap-disables-timers-without-disabling-delivery-test
+  (let [src (source/create {:coalesce-window-ms 1000
+                            :max-active-coalesce-scopes 0})
+        tap (source/subscribe src {:topic :request :id "req-1"})]
+    (try
+      (dotimes [i 3]
+        (is (= :capacity-bypass
+               (:coalescing (source/emit! src
+                                          (assoc invalidation-1 :seq i))))))
+      (is (= [0 1 2] (mapv :seq (repeatedly 3 #(take-value tap)))))
+      (let [stats (source/stats src)]
+        (is (zero? (:scheduled-count stats)))
+        (is (zero? (:pending-count stats)))
+        (is (= 3 (:coalesce-bypass-count stats)))
+        (is (= 3 (:fanout-count stats))))
+      (finally (source/close! src)))))
+
+(deftest concurrent-unique-scope-storm-stays-within-cooldown-cap-test
+  (let [src (source/create {:coalesce-window-ms 30000
+                            :max-active-coalesce-scopes 4})]
+    (try
+      (let [tasks (doall
+                   (for [worker (range 8)]
+                     (future
+                       (dotimes [i 25]
+                         (source/emit! src
+                                       (assoc invalidation-1
+                                              :id (str "scope-" worker "-" i)))))))]
+        (doseq [task tasks]
+          (is (not= ::timeout (deref task 10000 ::timeout)))))
+      (let [stats (source/stats src)]
+        (is (= 200 (:accepted-count stats)))
+        (is (= 200 (:fanout-count stats)))
+        (is (= 4 (:scheduled-count stats)))
+        (is (= 196 (:coalesce-bypass-count stats)))
+        (is (zero? (:pending-count stats))))
+      (finally (source/close! src)))))
+
+(deftest coalescing-scope-cap-option-fails-closed-before-source-creation-test
+  (doseq [bad [-1 65537 nil 1.5 "unlimited"]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Invalid gesso.live value"
+         (source/create {:max-active-coalesce-scopes bad}))
+        (str "invalid cap: " bad)))
+  (let [src (source/create)]
+    (try
+      (is (= 4096 (:max-active-coalesce-scopes (source/stats src))))
+      (finally (source/close! src)))))
