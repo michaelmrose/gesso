@@ -1610,6 +1610,50 @@
            (when @waiter (future-cancel @waiter))
            ((:close! route))))))))
 
+(deftest close-retry-refuses-once-consumed-cancel-with-open-stream-test
+  ;; A transport cancel callback can consume its one-shot handle and then
+  ;; fail before actually closing the SSE stream. A later silent no-op must
+  ;; NOT erase the cleanup obligation and certify provider-safe drain.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :authorize-subscription (constantly scope)})
+           response ((:handler route)
+                     {:uri "/live/events" :request-method :get})
+           out (:body response)
+           attempts (atom 0)
+           failure (ex-info "Cancel stopped before closing" {:test :v2155})]
+       (try
+         (is (= 200 (:status response)))
+         (is (= 1 (:subscription-count (source/stats src))))
+         (with-redefs [live/cancel-sse!
+                       (fn [_]
+                         (when (= 1 (swap! attempts inc))
+                           (throw failure))
+                         ;; Model a consumed once-only transport handle: no
+                         ;; exception, but the stream stays physically open.
+                         nil)]
+           (is (identical? failure
+                           (try ((:close! route))
+                                (catch Throwable e e))))
+           (is (= :incomplete-sse-cancellation
+                  (exception-reason #((:close! route)))))
+           (is (= 2 @attempts))
+           (is (not (stream/closed? out)))
+           (is (false? ((:drained? route))))
+           (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+           (is (= 1 (:subscription-count (source/stats src)))))
+         ;; Restore genuine cleanup and confirm the retained session can
+         ;; still be canceled instead of being lost on a silent no-op.
+         (is (= :closed ((:close! route))))
+         (is (stream/closed? out))
+         (is (true? ((:drained? route))))
+         (is (= {:outcome :drained} ((:await-drained! route) 0)))
+         (is (eventually #(zero? (:subscription-count (source/stats src)))))
+         (finally ((:close! route))))))))
+
 (deftest late-sse-rollback-retains-failed-cancellation-after-disconnect-test
   ;; close! may finish while a previously admitted SSE startup is blocked.
   ;; If that late stream closes and rollback cancellation fails, the route

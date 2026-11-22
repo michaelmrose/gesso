@@ -29,6 +29,14 @@
 (def ^:private default-managed-keepalive-ms 15000)
 (def ^:private default-max-pending-authorizations 1024)
 
+(defn- cancel-physical-sse! [session]
+  ;; A transport cancellation handle may already have been consumed by a
+  ;; failing first attempt. A subsequent no-op must not be mistaken for
+  ;; physical stream cleanup and grant permission to stop Live providers.
+  (live/cancel-sse! session)
+  (when-not (stream/closed? (get-in session [:response :body]))
+    (reject! :incomplete-sse-cancellation {})))
+
 (defn- drained-state? [{:keys [closed? close-completed? connections starting
                               retry-cancellations pending-authorizations]}]
   ;; A disconnect hook can remove the last connection while close! is still
@@ -277,7 +285,7 @@
                          (reduce-kv
                           (fn [failures key session]
                             (try
-                              (live/cancel-sse! session)
+                              (cancel-physical-sse! session)
                               (swap! state
                                      (fn [s] (-> s
                                                  (update :connections dissoc key)
@@ -408,7 +416,7 @@
                                         (if (or route-closed? provider-closed?
                                                 (stream/closed? (:stream session)))
                                           (do
-                                            (live/cancel-sse! session)
+                                            (cancel-physical-sse! session)
                                             (swap! state update :connections dissoc key)
                                             {:status 503 :headers {}
                                              :body (if (or route-closed?
@@ -421,7 +429,7 @@
                                         ;; an explicit close! retry, and retain
                                         ;; the original error as the cause.
                                         (try
-                                          (live/cancel-sse! session)
+                                          (cancel-physical-sse! session)
                                           (swap! state update :connections dissoc key)
                                           (catch Throwable cancel-error
                                             ;; A rollback stream can close
