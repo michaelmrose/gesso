@@ -407,3 +407,94 @@
           (is (empty? (:candidates
                        (discovery/discover-eligible! node {:source-id source-id})))))
         (finally (live/close! system))))))
+
+(deftest malformed-cycle-page-cursors-fail-before-delivery-test
+  ;; A one-item worker page is not proof of progress unless its identity
+  ;; agrees with its continuation cursor and moves beyond the input cursor.
+  ;; Rejected pages must not be recorded as completed or reach delivery.
+  (let [a (intent-id 711)
+        b (intent-id 712)
+        c (intent-id 713)
+        cases [[:wrong-continuation nil a b :page-budget]
+               [:backward-continuation b a a :page-budget]
+               [:repeated-continuation a a a :page-budget]
+               [:backward-terminal b a nil :observed-end]
+               [:equal-terminal a a nil :observed-end]
+               [:missing-identity nil nil c :page-budget]]]
+    (doseq [[label after current cursor halt] cases]
+      (let [delivery-attempts (atom 0)
+            page {:attempted 1
+                  :results [{:status :contended :intent-id current}]
+                  :halt-reason halt :next-after cursor}
+            opts (cond-> {:worker-id "w" :max-items 1}
+                   after (assoc :after after))
+            failure (with-redefs [worker/acquire-sweep! (fn [_ _] page)
+                                  delivery/dispatch-acquired!
+                                  (fn [& _] (swap! delivery-attempts inc)
+                                    {:status :dispatch-accepted})]
+                      (try
+                        (cycle/process-cycle! :node {:source ::source} {} source-id opts)
+                        (catch clojure.lang.ExceptionInfo e e)))]
+        (is (instance? clojure.lang.ExceptionInfo failure)
+            (str label " must not return a completed cycle"))
+        (when (instance? clojure.lang.ExceptionInfo failure)
+          (is (= :gesso.live.outbox/cycle-interrupted (:error/type (ex-data failure)))
+              (str label " must demand reconciliation"))
+          (is (= :acquisition (:phase (ex-data failure)))
+              (str label " must fail at the page boundary"))
+          (is (= :invalid-worker-page (:reason (ex-data (.getCause failure))))
+              (str label " must expose the malformed page"))
+          (is (zero? (:completed-count (ex-data failure)))
+              (str label " must not invent a completed prefix"))
+          (is (:rescan-required? (ex-data failure))))
+        (is (zero? @delivery-attempts)
+            (str label " must not dispatch"))))))
+
+(deftest malformed-cycle-page-with-acquired-lease-never-dispatches-test
+  ;; Even a purported successfully acquired lease cannot be sent if the
+  ;; worker's claimed page cursor contradicts its identity. The operator
+  ;; must reconcile the potential physical lease, not report dispatch.
+  (let [a (intent-id 721)
+        b (intent-id 722)
+        calls (atom 0)
+        page {:attempted 1
+              :results [{:status :acquired :intent-id a
+                         :lease-id (random-uuid) :worker-id "w"}]
+              :halt-reason :page-budget :next-after b}
+        failure (with-redefs [worker/acquire-sweep! (fn [_ _] page)
+                              delivery/dispatch-acquired!
+                              (fn [& _]
+                                (swap! calls inc)
+                                {:status :dispatch-accepted})]
+                  (try
+                    (cycle/process-cycle! :node {:source ::source} {} source-id
+                                          {:worker-id "w" :max-items 1})
+                    (catch clojure.lang.ExceptionInfo e e)))]
+    (is (instance? clojure.lang.ExceptionInfo failure))
+    (when (instance? clojure.lang.ExceptionInfo failure)
+      (is (= :acquisition (:phase (ex-data failure))))
+      (is (zero? (:completed-count (ex-data failure))))
+      (is (= :invalid-worker-page (:reason (ex-data (.getCause failure))))))
+    (is (zero? @calls)
+        "Malformed lease page must be refused before external source emission")))
+
+(deftest cycle-page-accepts-canonical-uuid-forward-progress-test
+  ;; XTDB's unsigned UUID keyset order differs from Java UUID.compareTo.
+  ;; A legitimate crossing from 7fff... to 8000... must stay admissible.
+  (let [low (UUID/fromString "7fffffff-ffff-ffff-ffff-ffffffffffff")
+        high (UUID/fromString "80000000-0000-0000-0000-000000000000")
+        pages (atom [])
+        outcome (with-redefs [worker/acquire-sweep!
+                             (fn [_ opts]
+                               (swap! pages conj opts)
+                               {:attempted 1
+                                :results [{:status :contended :intent-id high}]
+                                :halt-reason :page-budget :next-after high})]
+                  (cycle/process-cycle! :node {:source ::source} {} source-id
+                                        {:worker-id "w" :after low :max-items 1}))]
+    (is (= :cycle-completed (:status outcome)))
+    (is (= :page-budget (:halt-reason outcome)))
+    (is (= high (:next-after outcome)))
+    (is (= 1 (:processed outcome)))
+    (is (= 1 (:contended outcome)))
+    (is (= low (:after (first @pages))))))

@@ -76,20 +76,29 @@
             cause)))
 
 (defn- validate-page!
-  [page]
-  ;; worker/acquire-sweep! is a trusted internal entry point, but a malformed
-  ;; result must not allow an unaccounted acquisition to be treated as done.
-  (when-not (and (map? page)
-                 (vector? (:results page))
-                 (= (count (:results page)) (:attempted page))
-                 (<= (:attempted page) 1)
-                 (#{:page-budget :observed-end} (:halt-reason page))
-                 (if (= :page-budget (:halt-reason page))
-                   (and (= 1 (:attempted page))
-                        (uuid? (:next-after page)))
-                   (nil? (:next-after page))))
-    (reject! :invalid-worker-page {:page page}))
-  page)
+  [page after]
+  ;; A worker page is an advisory result, not a free-standing cursor claim.
+  ;; Check its single identity against the incoming cursor and require the
+  ;; continuation to name that SAME identity, before source dispatch. XTDB
+  ;; UUID SQL keyset order is canonical unsigned string order, not Java's
+  ;; signed UUID.compareTo order.
+  (let [results (:results page)
+        intent-id (:intent-id (first results))]
+    (when-not (and (map? page)
+                   (vector? results)
+                   (= (count results) (:attempted page))
+                   (<= (:attempted page) 1)
+                   (#{:page-budget :observed-end} (:halt-reason page))
+                   (or (empty? results)
+                       (and (uuid? intent-id)
+                            (or (nil? after)
+                                (neg? (compare (str after) (str intent-id))))))
+                   (if (= :page-budget (:halt-reason page))
+                     (and (= 1 (:attempted page))
+                          (= intent-id (:next-after page)))
+                     (nil? (:next-after page))))
+      (reject! :invalid-worker-page {:page page :after after}))
+    page))
 
 (defn- attempt-result!
   [node system ctx expected-source-id acquired completed cursor]
@@ -191,7 +200,7 @@
                                :max-pages 1}
                         cursor (assoc :after cursor))
             page (try
-                   (validate-page! (worker/acquire-sweep! node work-opts))
+                   (validate-page! (worker/acquire-sweep! node work-opts) cursor)
                    (catch Throwable e
                      (interrupted! :acquisition :acquisition-exception
                                    completed cursor nil
