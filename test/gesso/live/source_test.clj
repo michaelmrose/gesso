@@ -1233,3 +1233,105 @@
     (try
       (is (= 64 (:max-pending-puts-per-consumer (source/stats src))))
       (finally (source/close! src)))))
+
+(deftest source-wide-consumer-cap-is-shared-and-releases-on-close-test
+  ;; The source-wide limit includes compatibility broadcast taps; a cap on
+  ;; HTTP-managed connections alone cannot protect direct source consumers.
+  (let [src (source/create {:max-active-consumers 2})
+        tap (source/changes src)
+        subscriber (source/subscribe src {:topic :request :id "req-1"})]
+    (try
+      (doseq [[kind register]
+              [[:broadcast-tap #(source/changes src)]
+               [:indexed-subscription
+                #(source/subscribe src {:topic :request :id "req-2"})]]]
+        (let [error (try (register) nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo error))
+          (is (= :gesso.live.source/consumer-capacity-reached
+                 (:reason (ex-data error))))
+          (is (= kind (:consumer/kind (ex-data error))))
+          (is (= 2 (:active-consumer-count (ex-data error))))))
+      (let [snapshot (source/stats src)]
+        (is (= 2 (:active-consumer-count snapshot)))
+        (is (= 2 (:tap-count snapshot)))
+        (is (= 1 (:subscription-count snapshot)))
+        (is (= 1 (:indexed-scope-count snapshot)))
+        (is (zero? (:pending-consumer-put-count snapshot)))
+        (is (= 2 (:consumer-capacity-rejection-count snapshot))))
+      ;; Rejected admission is not confused with invalidation rejection.
+      ;; Existing healthy consumers still receive matching invalidations.
+      (is (= 2 (:attempted (source/emit! src invalidation-1))))
+      (is (= invalidation-1 (take-value tap)))
+      (is (= invalidation-1 (take-value subscriber)))
+      (s/close! tap)
+      (is (= 1 (:active-consumer-count (source/stats src))))
+      (let [replacement (source/changes src)]
+        (try
+          (is (= 2 (:active-consumer-count (source/stats src))))
+          (s/close! subscriber)
+          (let [indexed (source/subscribe src {:topic :request :id "req-2"})]
+            (is (= 2 (:active-consumer-count (source/stats src))))
+            (is (= 1 (:indexed-scope-count (source/stats src))))
+            (s/close! indexed))
+          (finally (s/close! replacement))))
+      (let [snapshot (source/stats src)]
+        (is (= 0 (:active-consumer-count snapshot)))
+        (is (= 0 (:indexed-scope-count snapshot)))
+        (is (= 2 (:consumer-capacity-rejection-count snapshot))))
+      (finally (source/close! src)))))
+
+(deftest source-wide-consumer-cap-concurrent-admission-is-exact-test
+  (let [src (source/create {:max-active-consumers 6})]
+    (try
+      (let [workers (doall
+                     (for [i (range 8)]
+                       (future
+                         (doall
+                          (for [j (range 15)]
+                            (try
+                              [:registered
+                               (if (even? j)
+                                 (source/changes src)
+                                 (source/subscribe
+                                  src {:topic :request
+                                       :id (str "req-" i "-" j)}))]
+                              (catch clojure.lang.ExceptionInfo e
+                                [:rejected (:reason (ex-data e))])))))))
+            results (mapcat #(deref % 10000 [[:timed-out]]) workers)
+            accepted (keep (fn [[status stream]]
+                             (when (= :registered status) stream)) results)
+            rejected (keep (fn [[status reason]]
+                             (when (= :rejected status) reason)) results)]
+        (is (= 120 (count results)))
+        (is (= 6 (count accepted)))
+        (is (= 114 (count rejected)))
+        (is (every? #{:gesso.live.source/consumer-capacity-reached}
+                    rejected))
+        (is (= 6 (:active-consumer-count (source/stats src))))
+        (is (= 114 (:consumer-capacity-rejection-count (source/stats src))))
+        (is (= 6 (:tap-count (source/stats src))))
+        (doseq [stream accepted] (s/close! stream))
+        (is (zero? (:active-consumer-count (source/stats src)))))
+      (finally (source/close! src)))))
+
+(deftest source-wide-consumer-cap-validates-config-and-cleans-shutdown-test
+  (doseq [bad [0 -1 65537 nil 1.5 "unlimited"]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Invalid gesso.live value"
+         (source/create {:max-active-consumers bad}))
+        (str "Invalid cap must fail preflight: " (pr-str bad))))
+  (let [default (source/create)
+        limited (source/create {:max-active-consumers 1})
+        tap (source/changes limited)]
+    (try
+      (is (= 4096 (:max-active-consumers (source/stats default))))
+      (is (= 1 (:active-consumer-count (source/stats limited))))
+      (is (= :closed (source/close! limited)))
+      (is (s/closed? tap))
+      (is (zero? (:active-consumer-count (source/stats limited))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"source is closed"
+                            (source/changes limited)))
+      (finally
+        (source/close! default)
+        (source/close! limited)))))

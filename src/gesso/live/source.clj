@@ -45,6 +45,7 @@
    :coalesce-window-ms nil
    :max-recorded-errors 256
    :max-active-coalesce-scopes 4096
+   :max-active-consumers 4096
    :max-pending-puts-per-consumer 64
    :on-error nil})
 
@@ -79,6 +80,7 @@
           (select-keys options [:id :coalesce-window-ms :on-error]))
          :max-recorded-errors (:max-recorded-errors options)
          :max-active-coalesce-scopes (:max-active-coalesce-scopes options)
+         :max-active-consumers (:max-active-consumers options)
          :max-pending-puts-per-consumer (:max-pending-puts-per-consumer options)))
 
 (defn- validate-options!
@@ -204,6 +206,23 @@
   [source]
   (.size ^ConcurrentHashMap (:cooldowns source)))
 
+(defn- ensure-consumer-capacity!
+  "Refuse any new source consumer when the shared source registration budget
+   is exhausted. Must be called under :coalesce-lock, which also protects all
+   registration removals and source shutdown. Failed admissions install no
+   stream, indexed scope, pending put, or source-owned retry obligation."
+  [source kind]
+  (let [active (+ (tap-count source) (subscription-count source))
+        limit (:max-active-consumers source)]
+    (when (>= active limit)
+      (.increment ^LongAdder (:consumer-capacity-rejection-count source))
+      (throw (ex "gesso.live source consumer capacity reached."
+                 {:reason :gesso.live.source/consumer-capacity-reached
+                  :source/id (:id source)
+                  :consumer/kind kind
+                  :active-consumer-count active
+                  :max-active-consumers limit})))))
+
 ;; -----------------------------------------------------------------------------
 ;; Error/rejection recording
 ;; -----------------------------------------------------------------------------
@@ -275,7 +294,10 @@
 
 (defn- remove-tap-if-same!
   [source tap-id stream]
-  (.remove ^ConcurrentHashMap (:taps source) tap-id stream)
+  ;; Use the same lock as both source registration paths, so a concurrent
+  ;; retirement cannot make the source-wide admission count ambiguous.
+  (locking (:coalesce-lock source)
+    (.remove ^ConcurrentHashMap (:taps source) tap-id stream))
   nil)
 
 (defn- track-tap-put-result!
@@ -495,6 +517,15 @@
        An already tracked scope still receives leading/trailing coalescing.
        Zero bypasses all coalescing even when a window is configured.
 
+     :max-active-consumers
+       Optional integer 1..65536 (default 4096). One shared source-wide
+       admission budget for indexed subscriptions AND broadcast taps.
+       Excess registrations throw typed capacity refusal before installing
+       resources. Closing a stream releases its slot. This limit does not
+       drop committed invalidations or confer authority to retry subscription;
+       rejected clients must reacquire current state through an authorized
+       route when capacity becomes available.
+
      :max-pending-puts-per-consumer
        Optional integer 1..4096 (default 64). A Manifold put! can remain
        unresolved when the reader stalls. Before the pending count reaches
@@ -519,6 +550,7 @@
       :coalesce-window-ms (:coalesce-window-ms options')
       :max-recorded-errors (:max-recorded-errors options')
       :max-active-coalesce-scopes (:max-active-coalesce-scopes options')
+      :max-active-consumers (:max-active-consumers options')
       :max-pending-puts-per-consumer (:max-pending-puts-per-consumer options')
       :on-error (:on-error options')
       :closed? (atom false)
@@ -552,6 +584,7 @@
       :suppressed-count (LongAdder.)
       :coalesce-bypass-count (LongAdder.)
       :slow-consumer-retire-count (LongAdder.)
+      :consumer-capacity-rejection-count (LongAdder.)
       :errors (atom {:retained [] :total 0 :evicted 0})})))
 
 (defn close!
@@ -601,6 +634,10 @@
      :tap-count (+ broadcast-count subscription-count)
      :broadcast-tap-count broadcast-count
      :subscription-count subscription-count
+     :active-consumer-count (+ broadcast-count subscription-count)
+     :max-active-consumers (:max-active-consumers source)
+     :consumer-capacity-rejection-count
+     (.sum ^LongAdder (:consumer-capacity-rejection-count source))
      :indexed-scope-count (indexed-scope-count source)
      :pending-count (pending-count source)
      :scheduled-count (scheduled-count source)
@@ -640,6 +677,7 @@
   [source]
   (locking (:coalesce-lock source)
     (ensure-open! source)
+    (ensure-consumer-capacity! source :broadcast-tap)
     (let [tap-id (next-tap-id! source)
           stream (s/stream)
           taps ^ConcurrentHashMap (:taps source)]
@@ -667,6 +705,7 @@
     ;; public subscription contract before installing indexed resources.
     ;; Otherwise unmatchable topics/ids become silent live consumers.
     (schema/validate-subscription! subscription)
+    (ensure-consumer-capacity! source :indexed-subscription)
     (let [k (scope-key subscription)
           subscription-id (next-subscription-id! source)
           stream (s/stream)
