@@ -1124,3 +1124,112 @@
     (try
       (is (= 4096 (:max-active-coalesce-scopes (source/stats src))))
       (finally (source/close! src)))))
+
+(deftest slow-indexed-or-broadcast-consumer-is-retired-before-unbounded-puts-test
+  ;; A Manifold stream's unanswered put! deferreds are queued indefinitely
+  ;; if nobody takes from the stream. A slow consumer must be detached with
+  ;; a visible close instead of accumulating another put for each source event.
+  (doseq [[kind register]
+          [[:indexed #(source/subscribe % {:topic :request :id "req-1"})]
+           [:broadcast source/changes]]]
+    (let [notices (atom [])
+          src (source/create {:max-pending-puts-per-consumer 2
+                              :on-error #(swap! notices conj %)})
+          slow (register src)
+          healthy (source/subscribe src {:topic :request :id "req-1"})
+          closed (promise)]
+      (s/on-closed slow #(deliver closed :slow-consumer-closed))
+      (try
+        (dotimes [i 2]
+          (let [read (s/take! healthy)
+                event (assoc invalidation-1 :marker i)]
+            (is (= 2 (:attempted (source/emit! src event))))
+            (is (= event (deref read timeout-ms ::timeout)))))
+        (is (= 2 (:pending-consumer-put-count (source/stats src))))
+        (is (= 2 (:tap-count (source/stats src))))
+        (let [read (s/take! healthy)
+              event (assoc invalidation-1 :marker :after-capacity)]
+          (is (= 1 (:attempted (source/emit! src event)))
+              "The healthy consumer must still receive the next invalidation")
+          (is (= event (deref read timeout-ms ::timeout)))
+          (is (= :slow-consumer-closed (deref closed timeout-ms ::timeout)))
+          (is (s/closed? slow))
+          (is (not (s/closed? healthy)))
+          (is (= 1 (:tap-count (source/stats src))))
+          (is (zero? (:pending-consumer-put-count (source/stats src))))
+          (is (= 1 (:slow-consumer-retire-count (source/stats src))))
+          (is (= 1 (count @notices)))
+          (let [record (first @notices)]
+            (is (= :slow-consumer-retired (:kind record)))
+            (is (= (case kind :indexed :indexed-subscription :broadcast :broadcast-tap)
+                   (:consumer/kind record)))
+            (is (= 2 (:pending-puts record)))
+            (is (= event (:invalidation record)))))
+        (is (= 0 (:attempted
+                   (source/emit! src
+                                 {:topic :other-topic :id "unrelated"}))))
+        (finally (source/close! src))))))
+
+(deftest consuming-a-pending-put-frees-a-slot-without-retiring-the-client-test
+  (let [src (source/create {:max-pending-puts-per-consumer 2})
+        subscriber (source/subscribe src {:topic :request :id "req-1"})]
+    (try
+      (is (= 1 (:attempted (source/emit! src (assoc invalidation-1 :seq 1)))))
+      (is (= 1 (:pending-consumer-put-count (source/stats src))))
+      (is (empty? (source/errors src))
+          "There is no failure just because a single put is outstanding")
+      (is (= 1 (:seq (take-value subscriber))))
+      (is (zero? (:pending-consumer-put-count (source/stats src))))
+      (doseq [n (range 2 9)]
+        (is (= 1 (:attempted (source/emit! src (assoc invalidation-1 :seq n)))))
+        (is (= n (:seq (take-value subscriber)))))
+      (is (not (s/closed? subscriber)))
+      (is (zero? (:slow-consumer-retire-count (source/stats src))))
+      (finally (source/close! src)))))
+
+(deftest concurrent-source-fanout-retirement-is-one-shot-and-bounded-test
+  ;; Concurrent emits share a single atomic per-consumer put reservation.
+  ;; At most N unresolved puts reach an unread Manifold stream, and a single
+  ;; overload event/close can be recorded even with competing emitters.
+  (let [src (source/create {:max-pending-puts-per-consumer 4})
+        slow (source/subscribe src {:topic :request :id "req-1"})]
+    (try
+      (let [futures (doall
+                     (for [t (range 8)]
+                       (future
+                         (dotimes [i 25]
+                           (source/emit! src (assoc invalidation-1
+                                                    :seq [t i]))))))]
+        (doseq [f futures]
+          (is (not= ::timeout (deref f 8000 ::timeout)))))
+      (is (s/closed? slow))
+      (is (zero? (:tap-count (source/stats src))))
+      (is (zero? (:pending-consumer-put-count (source/stats src))))
+      (is (= 1 (:slow-consumer-retire-count (source/stats src))))
+      (is (= 1 (count (filter #(= :slow-consumer-retired (:kind %))
+                              (source/errors src)))))
+      (is (= 200 (:accepted-count (source/stats src))))
+      (is (<= (:attempted-count (source/stats src)) 4))
+      (finally (source/close! src)))))
+
+(deftest source-close-forgets-all-outstanding-put-registrations-test
+  (let [src (source/create {:max-pending-puts-per-consumer 3})
+        indexed (source/subscribe src {:topic :request :id "req-1"})
+        broadcast (source/changes src)]
+    (is (= 2 (:attempted (source/emit! src invalidation-1))))
+    (is (= 2 (:pending-consumer-put-count (source/stats src))))
+    (is (= :closed (source/close! src)))
+    (is (s/closed? indexed))
+    (is (s/closed? broadcast))
+    (is (zero? (:pending-consumer-put-count (source/stats src))))
+    (is (zero? (:tap-count (source/stats src))))))
+
+(deftest source-pending-put-boundary-validates-configured-cap-test
+  (doseq [bad [0 -1 4097 3.5 nil "unbounded"]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"Invalid gesso.live value"
+         (source/create {:max-pending-puts-per-consumer bad}))))
+  (let [src (source/create)]
+    (try
+      (is (= 64 (:max-pending-puts-per-consumer (source/stats src))))
+      (finally (source/close! src)))))

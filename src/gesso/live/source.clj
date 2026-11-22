@@ -34,7 +34,7 @@
    [manifold.stream :as s])
   (:import
    [java.util.concurrent ConcurrentHashMap ScheduledThreadPoolExecutor TimeUnit]
-   [java.util.concurrent.atomic AtomicLong LongAdder]))
+   [java.util.concurrent.atomic AtomicBoolean AtomicInteger AtomicLong LongAdder]))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults
@@ -45,6 +45,7 @@
    :coalesce-window-ms nil
    :max-recorded-errors 256
    :max-active-coalesce-scopes 4096
+   :max-pending-puts-per-consumer 64
    :on-error nil})
 
 ;; -----------------------------------------------------------------------------
@@ -77,7 +78,8 @@
   (assoc (compact-map
           (select-keys options [:id :coalesce-window-ms :on-error]))
          :max-recorded-errors (:max-recorded-errors options)
-         :max-active-coalesce-scopes (:max-active-coalesce-scopes options)))
+         :max-active-coalesce-scopes (:max-active-coalesce-scopes options)
+         :max-pending-puts-per-consumer (:max-pending-puts-per-consumer options)))
 
 (defn- validate-options!
   [options]
@@ -300,6 +302,69 @@
   [stream invalidation]
   (s/put! stream invalidation))
 
+(defn- release-pending-put!
+  [^AtomicInteger pending]
+  ;; -1 means the consumer has been retired for overload. Completion
+  ;; callbacks racing with retirement cannot revive it or undo its fence.
+  (loop []
+    (let [n (.get pending)]
+      (when (pos? n)
+        (when-not (.compareAndSet pending n (dec n))
+          (recur))))))
+
+(defn- reserve-pending-put!
+  [source kind id stream invalidation]
+  (when-let [^AtomicInteger pending
+             (.get ^ConcurrentHashMap (:consumer-pending-puts source) stream)]
+    (loop []
+      (let [n (.get pending)]
+        (cond
+          (neg? n) nil
+          (< n (:max-pending-puts-per-consumer source))
+          (if (.compareAndSet pending n (inc n))
+            pending
+            (recur))
+
+          (.compareAndSet pending n -1)
+          (do
+            ;; A slow stream must be CLOSED rather than silently dropping an
+            ;; invalidation that is still required for authoritative refresh.
+            ;; SSE's normal disconnect/rejoin performs a fresh acquisition.
+            ;; Retirement is one-shot even under concurrent source emissions.
+            (when (.remove ^ConcurrentHashMap (:consumer-pending-puts source)
+                           stream pending)
+              (.increment ^LongAdder (:slow-consumer-retire-count source))
+              (s/close! stream)
+              (record-error! source
+                             {:kind :slow-consumer-retired
+                              :consumer/kind kind
+                              :consumer/id id
+                              :pending-puts n
+                              :invalidation invalidation}))
+            nil)
+          :else (recur))))))
+
+(defn- bounded-consumer-put!
+  "Allow at most N unresolved Manifold put! deferreds per consumer. A fully
+   queued/unread stream is retired before another put is attempted. Returns
+   nil on retirement, otherwise the normal Manifold put deferred."
+  [source kind id stream invalidation]
+  (when-let [^AtomicInteger pending
+             (reserve-pending-put! source kind id stream invalidation)]
+    (let [released? (AtomicBoolean. false)
+          release! (fn []
+                     (when (.compareAndSet released? false true)
+                       (release-pending-put! pending)))]
+      (try
+        (let [put-result (put-consumer! stream invalidation)]
+          (d/on-realized put-result
+                         (fn [_] (release!))
+                         (fn [_] (release!)))
+          put-result)
+        (catch Throwable e
+          (release!)
+          (throw e))))))
+
 (defn- put-tap!
   [source tap-id stream invalidation]
   (cond
@@ -310,9 +375,12 @@
 
     :else
     (try
-      (let [put-result (put-consumer! stream invalidation)]
-        (track-tap-put-result! source tap-id stream invalidation put-result)
-        true)
+      (if-let [put-result (bounded-consumer-put!
+                           source :broadcast-tap tap-id stream invalidation)]
+        (do
+          (track-tap-put-result! source tap-id stream invalidation put-result)
+          true)
+        false)
       (catch Throwable e
         (restore-interrupt! e)
         (remove-tap-if-same! source tap-id stream)
@@ -377,9 +445,14 @@
 
     :else
     (try
-      (let [put-result (put-consumer! stream invalidation)]
-        (track-subscription-put-result! source subscription-id stream invalidation put-result)
-        true)
+      (if-let [put-result (bounded-consumer-put!
+                           source :indexed-subscription subscription-id
+                           stream invalidation)]
+        (do
+          (track-subscription-put-result!
+           source subscription-id stream invalidation put-result)
+          true)
+        false)
       (catch Throwable e
         (restore-interrupt! e)
         (remove-subscription-if-same! source subscription-id stream)
@@ -422,6 +495,14 @@
        An already tracked scope still receives leading/trailing coalescing.
        Zero bypasses all coalescing even when a window is configured.
 
+     :max-pending-puts-per-consumer
+       Optional integer 1..4096 (default 64). A Manifold put! can remain
+       unresolved when the reader stalls. Before the pending count reaches
+       unbounded growth, retire/close that consumer with a diagnostic instead
+       of issuing another put. Healthy consumers continue receiving events.
+       A disconnected SSE client must reacquire current authoritative state;
+       source emission is NOT proof of browser receipt.
+
      :on-error
        Optional function called for every source error, even if its record is
        evicted from the bounded history.
@@ -438,6 +519,7 @@
       :coalesce-window-ms (:coalesce-window-ms options')
       :max-recorded-errors (:max-recorded-errors options')
       :max-active-coalesce-scopes (:max-active-coalesce-scopes options')
+      :max-pending-puts-per-consumer (:max-pending-puts-per-consumer options')
       :on-error (:on-error options')
       :closed? (atom false)
 
@@ -450,6 +532,9 @@
       :subscriptions (ConcurrentHashMap.)
       :subscription-keys (ConcurrentHashMap.)
       :by-scope (ConcurrentHashMap.)
+      ;; A registered consumer owns a bounded number of unresolved Manifold
+      ;; put! operations. The map is drained on stream close or source close.
+      :consumer-pending-puts (ConcurrentHashMap.)
 
       ;; Source-level pre-fanout coalescing/throttling.
       :pending (ConcurrentHashMap.)
@@ -466,6 +551,7 @@
       :trailing-count (LongAdder.)
       :suppressed-count (LongAdder.)
       :coalesce-bypass-count (LongAdder.)
+      :slow-consumer-retire-count (LongAdder.)
       :errors (atom {:retained [] :total 0 :evicted 0})})))
 
 (defn close!
@@ -489,6 +575,7 @@
                       (.clear subscriptions)
                       (.clear ^ConcurrentHashMap (:subscription-keys source))
                       (.clear ^ConcurrentHashMap (:by-scope source))
+                      (.clear ^ConcurrentHashMap (:consumer-pending-puts source))
                       (.clear ^ConcurrentHashMap (:pending source))
                       (.clear ^ConcurrentHashMap (:cooldowns source))
                       (.shutdownNow scheduler)
@@ -527,6 +614,13 @@
      :suppressed-count (.sum ^LongAdder (:suppressed-count source))
      :coalesce-bypass-count (.sum ^LongAdder (:coalesce-bypass-count source))
      :max-active-coalesce-scopes (:max-active-coalesce-scopes source)
+     :max-pending-puts-per-consumer (:max-pending-puts-per-consumer source)
+     :pending-consumer-put-count
+     (reduce + 0 (map (fn [^AtomicInteger n] (max 0 (.get n)))
+                      (.values ^ConcurrentHashMap
+                               (:consumer-pending-puts source))))
+     :slow-consumer-retire-count
+     (.sum ^LongAdder (:slow-consumer-retire-count source))
      :error-count (count (:retained @(:errors source)))
      :total-error-count (:total @(:errors source))
      :evicted-error-count (:evicted @(:errors source))
@@ -550,7 +644,13 @@
           stream (s/stream)
           taps ^ConcurrentHashMap (:taps source)]
       (.put taps tap-id stream)
-      (s/on-closed stream #(remove-tap-if-same! source tap-id stream))
+      (.put ^ConcurrentHashMap (:consumer-pending-puts source)
+            stream (AtomicInteger. 0))
+      (s/on-closed stream
+                   #(do
+                      (.remove ^ConcurrentHashMap
+                               (:consumer-pending-puts source) stream)
+                      (remove-tap-if-same! source tap-id stream)))
       stream)))
 
 (defn subscribe
@@ -574,7 +674,13 @@
       (.put ^ConcurrentHashMap (:subscriptions source) subscription-id stream)
       (.put ^ConcurrentHashMap (:subscription-keys source) subscription-id k)
       (.put ^ConcurrentHashMap bucket subscription-id stream)
-      (s/on-closed stream #(remove-subscription-if-same! source subscription-id stream))
+      (.put ^ConcurrentHashMap (:consumer-pending-puts source)
+            stream (AtomicInteger. 0))
+      (s/on-closed stream
+                   #(do
+                      (.remove ^ConcurrentHashMap
+                               (:consumer-pending-puts source) stream)
+                      (remove-subscription-if-same! source subscription-id stream)))
       stream)))
 
 ;; -----------------------------------------------------------------------------

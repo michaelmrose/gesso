@@ -181,6 +181,7 @@
    [:coalesce-window-ms {:optional true} Milliseconds]
    [:max-recorded-errors {:optional true} [:int {:min 0 :max 4096}]]
    [:max-active-coalesce-scopes {:optional true} [:int {:min 0 :max 65536}]]
+   [:max-pending-puts-per-consumer {:optional true} [:int {:min 1 :max 4096}]]
    [:on-error {:optional true} fn?]])
 
 (def OverflowPolicy
