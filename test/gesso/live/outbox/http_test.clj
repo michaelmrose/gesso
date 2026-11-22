@@ -628,6 +628,118 @@
            (future-cancel second-request)
            ((:close! route))))))))
 
+(deftest managed-route-bounds-pending-authorizations-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           calls (atom 0)
+           entered (promise)
+           release (promise)
+           request {:uri "/live/events" :request-method :get}
+           base {:path "/live/events"
+                 :authorize-subscription
+                 (fn [_]
+                   (when (= 1 (swap! calls inc))
+                     (deliver entered true)
+                     @release)
+                   scope)}]
+       ;; Invalid limits are rejected before authorization or subscription.
+       (doseq [limit [nil 0 -5 1.2 (inc (bigint Long/MAX_VALUE))]]
+         (is (= :invalid-max-pending-authorizations
+                (exception-reason
+                 #(http/wrap-authorized-sse
+                   started (assoc base :max-pending-authorizations limit)))))
+         (is (zero? @calls))
+         (is (zero? (:subscription-count (source/stats src)))))
+       (let [route (http/wrap-authorized-sse
+                    started (assoc base :max-pending-authorizations 1))
+             pending (future ((:handler route) request))]
+         (try
+           (is (= true (deref entered 5000 ::timeout)))
+           (is (= 1 ((:pending-authorization-count route))))
+           (is (= 0 ((:active-count route))))
+           (is (zero? (:subscription-count (source/stats src))))
+           (is (= {:status 503 :headers {}
+                   :body "Live authorization capacity reached"}
+                  ((:handler route) request))
+               "A second GET cannot invoke an unbounded callback")
+           (is (= 1 @calls))
+           (deliver release true)
+           (let [response (deref pending 10000 ::timeout)]
+             (is (= 200 (:status response)))
+             (is (= 0 ((:pending-authorization-count route))))
+             (is (= 1 ((:active-count route))))
+             (is (= 1 (:subscription-count (source/stats src))))
+             (stream/close! (:body response)))
+           (is (eventually #(zero? ((:active-count route)))))
+           (is (eventually #(zero? (:subscription-count (source/stats src)))))
+           ;; Release on normal completion allows another admission.
+           (let [response ((:handler route) request)]
+             (is (= 200 (:status response)))
+             (stream/close! (:body response))
+             (is (eventually #(zero? ((:active-count route))))))
+           (is (= 2 @calls))
+           (finally
+             (deliver release true)
+             (future-cancel pending)
+             ((:close! route)))))))))
+
+(deftest managed-route-releases-pending-authorization-on-failure-and-shutdown-test
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           request {:uri "/live/events" :request-method :get}
+           calls (atom 0)
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-pending-authorizations 1
+                           :authorize-subscription
+                           (fn [_]
+                             (swap! calls inc)
+                             (if (= 1 @calls)
+                               (throw (ex-info "auth failed" {:cause :expected}))
+                               scope))})]
+       (try
+         (is (= :expected
+                (try
+                  ((:handler route) request)
+                  nil
+                  (catch clojure.lang.ExceptionInfo e (:cause (ex-data e))))))
+         (is (zero? ((:pending-authorization-count route))))
+         (let [response ((:handler route) request)]
+           (is (= 200 (:status response)))
+           (is (= 1 (:subscription-count (source/stats src))))
+           (stream/close! (:body response)))
+         (is (eventually #(zero? (:subscription-count (source/stats src)))))
+         (is (= 2 @calls))
+         (finally ((:close! route)))))
+     ;; Close while authorization is blocked; its reservation must be
+     ;; released, but the delayed callback must not re-open the route.
+     (let [entered (promise)
+           release (promise)
+           request {:uri "/live/events" :request-method :get}
+           route (http/wrap-authorized-sse
+                  started {:path "/live/events"
+                           :max-pending-authorizations 1
+                           :authorize-subscription
+                           (fn [_] (deliver entered true) @release scope)})
+           pending (future ((:handler route) request))]
+       (try
+         (is (= true (deref entered 5000 ::timeout)))
+         (is (= 1 ((:pending-authorization-count route))))
+         ((:close! route))
+         (deliver release true)
+         (is (= {:status 503 :headers {} :body "Live shutting down"}
+                (deref pending 5000 ::timeout)))
+         (is (zero? ((:pending-authorization-count route))))
+         (is (zero? ((:active-count route))))
+         (is (zero? (:subscription-count
+                      (source/stats (:source (:gesso.live/system started))))))
+         (finally
+           (deliver release true)
+           (future-cancel pending)
+           ((:close! route))))))))
+
 (deftest concrete-host-serves-scope-authorized-progression-over-real-http-test
   (setup-host
    (fn [started]
