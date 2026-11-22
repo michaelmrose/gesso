@@ -1344,6 +1344,19 @@
         (s/close! first-stream)
         (s/close! second-stream)))))
 
+(deftest open-source-flow-exposes-per-interest-closure-test
+  (let [src (source/create)]
+    (try
+      (let [{release! :close! closed? :closed?}
+            (flow/open-source-flow! src {:subscription request-sub})]
+        (is (fn? closed?))
+        (is (false? (closed?)))
+        (is (= 1 (:subscription-count (source/stats src))))
+        (release!)
+        (is (true? (closed?)))
+        (is (zero? (:subscription-count (source/stats src)))))
+      (finally (source/close! src)))))
+
 (deftest open-source-flow-exposes-release-for-uncollected-subscription-test
   ;; Source subscription construction remains eager for the existing public
   ;; flow contract, but startup owners must be able to retire a never-started

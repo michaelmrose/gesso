@@ -499,6 +499,25 @@
       (finally
         (sse/cancel! started)))))
 
+(deftest source-backed-sse-cancellation-confirms-interest-release-test
+  (let [src (source/create)
+        started (sse/start-source! src
+                                   {:subscription {:topic :request
+                                                   :id "v2156-source"}} nil)]
+    (try
+      (is (fn? (:source-closed? started)))
+      (is (false? ((:source-closed? started))))
+      (is (= 1 (:subscription-count (source/stats src))))
+      (sse/cancel! started)
+      (is (s/closed? (:stream started)))
+      (is (true? ((:source-closed? started))))
+      (is (zero? (:subscription-count (source/stats src))))
+      (sse/cancel! started)
+      (is (true? ((:source-closed? started))))
+      (finally
+        (sse/cancel! started)
+        (source/close! src)))))
+
 (deftest cancel-closes-stream-and-calls-on-close-once-test
   (let [close-count (atom 0)
         started (sse/start! (never-flow)

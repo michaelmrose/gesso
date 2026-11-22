@@ -12,6 +12,7 @@
              :refer [with-surfaced-application standard-operations render-context
                      rendered-operation-button]]
             [gesso.live.core :as live]
+            [gesso.live.flow :as flow]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http :as http]
@@ -1609,6 +1610,60 @@
            (when @pending (future-cancel @pending))
            (when @waiter (future-cancel @waiter))
            ((:close! route))))))))
+
+(deftest route-drain-requires-physical-source-subscription-release-test
+  ;; A response can physically close while an eager source registration
+  ;; remains open (e.g., its first on-closed callback does not release it).
+  ;; The managed route must retry source cleanup, not treat a closed response
+  ;; as evidence that its Live interest was retired.
+  (setup-host
+   (fn [started]
+     (let [src (:source (:gesso.live/system started))
+           real-open flow/open-source-flow!
+           allow-release? (atom false)
+           release-attempts (atom 0)]
+       (with-redefs-fn
+         {#'gesso.live.flow/open-source-flow!
+          (fn [src flow-options]
+            (let [opened (real-open src flow-options)
+                  release! (:close! opened)]
+              (assoc opened :close!
+                     (fn []
+                       (swap! release-attempts inc)
+                       (when @allow-release? (release!))))) )
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _]
+            ;; Do not collect the Missionary source: this intentionally
+            ;; isolates the eager registration and explicit release hook.
+            (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [route (http/wrap-authorized-sse
+                        started {:path "/live/events"
+                                 :authorize-subscription (constantly scope)})
+                 response ((:handler route)
+                           {:uri "/live/events" :request-method :get})
+                 out (:body response)]
+             (try
+               (is (= 200 (:status response)))
+               (is (= 1 (:subscription-count (source/stats src))))
+               (is (= :incomplete-sse-source-release
+                      (exception-reason #((:close! route)))))
+               (is (stream/closed? out)
+                   "The physical HTTP response is already closed")
+               (is (= 1 (:subscription-count (source/stats src)))
+                   "Eager interest remains until source release succeeds")
+               (is (false? ((:drained? route))))
+               (is (= {:outcome :timed-out} ((:await-drained! route) 0)))
+               (is (pos? @release-attempts))
+               (reset! allow-release? true)
+               (is (= :closed ((:close! route)))
+                   "The second cancellation must retry source release")
+               (is (true? ((:drained? route))))
+               (is (= {:outcome :drained} ((:await-drained! route) 0)))
+               (is (zero? (:subscription-count (source/stats src))))
+               (finally
+                 (reset! allow-release? true)
+                 ((:close! route)))))))))))
 
 (deftest close-retry-refuses-once-consumed-cancel-with-open-stream-test
   ;; A transport cancel callback can consume its one-shot handle and then

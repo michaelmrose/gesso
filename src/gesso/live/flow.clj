@@ -705,7 +705,8 @@
   (contains? options :interested?))
 
 (defn open-source-flow!
-  "Open a source stream and return {:flow flow :close! release-subscription}.
+  "Open a source stream and return {:flow flow :close! release-subscription
+                                  :closed? subscription-closed?}.
 
    The caller owns the returned close handle until it has safely handed the
    flow to an active collector. This is important for eager registrations at
@@ -760,7 +761,9 @@
       {:flow (if indexed?
                (indexed-flow-for-stream* tap options'')
                (flow-for-stream* tap options''))
-       :close! (fn [] (s/close! tap))}
+       :close! (fn [] (s/close! tap))
+       ;; Per-interest physical evidence, not an aggregate source count.
+       :closed? (fn [] (s/closed? tap))}
       (catch Throwable e
         (s/close! tap)
         (throw e)))))

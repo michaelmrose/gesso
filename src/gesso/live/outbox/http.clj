@@ -35,7 +35,13 @@
   ;; physical stream cleanup and grant permission to stop Live providers.
   (live/cancel-sse! session)
   (when-not (stream/closed? (get-in session [:response :body]))
-    (reject! :incomplete-sse-cancellation {})))
+    (reject! :incomplete-sse-cancellation {}))
+  ;; The transport owns an eager Live source subscription as well as the
+  ;; response body. Stream closure is necessary but not sufficient: a failed
+  ;; release hook must not permit the HTTP owner to stop Live/XTDB.
+  (when-let [source-closed? (:source-closed? session)]
+    (when-not (true? (source-closed?))
+      (reject! :incomplete-sse-source-release {}))))
 
 (defn- drained-state? [{:keys [closed? close-completed? connections starting
                               retry-cancellations pending-authorizations]}]
@@ -139,7 +145,8 @@
    :drained? reports the stronger lifecycle condition: route close! has
    completed its cancellation pass successfully, no authorization or startup
    is outstanding, and neither a session nor a failed-cancellation retry
-   remains registered. A stream disconnect callback can remove a connection
+   remains registered. For source-backed SSE the cancellation handoff must
+   also confirm the eager Live source interest was physically released. A stream disconnect callback can remove a connection
    *before* its cancellation finishes; a cancellation that then throws must
    preserve a separate retry obligation despite that disconnect.
    A completed :close! alone does not establish full quiescence.

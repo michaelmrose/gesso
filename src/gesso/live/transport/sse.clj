@@ -703,7 +703,8 @@
    not sufficient to close an unobserved source flow on its own."
   [src flow-options sse-options]
   (let [options' (prepare-options! sse-options)
-        {live-events :flow release-flow! :close!}
+        {live-events :flow release-flow! :close!
+         source-closed? :closed?}
         (flow/open-source-flow! src flow-options)]
     (try
       (let [started (start! live-events options')]
@@ -716,7 +717,28 @@
         (s/on-closed (:stream started) release-flow!)
         (when (true? @(:closed? started))
           (release-flow!))
-        started)
+        ;; Re-attempt source release independently of the response stream's
+        ;; on-closed hook. A failed/ignored hook can otherwise leave the eager
+        ;; subscription registered after the response body is closed.
+        (assoc started
+               :source-closed? source-closed?
+               :cancel! (fn []
+                          (let [failure (try
+                                          ((:cancel! started))
+                                          nil
+                                          (catch Throwable e e))
+                                release-failure (try
+                                                  (release-flow!)
+                                                  nil
+                                                  (catch Throwable e e))]
+                            (when failure
+                              (when (and release-failure
+                                         (not (identical? failure release-failure)))
+                                (.addSuppressed ^Throwable failure
+                                                ^Throwable release-failure))
+                              (throw failure))
+                            (when release-failure
+                              (throw release-failure))))))
       (catch Throwable e
         (release-flow!)
         (throw e)))))
