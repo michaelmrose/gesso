@@ -232,9 +232,32 @@
       (reject! :no-invalidations {:intent-id intent-id}))
     ;; This execution cannot disappear from an async queue after an ack. Still,
     ;; source acceptance is not proof that a browser actually got the event.
-    (let [result (dispatch/run-sync! {:run #(live/emit-many! system expanded)})
-          source-result (verify-source-acceptance! result (count expanded)
-                                                   intent-id)
+    (let [source-result
+          (try
+            (let [result (dispatch/run-sync!
+                          {:run #(live/emit-many! system expanded)})]
+              (verify-source-acceptance! result (count expanded) intent-id))
+            (catch Throwable cause
+              ;; Source/emit-many! is not atomic with close! or a mid-batch
+              ;; failure. The source may already have accepted a prefix even
+              ;; when the job throws or its final acceptance report is
+              ;; contradictory. Keep the attempted lease for reconciliation;
+              ;; never reinterpret this as a safe, definitely unsent failure.
+              (when (instance? InterruptedException cause)
+                (.interrupt (Thread/currentThread)))
+              (throw (ex-info
+                      "Live source emission has an unknown physical outcome; reconcile the outbox before retry."
+                      {:error/type :gesso.live.outbox/source-emission-unknown
+                       :reason (or (:reason (ex-data cause))
+                                   :source-emission-exception)
+                       :intent-id intent-id
+                       :lease-id (:lease-id acquisition)
+                       :dispatch/status :unknown
+                       :source-acceptance :unknown
+                       :acknowledgment/status :not-attempted
+                       :rescan-required? true
+                       :original-error/type (:error/type (ex-data cause))}
+                      cause))))
           receipt {:receipt-id (random-uuid)
                    :adapter :gesso.live/synchronous-source
                    :result :accepted}

@@ -714,3 +714,119 @@
                   (:tx-result ack))))
           (is (= :dispatch-accepted (:gesso.live.outbox/status (row node id)))))
         (finally (live/close! system))))))
+
+
+(deftest partial-source-emission-failure-needs-reconciliation-test
+  ;; source/emit-many! is explicitly non-atomic with source shutdown. One
+  ;; invalidation may have reached the source before the next emit fails. A
+  ;; raw exception with no physical lease identity loses reconciliation data.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)]
+      (try
+        (doseq [interrupt? [false true]]
+          (let [id (random-uuid)
+                _ (seed! node id)
+                lease (acquire! node id)
+                tap (source/subscribe (:source system)
+                                      {:topic :request :id subject-id})
+                physical-cause (if interrupt?
+                                 (InterruptedException. "second source emit interrupted")
+                                 (ex-info "source stopped after first emission"
+                                          {:physical :partial}))
+                emits (atom 0)
+                acknowledgments (atom 0)]
+            (try
+              (Thread/interrupted)
+              (let [failure (with-redefs
+                              [live/emit-many!
+                               (fn [running invalidations]
+                                 (swap! emits inc)
+                                 (live/emit! running (first invalidations))
+                                 (throw physical-cause))
+                               acknowledgment/acknowledge-dispatch!
+                               (fn [& _]
+                                 (swap! acknowledgments inc)
+                                 (throw (AssertionError.
+                                         "No acknowledgment after uncertain source emission")))]
+                              (try
+                                (delivery/dispatch-acquired! node system {} lease
+                                                             source-id)
+                                (catch Throwable e e)))
+                    cancelled? (.isInterrupted (Thread/currentThread))]
+                (Thread/interrupted)
+                (is (instance? clojure.lang.ExceptionInfo failure))
+                (when (instance? clojure.lang.ExceptionInfo failure)
+                  (let [details (ex-data failure)]
+                    (is (identical? physical-cause (.getCause ^Throwable failure)))
+                    (is (= :gesso.live.outbox/source-emission-unknown
+                           (:error/type details)))
+                    (is (= :source-emission-exception (:reason details)))
+                    (is (= :unknown (:source-acceptance details)))
+                    (is (= :unknown (:dispatch/status details)))
+                    (is (= :not-attempted (:acknowledgment/status details)))
+                    (is (true? (:rescan-required? details)))
+                    (is (= id (:intent-id details)))
+                    (is (= (:lease-id lease) (:lease-id details)))))
+                (is (= interrupt? cancelled?)
+                    "Physical InterruptedException must restore JVM cancellation")
+                (is (= 1 @emits) "Do not repeat a possibly partial emission")
+                (is (zero? @acknowledgments) "Never acknowledge a partial emission")
+                (is (= subject-id (:id (deref (s/take! tap) 1500 ::timeout)))
+                    "The Live source actually accepted one invalidation")
+                (is (= :leased (:gesso.live.outbox/status (row node id))))
+                (is (nil? (:gesso.live.outbox/dispatch-receipt-id
+                           (row node id)))))
+              (finally
+                (Thread/interrupted)
+                (s/close! tap)))))
+        (finally
+          (Thread/interrupted)
+          (live/close! system))))))
+
+(deftest inconsistent-synchronous-emission-report-is-uncertain-after-acceptance-test
+  ;; A trusted dispatch adapter may report an incomplete/contradictory
+  ;; :emitted-many outcome after actual physical source acceptance. It cannot
+  ;; be classified as a known pre-dispatch validation error or acknowledged.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)
+          id (random-uuid)
+          acknowledgments (atom 0)]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id)
+              tap (source/subscribe (:source system)
+                                    {:topic :request :id subject-id})]
+          (try
+            (let [failure (with-redefs
+                            [dispatch/run-sync!
+                             (fn [job]
+                               ((:run job))
+                               {:status :ran
+                                :result {:status :emitted-many
+                                         :count 0 :results []}})
+                             acknowledgment/acknowledge-dispatch!
+                             (fn [& _]
+                               (swap! acknowledgments inc)
+                               (throw (AssertionError. "Never acknowledge")))]
+                            (try
+                              (delivery/dispatch-acquired! node system {} lease
+                                                           source-id)
+                              (catch Throwable e e)))
+                  data (ex-data failure)]
+              (is (= :gesso.live.outbox/source-emission-unknown
+                     (:error/type data)))
+              (is (= :unverified-dispatch-acceptance (:reason data)))
+              (is (= :unknown (:source-acceptance data)))
+              (is (= :not-attempted (:acknowledgment/status data)))
+              (is (= id (:intent-id data)))
+              (is (= (:lease-id lease) (:lease-id data)))
+              (is (true? (:rescan-required? data)))
+              (is (= :unverified-dispatch-acceptance
+                     (:reason (ex-data (.getCause ^Throwable failure)))))
+              (is (zero? @acknowledgments))
+              (is (= subject-id (:id (deref (s/take! tap) 1500 ::timeout))))
+              (is (= :leased (:gesso.live.outbox/status (row node id)))))
+            (finally
+              (s/close! tap))))
+        (finally
+          (live/close! system))))))
