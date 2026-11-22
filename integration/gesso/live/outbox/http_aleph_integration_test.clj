@@ -609,13 +609,25 @@
        (fn [src options]
          (let [opened (original-open src options)]
            (if (= "v2256-bad" (get-in options [:subscription :id]))
-             (update opened :close!
-                     (fn [underlying-close!]
-                       (fn []
-                         (swap! bad-close-attempts inc)
-                         (if @release-blocked?
-                           (throw fault)
-                           (underlying-close!)))))
+             ;; Model an additional physical indexed source interest that
+             ;; the bad session must release. The ordinary collector is free
+             ;; to close its own stream/tap independently; this extra tap
+             ;; remains genuinely registered until source cleanup succeeds.
+             (let [retained (source/subscribe src (:subscription options))
+                   close-original! (:close! opened)
+                   original-closed? (:closed? opened)]
+               (assoc opened
+                      :close! (fn []
+                                (close-original!)
+                                (swap! bad-close-attempts inc)
+                                (if @release-blocked?
+                                  (throw fault)
+                                  (stream/close! retained)))
+                      :closed? (fn []
+                                 (and (original-closed?)
+                                      (stream/closed? retained)))
+                      :on-closed! (fn [callback]
+                                    (stream/on-closed retained callback))))
              opened)))}
       (fn []
         (fixture
@@ -729,7 +741,7 @@
                (let [bad (open-client! "bad")
                      good (open-client! "good")]
                  (is (eventually #(and (= 2 ((:occupied-count route)))
-                                      (= 2 (:subscription-count (source/stats src)))
+                                      (= 3 (:subscription-count (source/stats src)))
                                       (= 2 (count @admitted)))))
                  (is (= 2 ((:active-count guard))))
                  (is (= 503
@@ -751,6 +763,8 @@
                      "Aleph close attempts the route-owned release, which fails")
                  (is (pos? @bad-close-attempts))
                  (is (= 1 ((:disconnected-count route))))
+                 (is (= 2 (:subscription-count (source/stats src)))
+                     "The failing cleanup retains a REAL indexed source tap")
                  (is (= 2 ((:occupied-count route)))
                      "Failed physical release preserves the route's occupied slot")
                  (is (= 2 ((:active-count guard)))
