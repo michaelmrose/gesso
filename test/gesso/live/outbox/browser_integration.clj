@@ -21,6 +21,8 @@
             [gesso.live.core :as live]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox.acknowledgment :as acknowledgment]
+            [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http :as http]
             [gesso.live.consistency.xtdb :as live.xtdb]
@@ -496,6 +498,163 @@
               (when-let [ctx @context*] (chromium/close-context! ctx))
               (when-let [br @harness*] (chromium/stop! br))
               (stream/close! correlated-source)
+              ((:close! route))
+              ((:close! server))
+              (host/stop! started))))))))
+
+(deftest recovered-biff-worker-redelivers-to-unchanged-chromium-fragment-test
+  ;; The original Biff worker emits a real SSE invalidation and then loses its
+  ;; XTDB acknowledgment. An operator explicitly chooses at-least-once
+  ;; recovery. A *new* physical lease emits a duplicate advisory invalidation
+  ;; through the original Live source; the same Chromium EventSource/HTMX
+  ;; owners issue a new, progression-correlated authoritative fragment GET.
+  ;; This is a bounded browser witness, not exactly-once or durable delivery.
+  (let [ops (standard-operations)
+        render (render-context ops)]
+    (with-surfaced-application
+      {:request-board [:main (rendered-operation-button
+                              render :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [ring (fn [_] (g/html-response
+                            [:main (rendered-operation-button
+                                    render :request/claim "/operations/request/claim")]))
+              started (host/start! assembly ring
+                                   (assoc (config) :worker-options
+                                          {:worker-id "browser-recovery-old"
+                                           :poll-ms 20 :lease-millis 1500}))
+              node (:xtdb/connectable started)
+              sys (:gesso.live/system started)
+              original (get started managed/handle-key)
+              requests (atom [])
+              source-tap (source/subscribe (:source sys) scope)
+              route (http/wrap-authorized-sse
+                     started {:path "/live/events"
+                              :authorize-subscription
+                              (fn [request]
+                                (when (str/includes?
+                                       (or (get-in request [:headers "cookie"]) "")
+                                       "v2109-test-session=1")
+                                  scope))})
+              javascript {"/assets/htmx.js" (asset! htmx-assets)
+                          "/assets/sse.js" (asset! sse-assets)
+                          "/assets/gesso-live.js" (runtime!)}
+              serve (fn [request]
+                      (cond
+                        (= "/live/events" (:uri request))
+                        ((:handler route) request)
+                        (contains? javascript (:uri request))
+                        {:status 200 :headers js-headers
+                         :body (get javascript (:uri request))}
+                        (= "/" (:uri request))
+                        {:status 200
+                         :headers (assoc html-headers "set-cookie"
+                                         "v2109-test-session=1; Path=/; SameSite=Lax")
+                         :body (page-html render)}
+                        (= "/fragment" (:uri request))
+                        (do (swap! requests conj request)
+                            (fragment-response node request))
+                        :else ((:handler route) request)))
+              server (start-loopback! serve)
+              original-ack acknowledgment/acknowledge-dispatch!
+              fail-first? (atom true)
+              harness* (atom nil)
+              context* (atom nil)]
+          (try
+            (with-redefs [acknowledgment/acknowledge-dispatch!
+                          (fn [& args]
+                            (if (compare-and-set! fail-first? true false)
+                              (throw (ex-info "source emitted, XTDB ack unknown"
+                                              {:error/type :test/ack-outcome-unknown}))
+                              (apply original-ack args)))]
+              (xt/execute-tx node [[:put-docs :requests
+                                    {:xt/id subject :status :pending}]])
+              (let [harness (chromium/start! {:args ["--no-sandbox"
+                                                     "--disable-dev-shm-usage"]})
+                    _ (reset! harness* harness)
+                    context (chromium/new-context! harness)
+                    _ (reset! context* context)
+                    page (chromium/new-page! context)]
+                (chromium/navigate! page (str (:url server) "/"))
+                (chromium/wait-for-js! page
+                  "() => window.__v2109 && window.__v2109.runtime === true && window.__v2109.opens >= 1")
+                (chromium/wait-for-js! page
+                  "() => document.getElementById('v2109-browser-panel')?.getAttribute('data-authoritative-status') === 'pending'")
+                (is (true? (chromium/evaluate page
+                  "() => {window.__v2109.root=document.querySelector('[data-gesso-live-fragment]');window.__v2109.listener=document.querySelector('[data-gesso-live-invalidation]');return !!window.__v2109.root && !!window.__v2109.listener;}")))
+                (let [intent (random-uuid)
+                      plan (outbox/prepare!
+                             {:intent-ids [intent] :source-id source-id
+                              :operation :request/claim :purpose :gesso.live/refresh}
+                             [{:topic :request :id subject :change/kind :updated}])]
+                  (xt/execute-tx node (into (vec (:guard-ops plan))
+                                            [[:put-docs :requests
+                                              {:xt/id subject :status :claimed}]
+                                             (:tx-op plan)]))
+                  (let [first-event (deref (stream/take! source-tap)
+                                           6000 ::missing-first-event)]
+                    (is (= subject (:id first-event)))
+                    (is (some? (:progression first-event)))
+                    (is (eventually #(= :failed (:status (lifecycle/status original)))))
+                    (is (= :same-lease-active
+                           (:status (lifecycle/inspect-failure! original))))
+                    (is (= :leased (:gesso.live.outbox/status
+                                    (first (stable-q node
+                                     ["SELECT * FROM gesso_live_outbox WHERE _id = ?" intent])))))
+                    (chromium/wait-for-js! page
+                      "() => window.__v2109.messages >= 1 && document.getElementById('v2109-browser-panel')?.getAttribute('data-authoritative-status') === 'claimed'")
+                    (let [baseline-requests (count @requests)
+                          baseline-refreshes (long (chromium/evaluate
+                                                     page "() => window.__v2109.refreshes"))
+                          recovery (managed/recover-module!
+                                     started :at-least-once-invalidation
+                                     {:worker-id "browser-recovery-successor"
+                                      :poll-ms 20 :lease-millis 1500})
+                          successor (:handle recovery)
+                          second-event (deref (stream/take! source-tap)
+                                               12000 ::missing-second-event)]
+                      (is (= :at-least-once-invalidation (:recovery-mode recovery)))
+                      (is (= :same-lease-active (get-in recovery [:reconciliation :status])))
+                      (is (= subject (:id second-event)))
+                      (is (some? (:progression second-event)))
+                      (is (not= (:progression first-event) (:progression second-event)))
+                      (is (eventually #(= :dispatch-accepted
+                                          (:gesso.live.outbox/status
+                                           (first (stable-q node
+                                            ["SELECT * FROM gesso_live_outbox WHERE _id = ?" intent]))))))
+                      (is (eventually #(= 1 (:total-dispatch-accepted
+                                              (lifecycle/status successor)))))
+                      (is (= 0 (:total-dispatch-accepted
+                                (lifecycle/status original))))
+                      (chromium/wait-for-js! page
+                        "() => window.__v2109.messages >= 2")
+                      (chromium/wait-for-js! page
+                        "() => window.__v2109.refreshes >= 2")
+                      (is (> (long (chromium/evaluate
+                                     page "() => window.__v2109.refreshes"))
+                             baseline-refreshes))
+                      (is (eventually
+                           #(some (fn [req]
+                                    (when-let [header (get-in req [:headers
+                                              progression.http/request-header-name])]
+                                      (= (:progression second-event)
+                                         (progression.http/decode-request-progression
+                                          header))))
+                                  (drop baseline-requests @requests)))
+                          "A duplicate advisory invalidation must produce a GET with its own exact progression")
+                      (is (= "claimed"
+                             (chromium/evaluate page
+                               "() => document.getElementById('v2109-browser-panel')?.textContent")))
+                      (is (true? (chromium/evaluate page
+                        "() => window.__v2109.root === document.querySelector('[data-gesso-live-fragment]') && window.__v2109.listener === document.querySelector('[data-gesso-live-invalidation]')")))
+                      (is (= [] (chromium/evaluate page
+                                                "() => window.__v2109.errors")))
+                      (is (true? (chromium/assert-clean! context))))))))
+            (finally
+              (when-let [context @context*]
+                (chromium/close-context! context))
+              (when-let [harness @harness*]
+                (chromium/stop! harness))
+              (stream/close! source-tap)
               ((:close! route))
               ((:close! server))
               (host/stop! started))))))))
