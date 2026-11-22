@@ -498,3 +498,141 @@
     (is (= 1 (:processed outcome)))
     (is (= 1 (:contended outcome)))
     (is (= low (:after (first @pages))))))
+
+(deftest malformed-delivery-success-cannot-complete-cycle-test
+  ;; A delivery adapter's :dispatch-accepted label is not itself evidence
+  ;; that the claimed intent, lease, receipt and source observation agree.
+  ;; Fail closed at the cycle boundary rather than return :cycle-completed.
+  (let [id (intent-id 811)
+        lease-id (random-uuid)
+        receipt-id (random-uuid)
+        progression {:basis :mock-lease}
+        acquired {:status :acquired :intent-id id :lease-id lease-id
+                  :worker-id "checked-worker" :progression progression}
+        valid {:status :dispatch-accepted :intent-id id :lease-id lease-id
+               :receipt-id receipt-id :progression progression
+               :source-result {:status :emitted-many :count 1
+                               :results [{:status :emitted}]}
+               :acknowledgment {:status :acknowledged :intent-id id
+                                :lease-id lease-id :receipt-id receipt-id}}
+        cases [[:missing-receipt (dissoc valid :receipt-id)]
+               [:wrong-intent (assoc valid :intent-id (random-uuid))]
+               [:wrong-lease (assoc valid :lease-id (random-uuid))]
+               [:wrong-progression (assoc valid :progression {:basis :different})]
+               [:missing-ack (dissoc valid :acknowledgment)]
+               [:wrong-ack-receipt (assoc-in valid [:acknowledgment :receipt-id]
+                                             (random-uuid))]
+               [:wrong-ack-intent (assoc-in valid [:acknowledgment :intent-id]
+                                            (random-uuid))]
+               [:unacknowledged (assoc-in valid [:acknowledgment :status] :contended)]
+               [:no-source-result (dissoc valid :source-result)]
+               [:false-source-count (assoc-in valid [:source-result :count] 2)]
+               [:unaccepted-source (assoc-in valid [:source-result :results 0 :status]
+                                             :rejected)]]]
+    (doseq [[label result] cases]
+      (let [sweeps (atom 0)
+            dispatches (atom 0)
+            failure (with-redefs [worker/acquire-sweep!
+                                  (fn [_ _]
+                                    (swap! sweeps inc)
+                                    {:attempted 1 :results [acquired]
+                                     :halt-reason :page-budget :next-after id})
+                                  delivery/dispatch-acquired!
+                                  (fn [& _] (swap! dispatches inc) result)]
+                      (try
+                        (cycle/process-cycle! :node {:source ::source} {}
+                                              source-id {:worker-id "checked-worker"
+                                                         :max-items 2})
+                        (catch clojure.lang.ExceptionInfo error error)))]
+        (is (instance? clojure.lang.ExceptionInfo failure)
+            (str label " cannot certify a completed cycle"))
+        (when (instance? clojure.lang.ExceptionInfo failure)
+          (let [data (ex-data failure)]
+            (is (= :gesso.live.outbox/cycle-interrupted (:error/type data))
+                (str label " must demand reconciliation"))
+            (is (= :delivery (:phase data)) (str label " failure phase"))
+            (is (= :invalid-delivery-result (:reason data))
+                (str label " must identify the violated adapter contract"))
+            (is (= :reported (:source-acceptance data))
+                (str label " cannot retract reported emission"))
+            (is (zero? (:completed-count data)))
+            (is (= id (get-in data [:in-flight :intent-id])))
+            (is (= lease-id (get-in data [:in-flight :lease-id])))))
+        (is (= 1 @sweeps) (str label " must not scan another page"))
+        (is (= 1 @dispatches) (str label " must not retry emission"))))))
+
+(deftest matched-delivery-success-completes-one-cycle-test
+  ;; A correctly matched physical adapter result must remain accepted.
+  (let [id (intent-id 812)
+        lease-id (random-uuid)
+        receipt-id (random-uuid)
+        progression {:basis :mock-lease}
+        acquired {:status :acquired :intent-id id :lease-id lease-id
+                  :worker-id "checked-worker" :progression progression}
+        delivered {:status :dispatch-accepted :intent-id id :lease-id lease-id
+                   :receipt-id receipt-id :progression progression
+                   :source-result {:status :emitted-many :count 1
+                                   :results [{:status :queued}]}
+                   :acknowledgment {:status :acknowledged :intent-id id
+                                    :lease-id lease-id :receipt-id receipt-id}}
+        outcome (with-redefs [worker/acquire-sweep!
+                              (fn [_ _] {:attempted 1 :results [acquired]
+                                         :halt-reason :observed-end :next-after nil})
+                              delivery/dispatch-acquired! (fn [& _] delivered)]
+                  (cycle/process-cycle! :node {:source ::source} {}
+                                        source-id {:worker-id "checked-worker"
+                                                   :max-items 2}))]
+    (is (= :cycle-completed (:status outcome)))
+    (is (= 1 (:processed outcome)))
+    (is (= 1 (:dispatch-accepted outcome)))
+    (is (= :observed-end (:halt-reason outcome)))
+    (is (= receipt-id (get-in outcome [:results 0 :receipt-id])))
+    (is (= progression (get-in outcome [:results 0 :progression])))))
+
+(deftest malformed-second-delivery-preserves-completed-cycle-prefix-test
+  ;; A malformed positive result on the second intent may follow a committed
+  ;; first intent. Preserve that known completed prefix, not an invented final
+  ;; cursor or permission to emit the second intent again.
+  (let [a (intent-id 813) b (intent-id 814)
+        token (random-uuid) receipt (random-uuid)
+        progression {:basis :mock-lease}
+        sweeps (atom 0)
+        dispatches (atom 0)
+        outcome
+        (with-redefs [worker/acquire-sweep!
+                      (fn [_ _]
+                        (let [id (if (= 1 (swap! sweeps inc)) a b)]
+                          {:attempted 1
+                           :results [{:status :acquired :intent-id id
+                                      :lease-id token :worker-id "w"
+                                      :progression progression}]
+                           :halt-reason :page-budget :next-after id}))
+                      delivery/dispatch-acquired!
+                      (fn [_ _ _ acquisition _]
+                        (swap! dispatches inc)
+                        (if (= a (:intent-id acquisition))
+                          {:status :dispatch-accepted :intent-id a
+                           :lease-id token :receipt-id receipt
+                           :progression progression
+                           :source-result {:status :emitted-many :count 1
+                                           :results [{:status :emitted}]}
+                           :acknowledgment {:status :acknowledged
+                                            :intent-id a :lease-id token
+                                            :receipt-id receipt}}
+                          {:status :dispatch-accepted :intent-id b}))]
+          (try
+            (cycle/process-cycle! :node {:source ::source} {} source-id
+                                  {:worker-id "w" :max-items 3})
+            (catch clojure.lang.ExceptionInfo error error)))]
+    (is (instance? clojure.lang.ExceptionInfo outcome))
+    (when (instance? clojure.lang.ExceptionInfo outcome)
+      (let [data (ex-data outcome)]
+        (is (= :delivery (:phase data)))
+        (is (= :invalid-delivery-result (:reason data)))
+        (is (= 1 (:completed-count data)))
+        (is (= a (:last-completed-cursor data)))
+        (is (= a (get-in data [:completed 0 :intent-id])))
+        (is (= receipt (get-in data [:completed 0 :receipt-id])))
+        (is (= b (get-in data [:in-flight :intent-id])))))
+    (is (= 2 @sweeps) "No third page after uncertainty")
+    (is (= 2 @dispatches) "No duplicate physical send after mismatch")))

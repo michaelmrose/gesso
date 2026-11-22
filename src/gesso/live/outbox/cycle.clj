@@ -100,6 +100,36 @@
       (reject! :invalid-worker-page {:page page :after after}))
     page))
 
+(defn- accepted-delivery-result?
+  "Confirm that reported source acceptance, physical receipt and the acquired
+   lease agree before allowing a cycle to certify completed work. This checks
+   the trusted adapter's result contract, not browser delivery or an
+   independent XTDB read after acknowledgment."
+  [acquired delivered]
+  (let [ack (:acknowledgment delivered)
+        source (:source-result delivered)
+        emissions (:results source)
+        receipt-id (:receipt-id delivered)]
+    (and (map? delivered)
+         (= :dispatch-accepted (:status delivered))
+         (= (:intent-id acquired) (:intent-id delivered))
+         (= (:lease-id acquired) (:lease-id delivered))
+         (uuid? receipt-id)
+         (some? (:progression acquired))
+         (= (:progression acquired) (:progression delivered))
+         (map? ack)
+         (= :acknowledged (:status ack))
+         (= (:intent-id acquired) (:intent-id ack))
+         (= (:lease-id acquired) (:lease-id ack))
+         (= receipt-id (:receipt-id ack))
+         (map? source)
+         (= :emitted-many (:status source))
+         (integer? (:count source))
+         (pos? (:count source))
+         (vector? emissions)
+         (= (:count source) (count emissions))
+         (every? #(#{:emitted :queued} (:status %)) emissions))))
+
 (defn- attempt-result!
   [node system ctx expected-source-id acquired completed cursor]
   (let [{:keys [intent-id lease-id status]} acquired
@@ -132,6 +162,17 @@
                         {:source-acceptance
                          (if (= :dispatched-unacknowledged (:status delivered))
                            :reported :unknown)
+                         :delivery-status (:status delivered)
+                         :acknowledgment-status
+                         (get-in delivered [:acknowledgment :status])}
+                        nil))
+        (when-not (accepted-delivery-result? acquired delivered)
+          ;; A positive label can conceal a mismatched receipt or unverified
+          ;; source acceptance. The physical send/ack may have happened; do
+          ;; not mark this lease as completed or schedule a second send.
+          (interrupted! :delivery :invalid-delivery-result
+                        completed cursor in-flight
+                        {:source-acceptance :reported
                          :delivery-status (:status delivered)
                          :acknowledgment-status
                          (get-in delivered [:acknowledgment :status])}
