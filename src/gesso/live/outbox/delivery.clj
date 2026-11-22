@@ -138,13 +138,41 @@
                 :dispatch-status (:status dispatch-result)}))
     source-result))
 
+(defn- committed-acknowledgment-evidence?
+  "A status label is not an XTDB commit receipt. Check the complete returned
+   transaction coordinates and that the receipt follows the acquired lease.
+   This verifies a trusted adapter result's *internal contract*; it does not
+   authenticate an arbitrary caller-supplied or forged transaction key."
+  [ack acquisition]
+  (let [ack-consistency (:consistency ack)
+        lease-consistency (:consistency acquisition)]
+    (try
+      (and (map? ack-consistency)
+           (integer? (:tx-id ack-consistency))
+           (instance? Instant (:system-time ack-consistency))
+           (integer? (:tx-id lease-consistency))
+           (> (:tx-id ack-consistency) (:tx-id lease-consistency))
+           (not (.isBefore ^Instant (:system-time ack-consistency)
+                           ^Instant (:system-time lease-consistency)))
+           (= ack-consistency
+              (live.xtdb/tx-result-consistency (:tx-result ack)))
+           (some? (:progression ack))
+           (= (:progression ack)
+              (live.xtdb/tx-result-progression (:tx-result ack))))
+      (catch Throwable e
+        (when (instance? InterruptedException e)
+          (.interrupt (Thread/currentThread)))
+        false))))
+
 (defn- require-acknowledgment-result!
   "Classify a physical acknowledgment adapter result only after source
    emission. A positive label must match the exact guarded submission;
    contradictory or unrecognized results are POST-DISPATCH uncertainty,
    never a successful terminal receipt or a safe pre-dispatch rejection."
-  [ack intent-id lease-id receipt-id]
-  (let [known-negative?
+  [ack acquisition receipt-id]
+  (let [intent-id (:intent-id acquisition)
+        lease-id (:lease-id acquisition)
+        known-negative?
         (and (#{:contended :unavailable} (:status ack))
              ;; Neither negative adapter result grants a lease or receipt.
              ;; Returning credentials alongside a negative status is
@@ -160,7 +188,8 @@
         (= intent-id (:intent-id ack))
         (or (and (= :acknowledged (:status ack))
                  (= lease-id (:lease-id ack))
-                 (= receipt-id (:receipt-id ack)))
+                 (= receipt-id (:receipt-id ack))
+                 (committed-acknowledgment-evidence? ack acquisition))
             known-negative?))
     (throw (ex-info
             "Live source accepted an invalidation but XTDB acknowledgment returned inconsistent evidence."
@@ -230,7 +259,7 @@
                                    :acknowledgment/status :unknown}
                                   e))))]
       (require-acknowledgment-result!
-       ack intent-id (:lease-id acquisition) (:receipt-id receipt))
+       ack acquisition (:receipt-id receipt))
       (if (= :acknowledged (:status ack))
         {:status :dispatch-accepted
          :intent-id intent-id

@@ -4,6 +4,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.live.core :as live]
             [gesso.live.dispatch :as dispatch]
+            [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.acknowledgment :as acknowledgment]
@@ -615,4 +616,101 @@
                 (is (= :leased (:gesso.live.outbox/status (row node id))))
                 (is (nil? (:gesso.live.outbox/dispatch-receipt-id (row node id)))))
               (finally (s/close! tap)))))
+        (finally (live/close! system))))))
+
+(deftest acknowledged-label-without-commit-proof-is-post-dispatch-unknown-test
+  ;; Source acceptance occurs BEFORE acknowledgment. A matched status/intent/
+  ;; lease/receipt with no committed transaction result cannot establish a
+  ;; durable terminal update, even when the trusted adapter claims success.
+  ;; Equally, reusing the acquisition's earlier transaction is not a new ack.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)
+          id (random-uuid)]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id)
+              prior {:tx-result (:tx-result lease)
+                     :consistency (:consistency lease)
+                     :progression (:progression lease)}
+              cases [[:label-only (constantly {})]
+                     [:missing-tx-result #(dissoc % :tx-result)]
+                     [:missing-consistency #(dissoc % :consistency)]
+                     [:missing-progression #(dissoc % :progression)]
+                     [:reused-acquisition-receipt identity]
+                     [:conflicting-tx-id
+                      #(assoc-in % [:consistency :tx-id]
+                                  (inc (get-in % [:consistency :tx-id])))]
+                     [:conflicting-progression
+                      #(assoc % :progression {:not-a-valid-basis true})]
+                     [:unusable-tx-result
+                      #(assoc % :tx-result {:tx-id :not-a-tx})]]]
+          (doseq [[scenario corrupt] cases]
+            (let [tap (source/subscribe (:source system)
+                                        {:topic :request :id subject-id})
+                  submissions (atom [])]
+              (try
+                (let [outcome
+                      (with-redefs
+                        [acknowledgment/acknowledge-dispatch!
+                         (fn [_ submission]
+                           (swap! submissions conj submission)
+                           (merge {:status :acknowledged
+                                   :intent-id (:intent-id submission)
+                                   :lease-id (:lease-id submission)
+                                   :receipt-id (get-in submission
+                                                       [:receipt :receipt-id])}
+                                  (corrupt prior)))]
+                        (try
+                          (delivery/dispatch-acquired!
+                           node system {} lease source-id)
+                          (catch Throwable e e)))
+                      data (when (instance? clojure.lang.ExceptionInfo outcome)
+                             (ex-data outcome))
+                      issued (first @submissions)]
+                  (is (instance? clojure.lang.ExceptionInfo outcome)
+                      (str scenario " must not report completed delivery"))
+                  (is (= :gesso.live.outbox/post-dispatch-ack-unknown
+                         (:error/type data))
+                      (str scenario " must require reconciliation"))
+                  (is (= :invalid-acknowledgment-result (:reason data)))
+                  (is (= :accepted (:dispatch/status data)))
+                  (is (= :unknown (:acknowledgment/status data)))
+                  (is (= id (:intent-id data)))
+                  (is (= (:lease-id lease) (:lease-id data)))
+                  (is (= (get-in issued [:receipt :receipt-id])
+                         (:receipt-id data)))
+                  (is (= 1 (count @submissions))
+                      "Uncertain acknowledgments must not retry")
+                  (is (= subject-id (:id (deref (s/take! tap) 1500 ::timeout)))
+                      "Live source acceptance occurred before the bad receipt")
+                  (is (= :leased (:gesso.live.outbox/status (row node id)))
+                      "False proof cannot terminalize the physical outbox")
+                  (is (nil? (:gesso.live.outbox/dispatch-receipt-id (row node id)))))
+                (finally (s/close! tap))))))
+        (finally (live/close! system))))))
+
+(deftest real-ack-transaction-advances-acquisition-transaction-test
+  ;; The native XTDB acknowledgment supplies complete committed coordinates,
+  ;; and its transaction must be later than the physical lease acquisition.
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)
+          id (random-uuid)]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id)
+              outcome (delivery/dispatch-acquired!
+                       node system {} lease source-id)
+              ack (:acknowledgment outcome)]
+          (is (= :dispatch-accepted (:status outcome)))
+          (is (= :acknowledged (:status ack)))
+          (is (integer? (get-in ack [:consistency :tx-id])))
+          (is (> (get-in ack [:consistency :tx-id])
+                 (get-in lease [:consistency :tx-id])))
+          (is (= (:consistency ack)
+                 (live.xtdb/tx-result-consistency
+                  (:tx-result ack))))
+          (is (= (:progression ack)
+                 (live.xtdb/tx-result-progression
+                  (:tx-result ack))))
+          (is (= :dispatch-accepted (:gesso.live.outbox/status (row node id)))))
         (finally (live/close! system))))))
