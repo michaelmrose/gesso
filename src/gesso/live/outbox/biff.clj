@@ -113,6 +113,52 @@
         (reject! :unrecognized-stop-outcome {:outcome (:outcome result)}))
       nil)))
 
+(defn recover-module!
+  "Operator-initiated recovery of the installed Biff outbox worker.
+
+   The ORIGINAL started Biff system remains the owner of the managed lifecycle;
+   do not replace its handle with the returned successor. Its ordinary Biff
+   stop callback permanently retires and drains the entire successor lineage
+   before closing Live or XTDB providers.
+
+   A caller must select one named mode and trusted new-worker options:
+   :physically-recorded requires exact current XTDB acknowledgment evidence;
+   :at-least-once-invalidation deliberately permits duplicate advisory
+   refreshes after the original lease expires. This API neither derives the
+   mode from a failure report nor retries automatically. A returned successor
+   is an owned worker, NOT proof of final delivery or browser adoption.
+
+   Recheck the installed providers, source ID and rules context against the
+   ORIGINAL lifecycle handle before any restart. A copied/modified Biff system
+   with substituted providers cannot launder its recovery through that handle.
+   Lifecycle retirement and restart use the same monitor, so Biff teardown
+   fences a concurrent recovery even if it begins after these checks."
+  [system mode worker-options]
+  (when-not (map? system)
+    (reject! :invalid-system {}))
+  (when-not (#{:physically-recorded :at-least-once-invalidation} mode)
+    (reject! :invalid-recovery-mode {:mode mode}))
+  (let [handle (get system handle-key)]
+    (when-not (instance? gesso.live.outbox.lifecycle.Lifecycle handle)
+      (reject! :missing-managed-handle {}))
+    (let [[node live-system] (require-providers! system)]
+      (when-not (and (identical? node
+                                 (.-node ^gesso.live.outbox.lifecycle.Lifecycle handle))
+                     (identical? live-system
+                                 (.-system ^gesso.live.outbox.lifecycle.Lifecycle handle)))
+        (reject! :recovery-provider-mismatch {}))
+      (when-not (= (get system source-id-key)
+                   (.-expected-source-id ^gesso.live.outbox.lifecycle.Lifecycle handle))
+        (reject! :recovery-source-mismatch {}))
+      (when-not (= (get system context-key)
+                   (.-ctx ^gesso.live.outbox.lifecycle.Lifecycle handle))
+        (reject! :recovery-context-mismatch {})))
+    (case mode
+      :physically-recorded
+      (lifecycle/restart-recorded! handle worker-options)
+      :at-least-once-invalidation
+      (lifecycle/restart-with-redelivery! handle worker-options))))
+
 (def module
   "The singleton, actual Biff 2 module. Include it exactly once in a modules
    Var with module-id LAST in start-order, after the XTDB and Live owners.

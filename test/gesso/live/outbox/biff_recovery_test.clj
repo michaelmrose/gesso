@@ -3,6 +3,8 @@
   (:require [clojure.test :refer [deftest is]]
             [com.biffweb.core :as biff]
             [gesso.live.core :as live]
+            [gesso.live.source :as source]
+            [manifold.stream :as stream]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.cycle :as cycle]
@@ -138,3 +140,180 @@
                 (finally
                   (.countDown release))))))
         (finally (live/close! live))))))
+
+(deftest managed-recovery-entrypoint-is-bound-to-the-original-host-test
+  ;; The actual Biff system owns the provider/worker relationship. A forged
+  ;; system map cannot replace its XTDB, Live system, source or rules context
+  ;; and then induce a restart. The original Biff stop owns the new worker.
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          receipt-id (random-uuid)
+          plan (outbox/prepare!
+                {:intent-ids [id] :source-id source-id
+                 :operation :request/claim :purpose :gesso.live/refresh}
+                [{:topic :request :id "managed-biff-recovery"}])
+          _ (xt/execute-tx node (conj (vec (:guard-ops plan)) (:tx-op plan)))
+          live (live-system)
+          forged-live (live-system)
+          closed (atom false)
+          provider {:biff.core/id :fixture/managed-provider
+                    :biff.core/start
+                    (fn [system]
+                      (assoc system :xtdb/connectable node
+                             :gesso.live/system live))
+                    :biff.core/stop
+                    (fn [_]
+                      (reset! closed true)
+                      (live/close! live))}]
+      (try
+        (with-redefs [delivery/dispatch-acquired!
+                      (fn [_ _ _ acquired _]
+                        (is (= :acknowledged
+                               (:status
+                                (acknowledgment/acknowledge-dispatch!
+                                 node {:intent-id (:intent-id acquired)
+                                       :lease-id (:lease-id acquired)
+                                       :worker-id (:worker-id acquired)
+                                       :receipt {:receipt-id receipt-id
+                                                 :adapter :gesso.live/synchronous-source
+                                                 :result :accepted}}))))
+                        (throw (ex-info "ack reply lost"
+                                        {:error/type
+                                         :gesso.live.outbox/post-dispatch-ack-unknown
+                                         :intent-id (:intent-id acquired)
+                                         :lease-id (:lease-id acquired)
+                                         :receipt-id receipt-id
+                                         :dispatch/status :accepted
+                                         :acknowledgment/status :unknown})))]
+          (binding [*modules* [provider managed/module]]
+            (let [started (biff/start
+                           (config {}) #'*modules*
+                           [:fixture/managed-provider managed/module-id])
+                  original (get started managed/handle-key)]
+              (try
+                (is (poll-until #(= :failed (:status (lifecycle/status original)))))
+                (is (= :invalid-recovery-mode
+                       (invalid-reason #(managed/recover-module!
+                                         started :unspecified
+                                         {:worker-id "bad-mode"}))))
+                (is (= :missing-managed-handle
+                       (invalid-reason #(managed/recover-module!
+                                         (dissoc started managed/handle-key)
+                                         :physically-recorded
+                                         {:worker-id "missing-handle"}))))
+                (is (= :recovery-provider-mismatch
+                       (invalid-reason #(managed/recover-module!
+                                         (assoc started :xtdb/connectable :foreign)
+                                         :physically-recorded
+                                         {:worker-id "wrong-node"}))))
+                (is (= :recovery-provider-mismatch
+                       (invalid-reason #(managed/recover-module!
+                                         (assoc started :gesso.live/system
+                                                forged-live)
+                                         :physically-recorded
+                                         {:worker-id "wrong-live"}))))
+                (is (= :recovery-source-mismatch
+                       (invalid-reason #(managed/recover-module!
+                                         (assoc started managed/source-id-key
+                                                "foreign/source")
+                                         :physically-recorded
+                                         {:worker-id "wrong-source"}))))
+                (is (= :recovery-context-mismatch
+                       (invalid-reason #(managed/recover-module!
+                                         (assoc started managed/context-key
+                                                {:unexpected :context})
+                                         :physically-recorded
+                                         {:worker-id "wrong-context"}))))
+                (let [{:keys [handle recovery-mode reconciliation]}
+                      (managed/recover-module!
+                       started :physically-recorded
+                       {:worker-id "qualified-biff-successor" :poll-ms 20})]
+                  (is (= :physically-recorded recovery-mode))
+                  (is (= :matching-acknowledgment-recorded
+                         (:status reconciliation)))
+                  (is (identical? original (get started managed/handle-key)))
+                  (is (poll-until #(pos? (:cycles (lifecycle/status handle)))))
+                  (is (zero? (:total-dispatch-accepted
+                              (lifecycle/status handle))))
+                  (is (false? @closed))
+                  (is (= :already-restarted
+                         (lifecycle-reason
+                          #(managed/recover-module!
+                            started :at-least-once-invalidation
+                            {:worker-id "not-a-second-successor"}))))
+                  (biff/stop started)
+                  (is @closed)
+                  (is (= :stopped (:status (lifecycle/status handle)))))
+                (finally
+                  (when-not @closed
+                    (biff/stop started)))))))
+        (finally
+          (live/close! live)
+          (live/close! forged-live))))))
+
+(deftest managed-biff-redelivery-after-unknown-ack-remains-at-least-once-test
+  ;; A real Biff-managed worker emits the physical advisory invalidation but
+  ;; fails to acknowledge. Its explicit successor must wait for the guarded
+  ;; lease reclaim, then send the same notification again without claiming
+  ;; that either copy reached a browser.
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          target-id "biff-redelivery"
+          plan (outbox/prepare!
+                {:intent-ids [id] :source-id source-id
+                 :operation :request/claim :purpose :gesso.live/refresh}
+                [{:topic :request :id target-id}])
+          _ (xt/execute-tx node (conj (vec (:guard-ops plan)) (:tx-op plan)))
+          live (live-system)
+          subscriber (source/subscribe (:source live)
+                                       {:topic :request :id target-id})
+          provider {:biff.core/id :fixture/replay-provider
+                    :biff.core/start
+                    (fn [system]
+                      (assoc system :xtdb/connectable node
+                             :gesso.live/system live))
+                    :biff.core/stop (fn [_] (live/close! live))}]
+      (try
+        (binding [*modules* [provider managed/module]]
+          (let [started
+                (with-redefs [acknowledgment/acknowledge-dispatch!
+                              (fn [_ _]
+                                (throw (ex-info "acknowledgment outcome unknown"
+                                                {:error/type :test/unknown-ack})))]
+                  (let [started
+                        (biff/start
+                         (config {managed/options-key
+                                  {:worker-id "biff-worker"
+                                   :poll-ms 20 :lease-millis 1500}})
+                         #'*modules* [:fixture/replay-provider managed/module-id])
+                        old (get started managed/handle-key)]
+                    (is (poll-until #(= :failed (:status (lifecycle/status old)))))
+                    started))
+                old (get started managed/handle-key)]
+            (try
+              (is (= target-id (:id (deref (stream/take! subscriber)
+                                            4000 ::timeout))))
+              (is (= :leased (:gesso.live.outbox/status
+                              (first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id])))))
+              (let [{:keys [handle recovery-mode reconciliation]}
+                    (managed/recover-module!
+                     started :at-least-once-invalidation
+                     {:worker-id "managed-redelivery-successor"
+                      :poll-ms 20 :lease-millis 1500})]
+                (is (= :at-least-once-invalidation recovery-mode))
+                (is (= :same-lease-active (:status reconciliation)))
+                (is (= target-id (:id (deref (stream/take! subscriber)
+                                               8000 ::timeout))))
+                (is (poll-until #(= 1 (:total-dispatch-accepted
+                                       (lifecycle/status handle)))))
+                (is (= 0 (:total-dispatch-accepted
+                          (lifecycle/status old))))
+                (is (= :dispatch-accepted
+                       (:gesso.live.outbox/status
+                        (first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id])))))
+                (biff/stop started)
+                (is (= :stopped (:status (lifecycle/status handle)))))
+              (finally (biff/stop started)))))
+        (finally
+          (stream/close! subscriber)
+          (live/close! live))))))
