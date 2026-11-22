@@ -757,11 +757,15 @@
                           (let [failure (try
                                           ((:cancel! started))
                                           nil
-                                          (catch Throwable e e))
+                                          (catch Throwable e
+                                            (restore-interrupt! e)
+                                            e))
                                 release-failure (try
                                                   (release-flow!)
                                                   nil
-                                                  (catch Throwable e e))]
+                                                  (catch Throwable e
+                                                    (restore-interrupt! e)
+                                                    e))]
                             (when failure
                               (when (and release-failure
                                          (not (identical? failure release-failure)))

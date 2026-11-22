@@ -904,6 +904,72 @@
         (finally
           (Thread/interrupted))))))
 
+(deftest interrupting-explicit-source-cancel-restores-caller-interrupt-test
+  ;; After a successful handoff, the public source-backed cancel! independently
+  ;; attempts transport cancellation and eager source release. Each can throw
+  ;; an InterruptedException that cleared the caller's interrupt flag. Both
+  ;; attempts must run; any interrupt must remain visible even when its error
+  ;; is suppressed behind a different primary failure.
+  (doseq [kind [:cancel-interrupted :release-interrupted
+                :both-interrupted :ordinary-errors]]
+    (Thread/interrupted)
+    (let [interrupted-cancel (InterruptedException. "cancel interrupted")
+          interrupted-release (InterruptedException. "release interrupted")
+          ordinary-cancel (ex-info "cancel failed" {})
+          ordinary-release (ex-info "release failed" {})
+          cancel-error (case kind
+                         (:cancel-interrupted :both-interrupted)
+                         interrupted-cancel
+                         :ordinary-errors ordinary-cancel
+                         nil)
+          release-error (case kind
+                          (:release-interrupted :both-interrupted)
+                          interrupted-release
+                          :ordinary-errors ordinary-release
+                          nil)
+          primary (or cancel-error release-error)
+          suppressed (if (and cancel-error release-error)
+                       [release-error]
+                       [])
+          calls (atom [])]
+      (try
+        (with-redefs [flow/open-source-flow!
+                      (fn [_ _]
+                        {:flow nil
+                         :close! (fn []
+                                   (swap! calls conj :source-release)
+                                   (when release-error
+                                     (throw release-error)))})
+                      sse/start!
+                      (fn [_ _]
+                        {:stream :mock-stream
+                         :closed? (atom false)
+                         :cancel! (fn []
+                                    (swap! calls conj :transport-cancel)
+                                    (when cancel-error
+                                      (throw cancel-error)))})
+                      sse/register-source-release! (fn [_ _] nil)]
+          (let [started (sse/start-source! :source
+                                           {:subscription {:topic :request
+                                                           :id "v2167"}}
+                                           nil)
+                caught (try
+                         (sse/cancel! started)
+                         (catch Throwable e e))
+                interrupted? (.isInterrupted (Thread/currentThread))]
+            ;; Reporters can clear the interrupt bit while updating test refs.
+            (Thread/interrupted)
+            (is (identical? primary caught)
+                "Preserve the exact primary cancellation or release error")
+            (is (= suppressed (vec (.getSuppressed ^Throwable caught)))
+                "Retain only independent secondary failures")
+            (is (= [:transport-cancel :source-release] @calls)
+                "Failure from the first operation must not skip the second")
+            (is (= (not= :ordinary-errors kind) interrupted?)
+                "Any interrupted cancellation/release must restore the flag")))
+        (finally
+          (Thread/interrupted))))))
+
 (deftest interrupted-source-cleanup-preserves-primary-error-and-interrupt-test
   ;; Both transport cancel and eager source release can fail with an
   ;; InterruptedException *after* a separate startup/handoff error. Keep the
