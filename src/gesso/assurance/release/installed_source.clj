@@ -1,0 +1,302 @@
+(ns gesso.assurance.release.installed-source
+  "v2262: Source-RECHECKED selected-catalog observation through ONE original,
+   guarded, physically started Biff HTTP generation.
+
+   Join the v2261 ORIGINAL abstract catalog checks to the catalog supplied to
+   v1784's original managed Biff startup, and its CURRENT physical listener,
+   full selected route inventory and fresh HTTP challenge. The same frozen
+   catalog must appear in both selections. It is not enough to combine two
+   independently supplied 'green' reports.
+
+   This is an opt-in LOCAL qualification helper for a host-owned callback and
+   ONE physical listener. Even a successful report is time-of-inspection
+   evidence, NOT admission, install/activation permission, a proof theorem,
+   authenticated external deployment, writer coverage, or release authority.
+   The original v2259 release evaluator remains blocked at installation.
+   No application command is executed by these read-only checks. Host-owned
+   callbacks, catalog completeness, the original Biff implementation, and
+   anything outside this in-process instance remain explicit assumptions."
+  (:require [gesso.assurance.release.operation-source :as source]
+            [gesso.assurance.proof.checked-biff-http-application-configuration
+             :as http]))
+
+(def report-type :gesso.assurance.release.installed-source/current-local-instance)
+(def report-version 1)
+(def ^:private original-source-check source/assess-original-catalog!)
+(def ^:private original-http-issuer http/issue-configured-checked-http-application!)
+(def ^:private retained-statuses
+  #{:issued :starting :running :stopping :stopped :cleanup-unconfirmed})
+
+(defn- reject! [reason]
+  (throw (ex-info "Selected source is not bound to a current checked Biff HTTP instance."
+                  {:release-installed-source/rejection true :reason reason})))
+
+(defn- plain-map? [x]
+  (and (or (instance? clojure.lang.PersistentArrayMap x)
+           (instance? clojure.lang.PersistentHashMap x))
+       (nil? (meta x))))
+
+(defn- pinned! []
+  (when-not (and (identical? original-source-check
+                             (var-get #'source/assess-original-catalog!))
+                 (identical? original-http-issuer
+                             (var-get #'http/issue-configured-checked-http-application!)))
+    (reject! :substituted-original-source-or-http-issuer)))
+
+(defn- checked-source! [catalog! config expected-catalog expected]
+  (pinned!)
+  (let [current (catalog!)
+        r (original-source-check catalog!)
+        selected (get-in r [:selected-release-diagnostic :decisions :candidate])
+        inventory (get-in r [:selected-release-diagnostic :initial-inventory])
+        final-inventory (get-in r [:selected-release-diagnostic :final-inventory])
+        positive-rows (filter #(= :positive (:kind %)) (vals (:rows selected)))]
+    (pinned!)
+    (when-not (and (= current expected-catalog)
+                   (= current (get-in config [:typed-trial :catalog-source :catalog]))
+                   (= source/report-type (:type r))
+                   (= source/report-version (:version r))
+                   (= (:selected-catalog-fingerprint expected)
+                      (:selected-catalog-fingerprint r))
+                   (= (:operation-ids expected) (:operation-ids r))
+                   (= (:invariant-ids expected) (:invariant-ids r))
+                   (= (:source-open-obligations expected)
+                      (:source-open-obligations r))
+                   (= (:source-open-meta-obligations expected)
+                      (:source-open-meta-obligations r))
+                   (= :matched (:status inventory) (:status final-inventory))
+                   (seq positive-rows)
+                   (= (+ (count (:operation-ids r))
+                         (count (:invariant-ids r)) 1)
+                      (count positive-rows))
+                   (every? #(= :passed (:status %)) positive-rows)
+                   (= (:candidate-status expected) (:candidate-status r))
+                   (= (:installation-status expected) (:installation-status r))
+                   (contains? #{:checks-passed-only :blocked}
+                              (:candidate-status r))
+                   (contains? #{:blocked :not-examined}
+                              (:installation-status r))
+                   (= :blocked (:status r))
+                   (= :not-examined (:activation-status r)
+                      (:completion-status r))
+                   (= :none (:release-authority r)
+                      (:runtime-effect-permission r))
+                   (= :not-issued (:candidate-admission r)
+                      (:installation-eligibility r)
+                      (:activation-eligibility r)
+                      (:completion-claim r)))
+      (reject! :selected-original-catalog-not-current))
+    r))
+
+(defn- check-running! [source-report inspection expected-routes]
+  (pinned!)
+  (let [ops (:operation-ids source-report)
+        rows (:selected-catalog-operation-open-evidence inspection)
+        routes (:selected-catalog-route-ids inspection)]
+    (when-not
+     (and (= http/running-report-type (:type inspection))
+          (= http/report-version (:version inspection))
+          (= :current-at-inspection (:status inspection))
+          (= :exact-original-issued-started-instance
+             (:generation-binding inspection))
+          (= :exact-identity (:returned-system inspection))
+          (= :verified-not-stopped (:original-guarded-adapter inspection))
+          (= :exact-issued-wrapper (:original-probe-handler-slot inspection))
+          (= :checked-at-startup-only (:selected-catalog-source inspection))
+          (= :matches-current-original-host-route-set
+             (:selected-catalog-route-continuity inspection))
+          (= :matches-original-startup-probe-route-ids
+             (:original-host-route-inventory-continuity inspection))
+          (= :observed-at-current-inspection
+             (:fresh-local-http-response inspection))
+          (= :matches-startup-verified-loopback-port
+             (:original-local-listener-endpoint inspection))
+          (= :matches-original-host-reported-object
+             (:physical-listener-instance inspection))
+          (= :trusted-host-callback-conditional
+             (:physical-instance-provenance inspection))
+          (= ops (:selected-catalog-operation-ids inspection))
+          (set? routes) (seq routes)
+          (or (nil? expected-routes) (= expected-routes routes))
+          (map? rows) (= ops (set (keys rows)))
+          (= routes (into #{} (mapcat :route-ids) (vals rows)))
+          (every? (fn [[_ row]]
+                    (and (= #{:route-ids :open-premises :open-obligations}
+                            (set (keys row)))
+                         (set? (:route-ids row)) (seq (:route-ids row))
+                         (set? (:open-premises row))
+                         (set? (:open-obligations row))))
+                  rows)
+          (set? (:selected-catalog-uncertified-operation-ids inspection))
+          (set? (:selected-catalog-uncertified-route-ids inspection))
+          (= :original-startup-source-only
+             (:selected-catalog-proof-evidence-scope inspection))
+          (set? (:selected-catalog-open-premises inspection))
+          (set? (:selected-catalog-open-obligations inspection))
+          (set? (:selected-catalog-open-assumptions inspection))
+          (= :not-established (:external-listener-liveness inspection)
+             (:out-of-band-adapter-stops inspection)
+             (:future-local-listener-availability inspection))
+          (= :none (:authority inspection)
+             (:transaction-authority inspection)
+             (:retry-authority inspection))
+          (= :not-issued (:certificate inspection))
+          (= :not-admitted (:admission inspection)))
+      (reject! :original-selected-running-http-evidence-not-current))
+    routes))
+
+(defn- observation [source-report inspection routes]
+  {:type report-type :version report-version
+   :status :selected-source-and-current-local-http-observed-only
+   :scope :one-original-managed-in-process-biff-http-instance
+   :selected-catalog-id (:selected-catalog-id source-report)
+   :selected-catalog-fingerprint (:selected-catalog-fingerprint source-report)
+   :selected-operation-ids (:operation-ids source-report)
+   :selected-invariant-ids (:invariant-ids source-report)
+   :selected-http-route-ids routes
+   :uncertified-application-operation-ids
+   (:selected-catalog-uncertified-operation-ids inspection)
+   :uncertified-application-route-ids
+   (:selected-catalog-uncertified-route-ids inspection)
+   :selected-operation-open-evidence
+   (:selected-catalog-operation-open-evidence inspection)
+   :original-candidate-diagnostic-status (:candidate-status source-report)
+   :original-candidate-blockers
+   (get-in source-report [:selected-release-diagnostic :decisions :candidate :blockers])
+   :original-source-obligations (:source-open-obligations source-report)
+   :original-source-meta-obligations (:source-open-meta-obligations source-report)
+   :installed-catalog-open-premises (:selected-catalog-open-premises inspection)
+   :installed-catalog-open-obligations (:selected-catalog-open-obligations inspection)
+   :current-local-listener :fresh-original-http-challenge-and-identity-observed
+   :generation-binding :original-opaque-generation-rechecked
+   :source-completeness :host-selected-catalog-only
+   :physical-listener-authenticity :trusted-host-callback-conditional
+   :installed-business-command-executed :not-established
+   :external-deployment :not-established
+   :all-application-writer-coverage :not-established
+   :authenticated-principal :not-established
+   :physical-xtdb-write-correspondence :not-established
+   :browser-and-live-adoption :not-established
+   :original-release-installation-decision
+   (if (= :checks-passed-only (:candidate-status source-report))
+     :blocked-on-physical-release-eligibility
+     :not-examined-because-candidate-blocked)
+   :accepted-premises #{:gesso.release.premise/source-obligations-open
+                        :gesso.release.premise/trusted-host-listener-callback}
+   :conditional? true
+   :release-authority :none :candidate-admission :not-issued
+   :installation-eligibility :not-issued
+   :activation-eligibility :not-issued :completion-claim :not-issued
+   :transaction-authority :none :runtime-effect-permission :none})
+
+(defn issue-selected-installed-catalog!
+  "Issue a ONE-USE selected original catalog + closed Biff HTTP startup.
+
+   catalog! returns the application's original abstract operation catalog;
+   http-config is exactly the original checked Biff configuration with a
+   required :typed-trial and :listener-instance! host callback. That callback
+   must return the actual concrete server instance for the current system.
+   :start-once! accepts the original initial Biff map and returns only a
+   redacted observation, never the system, handler, or opaque generation.
+   :inspect-current! reissues the real HTTP challenge and rechecks the same
+   source/route selection. :stop! releases the managed selected instance.
+   None of these callbacks grants a release decision or permission."
+  [catalog! http-config]
+  (pinned!)
+  (when-not (and (fn? catalog!)
+                 (plain-map? http-config)
+                 (contains? http-config :typed-trial)
+                 (plain-map? (:typed-trial http-config))
+                 (plain-map? (get-in http-config [:typed-trial :catalog-source]))
+                 (plain-map? (get-in http-config
+                                     [:typed-trial :catalog-source :catalog]))
+                 (fn? (:listener-instance! http-config)))
+    (reject! :missing-selected-original-source-or-listener))
+  (let [initial-catalog (catalog!)
+        source-report (original-source-check catalog!)
+        _ (checked-source! catalog! http-config initial-catalog source-report)
+        issued (original-http-issuer http-config)
+        monitor (Object.)
+        status (atom :issued)
+        running (atom nil)
+        generation (atom nil)
+        route-ids (atom nil)]
+    (letfn [(stop! []
+              (locking monitor
+                (when-not (contains? retained-statuses @status)
+                  (reject! :invalid-local-instance-state))
+                (if (= :stopped @status)
+                  {:status :stopped :authority :none}
+                  (do
+                    (reset! status :stopping)
+                    (let [result (try ((:stop! issued))
+                                      (catch Throwable _ nil))
+                          stopped? (= :stopped (:status result))]
+                      (reset! running nil)
+                      (reset! generation nil)
+                      (reset! route-ids nil)
+                      (reset! status (if stopped? :stopped :cleanup-unconfirmed))
+                      {:status @status :authority :none})))))
+            (inspect-locked! []
+              (when-not (= :running @status)
+                (reject! :no-current-issued-running-instance))
+              (let [running-system @running
+                    before (checked-source! catalog! http-config
+                                            initial-catalog source-report)
+                    result ((:inspect-generation! issued)
+                            @generation running-system)
+                    observed-routes (check-running! before result @route-ids)
+                    after (checked-source! catalog! http-config
+                                           initial-catalog source-report)]
+                (when-not (and (= before after)
+                               (= :running @status)
+                               (identical? @running running-system)
+                               (or (nil? @route-ids)
+                                   (= @route-ids observed-routes)))
+                  (reject! :source-or-running-instance-drifted-during-inspection))
+                (reset! route-ids observed-routes)
+                (observation after result observed-routes)))
+            (inspect-current! []
+              (locking monitor
+                (try
+                  (inspect-locked!)
+                  (catch Throwable error
+                    ;; A failed recheck must not leave this wrapper capable
+                    ;; of returning a historical green local observation.
+                    (when (= :running @status) (stop!))
+                    (throw error)))))
+            (start-once! [initial-system]
+              (locking monitor
+                (when-not (compare-and-set! status :issued :starting)
+                  (reject! :selected-original-http-start-not-once-only))
+                (try
+                  (checked-source! catalog! http-config initial-catalog
+                                   source-report)
+                  (let [{:keys [system instance-generation report]}
+                        ((:start-once! issued) initial-system)]
+                    (when-not (and (= http/report-type (:type report))
+                                   (= :verified-configured-start (:status report))
+                                   (= :none (:authority report))
+                                   (= :not-issued (:certificate report)))
+                      (reject! :original-checked-http-start-not-established))
+                    (reset! running system)
+                    (reset! generation instance-generation)
+                    (reset! status :running)
+                    (inspect-current!))
+                  (catch Throwable error
+                    (stop!)
+                    (throw error)))))
+            (summary! []
+              (locking monitor
+                {:type report-type :version report-version
+                 :status @status
+                 :current-installation-evidence :requires-fresh-inspection
+                 :selected-source-fingerprint
+                 (:selected-catalog-fingerprint source-report)
+                 :installation-eligibility :not-issued
+                 :release-authority :none
+                 :runtime-effect-permission :none}))]
+      {:start-once! start-once!
+       :inspect-current! inspect-current!
+       :stop! stop!
+       :summary! summary!})))
