@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http
-  "v2296: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
+  "v2297: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
    selected Biff adapter's HTTP dispatch point, not merely beside Biff.
 
    An issued original checked Biff/XTDB startup must complete its real HTTP
@@ -30,6 +30,14 @@
    permanently denying traffic. A retry may attempt cleanup again but the
    original lower-layer issuer may retain unconfirmed terminal state; a
    wrapper retry alone does not establish physical recovery.
+
+   v2297: Lifecycle summaries must query the fair traffic-fence lock
+   BEFORE acquiring the outer lifecycle monitor. Otherwise an unrelated
+   summary call can hold monitor while queued behind shutdown's fence
+   writer, deadlocking an admitted Ring request that holds a fence read
+   lease and calls summary! before it can finish and release that lease.
+   This order yields non-atomic, diagnostic-only composite snapshots;
+   no release or activation credential is inferred from a summary.
 
    v2296: Original managed stop must not hold the outer monitor while
    draining ordinary guarded Ring requests, waiting for registered
@@ -460,18 +468,25 @@
                            (reset! status :cleanup-unconfirmed)))
                     (throw error))))
               (summary! []
-                (locking monitor
-                  {:type report-type :version report-version
-                   :status @status
-                   :stop-result @last-stop-result
-                   :cleanup-retry-policy (if retry-enabled?
-                                           :explicit-host-idempotence
-                                           :one-shot-only)
-                   :cleanup-retry-attempted? @cleanup-retry-attempted?
-                   :traffic-fence ((:summary! fenced))
-                   :release-authority :none
-                   :installation-eligibility :not-issued
-                   :activation-eligibility :not-issued
-                   :completion-claim :not-issued}))]
+                ;; The fair Ring fence will block a NEW reader behind a
+                ;; pending shutdown writer. Never hold monitor while waiting
+                ;; for that read: a still-admitted request owns a reentrant
+                ;; Ring read lease and may need monitor for its own summary.
+                ;; This composite is diagnostic-only, not an atomic release
+                ;; certificate or an authorization decision.
+                (let [fence-summary ((:summary! fenced))]
+                  (locking monitor
+                    {:type report-type :version report-version
+                     :status @status
+                     :stop-result @last-stop-result
+                     :cleanup-retry-policy (if retry-enabled?
+                                             :explicit-host-idempotence
+                                             :one-shot-only)
+                     :cleanup-retry-attempted? @cleanup-retry-attempted?
+                     :traffic-fence fence-summary
+                     :release-authority :none
+                     :installation-eligibility :not-issued
+                     :activation-eligibility :not-issued
+                     :completion-claim :not-issued})))]
         {:start-once! start-once! :stop! stop!
          :retry-cleanup! retry-cleanup! :summary! summary!}))))
