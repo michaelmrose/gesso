@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source
-  "v2307: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
+  "v2308: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
    guarded, physically started Biff HTTP generation.
 
    Join the v2261 ORIGINAL abstract catalog checks to the catalog supplied to
@@ -19,6 +19,15 @@
    the ORIGINAL configured Biff inspector, then recheck the healthy instance.
    Activation and completion remain blocked by unobserved subjects. This is
    a narrower LOCAL qualification, not Stage 11 release eligibility.
+   v2308: Public current-instance inspection and whole-installation
+   assessment each claim an exclusive provisional state under monitor,
+   then release that monitor across source, original Biff HTTP challenges,
+   and evaluator callbacks. These callbacks may synchronously request this
+   issuer's lifecycle summary from another JVM thread. Competing stop and
+   reinspection cannot interrupt a claimed observation. Failed inspection
+   or assessment publishes :stopping before original physical cleanup and
+   never leaves historical local installation evidence available.
+
    v2307: Startup claims :starting under monitor, but the original checked
    Biff startup and source/HTTP inspection execute outside it. A configured
    original Biff callback may request this issuer's summary on another
@@ -66,7 +75,8 @@
 (def ^:private original-source-check source/assess-original-catalog!)
 (def ^:private original-http-issuer http/issue-configured-checked-http-application!)
 (def ^:private retained-statuses
-  #{:issued :starting :running :stopping :stopped :cleanup-unconfirmed :retrying-cleanup})
+  #{:issued :starting :running :inspecting :assessing
+    :stopping :stopped :cleanup-unconfirmed :retrying-cleanup})
 
 (defn- reject! [reason]
   (throw (ex-info "Selected source is not bound to a current checked Biff HTTP instance."
@@ -427,6 +437,10 @@
                     (locking monitor
                       (when (= :starting @status)
                         (reject! :local-original-start-in-progress))
+                      (when (= :inspecting @status)
+                        (reject! :local-inspection-in-progress))
+                      (when (= :assessing @status)
+                        (reject! :local-assessment-in-progress))
                       (when (= :retrying-cleanup @status)
                         (reject! :local-cleanup-retry-in-progress))
                       (when (= :stopping @status)
@@ -496,41 +510,61 @@
                 {:status outcome
                  :cleanup-retry :one-original-configured-attempt-consumed
                  :authority :none}))
-            (inspect-locked!
-              ([] (inspect-locked! false))
+            (inspect-claimed!
+              ([] (inspect-claimed! false))
               ([startup-owner?]
-               ;; The startup owner may inspect a still-private original
-               ;; instance while :starting. Public inspection and assessment
-               ;; cannot observe that provisional instance or requalify it.
-               (when-not (or (= :running @status)
-                             (and startup-owner? (= :starting @status)))
-                 (reject! :no-current-issued-running-instance))
-              (let [running-system @running
-                    before (checked-source! catalog! http-config
-                                            initial-catalog source-report)
-                    result ((:inspect-generation! issued)
-                            @generation running-system)
-                    observed-routes (check-running! before result @route-ids)
-                    after (checked-source! catalog! http-config
-                                           initial-catalog source-report)]
-                (when-not (and (= before after)
-                               (or (= :running @status)
-                                   (and startup-owner? (= :starting @status)))
-                               (identical? @running running-system)
-                               (or (nil? @route-ids)
-                                   (= @route-ids observed-routes)))
-                  (reject! :source-or-running-instance-drifted-during-inspection))
-                (reset! route-ids observed-routes)
-                (observation after result observed-routes))))
+               ;; Only the startup owner may inspect the original listener
+               ;; while it is still :starting. Public callers first claim
+               ;; :inspecting or :assessing; this helper runs exclusively
+               ;; within those claims, without holding lifecycle monitor.
+               (let [active? (fn []
+                               (if startup-owner?
+                                 (= :starting @status)
+                                 (contains? #{:inspecting :assessing} @status)))]
+                 (when-not (active?)
+                   (reject! :no-current-issued-running-instance))
+                 (let [running-system @running
+                       before (checked-source! catalog! http-config
+                                               initial-catalog source-report)
+                       result ((:inspect-generation! issued)
+                               @generation running-system)
+                       observed-routes (check-running! before result @route-ids)
+                       after (checked-source! catalog! http-config
+                                              initial-catalog source-report)]
+                   (when-not (and (= before after)
+                                  (active?)
+                                  (identical? @running running-system)
+                                  (or (nil? @route-ids)
+                                      (= @route-ids observed-routes)))
+                     (reject! :source-or-running-instance-drifted-during-inspection))
+                   (reset! route-ids observed-routes)
+                   (observation after result observed-routes)))))
+            (retire-failed-observation! []
+              ;; The claiming observation thread owns this transition.
+              ;; Publish :stopping BEFORE any original physical callback.
+              (locking monitor (reset! status :stopping))
+              (try (complete-claimed-stop!)
+                   (catch Throwable _
+                     (locking monitor
+                       (reset! running nil)
+                       (reset! generation nil)
+                       (reset! route-ids nil)
+                       (reset! status :cleanup-unconfirmed)))))
             (inspect-current! []
               (locking monitor
-                (try
-                  (inspect-locked!)
-                  (catch Throwable error
-                    ;; A failed recheck must not leave this wrapper capable
-                    ;; of returning a historical green local observation.
-                    (when (= :running @status) (stop!))
-                    (throw error)))))
+                (when-not (= :running @status)
+                  (reject! :no-current-issued-running-instance))
+                (reset! status :inspecting))
+              (try
+                (let [observed (inspect-claimed!)]
+                  (locking monitor (reset! status :running))
+                  observed)
+                (catch Throwable error
+                  ;; Never reuse a historical green observation after a
+                  ;; failed source/physical recheck. The claiming thread
+                  ;; retires the selected physical instance without monitor.
+                  (retire-failed-observation!)
+                  (throw error))))
             (start-once! [initial-system]
               ;; Publish the one-use :starting claim under monitor. The
               ;; original Biff adapter and fresh HTTP inspections can call
@@ -555,7 +589,7 @@
                   (locking monitor
                     (reset! running system)
                     (reset! generation instance-generation))
-                  (let [observed (inspect-locked! true)]
+                  (let [observed (inspect-claimed! true)]
                     (locking monitor (reset! status :running))
                     observed))
                 (catch Throwable error
@@ -572,13 +606,15 @@
                   (throw error))))
             (assess-current-installation! []
               (locking monitor
-                (try
-                  (when-not (= :running @status)
-                    (reject! :no-current-issued-running-instance))
-                  ;; These observations and the original managed stop are
-                  ;; serialized by this monitor, but the result is NOT a
-                  ;; future liveness lease or permission to activate.
-                  (let [fresh-source! #(checked-source! catalog! http-config
+                (when-not (= :running @status)
+                  (reject! :no-current-issued-running-instance))
+                (reset! status :assessing))
+              (try
+                ;; The provisional :assessing claim prevents any competing
+                ;; lifecycle transition. All callbacks execute OUTSIDE
+                ;; monitor and produce diagnostic-only results, never a
+                ;; liveness lease or release/activation permission.
+                (let [fresh-source! #(checked-source! catalog! http-config
                                                          initial-catalog source-report)
                         source-ok! (fn []
                                      (let [r (fresh-source!)]
@@ -587,7 +623,7 @@
                                        r))
                         discover! (fn []
                                     (source-ok!)
-                                    (inspect-locked!)
+                                    (inspect-claimed!)
                                     (local-inventory local-intent))
                         subject! (fn [phase]
                                    (case phase
@@ -596,7 +632,7 @@
                                                      :claim-id (:claim-id local-intent)
                                                      :subject-id (get-in local-intent
                                                                          [:subjects phase])})
-                                     :installation (do (inspect-locked!)
+                                     :installation (do (inspect-claimed!)
                                                        {:phase phase
                                                         :claim-id (:claim-id local-intent)
                                                         :subject-id (get-in local-intent
@@ -620,7 +656,7 @@
                                             {:status :failed}))
 
                                         (= :installation phase)
-                                        (let [before (inspect-locked!)]
+                                        (let [before (inspect-claimed!)]
                                           (cond
                                             (= id :gesso.release.local/loopback-positive)
                                             (release-local-evidence
@@ -635,7 +671,7 @@
                                                          :generation :system)
                                                   rejected? (original-http-rejects-wrong-identity?
                                                              issued @generation @running kind)
-                                                  after (inspect-locked!)]
+                                                  after (inspect-claimed!)]
                                               (if (and rejected?
                                                        (= (:selected-http-route-ids before)
                                                           (:selected-http-route-ids after))
@@ -675,8 +711,8 @@
                       (reject! :selected-local-installation-phase-not-qualified))
                     ;; A final fresh local HTTP challenge is necessary after
                     ;; the decision evaluator's callbacks and identity tests.
-                    (let [installed (inspect-locked!)]
-                      {:type local-assessment-type
+                    (let [installed (inspect-claimed!)
+                          report {:type local-assessment-type
                        :version local-assessment-version
                        :status :selected-local-source-and-installation-checks-only
                        :selected-source (:selected-catalog-fingerprint source-report)
@@ -692,13 +728,16 @@
                        :installation-eligibility :not-issued
                        :activation-eligibility :not-issued
                        :completion-claim :not-issued
-                       :runtime-effect-permission :none}))
-                  (catch Throwable error
-                    ;; An unavailable or inconsistent physical/source check
-                    ;; cannot preserve a prior apparent success in this
-                    ;; one-use local wrapper.
-                    (when (= :running @status) (stop!))
-                    (throw error)))))
+                       :runtime-effect-permission :none}]
+                      (locking monitor (reset! status :running))
+                      report))
+                (catch Throwable error
+                  ;; Any failed source, original HTTP or evaluator check
+                  ;; invalidates the prior local observation. The assessment
+                  ;; owner closes the original physical instance outside
+                  ;; monitor, even if its callbacks query our summary.
+                  (retire-failed-observation!)
+                  (throw error))))
             (summary! []
               (locking monitor
                 {:type report-type :version report-version
