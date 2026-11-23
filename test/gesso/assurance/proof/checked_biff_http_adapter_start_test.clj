@@ -1,7 +1,12 @@
 (ns gesso.assurance.proof.checked-biff-http-adapter-start-test
-  "v1782: An independently selected Biff HTTP adapter cannot finish startup
+  "v2317: An independently selected Biff HTTP adapter cannot finish startup
    until its original final-handler probe passes over an actual HTTP socket.
-   On failure its server stop callback runs exactly once."
+   On failure its server stop callback runs exactly once.
+
+   v2317: A stop that arrives during original adapter startup cannot steal
+   the one-use physical cleanup attempt; only the startup owner can roll back
+   a partially opened listener during :failed-cleaning-up. Both adversarial
+   interleavings run with the original real Biff/XTDB listener."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.proof.checked-biff-http-adapter-start :as guarded]
             [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
@@ -17,7 +22,8 @@
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
             HttpResponse$BodyHandlers]
-           [java.time Duration]))
+           [java.time Duration]
+           [java.util.concurrent CountDownLatch ExecutorService TimeUnit]))
 
 (def ^:private prior-ns
   'gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test)
@@ -281,3 +287,131 @@
     (is (= :not-established
            (:selected-adapter-cleanup ((:summary! guarded-module)))))
     (close! s nil)))
+
+(deftest racing-external-stop-cannot-consume-provisional-startup-cleanup
+  ;; The original adapter's Biff start callback is paused BEFORE it opens its
+  ;; real listener. An external stop on a foreign target used to consume the
+  ;; only physical cleanup attempt and overwrite :starting with :stopped.
+  ;; That let startup open a listener it could no longer close on failure.
+  (let [s (scenario :honest)
+        raw (:raw s)
+        physical-calls (atom 0)
+        start-entered (CountDownLatch. 1)
+        start-release (CountDownLatch. 1)
+        wrapped (assoc raw
+                       :biff.core/start
+                       (fn [system]
+                         (.countDown start-entered)
+                         (when-not (.await start-release 8 TimeUnit/SECONDS)
+                           (throw (ex-info "Start latch never released" {})))
+                         ((:biff.core/start raw) system))
+                       :biff.core/stop
+                       (fn [system]
+                         (swap! physical-calls inc)
+                         ((:biff.core/stop raw) system)))
+        issued (guarded/issue-checked-http-adapter-start!
+                (:probe s) wrapped
+                (fn [_] (str "http://127.0.0.1:"
+                             (:port @(:server-state s)))))
+        cfg (assoc s :guarded issued
+                   :modules [app/application-handler-module
+                             (:module (:adopted s))
+                             (:module (:probe s))
+                             (:module issued)])
+        starter (atom nil)]
+    (try
+      (reset! starter (future (try (start! cfg)
+                                   (catch Throwable error error))))
+      (is (.await start-entered 4000 TimeUnit/MILLISECONDS)
+          "Original start must claim lifecycle before opening listener")
+      (is (= :starting (:status ((:summary! issued)))))
+      (is (= :adapter-start-in-progress
+             (deref (future (reason #((:biff.core/stop (:module issued))
+                                     {:foreign :shutdown-target})))
+                    1500 ::competing-stop-timeout))
+          "Concurrent stop rejects rather than consuming provisional startup")
+      (is (zero? @physical-calls))
+      (is (zero? (:original-stop-attempts ((:summary! issued)))))
+      (is (= :not-attempted
+             (:selected-adapter-cleanup ((:summary! issued)))))
+      (is (not (realized? @starter)))
+      (.countDown start-release)
+      (let [out (deref @starter 9000 ::start-timeout)]
+        (is (map? out)
+            "Original real start must finish with the stop capability intact")
+        (is (= :verified-selected-adapter-start
+               (:status ((:summary! issued)))))
+        (is (some? @(:server-state s)))
+        ((:biff.core/stop (:module issued)) out)
+        (is (= 1 @physical-calls))
+        (is (.isShutdown ^ExecutorService
+                          (:executor @(:server-state s)))
+            "Only the legitimate stop should terminate the real executor")
+        (is (= :stopped (:status ((:summary! issued))))))
+      (finally
+        (.countDown start-release)
+        (when @starter (deref @starter 10000 nil))
+        (try ((:biff.core/stop raw) {}) (catch Throwable _ nil))))))
+
+(deftest racing-external-stop-cannot-steal-failed-start-rollback
+  ;; The original start opens a real listener and then throws. Its own
+  ;; cleanup callback pauses before closing the listener, while an external
+  ;; stop attempts to replace the startup-owned :failed-cleaning-up state.
+  (let [s (scenario :honest)
+        raw (:raw s)
+        physical-calls (atom 0)
+        cleanup-entered (CountDownLatch. 1)
+        cleanup-release (CountDownLatch. 1)
+        wrapped (assoc raw
+                       :biff.core/start
+                       (fn [system]
+                         ((:biff.core/start raw) system)
+                         (throw (ex-info "Original Biff start failed after listening"
+                                         {:reason :original-start-failed-after-listening})))
+                       :biff.core/stop
+                       (fn [system]
+                         (swap! physical-calls inc)
+                         (.countDown cleanup-entered)
+                         (when-not (.await cleanup-release 8 TimeUnit/SECONDS)
+                           (throw (ex-info "Stop cleanup never released" {})))
+                         ((:biff.core/stop raw) system)))
+        issued (guarded/issue-checked-http-adapter-start!
+                (:probe s) wrapped
+                (fn [_] (str "http://127.0.0.1:"
+                             (:port @(:server-state s)))))
+        cfg (assoc s :guarded issued
+                   :modules [app/application-handler-module
+                             (:module (:adopted s))
+                             (:module (:probe s))
+                             (:module issued)])
+        starter (atom nil)]
+    (try
+      (reset! starter (future (try (start! cfg)
+                                   (catch Throwable error error))))
+      (is (.await cleanup-entered 5000 TimeUnit/MILLISECONDS)
+          "Startup owner begins physical rollback after opening listener")
+      (is (= :failed-cleaning-up (:status ((:summary! issued)))))
+      (is (= :in-progress (:selected-adapter-cleanup ((:summary! issued)))))
+      (is (= 1 @physical-calls))
+      (is (= :adapter-start-cleanup-in-progress
+             (deref (future (reason #((:biff.core/stop (:module issued))
+                                     {:foreign :caller-target})))
+                    1500 ::competing-stop-timeout))
+          "Concurrent stop must not steal failed startup's rollback claim")
+      (is (= 1 @physical-calls))
+      (is (= :failed-cleaning-up (:status ((:summary! issued)))))
+      (.countDown cleanup-release)
+      (let [result (deref @starter 9000 ::failed-start-timeout)]
+        (is (= :original-start-failed-after-listening
+               (when (instance? clojure.lang.ExceptionInfo result)
+                 (:reason (ex-data result)))))
+        (is (= :failed-and-cleaned-up
+               (:status ((:summary! issued)))))
+        (is (= 1 @physical-calls))
+        (is (.isShutdown ^ExecutorService
+                         (:executor @(:server-state s)))
+            "Startup owner actually shut down the original Biff executor"))
+      (finally
+        (.countDown cleanup-release)
+        (when @starter (deref @starter 10000 nil))
+        (try ((:biff.core/stop raw) {}) (catch Throwable _ nil))))))
