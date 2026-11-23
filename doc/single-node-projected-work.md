@@ -1,12 +1,30 @@
-# Gesso R5.1 single-node closure estimate — v2257
+# Gesso R5.1 single-node closure estimate — v2319
 
-Re-estimated November 22, 2026, from the accepted Gessoplan R5.1 Stage 1–17 roadmap (excluding HumanHelp Stage 12 and multi-node Stage 18), Part XI completion scopes, prior v2209/v2229 ledgers, and the clean Gesso `typed-clojure` source at `aabe02630f6e831ea522afb9434ee9a8509cc55e` (v2257). The v2257 archive and GitHub branch match.
+Re-estimated November 23, 2026, against the accepted Gessoplan R5.1
+Stage 1–17 roadmap and Part XI completion scopes, the prior v2257 ledger,
+and the clean Gesso `typed-clojure` source at `4996190cecaefc79ef28693cbd4f7c5f26113e6a` (v2319).
+The uploaded archive and GitHub branch match. Published as the
+documentation-only revision v2320.
 
-**Scope:** Framework-owned single-node construction, operations, Live, browser, certification, independent formal theorem/selected formal transfer, and release. No HumanHelp product development or multi-node operation. A Gesso-owned canonical proving app is *not* a substitute for the HumanHelp-specific normative gate.
+**Scope:** Framework-owned single-node construction, authoritative
+operations, Live, browser, compositional certification, independent
+formal soundness/selected S0–S4 transfer, and release. HumanHelp Stage
+12 and multi-node Stage 18 are **excluded, not completed**. A Gesso-owned
+proving example cannot substitute for HumanHelp-specific acceptance.
 
-**Interpretation:** These are *remaining closure work packages*, not claims that their modules do not exist. The revision allocations are subjective planning estimates, not measured tickets or formal guarantees. A revision is a small atomic, tested, directly committed GitHub change; no one-to-one mapping from required source obligations to revisions is possible.
+**Interpretation:** The packages below represent *remaining acceptance
+work*, not absent modules or earned progress points. A closed package
+requires its original requirement, an enforcing physical boundary,
+positive/adversarial evidence, a current applicability statement and a
+qualified completion decision. Additional tests alone do not close it.
 
-**Budget:** 62 still-open proposed packages, central **464 additional revisions from v2257** (down from 470 remaining at v2229 and 483 at v2209). This is a cost-of-remaining-obligations estimate, **not** subtraction of 31 intervening commits. No whole package or R5.1 implementation milestone newly qualifies for closure. A favorable case remains roughly 240; the credible planning range remains roughly 300–800, and independent proof/transfer can exceed that. An unconditional universal source-to-production theorem is not necessarily feasible at any finite revision budget.
+**Current budget:** **62 still-open packages; zero newly qualified
+closed.** Central **452 additional revisions from v2319**, compared
+with 464 at v2257. An optimistic research/implementation case remains
+around 240; the credible broad planning range remains roughly 300–800,
+with independent proof/production transfer possibly exceeding it or
+requiring revised assumptions. This is a planning judgment, not a
+measured velocity or finite-completion guarantee.
 
 ## Maintenance and re-estimation policy
 
@@ -44,6 +62,11 @@ forecast is measured from v2229, not from the documentation commit.
 **Re-estimation:** v2258 revises this document from the **v2257 source
 baseline**. The planning commit itself does not qualify a new feature or gate,
 and the 464-revision estimate is measured from v2257, not v2258.
+
+**Re-estimation:** v2320 revises this document from the verified
+**v2319 source baseline**. The documentation-only commit closes no new
+framework work package; the 452-revision estimate is measured from
+v2319, not from v2320.
 
 ## Re-estimation ledger — v2229 source baseline (published v2230)
 
@@ -189,6 +212,89 @@ is an accounting of *supported evidence*, not a newly weakened completion
 claim, and it does not pronounce HumanHelp complete by substituting a
 Gesso-owned test fixture.
 
+## Re-estimation ledger — v2319 source baseline (published v2320)
+
+**Evidence interval:** v2258–v2319 is **62 commits** after the v2257
+baseline, comprising one planning-only revision (v2258) and 61 source
+or test commits. The complete baseline-to-head diff touches 24 files,
+with 8,351 insertions and 128 deletions including the prior planning
+edit. Commit count and lines changed are **not** evidence of completed
+original requirements.
+
+**Qualified advances, with explicit boundaries:**
+
+- **v2259–v2266:** Selected release-phase diagnostics now evaluate an
+  original operation catalog, including source omissions and a selected
+  physical Biff installation. This does **not** independently inventory
+  all application capabilities or grant release/activation authority.
+- **v2267–v2279:** Actual selected Biff HTTP traffic can be fenced by
+  a host-local Ring mechanism; SSE/continuation leases can retain
+  physical work through known Aleph/Netty endpoints. A Netty write
+  completion is **not** receipt or browser adoption, and an opt-in
+  mechanism is not proof of its installation in every application.
+- **v2280–v2295:** Failed stop and bounded retry remain visible;
+  selected private assurance probes can no longer bypass a retired
+  fence. Real HTTP and adversarial tests exercise selected original
+  startup, probe draining, stop and failed-cleanup transitions.
+- **v2296–v2319:** Real deadlocks, lock-order problems and races in
+  original Biff/host, installed-source, guarded-adapter and consumption
+  probe paths were repaired and permanently tested. In particular,
+  v2319 verifies that a racing stop cannot overwrite the original
+  consumption probe's provisional `:starting` ownership. This does not
+  prove general deadlock freedom, comprehensive resource bounds or
+  fault-free recovery for unregistered work.
+
+**Exact-head CI evidence:** At `4996190cecae`, GitHub Actions shows
+[Typed Clojure assurance](https://github.com/michaelmrose/gesso/actions/runs/45284438539)
+and [Ansatz proof regression](https://github.com/michaelmrose/gesso/actions/runs/45284438558)
+completed successfully. This review did not execute a complete local
+Ygg, JVM, CLJS, Chromium/HTMX/XTDB, real Aleph, load, security or
+deployment suite. The four exact-v2257 selected CI lanes described
+earlier are *historical*, not fresh exact-v2319 results.
+
+**Still open:** One original source-to-enforcing Biff handler-to-all
+authorized XTDB writers-to-commit-bound Live publication-to-current
+subscriber-to-served browser-adopted result has not been independently
+qualified. Four phase diagnostics do not issue production release
+admission; selected HTTP/transport tests do not establish whole
+deployment inventories, true rollback, rolling browser generations
+or all host producers. Independent S0/S1 soundness and selected S2–S4
+production correspondence remain unproved. Neither HumanHelp nor
+multi-node completion is claimed here.
+
+**Package accounting:** All **62 IDs remain open**, with no new
+package, no newly closed packet and no expansion of the accepted
+requirements denominator. The estimates below adjust costs, *not*
+the definition of acceptance:
+
+| Package | Remaining at v2257 → v2319 | Evidence and residual gap |
+|---|---:|---|
+| #09 host lifecycle | 3 → 2 | Actual selected Biff startup/stop, retry and concurrency safety; full producer/provider termination remains open |
+| #31 installed Biff source | 8 → 6 | Source-pinned HTTP installation and fence; all deployed routes/writers unproven |
+| #34 installed canonical acceptance | 12 → 11 | Stronger physical negative cases, not an end-to-end source→browser certificate |
+| #35 release decisions | 10 → 7 | Four selected phase diagnostics; release authority explicitly not issued |
+| #36 source/build reuse | 12 → 11 | Original selected source binding, not full build/cache/proof provenance |
+| #37 activation/rollback | 12 → 10 | Selected traffic activation and failed-stop refusal, not general rollback |
+| #39 retirement/completion | 12 → 10 | Continuation leases and tested retirement; whole release completion open |
+| All other 55 | unchanged | No additional complete accepted evidence supports reducing costs |
+| **Total** | **464 → 452** | **12 fewer estimated revisions after 62 commits; zero packets closed** |
+
+Stage 4 changes **14 → 13**, Stage 10 **44 → 41**, Stage 11
+**58 → 50**; all other stages are unchanged. Track O changes
+**124 → 121**, Q **90 → 81**, while C stays **146** and F
+**104**. The updated cumulative profiles are operational/release
+**202**, compositional **348**, and selected independent formal
+frontier **452**.
+
+**Calibration:** The earlier illustration v2257 + 464 = v2721
+becomes v2319 + 452 = **v2771**, *50 revision numbers later*
+despite useful physical safety work. This is a warning against using
+elapsed revisions to assert closure, not a delivery target or reason
+to weaken any R5.1 gate. Prioritize a selected joined installed
+source→operation→XTDB→publication→authorized browser path and
+predeclared release acceptance over indefinitely expanding adjacent
+shutdown and transport wrappers.
+
 ## Upcoming single-node work — recommended execution order
 
 This is an **ordered working hypothesis**, not permission to skip other
@@ -206,10 +312,11 @@ owner-requested estimation, not after every commit.
 | 5 | #35–#39, #59–#62 | Create a single-node **predeclared release decision and artifact/handler gate**, with failed activation, genuine rollback, directional compatibility, whole selected suite and load/security envelopes |
 | Parallel | #03–#07, #40–#58 | Advance Typed Clojure, source-derived certification and **independent Ansatz S0–S4** only against still-open exact proof/transfer obligations. Positive examples or bounded sample checks cannot be promoted to unconditional soundness |
 
-**Near-term stopping rule:** v2231–v2257 has substantially strengthened the
-physical SSE/host edge. **Do not continue indefinitely through neighboring
-transport wrappers** unless a real observed safety defect requires a fix or
-a predeclared gap is actually being closed. Prioritize a complete selected
+**Near-term stopping rule:** v2231–v2319 has strengthened the selected
+physical SSE/host/release boundaries, including concrete concurrency
+repairs. **Do not continue indefinitely through neighboring transport
+and shutdown wrappers** unless a reproduced defect requires the fix or a
+predeclared original acceptance gap is actually being closed. Prioritize a complete selected
 original-source-to-Biff/XTDB-to-publication-to-authorized-browser path,
 including positive and adversarial evidence and the independent writer/
 capability denominator. Keep incorporated, attempted, acknowledged,
@@ -222,29 +329,29 @@ observed and browser-adopted outcomes distinct.
 | 1 | Source ownership | 2 | 6 |
 | 2 | Typed rule semantics | 3 | 12 |
 | 3 | Propositional proof checking and induction | 2 | 10 |
-| 4 | Biff/host context | 3 | 14 |
+| 4 | Biff/host context | 3 | 13 |
 | 5 | Authoritative operations | 3 | 17 |
 | 6 | Physical XTDB mediation | 5 | 35 |
 | 7 | Choreo and projection | 3 | 22 |
 | 8 | Browser effects and continuity | 4 | 28 |
 | 9 | Live publication and recovery | 4 | 15 |
-| 10 | Application assembly and installed closure | 5 | 44 |
-| 11 | Release integrity/compatibility | 5 | 58 |
+| 10 | Application assembly and installed closure | 5 | 41 |
+| 11 | Release integrity/compatibility | 5 | 50 |
 | 13 | Source-derived certification | 4 | 40 |
 | 14 | Mutation and negative coverage | 3 | 22 |
 | 15 | Counterexamples and explainability | 3 | 17 |
 | 16 | Independent proof-kernel soundness | 4 | 39 |
 | 17 | Formal-to-production transfer | 5 | 65 |
 | Cross | Cross-stage verification and packaging | 4 | 20 |
-| **Total** |  | **62** | **464** |
+| **Total** |  | **62** | **452** |
 
 ## Cost by practical track
 
 | Track | Central | Interpretation |
 |---|---:|---|
-| O — Operational/semantic core | 124 | Finish actual source→host→command→browser/Live runtime contract |
+| O — Operational/semantic core | 121 | Finish actual source→host→command→browser/Live runtime contract |
 | C — Compositional assurance | 146 | Source completeness, writer coverage, conditional certification, negative conformance |
-| Q — Release/integration | 90 | Selected release qualification, activation/compatibility, whole-suite test and packaging |
+| Q — Release/integration | 81 | Selected release qualification, activation/compatibility, whole-suite test and packaging |
 | F — Independent formal transfer | 104 | S0/S1 theorem and selected S2–S4 production-applicability frontier |
 
 ## Source-based stage evidence and remaining packets
@@ -253,7 +360,7 @@ observed and browser-adopted outcomes distinct.
 
 Existing evidence: Source-owned semantic identities are extensively modeled; independent required product denominator not complete for generic release.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 01 | Freeze original semantic identities and a concrete framework-owned requirement inventory | O | 3 | partial |
 | 02 | Trace actor, target, relationship, source owner and operation IDs through consumers | C | 3 | partial |
@@ -264,7 +371,7 @@ Existing evidence: Source-owned semantic identities are extensively modeled; ind
 
 Existing evidence: Closed rule language, evaluator, typed semantics and negative tests exist; complete supported use-site scope remains qualified.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 03 | Close rule-reader, absence/nil/false and ordered-evaluation use cases | O | 4 | substantial base |
 | 04 | Qualify use-site knowledge, authorization and dynamic premises | C | 4 | partial |
@@ -276,7 +383,7 @@ Existing evidence: Closed rule language, evaluator, typed semantics and negative
 
 Existing evidence: Production seven-rule kernel and conditional checkers exist; universal independent soundness explicitly open (Stage 16).
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 06 | Close limited inference/induction checker contract and unsupported outcomes | C | 5 | substantial base |
 | 07 | Bind issued proof conclusions, open premises and source-derived dependency inventory | C | 5 | partial |
@@ -285,12 +392,12 @@ Existing evidence: Production seven-rule kernel and conditional checkers exist; 
 
 ### Stage 4 — Biff/host context
 
-Existing evidence: Checked Biff hosts/routes and v2214–v2218 worker restart. v2245–v2257 adds physical listener lifetime tracking, real Biff-backed authorized SSE sessions, concrete Netty completion and bounded cleanup/reconciliation under HTTP/1 peer failure. Aleph is opt-in; complete installed-host adoption, other producers and termination under load remain partial.
+Existing evidence: Checked Biff hosts/routes, opt-in physical Aleph HTTP/1 and bounded SSE cleanup. v2267–v2319 adds selected original Biff HTTP traffic fencing, private-probe closure, failed-stop/retry qualification and permanent deadlock/race tests. Complete installed-host adoption, other producers and load bounds remain open.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 08 | Pin actual Biff/Ring/Aleph/XTDB/CLJS provider profiles and host constraints | O | 5 | partial |
-| 09 | Close host startup, lifecycle, termination and failed-compensation behavior | O | 3 | advanced partial: physical JDK/Aleph HTTP/1 listener/route recovery; not all host continuations |
+| 09 | Close host startup, lifecycle, termination and failed-compensation behavior | O | 2 | advanced partial: original Biff startup/stop, retry and race controls; whole host closure not established |
 | 10 | Prove correct request principal/context forwarding and host/handler adoption paths | O | 6 | partial |
 
 **Definition of complete:** All selected profile gates represented by these packets have current applicable evidence; negative tests demonstrate refusal at the enforcing boundary; residual assumptions are explicitly qualified, rather than promoted to proven.
@@ -299,7 +406,7 @@ Existing evidence: Checked Biff hosts/routes and v2214–v2218 worker restart. v
 
 Existing evidence: Command, certified-plan, outcome and recovery modules exist; full source-to-authority adoption remains partial.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 11 | Close the public operation catalog and source-to-command identity | O | 6 | partial |
 | 12 | Complete command-unknown recovery, deduplication and settlement semantics | O | 5 | partial |
@@ -311,7 +418,7 @@ Existing evidence: Command, certified-plan, outcome and recovery modules exist; 
 
 Existing evidence: Numerous physical XTDB gateway tests and correspondence modules; actual installed writer/initializer exhaustiveness and universal refinement remain open.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 14 | Connect one original declared operation to the exact immutable one-shot XTDB submission | O | 7 | substantial base |
 | 15 | Qualify multi-document atomic guards, prestate, poststate and full write frame | O | 8 | partial |
@@ -325,7 +432,7 @@ Existing evidence: Numerous physical XTDB gateway tests and correspondence modul
 
 Existing evidence: Executable Choreo semantics, projection and JVM/Node parity tests; whole real-application coverage/correspondence partial.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 19 | Complete Choreo global admission and distributed knowledge/premise checks | O | 7 | substantial base |
 | 20 | Establish same-subject global-to-role projection/trace correspondence | C | 8 | partial |
@@ -337,7 +444,7 @@ Existing evidence: Executable Choreo semantics, projection and JVM/Node parity t
 
 Existing evidence: Large adapter/CLJS/browser infrastructure and real Chromium convergence, extended through v2218–v2221 Biff recovery, late-interest and reconnect scenarios; general shell effects/served-generation correspondence remains partial.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 22 | Close pure adapter event/effect/continuity semantics for chosen canonical flow | O | 8 | substantial base |
 | 23 | Enforce shell target, generation and last-effect permissions on real browser paths | O | 7 | partial |
@@ -350,7 +457,7 @@ Existing evidence: Large adapter/CLJS/browser infrastructure and real Chromium c
 
 Existing evidence: Durable outbox/receipt/worker audits, real Chromium restart/reconnect tests (v2211–v2225), bounded source diagnostics, coalescing, pending puts and frame writes (v2226–v2229). v2231–v2257 adds active-consumer caps, HTTP capacity refusal, source-release recovery, bounded scheduled retries, concrete JDK listener and opt-in real Aleph HTTP/1 physical disconnect/Netty completion/healthy-peer recovery. The exact-head four-lane CI runs passed. This does **not** establish original mutation/publication completeness, authorized initial acquisition, whole application read permissions, physical HTTP/2, a universal load envelope or exact browser adoption for the same subject.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 26 | Prove commit-bound publication intent is captured for every selected mutation | O | 6 | substantial base |
 | 27 | Complete outbox uncertainty/receipt reconciliation and supported lease-reclaim races | O | 4 | advanced partial: receipt, lease, worker, cold-host recovery evidence |
@@ -361,29 +468,29 @@ Existing evidence: Durable outbox/receipt/worker audits, real Chromium restart/r
 
 ### Stage 10 — Application assembly and installed closure
 
-Existing evidence: Application preflight and original-source checks extensive; cannot infer that every deployed route, writer and provider is covered.
+Existing evidence: Extensive application preflight now includes selected original-catalog rechecking, Biff HTTP installation, final-handler physical liveness and a selected traffic fence. These do not independently inventory all deployed routes, writers, providers and browser generations.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 30 | Inventory independently required app operations, routes and protected capabilities | O | 8 | partial |
-| 31 | Close actual installed Biff handler/route/executor/source adoption joins | O | 8 | partial |
+| 31 | Close actual installed Biff handler/route/executor/source adoption joins | O | 6 | advanced partial: selected installed original Biff HTTP and fence; whole application inventory open |
 | 32 | Bind rendered affordances, generated browser assets and Live requirements to originals | C | 8 | partial |
 | 33 | Audit all protected writers, initializers, providers and unchecked escape paths | C | 8 | open |
-| 34 | Demonstrate complete positive/negative installed canonical application acceptance | Q | 12 | open |
+| 34 | Demonstrate complete positive/negative installed canonical application acceptance | Q | 11 | partial: selected real HTTP adversarial controls; whole canonical acceptance open |
 
 **Definition of complete:** All selected profile gates represented by these packets have current applicable evidence; negative tests demonstrate refusal at the enforcing boundary; residual assumptions are explicitly qualified, rather than promoted to proven.
 
 ### Stage 11 — Release integrity/compatibility
 
-Existing evidence: Source tree has artifact/host checks but no comparable complete release decision, rolling-compatibility and physical activation system.
+Existing evidence: Selected four-phase source-release diagnostics, catalog omission tests and physical Biff traffic-fence/retirement machinery exist. Production release authority, genuine rollback, directional old/new compatibility and complete release-record issuance remain open.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
-| 35 | Implement exact selected release intent, four decisions and mandatory gate ledger | Q | 10 | early |
-| 36 | Bind current source/build/issuer/cache invalidation and proof-evidence reuse | Q | 12 | early |
-| 37 | Implement physical install, activation, failed activation and checked rollback | Q | 12 | early |
+| 35 | Implement exact selected release intent, four decisions and mandatory gate ledger | Q | 7 | partial: source-selected four-phase diagnostics; no release credential issued |
+| 36 | Bind current source/build/issuer/cache invalidation and proof-evidence reuse | Q | 11 | partial: source-pinned selected issuer; complete build and proof reuse open |
+| 37 | Implement physical install, activation, failed activation and checked rollback | Q | 10 | partial: selected fence activation and failed-stop refusal; genuine rollback open |
 | 38 | Qualify directional old/new compatibility and active client/command generations | Q | 12 | early |
-| 39 | Qualify continuation, asset retention, retirement and release completion record | Q | 12 | early |
+| 39 | Qualify continuation, asset retention, retirement and release completion record | Q | 10 | partial: selected continuation and release retirement; full completion record open |
 
 **Definition of complete:** All selected profile gates represented by these packets have current applicable evidence; negative tests demonstrate refusal at the enforcing boundary; residual assumptions are explicitly qualified, rather than promoted to proven.
 
@@ -391,7 +498,7 @@ Existing evidence: Source tree has artifact/host checks but no comparable comple
 
 Existing evidence: Many conditional proof and source-derived reports; application assurance report explicitly marks full certification and physical writer/HTMX correspondence unestablished.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 40 | Close original source-derived operation/obligation/certification catalog | C | 8 | partial |
 | 41 | Bind proof checker, premises and issuer to current specific installed subjects | C | 10 | partial |
@@ -404,7 +511,7 @@ Existing evidence: Many conditional proof and source-derived reports; applicatio
 
 Existing evidence: Large negative regression coverage in selected domains; independent mutation-corpus completeness and first-effect refusal not system-wide.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 44 | Freeze the generic per-boundary mutation corpus and valid control cases | C | 7 | partial |
 | 45 | Verify negative cases fail before forbidden physical effects across boundaries | C | 7 | partial |
@@ -416,7 +523,7 @@ Existing evidence: Large negative regression coverage in selected domains; indep
 
 Existing evidence: Diagnostic/counterexample interfaces exist; current complete source repair and evidence requalification are not demonstrated.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 47 | Derive source-relative explanations from actual authoritative ledgers | C | 5 | partial |
 | 48 | Bind model/checker counterexamples to original-source locations and evidence | C | 6 | partial |
@@ -428,7 +535,7 @@ Existing evidence: Diagnostic/counterexample interfaces exist; current complete 
 
 Existing evidence: 15 Ansatz pilot namespaces with passing CI; not equivalent to universally quantified independent S0/S1 theorem or production-checker soundness.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 50 | Obtain actual independently kernel-checked S0 rule-schema soundness theorem | F | 10 | research |
 | 51 | Prove S1 arbitrary finite valid derivation with open premises, not samples | F | 12 | research |
@@ -441,7 +548,7 @@ Existing evidence: 15 Ansatz pilot namespaces with passing CI; not equivalent to
 
 Existing evidence: Many bounded physical/semantic witness modules; separately justified production S2/S3/S4 transfer proof remains open.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
 | 54 | Qualify S2 production parser, validator, normalizer and checker correspondence | F | 12 | research |
 | 55 | Qualify S3 typed atom semantics and actual reader/use-site correspondence | F | 13 | research |
@@ -453,11 +560,11 @@ Existing evidence: Many bounded physical/semantic witness modules; separately ju
 
 ### Cross-stage — Cross-stage verification and packaging
 
-Existing evidence: Four distinct selected GitHub Actions workflows green at the **exact v2257 head**: Typed Clojure, Ansatz proof regression, strict Chromium/HTMX/XTDB outbox and the new real Aleph HTTP/1 qualification. These are not a single predeclared full JVM/CLJS/formal/release/deployment certificate.
+Existing evidence: Two exact-v2319 GitHub Actions workflows, Typed Clojure and Ansatz, passed. The four exact-v2257 selected lanes are historical; there is no verified complete current combined JVM/CLJS/browser/XTDB/Aleph/formal/release/deployment certificate.
 
-| # | Work package to close | Track | Estimated revisions | Status at v2257 |
+| # | Work package to close | Track | Estimated revisions | Status at v2319 |
 |---:|---|:---:|---:|---|
-| 59 | Add predeclared full-suite JVM/CLJS/browser/XTDB/restart coverage with clean exits | Q | 4 | partial: four exact-head selected CI lanes; full denominator still open |
+| 59 | Add predeclared full-suite JVM/CLJS/browser/XTDB/restart coverage with clean exits | Q | 4 | partial: two exact-v2319 CI lanes; other selected suites not requalified at head |
 | 60 | Run reproducible load/fault/security bounds and resource limits for selected profile | Q | 6 | early |
 | 61 | Write runnable canonical example, supported boundaries and versioned integration docs | Q | 5 | partial |
 | 62 | Stabilize dependency/toolchain versions, compatibility checks and release cut | Q | 5 | early |
@@ -466,7 +573,7 @@ Existing evidence: Four distinct selected GitHub Actions workflows green at the 
 
 ## Forecasting restrictions
 
-1. One revision here means a tested, coherent commit, **not** a guaranteed fixed unit of acceptance work. Historical v2166–v2209: 43 revisions, 34 changed files, 4,629 added source/test lines. v2210–v2229: 20 commits including one planning-only commit; 22 changed files and 3,996 added lines (including planning). v2230–v2257: **31 commits**, of which v2230 was planning-only, across **25 changed files, 6,128 added / 71 deleted lines**. Some commits reuse a `v2252` or `v2256` label. No R5.1 release or independent formal-completion claim follows from raw code/commit volume.
+1. One revision here means a tested, coherent commit, **not** a guaranteed fixed unit of acceptance work. Historical v2166–v2209: 43 revisions, 34 changed files, 4,629 added source/test lines. v2210–v2229: 20 commits including one planning-only commit; 22 changed files and 3,996 added lines (including planning). v2230–v2257: **31 commits**, of which v2230 was planning-only, across **25 changed files, 6,128 added / 71 deleted lines**. v2258–v2319: **62 commits**, including one planning-only, across **24 changed files, 8,351 added / 128 deleted lines**. Some earlier commits reuse a `v2252` or `v2256` label. No R5.1 release or independent formal-completion claim follows from raw code/commit volume.
 2. These 62 packets are an expert decomposition, *not* the original requirement denominator. R5.1 explicitly forbids replacing required original obligations with a generated closed subset.
 3. The practical operational release under a narrower predeclared conditional assurance profile may be achieved substantially earlier than the full reusable formal-completion profile. The totals should not be mistaken for the schedule of a critical path; parallel development is possible.
 4. Research uncertainty is not Gaussian and is not a strict upper bound. Especially S2/S3/S4 and general physical refinement could demand a changed technical approach. If a theorem is impossible under the selected implementation assumptions, it is not an additional fixed number of commits.
@@ -498,11 +605,11 @@ These gates are *included inside* the stage packets above; they are not 16 extra
 
 ## Incremental planning profiles
 
-| Profile | Work tracks counted | Central remaining effort from v2257 | Limitation |
+| Profile | Work tracks counted | Central remaining effort from v2319 | Limitation |
 |---|---|---:|---|
-| Qualified framework-owned single-node operational/release profile | O + Q | **214** | Declares accepted bounded assumptions; not the original HumanHelp operational milestone |
-| Same profile with reusable compositional certification | O + Q + C | **360** | A framework-owned Claim-like witness cannot fulfill R5.1's real HumanHelp Claim pilot |
-| Same plus selected independent S0–S4 formal frontier | O + Q + C + F | **464** | Source-to-production universal proof beyond a declared supported subset may remain open |
+| Qualified framework-owned single-node operational/release profile | O + Q | **202** | Declares accepted bounded assumptions; not the original HumanHelp operational milestone |
+| Same profile with reusable compositional certification | O + Q + C | **348** | A framework-owned Claim-like witness cannot fulfill R5.1's real HumanHelp Claim pilot |
+| Same plus selected independent S0–S4 formal frontier | O + Q + C + F | **452** | Source-to-production universal proof beyond a declared supported subset may remain open |
 
 These are cumulative *effort budgets*, not serial implementation waves; results can be reused and tracks may be developed concurrently. Stage 11's rolling compatibility applies to old/new live browser or host generations even in a one-node deployment; general multi-node routing remains out of scope.
 
@@ -521,9 +628,24 @@ These are cumulative *effort budgets*, not serial implementation waves; results 
 | v2210 | v2209 | 62 | 483 | Initial single-node closure estimate |
 | v2230 | v2229 | 62 | 470 | Revised selected Stage 4/8/9 and cross-test costs after real outbox/Live convergence work; none fully closed |
 | v2258 | v2257 | 62 | 464 | Real source/SSE capacity and HTTP/1 listener-disconnect/reconciliation evidence reduced #09/#28/#29/#59 costs; none fully closed |
+| v2320 | v2319 | 62 | 452 | Selected release diagnostics, installed Biff traffic fence and original-host concurrency regressions reduced seven packet costs; no gate fully closed |
 
 ## Revision-number projection and calibration
 
-The **current** additive center **464 from v2257** gives an arithmetic illustration of **v2721** (v2257 + 464), **not** a promised delivery revision. A favorable case around **240** from this baseline would be ~v2497; a planning case of **300–800** spans ~v2557–v3057. Independent proof/transfer may extend beyond that or require a revised claim profile. The earlier v2229 + 470 forecast was v2699, and the original v2209 + 483 forecast was v2692. The fact that the arithmetic center moved outward while important physical safety tests passed illustrates why commit counts must never be used as closure denominators.
+The **current** additive center **452 from v2319** gives an
+arithmetic illustration of **v2771** (v2319 + 452), not a promised
+delivery revision. A favorable case remains approximately **240**
+additional revisions from the current baseline, and the broad
+planning case roughly **300–800** (arithmetic v2619–v3119). Independent
+soundness/production transfer may exceed this or demand narrower
+explicitly justified assumptions. Earlier arithmetic centers were
+v2209 + 483 = v2692; v2229 + 470 = v2699; v2257 + 464 = v2721.
+The center moves 50 revision numbers later after 62 commits despite
+important safety improvements.
 
-Re-estimation must be conditioned on **closed packets**, not revisions consumed. After 40–60 more substantive commits, record the number of closed packages, current scope, each newly discovered obligation and whether full end-to-end source-to-installation acceptance has become executable. If another 40–60 commits retire no package, reconsider the *granularity and forecast calibration*, not just the remaining numbers.
+At the next owner-requested review, identify closed original gates
+and accepted installed-source-to-production evidence, not simply
+nearby module growth. If another development interval creates
+substantial tested work but retires no packet, reconsider packet
+granularity and estimate calibration rather than mechanically
+subtracting commits or calling a partial predicate a certificate.
