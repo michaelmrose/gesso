@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source
-  "v2305: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
+  "v2307: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
    guarded, physically started Biff HTTP generation.
 
    Join the v2261 ORIGINAL abstract catalog checks to the catalog supplied to
@@ -19,6 +19,13 @@
    the ORIGINAL configured Biff inspector, then recheck the healthy instance.
    Activation and completion remain blocked by unobserved subjects. This is
    a narrower LOCAL qualification, not Stage 11 release eligibility.
+   v2307: Startup claims :starting under monitor, but the original checked
+   Biff startup and source/HTTP inspection execute outside it. A configured
+   original Biff callback may request this issuer's summary on another
+   thread. External stops are refused throughout :starting; the startup
+   owner alone claims failed-start cleanup, and publishes :running only
+   after the final original source/HTTP inspection has passed.
+
    v2305: The one-shot selected-source cleanup retry must also release its
    lifecycle monitor before invoking the original configured Biff retry.
    An original physical retry callback may synchronously consult this
@@ -395,13 +402,31 @@
         route-ids (atom nil)
         local-intent (local-intent source-report
                                    (str "local-http/" (java.util.UUID/randomUUID)))]
-    (letfn [(stop! []
-              ;; Claim a single physical stop under monitor, but NEVER hold
-              ;; that monitor across original-host callbacks. Those callbacks
-              ;; may synchronously query our diagnostic summary on a separate
-              ;; thread while performing physical listener shutdown.
+    (letfn [(complete-claimed-stop! []
+              ;; Only the thread that owns the published :stopping claim
+              ;; invokes original physical cleanup. Never retain monitor
+              ;; during any configured stop callback, even failed startup.
+              (let [result (try ((:stop! issued))
+                                (catch Throwable error
+                                  (when (instance? InterruptedException error)
+                                    (.interrupt (Thread/currentThread)))
+                                  nil))
+                    terminal (if (= :stopped (:status result))
+                               :stopped :cleanup-unconfirmed)]
+                (locking monitor
+                  (reset! running nil)
+                  (reset! generation nil)
+                  (reset! route-ids nil)
+                  (reset! status terminal))
+                {:status terminal :authority :none}))
+            (stop! []
+              ;; An external stop cannot interrupt an original Biff startup
+              ;; in progress. Its initiating thread retains the responsibility
+              ;; to clean up any failed startup, including partial listeners.
               (let [claimed?
                     (locking monitor
+                      (when (= :starting @status)
+                        (reject! :local-original-start-in-progress))
                       (when (= :retrying-cleanup @status)
                         (reject! :local-cleanup-retry-in-progress))
                       (when (= :stopping @status)
@@ -411,24 +436,9 @@
                       (if (= :stopped @status)
                         false
                         (do (reset! status :stopping) true)))]
-                (if-not claimed?
-                  {:status :stopped :authority :none}
-                  (let [result (try ((:stop! issued))
-                                    (catch Throwable error
-                                      (when (instance? InterruptedException error)
-                                        (.interrupt (Thread/currentThread)))
-                                      nil))
-                        stopped? (= :stopped (:status result))
-                        terminal (if stopped? :stopped :cleanup-unconfirmed)]
-                    ;; Retire the physical evidence and publish terminal state
-                    ;; together. A competing transition cannot enter while
-                    ;; :stopping is still visible.
-                    (locking monitor
-                      (reset! running nil)
-                      (reset! generation nil)
-                      (reset! route-ids nil)
-                      (reset! status terminal))
-                    {:status terminal :authority :none}))))
+                (if claimed?
+                  (complete-claimed-stop!)
+                  {:status :stopped :authority :none})))
             (retry-cleanup! []
               ;; Validate source, original issuer and the one-use capability
               ;; under monitor. No original retry callback may run before
@@ -486,9 +496,15 @@
                 {:status outcome
                  :cleanup-retry :one-original-configured-attempt-consumed
                  :authority :none}))
-            (inspect-locked! []
-              (when-not (= :running @status)
-                (reject! :no-current-issued-running-instance))
+            (inspect-locked!
+              ([] (inspect-locked! false))
+              ([startup-owner?]
+               ;; The startup owner may inspect a still-private original
+               ;; instance while :starting. Public inspection and assessment
+               ;; cannot observe that provisional instance or requalify it.
+               (when-not (or (= :running @status)
+                             (and startup-owner? (= :starting @status)))
+                 (reject! :no-current-issued-running-instance))
               (let [running-system @running
                     before (checked-source! catalog! http-config
                                             initial-catalog source-report)
@@ -498,13 +514,14 @@
                     after (checked-source! catalog! http-config
                                            initial-catalog source-report)]
                 (when-not (and (= before after)
-                               (= :running @status)
+                               (or (= :running @status)
+                                   (and startup-owner? (= :starting @status)))
                                (identical? @running running-system)
                                (or (nil? @route-ids)
                                    (= @route-ids observed-routes)))
                   (reject! :source-or-running-instance-drifted-during-inspection))
                 (reset! route-ids observed-routes)
-                (observation after result observed-routes)))
+                (observation after result observed-routes))))
             (inspect-current! []
               (locking monitor
                 (try
@@ -515,26 +532,44 @@
                     (when (= :running @status) (stop!))
                     (throw error)))))
             (start-once! [initial-system]
+              ;; Publish the one-use :starting claim under monitor. The
+              ;; original Biff adapter and fresh HTTP inspections can call
+              ;; into this issuer's diagnostics on another thread, so no
+              ;; lifecycle monitor may be held over those operations.
               (locking monitor
                 (when-not (compare-and-set! status :issued :starting)
-                  (reject! :selected-original-http-start-not-once-only))
-                (try
-                  (checked-source! catalog! http-config initial-catalog
-                                   source-report)
-                  (let [{:keys [system instance-generation report]}
-                        ((:start-once! issued) initial-system)]
-                    (when-not (and (= http/report-type (:type report))
-                                   (= :verified-configured-start (:status report))
-                                   (= :none (:authority report))
-                                   (= :not-issued (:certificate report)))
-                      (reject! :original-checked-http-start-not-established))
+                  (reject! :selected-original-http-start-not-once-only)))
+              (try
+                (checked-source! catalog! http-config initial-catalog
+                                 source-report)
+                (let [{:keys [system instance-generation report]}
+                      ((:start-once! issued) initial-system)]
+                  (when-not (and (= http/report-type (:type report))
+                                 (= :verified-configured-start (:status report))
+                                 (= :none (:authority report))
+                                 (= :not-issued (:certificate report)))
+                    (reject! :original-checked-http-start-not-established))
+                  ;; Keep this original listener PRIVATE until its final
+                  ;; source/HTTP inspection passes. All public stop/inspect
+                  ;; calls reject during :starting.
+                  (locking monitor
                     (reset! running system)
-                    (reset! generation instance-generation)
-                    (reset! status :running)
-                    (inspect-current!))
-                  (catch Throwable error
-                    (stop!)
-                    (throw error)))))
+                    (reset! generation instance-generation))
+                  (let [observed (inspect-locked! true)]
+                    (locking monitor (reset! status :running))
+                    observed))
+                (catch Throwable error
+                  ;; The startup owner, not an external stop racing the
+                  ;; original adapter, exclusively owns failed-start cleanup.
+                  (locking monitor (reset! status :stopping))
+                  (try (complete-claimed-stop!)
+                       (catch Throwable _
+                         (locking monitor
+                           (reset! running nil)
+                           (reset! generation nil)
+                           (reset! route-ids nil)
+                           (reset! status :cleanup-unconfirmed))))
+                  (throw error))))
             (assess-current-installation! []
               (locking monitor
                 (try
