@@ -967,13 +967,11 @@
       (is (= :none (:release-authority ((:stats lease)))))
       (finally (stop!)))))
 
-;; v2278: The original managed Biff/XTDB SSE route executes THROUGH the
-;; actual socket-facing release fence. The route's own admission callback is
-;; bound to the exact per-request fence continuation, while Aleph's installed
-;; outbound observer and original route-cancellation ledger own its release.
-;; An SSE handler return and even one disconnected peer are not sufficient
-;; to retire the surviving session. This is one local HTTP/1 qualification,
-;; not public-ingress completeness, release permission or HTTP/2 coverage.
+;; v2279: Qualify a real failed indexed-source release and its scheduled
+;; recovery through the installed Aleph/SSE fence. A disconnected HTTP client
+;; cannot retire a lease until route-owned cancellation and reconciliation
+;; complete. The unaffected peer retains its real source and fence ownership.
+;; This is local HTTP/1 evidence, not general release authority or HTTP/2.
 (deftest real-aleph-release-fence-managed-sse-disconnect-and-drain-test
   (let [standard ((requiring-resolve
                    'gesso.live.application-preflight.fixture/standard-operations))
@@ -983,10 +981,30 @@
                  'gesso.live.application-preflight.fixture/rendered-operation-button)
                 render :request/claim "/operations/request/claim")
         fixture (requiring-resolve
-                 'gesso.live.application-preflight.fixture/with-surfaced-application)]
-    (fixture
-     {:request-board [:main button]}
-     (fn [{:keys [assembly]}]
+                 'gesso.live.application-preflight.fixture/with-surfaced-application)
+        original-open flow/open-source-flow!
+        release-blocked? (atom true)
+        failed-release-attempts (atom 0)]
+    (with-redefs [flow/open-source-flow!
+                  (fn [src opts]
+                    (let [opened (original-open src opts)]
+                      (if (= "v2278-one" (get-in opts [:subscription :id]))
+                        (let [retained (source/subscribe src (:subscription opts))]
+                          (assoc opened
+                                 :close! (fn []
+                                           ((:close! opened))
+                                           (swap! failed-release-attempts inc)
+                                           (if @release-blocked?
+                                             (throw (ex-info "Injected source release failure"
+                                                             {:test :v2279}))
+                                             (stream/close! retained)))
+                                 :closed? #(and ((:closed? opened))
+                                                (stream/closed? retained))
+                                 :on-closed! #(stream/on-closed retained %)))
+                        opened)))]
+      (fixture
+       {:request-board [:main button]}
+       (fn [{:keys [assembly]}]
        (let [host-start (requiring-resolve 'gesso.live.outbox.host/start!)
              host-stop (requiring-resolve 'gesso.live.outbox.host/stop!)
              app (host-start
@@ -1012,6 +1030,7 @@
                     {:qualify! (constantly true) :drain-timeout-ms 80})
              reconciler (aleph-live/prepare-reconciler!
                          {:max-pending 4 :max-per-step 4})
+             scheduler (atom nil)
              adapter (release-sse-lease/issue!
                       {:fence fence :capture observer
                        :executor pool :reconciler reconciler})
@@ -1084,7 +1103,7 @@
              (let [one (open-client! "one")
                    two (open-client! "two")]
                (is (eventually #(and (= 2 ((:occupied-count route)))
-                                     (= 2 (:subscription-count (source/stats src)))
+                                     (= 3 (:subscription-count (source/stats src)))
                                      (= 2 (:registered ((:stats adapter))))
                                      (= 2 (:retained-continuations
                                            ((:summary! fence)))))))
@@ -1100,11 +1119,34 @@
                    "The surviving route still delivers real SSE frames")
                (.setSoLinger ^java.net.Socket (:socket one) true 0)
                (.close ^java.net.Socket (:socket one))
-               (is (eventually #(and (= 1 ((:occupied-count route)))
+               (is (eventually #(and (pos? @failed-release-attempts)
+                                     (= 1 ((:disconnected-count route)))
+                                     (= 2 ((:occupied-count route)))
+                                     (= 2 (:subscription-count (source/stats src)))
+                                     (= 2 (:retained-continuations
+                                           ((:summary! fence))))))
+                   "A failed physical source release retains route and fence")
+               (reset! scheduler
+                       (recovery/start-scheduled!
+                        route {:poll-ms 20 :min-interval-ms 30
+                               :max-attempts 1 :max-failure-interval-ms 100
+                               :after-step! (:after-step! reconciler)}))
+               (is (eventually #(pos? (:failure-count ((:stats @scheduler)))))
+                   "Scheduled cleanup observes the real source-release error")
+               (source/emit! src {:topic :request :id "v2278-two"
+                                  :change/kind :updated})
+               (is (read-update! (:reader two))
+                   "Failure and retries must not interrupt the healthy peer")
+               (reset! release-blocked? false)
+               (is (eventually #(and (zero? ((:disconnected-count route)))
+                                     (= 1 ((:occupied-count route)))
                                      (= 1 (:subscription-count (source/stats src)))
                                      (= 1 (:retained-continuations
                                            ((:summary! fence))))))
-                   "One original route release finishes only its own lease")
+                   "Physical retry and reconciliation release only the bad lease")
+               (is (pos? (get-in ((:stats @scheduler))
+                                 [:last-physical-outcome :recovered] 0)))
+               (is (pos? (:reconciliation-count ((:stats @scheduler)))))
                (is (= :registered-continuation-drain-timeout
                       (refusal-reason #((:retire! fence) candidate)))
                    "An active SSE peer must block physical retirement")
@@ -1135,12 +1177,15 @@
              (host-stop app)
              (reset! host-stopped? true))
            (finally
+             (reset! release-blocked? false)
              (doseq [socket @sockets]
                (try (.close ^java.net.Socket socket) (catch Throwable _ nil)))
+             (when-let [handle @scheduler]
+               (try ((:stop! handle) 3000) (catch Throwable _ nil)))
              (when-let [live @server]
                (try (.close ^Closeable live) (catch Throwable _ nil)))
              (try ((:close! route)) (catch Throwable _ nil))
              (try ((:close! fence)) (catch Throwable _ nil))
              (.shutdownNow pool)
              (when-not @host-stopped?
-               (try (host-stop app) (catch Throwable _ nil))))))))))
+               (try (host-stop app) (catch Throwable _ nil)))))))))))
