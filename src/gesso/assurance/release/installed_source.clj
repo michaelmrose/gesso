@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source
-  "v2308: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
+  "v2310: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
    guarded, physically started Biff HTTP generation.
 
    Join the v2261 ORIGINAL abstract catalog checks to the catalog supplied to
@@ -19,6 +19,15 @@
    the ORIGINAL configured Biff inspector, then recheck the healthy instance.
    Activation and completion remain blocked by unobserved subjects. This is
    a narrower LOCAL qualification, not Stage 11 release eligibility.
+   v2310: Selected-source retry preflight must claim :validating-retry and
+   release the lifecycle monitor before calling host catalog! or original
+   installed-source summary callbacks. These may synchronously query this
+   issuer's summary from another JVM thread. The provisional claim excludes
+   competing stop/retry transitions, but does not consume the one-use
+   original physical retry until source and issuer validation pass.
+   Failed validation restores the prior :cleanup-unconfirmed state without
+   admitting old installation evidence or issuing release authority.
+
    v2308: Public current-instance inspection and whole-installation
    assessment each claim an exclusive provisional state under monitor,
    then release that monitor across source, original Biff HTTP challenges,
@@ -76,7 +85,8 @@
 (def ^:private original-http-issuer http/issue-configured-checked-http-application!)
 (def ^:private retained-statuses
   #{:issued :starting :running :inspecting :assessing
-    :stopping :stopped :cleanup-unconfirmed :retrying-cleanup})
+    :stopping :stopped :cleanup-unconfirmed
+    :validating-retry :retrying-cleanup})
 
 (defn- reject! [reason]
   (throw (ex-info "Selected source is not bound to a current checked Biff HTTP instance."
@@ -441,7 +451,8 @@
                         (reject! :local-inspection-in-progress))
                       (when (= :assessing @status)
                         (reject! :local-assessment-in-progress))
-                      (when (= :retrying-cleanup @status)
+                      (when (contains? #{:validating-retry :retrying-cleanup}
+                                       @status)
                         (reject! :local-cleanup-retry-in-progress))
                       (when (= :stopping @status)
                         (reject! :local-physical-stop-in-progress))
@@ -454,18 +465,25 @@
                   (complete-claimed-stop!)
                   {:status :stopped :authority :none})))
             (retry-cleanup! []
-              ;; Validate source, original issuer and the one-use capability
-              ;; under monitor. No original retry callback may run before
-              ;; :retrying-cleanup becomes visible to all competitors.
+              ;; Claim the exclusive preflight transition BEFORE invoking
+              ;; original catalog/source/issuer callbacks. Those callbacks
+              ;; can ask another thread to inspect our lifecycle summary,
+              ;; so no lifecycle monitor may be held across validation.
               (locking monitor
                 (when-not retry-enabled?
                   (reject! :local-cleanup-retry-not-enabled))
                 (when @cleanup-retry-attempted?
                   (reject! :local-cleanup-retry-already-attempted))
+                (when (= :validating-retry @status)
+                  (reject! :local-cleanup-retry-in-progress))
                 (when-not (= :cleanup-unconfirmed @status)
                   (reject! :local-cleanup-retry-not-eligible))
-                ;; Never requalify a possibly stopped HTTP listener as live;
-                ;; only recheck the original frozen catalog and issuer.
+                (reset! status :validating-retry))
+              (try
+                ;; Never treat a potentially stopped HTTP listener as live.
+                ;; Only recheck the frozen original source and selected
+                ;; issuer. The provisional claim excludes any other stop or
+                ;; retry until validation has finished.
                 (checked-source! catalog! http-config
                                  initial-catalog source-report)
                 (when-not (fn? (:retry-cleanup! issued))
@@ -478,10 +496,23 @@
                                  (= :none (:authority before))
                                  (= :not-issued (:certificate before)))
                     (reject! :original-configured-cleanup-not-retryable)))
-                ;; Consume BEFORE any original callback, even when a later
-                ;; callback fails. Both flags belong to the same claim.
-                (reset! cleanup-retry-attempted? true)
-                (reset! status :retrying-cleanup))
+                ;; Only successful preflight consumes the one-use physical
+                ;; retry. Publish the claim atomically before the callback.
+                (locking monitor
+                  (when-not (= :validating-retry @status)
+                    (reject! :local-cleanup-retry-claim-lost))
+                  (reset! cleanup-retry-attempted? true)
+                  (reset! status :retrying-cleanup))
+                (catch Throwable error
+                  ;; Preflight has not invoked the physical retry. Restore
+                  ;; fail-closed cleanup-unconfirmed rather than stranding
+                  ;; the issuer in a provisional state or consuming retry.
+                  (locking monitor
+                    (when (= :validating-retry @status)
+                      (reset! status :cleanup-unconfirmed)))
+                  (when (instance? InterruptedException error)
+                    (.interrupt (Thread/currentThread)))
+                  (throw error)))
               ;; Never hold monitor during the original physical callback:
               ;; it may synchronously ask another thread for this wrapper's
               ;; lifecycle summary while the host is completing its stop.
