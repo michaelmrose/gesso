@@ -18,13 +18,20 @@ requires its original requirement, an enforcing physical boundary,
 positive/adversarial evidence, a current applicability statement and a
 qualified completion decision. Additional tests alone do not close it.
 
-**Current budget:** **62 still-open packages; zero newly qualified
-closed.** Central **452 additional revisions from v2319**, compared
-with 464 at v2257. An optimistic research/implementation case remains
-around 240; the credible broad planning range remains roughly 300–800,
-with independent proof/production transfer possibly exceeding it or
-requiring revised assumptions. This is a planning judgment, not a
-measured velocity or finite-completion guarantee.
+**Current working forecast:** approximately **380 additional numbered
+revisions from v2319**, assuming an unproven **15% improvement in
+qualified work per revision** under the revised, larger-objective
+workflow. The arithmetic is 452 × 0.85 ≈ **384**; the provisional
+planning range remains **300–550**, with independent formal proof
+capable of exceeding it.
+
+**Undiscounted remaining work:** **452 old-workflow-equivalent
+revision units** across **62 still-open acceptance packages**,
+with **zero newly qualified closed**. The prior v2320 document
+incorrectly presented 452 as the directly comparable central
+numbered-revision forecast. Without demonstrated acceptance
+throughput improvements, the more conservative planning center
+moves toward 452. Neither number is a proven delivery bound.
 
 ## Maintenance and re-estimation policy
 
@@ -65,8 +72,14 @@ and the 464-revision estimate is measured from v2257, not v2258.
 
 **Re-estimation:** v2320 revises this document from the verified
 **v2319 source baseline**. The documentation-only commit closes no new
-framework work package; the 452-revision estimate is measured from
-v2319, not from v2320.
+framework work package; the *undiscounted* 452-unit estimate is
+measured from v2319, not from v2320.
+
+**Forecast reconciliation:** v2321 corrects a method mismatch in
+v2320's report: it keeps the 452-unit package budget but restores
+the *conditional* roughly 380-revision working forecast consistent
+with the 375-revision v2290 discussion. This documentation-only
+correction does not close an acceptance obligation.
 
 ## Re-estimation ledger — v2229 source baseline (published v2230)
 
@@ -295,6 +308,32 @@ source→operation→XTDB→publication→authorized browser path and
 predeclared release acceptance over indefinitely expanding adjacent
 shutdown and transport wrappers.
 
+## Forecast reconciliation — v2321
+
+The assessment at **v2290** gave **375 numbered revisions remaining**
+(range **300–550**) for the same single-node R5.1 scope, excluding
+HumanHelp and multi-node. It estimated roughly **440 remaining
+old-workflow-equivalent units**, then provisionally discounted the
+future commit count by **15%** for the larger acceptance-oriented
+one-file revision workflow: 440 × 0.85 = 374 ≈ **375**.
+
+The v2320 progress ledger updated the itemized **undiscounted**
+sum to **452** units at v2319, but silently dropped the workflow
+adjustment. Its headline of 452 *numbered revisions* was therefore
+not directly comparable with 375. Holding the v2290 method constant
+gives 452 × 0.85 ≈ **384**, expressed as **about 380 remaining
+numbered revisions from the v2319 source baseline**.
+
+This does **not** establish that larger source edits have produced
+15% more *accepted R5.1 requirement closure*. All 62 packages are
+still open, and real independent S0–S4 formal transfer remains
+uncertain. Treat **380** as a conditional working estimate, **452**
+as the undiscounted package sum, **300–550** as the provisional
+forecast range, and **300–800+** as a wider stress scenario.
+If the next genuine installed source-to-production acceptance paths
+do not retire work packages faster, remove the 15% discount
+rather than counting lines or tests as earned completion.
+
 ## Upcoming single-node work — recommended execution order
 
 This is an **ordered working hypothesis**, not permission to skip other
@@ -324,7 +363,7 @@ observed and browser-adopted outcomes distinct.
 
 ## Budget by stage
 
-| Stage | Theme | Closure packets | Central additional revisions |
+| Stage | Theme | Closure packets | Undiscounted revision-equivalent units |
 |---|---|---:|---:|
 | 1 | Source ownership | 2 | 6 |
 | 2 | Typed rule semantics | 3 | 12 |
@@ -347,7 +386,7 @@ observed and browser-adopted outcomes distinct.
 
 ## Cost by practical track
 
-| Track | Central | Interpretation |
+| Track | Undiscounted units | Interpretation |
 |---|---:|---|
 | O — Operational/semantic core | 121 | Finish actual source→host→command→browser/Live runtime contract |
 | C — Compositional assurance | 146 | Source completeness, writer coverage, conditional certification, negative conformance |
@@ -605,7 +644,7 @@ These gates are *included inside* the stage packets above; they are not 16 extra
 
 ## Incremental planning profiles
 
-| Profile | Work tracks counted | Central remaining effort from v2319 | Limitation |
+| Profile | Work tracks counted | Undiscounted remaining units from v2319 | Limitation |
 |---|---|---:|---|
 | Qualified framework-owned single-node operational/release profile | O + Q | **202** | Declares accepted bounded assumptions; not the original HumanHelp operational milestone |
 | Same profile with reusable compositional certification | O + Q + C | **348** | A framework-owned Claim-like witness cannot fulfill R5.1's real HumanHelp Claim pilot |
@@ -623,25 +662,34 @@ These are cumulative *effort budgets*, not serial implementation waves; results 
 
 ## Planning revision history
 
-| Publication | Source baseline | Open packages | Central additional revisions | Decision |
+| Publication | Source baseline | Open packages | Undiscounted additive units | Decision |
 |---|---|---:|---:|---|
 | v2210 | v2209 | 62 | 483 | Initial single-node closure estimate |
 | v2230 | v2229 | 62 | 470 | Revised selected Stage 4/8/9 and cross-test costs after real outbox/Live convergence work; none fully closed |
 | v2258 | v2257 | 62 | 464 | Real source/SSE capacity and HTTP/1 listener-disconnect/reconciliation evidence reduced #09/#28/#29/#59 costs; none fully closed |
 | v2320 | v2319 | 62 | 452 | Selected release diagnostics, installed Biff traffic fence and original-host concurrency regressions reduced seven packet costs; no gate fully closed |
+| v2321 | v2319 | 62 | 452 | Corrected forecast methodology: 452 undiscounted units versus conditional ≈380 numbered revisions at 15% higher per-revision delivery; no package closed |
 
 ## Revision-number projection and calibration
 
-The **current** additive center **452 from v2319** gives an
-arithmetic illustration of **v2771** (v2319 + 452), not a promised
-delivery revision. A favorable case remains approximately **240**
-additional revisions from the current baseline, and the broad
-planning case roughly **300–800** (arithmetic v2619–v3119). Independent
-soundness/production transfer may exceed this or demand narrower
-explicitly justified assumptions. Earlier arithmetic centers were
-v2209 + 483 = v2692; v2229 + 470 = v2699; v2257 + 464 = v2721.
-The center moves 50 revision numbers later after 62 commits despite
-important safety improvements.
+The itemized **undiscounted** 452-unit budget from v2319
+would arithmetically point to v2771 (v2319 + 452), but this is
+an **old-workflow-equivalent effort estimate**, not a forecast of
+how many current-style atomic Git commits are needed.
+
+The comparable revised-workflow estimate is 452 × 0.85 ≈ **384
+additional commits**, or **about 380** (illustrative v2703 using
+the unrounded number). It is conditional on proving actual
+per-revision acceptance throughput, not merely on larger commits.
+The earlier v2290 estimate was 375 remaining (illustrative v2665)
+using the same provisional discount. Thus no unexplained
+375-to-452 jump should be inferred.
+
+The working planning range is **300–550** with the throughput
+assumption; the broader stress range is **300–800+**, and
+independent theorem/production transfer might exceed it.
+Earlier *undiscounted* arithmetic centers were v2209 + 483 = v2692,
+v2229 + 470 = v2699, and v2257 + 464 = v2721.
 
 At the next owner-requested review, identify closed original gates
 and accepted installed-source-to-production evidence, not simply
