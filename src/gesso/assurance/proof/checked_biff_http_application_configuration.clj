@@ -612,6 +612,9 @@
    :listener-instance! plus :listener-shutdown-confirmed? host callbacks,
    (:retry-cleanup! issued) may perform ONE guarded-adapter stop retry after
    a failed original managed stop. It does not rerun the whole Biff stop.
+   Physical cleanup retry callbacks and the host listener observer execute
+   after claiming :retrying-cleanup but without the lifecycle monitor, so
+   independent inspections can promptly reject while recovery is active.
    Even a returned retry cannot report :stopped unless the original probe
    and guard agree and the source-trusted original listener observer confirms
    shutdown. A failed start consumes issuance; physical rollback is not
@@ -982,6 +985,12 @@
                       ;; still have an external listener: retain uncertainty.
                       (summary!))))))
         retry-cleanup! (fn []
+                         ;; Claim the one-use physical retry under monitor.
+                         ;; Host-owned original adapter stop and listener
+                         ;; shutdown callbacks MUST run outside it: they may
+                         ;; request a fresh inspection from another JVM thread.
+                         ;; The :retrying-cleanup claim prevents any new stop,
+                         ;; inspection or retry from returning running evidence.
                          (locking lifecycle-monitor
                            (when-not retry-enabled?
                              (reject! :configured-cleanup-retry-not-enabled))
@@ -1005,48 +1014,50 @@
                                             (= :explicit-host-idempotence
                                                (:stop-retry-policy before)))
                                (reject! :original-guarded-stop-not-retryable)))
-                           ;; Consume the configured retry BEFORE executing
-                           ;; trusted callbacks; a thrown callback cannot
-                           ;; make this same capability eligible again.
+                           ;; A thrown original callback must NEVER make this
+                           ;; physical retry capability eligible again.
                            (reset! cleanup-retry-attempted? true)
-                           (reset! state :retrying-cleanup)
-                           (let [confirmed?
-                                 (try
-                                   (let [lower ((:retry-cleanup! issued-guarded))
-                                         guarded-status ((:summary! issued-guarded))
-                                         probe-status ((:summary! issued-probe))
-                                         ;; Reuse only the original captured
-                                         ;; listener object, never a replacement
-                                         ;; returned by a later URL locator.
-                                         listener-confirmed?
-                                         (and (= :callback-returned (:status lower))
-                                              (= 2 (:attempts lower))
-                                              (= :original-selected-stop-callback-only
-                                                 (:scope lower))
-                                              (= :none (:release-authority lower))
-                                              (= :not-issued (:activation-eligibility lower))
-                                              (= :stopped (:status guarded-status))
-                                              (= :completed
-                                                 (:selected-adapter-cleanup guarded-status))
-                                              (= 2 (:original-stop-attempts guarded-status))
-                                              (= :stopped (:module-state probe-status))
-                                              (true? ((:listener-shutdown-confirmed? source)
-                                                      @original-listener-instance
-                                                      @started)))]
-                                     ;; Callback itself can replace original
-                                     ;; proof roots. Re-pin after the LAST
-                                     ;; source-trusted listener observation.
-                                     (and listener-confirmed?
-                                          (try (pinned!) true
-                                               (catch Throwable _ false))))
-                                   (catch Throwable error
-                                     (when (instance? InterruptedException error)
-                                       (.interrupt (Thread/currentThread)))
-                                     false))]
+                           (reset! state :retrying-cleanup))
+                         ;; Do not hold lifecycle-monitor through original
+                         ;; host callbacks or terminal listener observation.
+                         ;; A callback may query inspect-generation! from a
+                         ;; different thread while physical recovery is live.
+                         (let [confirmed?
+                               (try
+                                 (let [lower ((:retry-cleanup! issued-guarded))
+                                       guarded-status ((:summary! issued-guarded))
+                                       probe-status ((:summary! issued-probe))
+                                       ;; Reuse only the original captured
+                                       ;; listener, never a replacement.
+                                       listener-confirmed?
+                                       (and (= :callback-returned (:status lower))
+                                            (= 2 (:attempts lower))
+                                            (= :original-selected-stop-callback-only
+                                               (:scope lower))
+                                            (= :none (:release-authority lower))
+                                            (= :not-issued (:activation-eligibility lower))
+                                            (= :stopped (:status guarded-status))
+                                            (= :completed
+                                               (:selected-adapter-cleanup guarded-status))
+                                            (= 2 (:original-stop-attempts guarded-status))
+                                            (= :stopped (:module-state probe-status))
+                                            (true? ((:listener-shutdown-confirmed? source)
+                                                    @original-listener-instance
+                                                    @started)))]
+                                   ;; A late host callback can change pinned
+                                   ;; original proof roots: recheck after it.
+                                   (and listener-confirmed?
+                                        (try (pinned!) true
+                                             (catch Throwable _ false))))
+                                 (catch Throwable error
+                                   (when (instance? InterruptedException error)
+                                     (.interrupt (Thread/currentThread)))
+                                   false))]
+                           (locking lifecycle-monitor
                              (reset! state (if confirmed?
                                              :stopped
-                                             :stop-cleanup-not-established))
-                             (summary!))))]
+                                             :stop-cleanup-not-established)))
+                           (summary!)))]
     {:start-once! start! :stop! stop! :retry-cleanup! retry-cleanup!
      :summary! summary! :inspect-running! inspect-running!
      :inspect-generation! inspect-generation!}))
