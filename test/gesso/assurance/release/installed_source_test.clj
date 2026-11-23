@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source-test
-  "v2309: Original Claim catalog through an actual, locally started Biff/XTDB
+  "v2311: Original Claim catalog through an actual, locally started Biff/XTDB
    application, with permanent checks of the diagnostic release phase boundary.
 
    This suite uses the existing original Biff HTTP fixture, its actual loopback
@@ -20,7 +20,13 @@
    lifecycle claims on real original Biff/XTDB listeners. Cross-thread
    callback summaries must remain responsive, concurrent operations must
    reject promptly, and a failed assessment must physically retire the
-   original listener without ever issuing release authority."
+   listener without ever issuing release authority.
+
+   v2311 permanently checks that source preflight during an opted-in
+   physical cleanup retry can call summary! from a different JVM thread,
+   while duplicate retry and stop requests are refused. Rejected original
+   catalog validation must leave the one-use physical retry unconsumed
+   and permit recovery after the catalog is restored."
   (:import [java.util.concurrent CountDownLatch ExecutorService TimeUnit])
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gesso.assurance.release.installed-source :as installed]
@@ -550,3 +556,125 @@
         (.countDown release)
         (when @result (deref @result 5000 nil))
         (clean! s instance)))))
+
+(deftest original-catalog-retry-preflight-allows-cross-thread-lifecycle-summary
+  ;; The source-relative retry preflight invokes the ORIGINAL frozen
+  ;; catalog callback while :validating-retry is exclusively claimed.
+  ;; That callback may need a lifecycle summary from a different JVM
+  ;; thread. A blocked callback must not deadlock or consume the retry.
+  (let [s (scenario)
+        catalog (get-in s [:env :catalog-source :catalog])
+        real-stop (get-in s [:raw :biff.core/stop])
+        physical-calls (atom 0)
+        instance-ref (atom nil)
+        armed? (atom false)
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        catalog-observation (promise)
+        catalog! (fn []
+                   (when (compare-and-set! armed? true false)
+                     (.countDown entered)
+                     (deliver catalog-observation
+                              (deref (future ((:summary! @instance-ref)))
+                                     1800 ::summary-timeout))
+                     (when-not (.await release 8 TimeUnit/SECONDS)
+                       (throw (ex-info "Catalog validation was never released" {}))))
+                   catalog)
+        config (assoc (fixture/original-source s true)
+                      :adapter-module
+                      (assoc (:raw s) :biff.core/stop
+                             (fn [system]
+                               (if (= 1 (swap! physical-calls inc))
+                                 (throw (ex-info "First stop failed" {}))
+                                 (real-stop system))))
+                      :listener-instance!
+                      (fn [_] (:server @(:server-state s)))
+                      :listener-shutdown-confirmed?
+                      (fn [listener _]
+                        (and (identical? listener (:server @(:server-state s)))
+                             (.isShutdown ^ExecutorService (:executor @(:server-state s)))))
+                      :idempotent-stop-retry? true)
+        instance (installed/issue-selected-installed-catalog! catalog! config)
+        retry-job (atom nil)]
+    (reset! instance-ref instance)
+    (try
+      (is (= :selected-source-and-current-local-http-observed-only
+             (:status ((:start-once! instance) {}))))
+      (is (= :cleanup-unconfirmed (:status ((:stop! instance)))))
+      (is (= 1 @physical-calls))
+      (reset! armed? true)
+      (reset! retry-job (future (try ((:retry-cleanup! instance))
+                                     (catch Throwable ex ex))))
+      (is (.await entered 4000 TimeUnit/MILLISECONDS)
+          "Physical-retry validation must call the original selected catalog")
+      (let [snapshot (deref catalog-observation 3500 ::missing)]
+        (is (map? snapshot) "Catalog callback must read lifecycle without deadlocking")
+        (is (= :validating-retry (:status snapshot)))
+        (is (= false (:cleanup-retry-attempted? snapshot))
+            "No physical callback has been attempted while validating")
+        (is (= :none (:release-authority snapshot))))
+      (is (= :local-cleanup-retry-in-progress
+             (deref (future (reason #((:stop! instance)))) 1700 ::stop-timeout)))
+      (is (= :local-cleanup-retry-in-progress
+             (deref (future (reason #((:retry-cleanup! instance))))
+                    1700 ::retry-timeout)))
+      (is (not (realized? @retry-job)))
+      (.countDown release)
+      (is (= :stopped (:status (deref @retry-job 9000 ::retry-timeout))))
+      (is (= 2 @physical-calls))
+      (is (= :stopped (:status ((:summary! instance)))))
+      (is (= true (.isShutdown ^ExecutorService
+                              (:executor @(:server-state s)))))
+      (is (= :none (:release-authority ((:summary! instance)))))
+      (finally
+        (.countDown release)
+        (when @retry-job (deref @retry-job 9000 nil))
+        (clean! s instance)))))
+
+(deftest rejected-catalog-retry-preflight-preserves-original-physical-capability
+  ;; No original physical retry occurs if source revalidation rejects.
+  ;; After the original catalog is restored, one retry remains available
+  ;; to stop the real Biff/XTDB listener and executor exactly once.
+  (let [s (scenario)
+        original (get-in s [:env :catalog-source :catalog])
+        current (atom original)
+        physical-stop (get-in s [:raw :biff.core/stop])
+        physical-calls (atom 0)
+        config (assoc (fixture/original-source s true)
+                      :adapter-module
+                      (assoc (:raw s) :biff.core/stop
+                             (fn [system]
+                               (if (= 1 (swap! physical-calls inc))
+                                 (throw (ex-info "Expected original first stop failure" {}))
+                                 (physical-stop system))))
+                      :listener-instance!
+                      (fn [_] (:server @(:server-state s)))
+                      :listener-shutdown-confirmed?
+                      (fn [listener _]
+                        (and (identical? listener (:server @(:server-state s)))
+                             (.isShutdown ^ExecutorService (:executor @(:server-state s)))))
+                      :idempotent-stop-retry? true)
+        instance (installed/issue-selected-installed-catalog!
+                  (fn [] @current) config)]
+    (try
+      (is (= :selected-source-and-current-local-http-observed-only
+             (:status ((:start-once! instance) {}))))
+      (is (= :cleanup-unconfirmed (:status ((:stop! instance)))))
+      (is (= 1 @physical-calls))
+      (swap! current update :invariants dissoc
+             (first (keys (:invariants @current))))
+      (is (= :invariant-count (reason #((:retry-cleanup! instance)))))
+      (is (= :cleanup-unconfirmed (:status ((:summary! instance)))))
+      (is (false? (:cleanup-retry-attempted? ((:summary! instance)))))
+      (is (= 1 @physical-calls))
+      (is (= :none (:release-authority ((:summary! instance)))))
+      (reset! current original)
+      (is (= :stopped (:status ((:retry-cleanup! instance)))))
+      (is (= 2 @physical-calls))
+      (is (.isShutdown ^ExecutorService (:executor @(:server-state s))))
+      (is (= :local-cleanup-retry-already-attempted
+             (reason #((:retry-cleanup! instance)))))
+      (is (= :none (:release-authority ((:summary! instance)))))
+      (finally
+        (try ((:stop! instance)) (catch Throwable _ nil))
+        (try (physical-stop {}) (catch Throwable _ nil))))))
