@@ -1,7 +1,9 @@
 (ns gesso.assurance.release.fenced-biff-http-test
-  "v2281: Permanent original-Biff/XTDB socket and managed-stop tests of
+  "v2291: Permanent original-Biff/XTDB socket and managed-stop tests of
    the host-local Ring traffic fence. Source, listener, preactivation denial,
    failure-preserving stop results, and bounded retry are exercised together.
+   v2291 qualifies a failed stop and bounded retry through the original
+   source checker and actual listener, without replacing installed-source.
    Fault-injection tests qualify the wrapper's behavior under explicit host
    callbacks; they do NOT independently prove physical cleanup or exclusive
    public ingress. No release authority or completion claim is issued."
@@ -421,3 +423,88 @@
        (dotimes [_ 3]
          (is (= {:status :stopped :authority :none} ((:stop! wrapper)))))
        (is (= 1 @calls))))))
+
+(deftest original-source-qualified-fence-survives-physical-stop-failure-and-retry
+  ;; Unlike the controlled-v2290 fake-issuer socket, this path retains the
+  ;; ORIGINAL operation-set source checker, configured Biff issuer, consumed
+  ;; handler, listener-identity observer, and physically installed fence.
+  ;; Only the selected raw adapter's first stop is fault-injected. In
+  ;; particular, a surviving socket must not accept forged internal probe
+  ;; markers while cleanup remains unconfirmed.
+  (let [s (scenario)
+        physical-stop (get-in s [:raw :biff.core/stop])
+        attempts (atom 0)
+        observations (atom [])
+        injected (assoc (:raw s) :biff.core/stop
+                        (fn [system]
+                          (if (= 1 (swap! attempts inc))
+                            (throw (ex-info "Injected first physical stop failure" {}))
+                            (physical-stop system))))
+        listener! (fn [] (:server @(:server-state s)))
+        stopped? (fn []
+                   (boolean (and @(:server-state s)
+                                 (.isShutdown ^java.util.concurrent.ExecutorService
+                                              (:executor @(:server-state s))))))
+        conf (assoc (config s)
+                    :adapter-module injected
+                    :idempotent-stop-retry? true
+                    :listener-shutdown-confirmed?
+                    (fn [captured original-system]
+                      (swap! observations conj {:same-listener?
+                                                (identical? captured (listener!))
+                                                :shutdown? (stopped?)
+                                                :real-original-system? (map? original-system)})
+                      (and (identical? captured (listener!))
+                           (stopped?))))
+        issuer (fenced/issue-fenced-checked-biff-http!
+                (constantly (get-in s [:env :catalog-source :catalog]))
+                conf (constantly true))
+        marked! (fn [path header]
+                  (let [port (:port @(:server-state s))
+                        req (-> (HttpRequest/newBuilder
+                                 (URI/create (str "http://127.0.0.1:" port path)))
+                                (.timeout (Duration/ofSeconds 6))
+                                (.header header "forged")
+                                (.GET)
+                                (.build))]
+                    (.send (HttpClient/newHttpClient) req
+                           (HttpResponse$BodyHandlers/ofString))))
+        probes [["/not-a-route" "x-gesso-local-liveness-probe"]
+                ["/not-a-route" "x-gesso-operation-route-probe"]
+                ["/__gesso_assurance_http_consumption/abcdef12-1234-1234-1234-abcdef123456"
+                 "x-gesso-consumption-probe"]]]
+    (try
+      (let [started ((:start-once! issuer) {})]
+        (is (= :one-original-biff-listener-host-locally-fenced (:status started)))
+        (is (= :running (:status ((:summary! issuer)))))
+        (is (= 404 (.statusCode (request s "GET" "/not-a-route"))))
+        (let [failed ((:stop! issuer))]
+          (is (= :cleanup-unconfirmed (:status failed)))
+          (is (= :original-managed-stop-not-confirmed (:reason failed)))
+          (is (= 1 @attempts))
+          (is (false? (stopped?)) "The selected physical Biff socket must still be alive")
+          (is (= :closed (get-in ((:summary! issuer)) [:traffic-fence :phase])))
+          (is (= 503 (.statusCode (request s "GET" "/not-a-route")))
+              "Ordinary requests cannot reach the original handler after stop")
+          (doseq [[path header] probes]
+            (let [response (marked! path header)]
+              (is (= 503 (.statusCode response)) (str "Marker refused: " header))
+              (is (= "Protected application traffic is unavailable" (.body response)))))
+          (is (empty? @observations)
+              "A throwing stop callback cannot fabricate shutdown confirmation"))
+        (let [recovered ((:retry-cleanup! issuer))]
+          (is (= :stopped (:status recovered)))
+          (is (= :none (:authority recovered)))
+          (is (= 2 @attempts))
+          (is (stopped?))
+          (is (= [{:same-listener? true :shutdown? true
+                   :real-original-system? true}] @observations))
+          (is (= :closed (get-in ((:summary! issuer)) [:traffic-fence :phase])))
+          (is (= :stopped (:status ((:summary! issuer)))))
+          (is (= :none (:release-authority ((:summary! issuer)))))
+          (is (= :not-issued (:activation-eligibility ((:summary! issuer)))))
+          (is (= :fenced-biff-cleanup-retry-already-attempted
+                 (reason #((:retry-cleanup! issuer)))))
+          (is (= :fenced-biff-start-not-once-only
+                 (reason #((:start-once! issuer) {}))))))
+      (finally (clean s issuer)))))
