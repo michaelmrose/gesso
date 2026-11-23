@@ -1,13 +1,22 @@
 (ns gesso.assurance.proof.checked-biff-http-application-inspection-callback-race-test
-  "v1829: Callback-driven inspection races against the original Biff HTTP
-   listener: failed URL lookup, second identity check, reentrant managed stop.
-   These are in-process observations, never deployment certification."
-  (:require [clojure.test :refer [deftest is use-fixtures]]
+  "v2287: Real Biff HTTP listener lifecycle and callback races, including
+   failure-preserving stop, bounded original managed cleanup retry, and
+   physically verified traffic-fence exclusion. Original source-trusted
+   listener callbacks are still explicit premises, not production release
+   authority or independent deployment certification."
+  (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gesso.assurance.proof.checked-biff-http-application-configuration :as config]
+            [gesso.assurance.release.fenced-biff-http :as f]
+            [gesso.assurance.release.installed-source :as installed]
             [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
             [gesso.assurance.proof.checked-biff-http-application-configuration-fixture
+             :as fixture
              :refer [scenario original-source reason cleanup!
-                     with-real-application-fixture]]))
+                     with-real-application-fixture]])
+  (:import [java.net URI]
+           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
+            HttpResponse$BodyHandlers]
+           [java.time Duration]))
 
 (use-fixtures :once with-real-application-fixture)
 
@@ -407,3 +416,205 @@
         (alter-var-root #'probe/require-fresh-local-http-liveness!
                         (constantly original-live-root))
         (cleanup! s issued)))))
+
+;; v2287: Physical cleanup and traffic-fence recovery qualification is kept
+;; here so the exact-head Typed Clojure real Biff/XTDB CI gate runs it.
+(defn- http-status [s method path]
+  (let [port (:port @(:server-state s))
+        req (-> (HttpRequest/newBuilder
+                 (URI/create (str "http://127.0.0.1:" port path)))
+                (.timeout (Duration/ofSeconds 5))
+                (.method method (HttpRequest$BodyPublishers/noBody))
+                (.build))]
+    (.statusCode (.send (HttpClient/newHttpClient) req
+                        (HttpResponse$BodyHandlers/ofString)))))
+
+(defn mock-reason [g]
+  (try (g) :no-rejection
+       (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+(def base
+  {:contract-source {} :adapter-module {:biff.core/id :v2286/raw
+                                        :biff.core/start identity
+                                        :biff.core/stop (fn [_] true)}
+   :typed-trial {} :base-url! (fn [_] "http://127.0.0.1:1")
+   :listener-instance! (fn [_] (Object.))})
+(defn make-wrapper [options]
+  (let [commands (atom [])
+        state (atom :issued)
+        ret (atom nil)
+        fake {:stop! (fn []
+                       (swap! commands conj :stop)
+                       (reset! state :cleanup-unconfirmed)
+                       {:status :cleanup-unconfirmed :authority :none})
+              :retry-cleanup! (fn []
+                                (swap! commands conj :retry)
+                                (when-let [before (:before options)]
+                                  (before @ret))
+                                (case (:outcome options :success)
+                                  :throws (throw (ex-info "stop failed" {}))
+                                  :forged {:status :stopped :authority :none}
+                                  :bad-authority (do (reset! state :stopped)
+                                                     {:status :stopped :authority :unexpected})
+                                  :bad-status (do (reset! state :bad)
+                                                  {:status :stopped :authority :none})
+                                  :success (do (reset! state :stopped)
+                                               {:status :stopped :authority :none})))
+              :summary! (fn [] {:status @state :authority :none
+                                 :release-authority :none
+                                 :cleanup-retry-policy
+                                 (if (:opt-in? options) :explicit-host-idempotence :one-shot-only)
+                                 :cleanup-retry-attempted? (boolean (= :stopped @state))
+                                 :selected-source-fingerprint "source-v2286"})}
+        config (cond-> base
+                 (:opt-in? options) (assoc :idempotent-stop-retry? true
+                                           :listener-shutdown-confirmed? (fn [_ _] true)))
+        wrapper (with-redefs [installed/issue-selected-installed-catalog!
+                              (fn [_ candidate]
+                                (is (= config (assoc candidate :adapter-module (:adapter-module config))))
+                                fake)]
+                  (f/issue-fenced-checked-biff-http!
+                   (constantly {}) config (constantly true)))]
+    (reset! ret wrapper)
+    {:wrapper wrapper :calls commands :state state}))
+(deftest valid-opt-in-and-invalid-declarations
+  (let [issued (make-wrapper {:opt-in? true})]
+    (is (= :explicit-host-idempotence (:cleanup-retry-policy ((:summary! (:wrapper issued)))))))
+  (doseq [extra [{:idempotent-stop-retry? true}
+                 {:idempotent-stop-retry? false :listener-shutdown-confirmed? (fn [_ _] true)}
+                 {:idempotent-stop-retry? true :listener-shutdown-confirmed? false}
+                 {:listener-shutdown-confirmed? (fn [_ _] true)}]]
+    (is (= :invalid-original-fenced-biff-input
+           (mock-reason #(f/issue-fenced-checked-biff-http!
+                     (constantly {}) (merge base extra) (constantly true)))))))
+(deftest explicit-success-preserves-closed-fence
+  (let [{:keys [wrapper calls]} (make-wrapper {:opt-in? true})]
+    (is (= :fenced-biff-managed-cleanup-not-retryable (mock-reason #((:retry-cleanup! wrapper)))))
+    (is (= :cleanup-unconfirmed (:status ((:stop! wrapper)))))
+    (is (= :closed (get-in ((:summary! wrapper)) [:traffic-fence :phase])))
+    (is (= :original-managed-stop-not-confirmed (get-in ((:summary! wrapper)) [:stop-result :reason])))
+    (is (= [:stop] @calls))
+    (is (= :stopped (:status ((:retry-cleanup! wrapper)))))
+    (is (= :stopped (:status ((:summary! wrapper)))))
+    (is (= :closed (get-in ((:summary! wrapper)) [:traffic-fence :phase])))
+    (is (= :none (:release-authority ((:summary! wrapper)))))
+    (is (true? (:cleanup-retry-attempted? ((:summary! wrapper)))))
+    (is (= [:stop :retry] @calls))
+    (is (= :fenced-biff-cleanup-retry-already-attempted (mock-reason #((:retry-cleanup! wrapper)))))
+    (is (= :stopped (:status ((:stop! wrapper)))))
+    (is (= [:stop :retry] @calls))
+    (is (= :fenced-biff-start-not-once-only (mock-reason #((:start-once! wrapper) {}))))))
+(deftest failure-and-forgeries-cannot-report-stopped
+  (doseq [outcome [:throws :forged :bad-authority :bad-status]]
+    (let [{:keys [wrapper calls]} (make-wrapper {:opt-in? true :outcome outcome})]
+      (is (= :cleanup-unconfirmed (:status ((:stop! wrapper)))))
+      (is (= :cleanup-unconfirmed (:status ((:retry-cleanup! wrapper)))) (str outcome))
+      (is (= :cleanup-unconfirmed (:status ((:summary! wrapper)))) (str outcome))
+      (is (= :closed (get-in ((:summary! wrapper)) [:traffic-fence :phase])) (str outcome))
+      (is (= [:stop :retry] @calls))
+      (is (= :fenced-biff-cleanup-retry-already-attempted (mock-reason #((:retry-cleanup! wrapper)))))
+      (is (= :fenced-biff-start-not-once-only (mock-reason #((:start-once! wrapper) {})))))))
+(deftest no-default-retry-and-no-downgrade
+  (let [{:keys [wrapper calls]} (make-wrapper {:opt-in? false})]
+    (is (= :one-shot-only (:cleanup-retry-policy ((:summary! wrapper)))))
+    (is (= :cleanup-unconfirmed (:status ((:stop! wrapper)))))
+    (is (= :fenced-biff-cleanup-retry-not-enabled (mock-reason #((:retry-cleanup! wrapper)))))
+    (is (= [:stop] @calls))))
+(deftest reentrant-retry-and-stop-rejected
+  (let [observed (atom [])
+        {:keys [wrapper calls]} (make-wrapper
+                                 {:opt-in? true
+                                  :before (fn [issuer]
+                                            (swap! observed conj
+                                                   (mock-reason (fn [] ((:stop! issuer))))
+                                                   (mock-reason (fn [] ((:retry-cleanup! issuer))))))})]
+    (is (= :cleanup-unconfirmed (:status ((:stop! wrapper)))))
+    (is (= :stopped (:status ((:retry-cleanup! wrapper)))))
+    (is (= [:fenced-biff-stop-in-progress
+            :fenced-biff-cleanup-retry-already-attempted] @observed))
+    (is (= [:stop :retry] @calls))))
+
+(defn stopped? [s]
+  (boolean (and @(:server-state s)
+                (.isShutdown ^java.util.concurrent.ExecutorService
+                             (:executor @(:server-state s))))))
+(defn physical-reason [g]
+  (try (g) :no-error (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+(defn- physical-setup [observer]
+  (let [s (fixture/scenario :honest)
+        attempts (atom 0)
+        physical (:biff.core/stop (:raw s))
+        raw (assoc (:raw s) :biff.core/stop
+                   (fn [sys]
+                     (if (= 1 (swap! attempts inc))
+                       (throw (ex-info "First physical stop fails" {}))
+                       (physical sys))))
+        source (assoc (fixture/original-source s true)
+                      :adapter-module raw
+                      :listener-instance! (fn [_] (:server @(:server-state s)))
+                      :idempotent-stop-retry? true
+                      :listener-shutdown-confirmed?
+                      (fn [instance _]
+                        (and (identical? instance (:server @(:server-state s)))
+                             (stopped? s)
+                             (observer s))))
+        wrapper (f/issue-fenced-checked-biff-http!
+                 (constantly (get-in s [:env :catalog-source :catalog]))
+                 source (constantly true))]
+    {:s s :attempts attempts :wrapper wrapper :physical physical}))
+(defn- physical-clean [{:keys [s wrapper physical]}]
+  (try ((:stop! wrapper)) (catch Throwable _ nil))
+  (try (physical {}) (catch Throwable _ nil)))
+
+(deftest real-biff-http-listener-retry-recovery-and-observer-refusal
+  (do
+    (testing "The first real Biff stop fails: the socket remains live but the closed fence denies protected traffic"
+       (let [{:keys [s attempts wrapper] :as ctx} (physical-setup (constantly true))]
+         (try
+           (is (= :one-original-biff-listener-host-locally-fenced
+                  (:status ((:start-once! wrapper) {}))))
+           (is (not (stopped? s)))
+           (is (= :active (get-in ((:summary! wrapper)) [:traffic-fence :phase])))
+           (is (= 404 (http-status s "GET" "/not-a-route")))
+           (let [failed ((:stop! wrapper))]
+             (is (= :cleanup-unconfirmed (:status failed)))
+             (is (= :original-managed-stop-not-confirmed (:reason failed))))
+           (is (= 1 @attempts))
+           (is (not (stopped? s)))
+           (is (= :closed (get-in ((:summary! wrapper)) [:traffic-fence :phase])))
+           (is (= 503 (http-status s "GET" "/not-a-route"))
+               "Physical listener still responds, but closed fence refuses business")
+           (is (= :fenced-biff-start-not-once-only
+                  (physical-reason #((:start-once! wrapper) {}))))
+           (is (= :stopped (:status ((:retry-cleanup! wrapper)))))
+           (is (= 2 @attempts))
+           (is (stopped? s))
+           (is (= :stopped (:status ((:summary! wrapper)))))
+           (is (= :closed (get-in ((:summary! wrapper)) [:traffic-fence :phase])))
+           (is (= :none (:release-authority ((:summary! wrapper)))))
+           (is (= :not-issued (:completion-claim ((:summary! wrapper)))))
+           (is (= :fenced-biff-cleanup-retry-already-attempted
+                  (physical-reason #((:retry-cleanup! wrapper)))))
+           (is (= :stopped (:status ((:stop! wrapper)))))
+           (is (= 2 @attempts))
+           (finally (physical-clean ctx)))))
+     (testing "A false independent listener observer retains uncertainty after physical stop"
+       (let [{:keys [s attempts wrapper] :as ctx} (physical-setup (constantly false))]
+         (try
+           (is (= :one-original-biff-listener-host-locally-fenced
+                  (:status ((:start-once! wrapper) {}))))
+           (is (= :cleanup-unconfirmed (:status ((:stop! wrapper)))))
+           (is (= 1 @attempts))
+           (is (= :closed (get-in ((:summary! wrapper)) [:traffic-fence :phase])))
+           (is (= 503 (http-status s "GET" "/not-a-route")))
+           (is (= :cleanup-unconfirmed (:status ((:retry-cleanup! wrapper)))))
+           (is (= 2 @attempts))
+           (is (stopped? s))
+           (is (= :cleanup-unconfirmed (:status ((:summary! wrapper)))))
+           (is (= :closed (get-in ((:summary! wrapper)) [:traffic-fence :phase])))
+           (is (= :none (:release-authority ((:summary! wrapper)))))
+           (is (= :not-issued (:completion-claim ((:summary! wrapper)))))
+           (is (= :fenced-biff-cleanup-retry-already-attempted
+                  (physical-reason #((:retry-cleanup! wrapper)))))
+           (is (= :fenced-biff-start-not-once-only
+                  (physical-reason #((:start-once! wrapper) {}))))
+           (finally (physical-clean ctx)))))))
