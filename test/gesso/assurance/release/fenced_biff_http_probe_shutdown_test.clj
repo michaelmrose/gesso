@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http-probe-shutdown-test
-  "v2298: Permanent live-HTTP qualification of private-probe admission,
+  "v2300: Permanent live-HTTP qualification of private-probe admission,
    synchronous probe drain, and fail-closed retries at the selected
    Biff traffic fence. Controlled installed-source callbacks are explicit
    test doubles, not independent source or release authority.
@@ -9,6 +9,8 @@
    and rejects cross-thread stop during either successful or failed startup.
    v2298 captures the ordinary Ring request / queued diagnostic summary /
    shutdown deadlock with deterministic lock-order coordination.
+   v2300 qualifies cleanup-retry callbacks that consult the outer lifecycle
+   summary from another thread while the one-use retry is in progress.
 
    After stop begins, even a valid assurance marker cannot bypass
    the closed fence on a surviving physical HTTP listener."
@@ -625,4 +627,88 @@
         (.countDown release)
         (when @pending-request (deref @pending-request 4000 nil))
         (when @stop-thread (.join ^Thread @stop-thread 4000))
+        (stop-server! h)))))
+
+
+(deftest managed-retry-callback-can-observe-lifecycle-summary
+  ;; The managed installed-source retry executes while the outer service
+  ;; holds its exclusive :retrying-cleanup lifecycle claim. Its physical
+  ;; callback may synchronously obtain a summary from a DIFFERENT thread.
+  ;; Before v2299, the outer service held monitor over the callback, so
+  ;; the callback's nested summary could not finish until the callback
+  ;; itself had returned. This test uses a bounded wait to expose that
+  ;; inversion without hanging the JVM on regression.
+  (let [entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        callback-summary (promise)
+        issued (atom nil)
+        h (host true)
+        retry-worker (atom nil)
+        selected-issuer
+        (fn [catalog configured]
+          (let [original ((:issuer h) catalog configured)
+                original-retry (:retry-cleanup! original)]
+            (assoc original :retry-cleanup!
+                   (fn []
+                     (.countDown entered)
+                     (deliver callback-summary
+                              (deref (future ((:summary! @issued)))
+                                     2500 ::summary-timeout))
+                     (when-not (.await release 8 TimeUnit/SECONDS)
+                       (throw (ex-info "Managed retry callback was not released" {})))
+                     (original-retry)))))]
+    (try
+      (with-redefs [installed/issue-selected-installed-catalog! selected-issuer]
+        (let [w (outer/issue-fenced-checked-biff-http!
+                 (constantly {}) (:config h) (constantly true))]
+          (reset! issued w)
+          (is (= :one-original-biff-listener-host-locally-fenced
+                 (:status ((:start-once! w) {}))))
+          (is (= :cleanup-unconfirmed (:status ((:stop! w)))))
+          (is (= :original-managed-stop-not-confirmed
+                 (get-in ((:summary! w)) [:stop-result :reason]))
+              "Selected physical stop remains unconfirmed before retry")
+          (is (= :closed (get-in ((:summary! w)) [:traffic-fence :phase])))
+          (reset! retry-worker (future ((:retry-cleanup! w))))
+          (is (.await entered 3 TimeUnit/SECONDS)
+              "Selected original managed-retry callback must be entered")
+          (let [snapshot (deref callback-summary 4000 ::missing)]
+            (is (map? snapshot)
+                "Original managed-retry callback must obtain the outer summary")
+            (is (= :retrying-cleanup (:status snapshot)))
+            (is (true? (:cleanup-retry-attempted? snapshot)))
+            (is (= :closed (get-in snapshot [:traffic-fence :phase])))
+            (is (= :none (:release-authority snapshot))))
+          (is (= :fenced-biff-cleanup-retry-already-attempted
+                 (deref (future
+                          (try ((:retry-cleanup! w)) :unexpected-second-retry
+                               (catch clojure.lang.ExceptionInfo error
+                                 (:reason (ex-data error)))))
+                        2500 ::retry-timeout))
+              "One-shot retry must reject a competing retry during callback")
+          (is (= :fenced-biff-stop-in-progress
+                 (deref (future
+                          (try ((:stop! w)) :unexpected-stop
+                               (catch clojure.lang.ExceptionInfo error
+                                 (:reason (ex-data error)))))
+                        2500 ::stop-timeout))
+              "Stop must remain excluded while original recovery runs")
+          (is (not (realized? @retry-worker)))
+          (is (= 503 (request! (:port h) "/anything" nil nil)))
+          (is (= 503 (request! (:port h) "/anything"
+                               "x-gesso-local-liveness-probe" "forged")))
+          (.countDown release)
+          (is (= :stopped (:status (deref @retry-worker 4000 ::retry-timeout))))
+          (is (= [503 503 503] @(:retry-while-closed h))
+              "Physical callback must not reopen original or private traffic")
+          (is (= :stopped (:status ((:summary! w)))))
+          (is (= :closed (get-in ((:summary! w)) [:traffic-fence :phase])))
+          (is (= :none (:release-authority ((:summary! w)))))
+          (is (= :fenced-biff-cleanup-retry-already-attempted
+                 (try ((:retry-cleanup! w)) :unexpected-late-retry
+                      (catch clojure.lang.ExceptionInfo error
+                        (:reason (ex-data error))))))))
+      (finally
+        (.countDown release)
+        (when @retry-worker (deref @retry-worker 4000 nil))
         (stop-server! h)))))
