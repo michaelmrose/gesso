@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http
-  "v2286: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
+  "v2292: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
    selected Biff adapter's HTTP dispatch point, not merely beside Biff.
 
    An issued original checked Biff/XTDB startup must complete its real HTTP
@@ -30,6 +30,12 @@
    permanently denying traffic. A retry may attempt cleanup again but the
    original lower-layer issuer may retain unconfirmed terminal state; a
    wrapper retry alone does not establish physical recovery.
+
+   v2292: Stop publishes :stopping under the lifecycle monitor, releases
+   that monitor while draining in-flight private probe leases, and only then
+   reacquires it for managed physical cleanup. Original private probes may
+   call summary; waiting for their leases while holding that monitor caused
+   a real cross-thread deadlock. No new probe can bypass a :stopping fence.
 
    v2289: Private source probes enter the original final checked handler
    ONLY during :starting or :running, under a private read lease. Stop
@@ -281,44 +287,56 @@
                 ;; into exclusive shutdown from within the same thread.
                 (when (pos? (.getReadHoldCount probe-lock))
                   (reject! :fenced-biff-stop-during-private-probe))
-                (locking monitor
-                  (when (contains? #{:stopping :retrying-cleanup} @status)
-                    (reject! :fenced-biff-stop-in-progress))
-                  (if (= :stopped @status)
+                ;; Claim stop under the lifecycle monitor, but do not HOLD
+                ;; that monitor while waiting for private probe read leases.
+                ;; A probe is permitted to inspect :summary! in the original
+                ;; checked handler. Holding monitor while acquiring the write
+                ;; lease would deadlock if that probe queried :summary!.
+                ;; Publishing :stopping before the drain denies newly arriving
+                ;; private probes, even though the physical socket is still up.
+                (let [claimed?
+                      (locking monitor
+                        (when (contains? #{:stopping :retrying-cleanup} @status)
+                          (reject! :fenced-biff-stop-in-progress))
+                        (if (= :stopped @status)
+                          false
+                          (do (reset! status :stopping) true)))]
+                  (if-not claimed?
                     {:status :stopped :authority :none}
                     (do
-                      ;; Drain any original private probes under an exclusive
-                      ;; lease, publish :stopping, then perform the physical
-                      ;; cleanup. No later private probe may bypass the fence.
                       (let [write (.writeLock probe-lock)]
                         (.lock write)
-                        (try (reset! status :stopping)
-                             (finally (.unlock write))))
-                      (let [outcome
-                            (try
-                              (let [closed ((:close! fenced))]
-                                (if-not (and (= :closed (:status closed))
-                                             (= :none (:authority closed)))
+                        (try
+                          ;; The exclusive lease drains every existing private
+                          ;; probe. Requests arriving after :stopping cannot
+                          ;; pass the checked handler's private bypass.
+                          (finally (.unlock write))))
+                      (locking monitor
+                        (let [outcome
+                              (try
+                                (let [closed ((:close! fenced))]
+                                  (if-not (and (= :closed (:status closed))
+                                               (= :none (:authority closed)))
+                                    {:status :cleanup-unconfirmed
+                                     :reason :fence-drain-not-confirmed
+                                     :authority :none}
+                                    (let [managed ((:stop! local-issued))]
+                                      (if (and (= :stopped (:status managed))
+                                               (= :none (:authority managed)))
+                                        {:status :stopped :authority :none}
+                                        {:status :cleanup-unconfirmed
+                                         :reason :original-managed-stop-not-confirmed
+                                         :authority :none}))))
+                                (catch Throwable error
+                                  (when (instance? InterruptedException error)
+                                    (.interrupt (Thread/currentThread)))
                                   {:status :cleanup-unconfirmed
-                                   :reason :fence-drain-not-confirmed
-                                   :authority :none}
-                                  (let [managed ((:stop! local-issued))]
-                                    (if (and (= :stopped (:status managed))
-                                             (= :none (:authority managed)))
-                                      {:status :stopped :authority :none}
-                                      {:status :cleanup-unconfirmed
-                                       :reason :original-managed-stop-not-confirmed
-                                       :authority :none}))))
-                              (catch Throwable error
-                                (when (instance? InterruptedException error)
-                                  (.interrupt (Thread/currentThread)))
-                                {:status :cleanup-unconfirmed
-                                 :reason :stop-callback-failed
-                                 :error-class (.getName (class error))
-                                 :authority :none}))]
-                        (reset! status (:status outcome))
-                        (reset! last-stop-result outcome)
-                        outcome)))))
+                                   :reason :stop-callback-failed
+                                   :error-class (.getName (class error))
+                                   :authority :none}))]
+                          (reset! status (:status outcome))
+                          (reset! last-stop-result outcome)
+                          outcome))))))
               (retry-cleanup! []
                 (locking monitor
                   (when-not retry-enabled?
