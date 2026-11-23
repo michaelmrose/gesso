@@ -1,10 +1,14 @@
 (ns gesso.assurance.release.fenced-biff-http-test
-  "v2269: Permanent original-Biff/XTDB socket tests of the host-local Ring
-   traffic fence. Source, live listener, guard, preactivation denial, and
-   fail-closed cleanup are exercised together. No release authority,
-   asynchronous/SSE qualification or exclusive public ingress is claimed."
+  "v2281: Permanent original-Biff/XTDB socket and managed-stop tests of
+   the host-local Ring traffic fence. Source, listener, preactivation denial,
+   failure-preserving stop results, and bounded retry are exercised together.
+   Fault-injection tests qualify the wrapper's behavior under explicit host
+   callbacks; they do NOT independently prove physical cleanup or exclusive
+   public ingress. No release authority or completion claim is issued."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gesso.assurance.release.fenced-biff-http :as fenced]
+            [gesso.assurance.release.installed-source :as installed]
+            [gesso.assurance.release.traffic-fence :as traffic]
             [gesso.assurance.proof.checked-biff-http-application-configuration-fixture :as fixture])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -223,3 +227,197 @@
     (doseq [h ["x-gesso-local-liveness-probe" "x-gesso-operation-route-probe"]]
       (is (true? (probe {:request-method :get :uri "/arbitrary"
                          :headers {h "not-verified"}}))))))
+
+;; Selected managed-stop callbacks are explicit controlled fault injectors:
+;; these tests prove the OUTER wrapper reports failures accurately, not
+;; that arbitrary physical listeners stopped. Reaching :stopped through the
+;; stub is conditional on that callback's explicit :stopped assertion.
+(defn- issue-with-stop [stop-fn callback]
+  (with-redefs [installed/issue-selected-installed-catalog!
+                (fn [_ _] {:stop! stop-fn})]
+    (let [issued (fenced/issue-fenced-checked-biff-http!
+                  (constantly {:placeholder :catalog})
+                  {:contract-source {}
+                   :adapter-module {:biff.core/id :test/fake-biff
+                                    :biff.core/start identity
+                                    :biff.core/stop (fn [_] nil)}
+                   :base-url! (constantly "http://127.0.0.1:12345")
+                   :listener-instance! (constantly nil)
+                   :typed-trial {}}
+                  (constantly true))]
+      (callback issued))))
+
+(deftest incomplete-physical-cleanup-stays-unconfirmed-until-explicit-success
+  (let [calls (atom 0)]
+    (issue-with-stop
+     (fn [] (if (= 1 (swap! calls inc))
+              {:status :cleanup-unconfirmed :authority :none}
+              {:status :stopped :authority :none}))
+     (fn [issued]
+       (let [bad ((:stop! issued))]
+         (is (= :cleanup-unconfirmed (:status bad)))
+         (is (= :original-managed-stop-not-confirmed (:reason bad)))
+         (is (= bad (:stop-result ((:summary! issued)))))
+         (is (= :closed (get-in ((:summary! issued)) [:traffic-fence :phase])))
+         (is (= :fenced-biff-start-not-once-only
+                (reason #((:start-once! issued) {}))))
+         (is (= 1 @calls)))
+       (is (= :stopped (:status ((:stop! issued)))))
+       (is (= :stopped (:status ((:summary! issued)))))
+       (is (= :none (:release-authority ((:summary! issued)))))
+       (is (= :stopped (:status ((:stop! issued)))))
+       (is (= 2 @calls))))))
+
+(deftest thrown-managed-stop-is-visible-and-retryable
+  (let [calls (atom 0)]
+    (issue-with-stop
+     (fn [] (if (= 1 (swap! calls inc))
+              (throw (IllegalStateException. "physical stop failed"))
+              {:status :stopped :authority :none}))
+     (fn [issued]
+       (let [bad ((:stop! issued))]
+         (is (= :cleanup-unconfirmed (:status bad)))
+         (is (= :stop-callback-failed (:reason bad)))
+         (is (= "java.lang.IllegalStateException" (:error-class bad)))
+         (is (= bad (:stop-result ((:summary! issued)))))
+         (is (= :closed (get-in ((:summary! issued)) [:traffic-fence :phase]))))
+       (is (= :stopped (:status ((:stop! issued)))))
+       (is (= 2 @calls))))))
+
+(deftest fake-stop-credentials-never-qualify
+  (doseq [fake [nil :stopped {}
+                {:status :running :authority :none}
+                {:status :stopped :authority :unknown}
+                {:status :stopped}]]
+    (issue-with-stop
+     (constantly fake)
+     (fn [issued]
+       (is (= :cleanup-unconfirmed (:status ((:stop! issued)))) (pr-str fake))
+       (is (= :original-managed-stop-not-confirmed
+              (get-in ((:summary! issued)) [:stop-result :reason])))
+       (is (= :not-issued (:completion-claim ((:summary! issued)))))))))
+
+(deftest fence-failure-prevents-managed-stop-and-can-retry
+  (let [fence-calls (atom 0)
+        managed-calls (atom 0)]
+    (with-redefs [traffic/issue-local-ring-traffic-fence!
+                  (fn [_] {:close! (fn []
+                                     (if (= 1 (swap! fence-calls inc))
+                                       (throw (ex-info "continuations remain" {}))
+                                       {:status :closed :authority :none}))
+                           :summary! (fn [] {:phase :closing})})]
+      (issue-with-stop
+       (fn [] (swap! managed-calls inc)
+         {:status :stopped :authority :none})
+       (fn [issued]
+         (let [bad ((:stop! issued))]
+           (is (= :cleanup-unconfirmed (:status bad)))
+           (is (= :stop-callback-failed (:reason bad)))
+           (is (zero? @managed-calls))
+           (is (= :cleanup-unconfirmed (:status ((:summary! issued))))))
+         (is (= :stopped (:status ((:stop! issued)))))
+         (is (= 1 @managed-calls))
+         (is (= 2 @fence-calls)))))))
+
+(deftest reentrant-stop-rejected-and-no-false-completion
+  (let [issued (atom nil)
+        observed (atom nil)]
+    (issue-with-stop
+     (fn []
+       (reset! observed (reason #((:stop! @issued))))
+       {:status :cleanup-unconfirmed :authority :none})
+     (fn [wrapper]
+       (reset! issued wrapper)
+       (is (= :cleanup-unconfirmed (:status ((:stop! wrapper)))))
+       (is (= :fenced-biff-stop-in-progress @observed))
+       (is (= :original-managed-stop-not-confirmed
+              (:reason ((:stop! wrapper)))))))))
+
+(deftest original-real-fence-idempotent-stop
+  (let [calls (atom 0)]
+    (issue-with-stop
+     (fn [] (swap! calls inc) {:status :stopped :authority :none})
+     (fn [issued]
+       (is (= :issued (:status ((:summary! issued)))))
+       (is (= :stopped (:status ((:stop! issued)))))
+       (is (= :closed (get-in ((:summary! issued)) [:traffic-fence :phase])))
+       (is (= :stopped (:status ((:stop! issued)))))
+       (is (= 1 @calls))))))
+
+
+(deftest unconfirmed-fence-drain-cannot-start-managed-stop
+  (let [fence-calls (atom 0)
+        managed-calls (atom 0)]
+    (with-redefs [traffic/issue-local-ring-traffic-fence!
+                  (fn [_]
+                    {:close! (fn []
+                               (if (= 1 (swap! fence-calls inc))
+                                 {:status :closing :authority :none}
+                                 {:status :closed :authority :none}))
+                     :summary! (fn [] {:phase :closing})})]
+      (issue-with-stop
+       (fn [] (swap! managed-calls inc) {:status :stopped :authority :none})
+       (fn [wrapper]
+         (let [first-stop ((:stop! wrapper))]
+           (is (= :cleanup-unconfirmed (:status first-stop)))
+           (is (= :fence-drain-not-confirmed (:reason first-stop)))
+           (is (= first-stop (:stop-result ((:summary! wrapper)))))
+           (is (= :cleanup-unconfirmed (:status ((:summary! wrapper)))))
+           (is (zero? @managed-calls))
+           (is (= :fenced-biff-start-not-once-only
+                  (reason #((:start-once! wrapper) {})))))
+         (is (= :stopped (:status ((:stop! wrapper)))))
+         (is (= 2 @fence-calls))
+         (is (= 1 @managed-calls)))))))
+
+(deftest forged-fence-close-authority-is-not-physical-cleanup
+  (let [managed-calls (atom 0)]
+    (doseq [bad [nil {}
+                 {:status :closed}
+                 {:status :closed :authority :granted}
+                 {:status :closing :authority :none}]]
+      (with-redefs [traffic/issue-local-ring-traffic-fence!
+                    (fn [_]
+                      {:close! (fn [] bad)
+                       :summary! (fn [] {:phase :closing})})]
+        (issue-with-stop
+         (fn [] (swap! managed-calls inc) {:status :stopped :authority :none})
+         (fn [wrapper]
+           (let [result ((:stop! wrapper))]
+             (is (= :cleanup-unconfirmed (:status result)) (pr-str bad))
+             (is (= :fence-drain-not-confirmed (:reason result)))
+             (is (= :cleanup-unconfirmed (:status ((:summary! wrapper)))))
+             (is (= :not-issued (:completion-claim ((:summary! wrapper))))))))))
+    (is (zero? @managed-calls))))
+
+(deftest consecutive-unconfirmed-managed-stops-never-become-idempotent-success
+  (let [calls (atom 0)]
+    (issue-with-stop
+     (fn [] (swap! calls inc)
+       {:status :cleanup-unconfirmed :authority :none})
+     (fn [wrapper]
+       (dotimes [i 3]
+         (let [result ((:stop! wrapper))
+               summary ((:summary! wrapper))]
+           (is (= :cleanup-unconfirmed (:status result)))
+           (is (= :original-managed-stop-not-confirmed (:reason result)))
+           (is (= result (:stop-result summary)))
+           (is (= :cleanup-unconfirmed (:status summary)))
+           (is (= :none (:release-authority summary)))
+           (is (= :not-issued (:completion-claim summary)))
+           (is (= (inc i) @calls))))))))
+
+(deftest terminal-stop-is-not-replayed-after-confirmation
+  (let [calls (atom 0)]
+    (issue-with-stop
+     (fn [] (swap! calls inc) {:status :stopped :authority :none})
+     (fn [wrapper]
+       (is (= :stopped (:status ((:stop! wrapper)))))
+       (let [first-summary ((:summary! wrapper))]
+         (is (= :stopped (:status first-summary)))
+         (is (= :stopped (get-in first-summary [:stop-result :status])))
+         (is (= :none (:release-authority first-summary)))
+         (is (= :not-issued (:completion-claim first-summary))))
+       (dotimes [_ 3]
+         (is (= {:status :stopped :authority :none} ((:stop! wrapper)))))
+       (is (= 1 @calls))))))
