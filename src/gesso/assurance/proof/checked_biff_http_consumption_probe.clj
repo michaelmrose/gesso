@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe
-  "v1805: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
+  "v2318: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
    actually consumes the final checked Ring handler installed through Biff's
    ordinary module start lifecycle.
 
@@ -34,6 +34,14 @@
    port and checks it BEFORE sending a fresh health challenge. Same-port
    listener replacement and external identity remain outside this claim.
    No business transition, deployed-service claim or certificate is issued.
+
+   v2318: Probe retirement owns an atomic transition from an issued, failed,
+   or started generation to :stopping before draining business read leases.
+   Stop cannot overwrite the provisional :starting claim: only the startup
+   owner can finish installing the original wrapper (or fail its one-use
+   startup). A second stop during draining rejects rather than claiming that
+   the listener is already retired. A completed stop publishes :stopped only
+   after admitted dispatch has drained.
 
    This is local test evidence for a selected HTTP server module only: Biff
    core 2 does not choose/install an HTTP listener for Gesso. It does not
@@ -99,7 +107,12 @@
                parameterized-routes]
   {:type report-type :version report-version
    :scope :one-final-ring-handler-loopback-http-consumption-challenge
-   :module-state (if (map? state) :started state)
+   ;; Existing callers use :stopped to mean that probe admission is CLOSED.
+   ;; The internal :stopping claim also closes admission immediately; draining
+   ;; an in-flight Ring request happens afterward before stop! returns.
+   :module-state (cond (map? state) :started
+                       (= :stopping state) :stopped
+                       :else state)
    :status outcome
    :challenge-handler-observations hits
    :final-checked-handler-consumed-over-http
@@ -496,23 +509,32 @@
            ;; A trusted application callback can request stop from INSIDE
            ;; the same synchronous Ring invocation (or its verification
            ;; callback). ReentrantReadWriteLock cannot upgrade its own read
-           ;; lease to a write lease: attempting to do so deadlocks both the
-           ;; callback and physical teardown. Reject before changing state;
-           ;; another thread can retire the issued probe once this call exits.
+           ;; lease to a write lease: reject BEFORE changing lifecycle state.
            (when (pos? (.getReadHoldCount business-dispatch-lock))
              (reject! :probe-retirement-from-admitted-dispatch))
-           ;; Close admission BEFORE waiting on existing dispatches. Read
-           ;; leases are held through the entire original Ring invocation,
-           ;; including its transactional effects; no business dispatch can
-           ;; outlive a completed stop. Read leases do not serialize normal
-           ;; concurrent requests with one another.
-           (reset! state :stopped)
-           (let [lease (.writeLock business-dispatch-lock)]
-             (.lock lease)
-             (try
-               (reset! pending :inactive)
-               (reset! liveness-pending nil)
-               (finally (.unlock lease)))))}
+           ;; Claim retirement atomically before draining in-flight business
+           ;; dispatch. A competing stop cannot overwrite the private
+           ;; :starting generation and make startup lose its one-use wrapper,
+           ;; nor can it return as :stopped before the write lease drains.
+           (let [claimed?
+                 (loop []
+                   (let [current @state]
+                     (cond
+                       (= :starting current)
+                       (reject! :probe-start-in-progress)
+                       (= :stopping current)
+                       (reject! :probe-retirement-in-progress)
+                       (= :stopped current) false
+                       (compare-and-set! state current :stopping) true
+                       :else (recur))))]
+             (when claimed?
+               (let [lease (.writeLock business-dispatch-lock)]
+                 (.lock lease)
+                 (try
+                   (reset! pending :inactive)
+                   (reset! liveness-pending nil)
+                   (reset! state :stopped)
+                   (finally (.unlock lease)))))))}
         current! (fn []
                    (pinned!)
                    (let [started @state]
