@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.traffic-fence
-  "v2270: An enforcing, host-local Ring fence with explicit continuation leases.
+  "v2276: An enforcing, host-local Ring fence with explicit continuation leases.
 
    This is a narrow runtime MECHANISM for R5.1 Part XI: no business handler
    can run through the issued Ring entrypoint before an explicitly qualified
@@ -19,14 +19,21 @@
    protected entrypoint; this file cannot discover bypass routes or workers.
 
    The default Ring return path refuses delayed/streaming response bodies.
-   A handler can explicitly pin host-owned continuation work through
-   :retain-current!, then call :finish! on that opaque lease when it has
-   REALLY ended. Retirement and closure first block new traffic and then
+   A narrowly selected SSE response can pass ONLY when the admitted handler
+   registers its EXACT current response with :permit-current-sse! and a still
+   outstanding :retain-current! continuation. The holder must separately
+   prove source/route cancellation and physical response termination BEFORE
+   :finish!; the permit itself is NOT completion or an SSE delivery proof.
+   All other opaque returns are refused. A handler can explicitly pin
+   host-owned continuation work through :retain-current!, then call :finish!
+   on that opaque lease when it has REALLY ended. Retirement and closure first block new traffic and then
    wait a bounded interval for those registered continuations; an incomplete
    drain FAILS CLOSED and remains retryable, never reports success. These
    leases cannot discover unregistered background work, prove byte delivery,
    or automatically close SSE. Honest caller completion remains a premise.
    No rollback of committed effects or reuse of past request authorization."
+  (:require [clojure.string :as str]
+            [manifold.stream :as stream])
   (:import [java.util IdentityHashMap]
            [java.util.concurrent.locks ReentrantReadWriteLock]))
 
@@ -48,6 +55,8 @@
 (deftype ^:private CandidateToken []
   Object
   (toString [_] "#<gesso.release/opaque-staged-candidate>"))
+
+(deftype ^:private RequestOwner [generation])
 
 (defn- reject! [reason]
   (throw (ex-info "Host-local traffic fence cannot perform this transition."
@@ -103,13 +112,32 @@
              (number? body)
              (instance? byte-array-class body)))))
 
+(defn- sse-ring-result? [response]
+  ;; The exceptional streaming path is intentionally narrower than Ring:
+  ;; one concrete Manifold stream with explicit SSE content type, no callback,
+  ;; metadata, lazy body, or extra response fields.
+  (and (plain-map? response)
+       (every? eager-response-keys (keys response))
+       (= 200 (:status response))
+       (plain-map? (:headers response))
+       (every? (fn [[k v]] (and (string? k) (string? v)))
+               (:headers response))
+       (some (fn [[k v]]
+               (and (= "content-type" (str/lower-case k))
+                    (boolean (re-matches #"(?i)text/event-stream(?:\s*;.*)?" v))))
+             (:headers response))
+       (stream/stream? (:body response))))
+
 (defn- refuse-opaque-result [response]
   (when-let [body (and (map? response) (:body response))]
-    (when (instance? java.lang.AutoCloseable body)
-      (try (.close ^java.lang.AutoCloseable body)
-           (catch Throwable error
-             (when (instance? InterruptedException error)
-               (.interrupt (Thread/currentThread)))))))
+    (try
+      (cond
+        (stream/stream? body) (stream/close! body)
+        (instance? java.lang.AutoCloseable body)
+        (.close ^java.lang.AutoCloseable body))
+      (catch Throwable error
+        (when (instance? InterruptedException error)
+          (.interrupt (Thread/currentThread))))))
   unavailable)
 
 (defn issue-local-ring-traffic-fence!
@@ -123,7 +151,13 @@
    own per-request guard still independently controls its usability).
    Both staged and historically used generation inventories are bounded.
    :retain-current! may be invoked only by the currently executing admitted
-   Ring handler. It returns an opaque continuation token. Any thread may call
+   Ring handler. It returns an opaque continuation token. Before returning an
+   SSE Manifold response, the same handler may call :permit-current-sse!
+   WITH THAT token and THE EXACT response object. The fence allows only that
+   identity-bound response while the continuation remains outstanding;
+   a token from another request, inactive generation, completed lease, or
+   arbitrarily borrowed response does not qualify. This mechanism does NOT
+   attach SSE cancellation or attest physical channel termination. Any thread may call
    :finish! ONCE on that token after the registered operation really ends.
    Continuations are bounded and do not grant authority to start NEW effects.
    :retire! and :close! stop new admission before waiting for those tokens;
@@ -145,6 +179,7 @@
         ^Object continuation-monitor (Object.)
         continuations (IdentityHashMap.)
         ^ThreadLocal request-owner (ThreadLocal.)
+        ^ThreadLocal current-sse-permit (ThreadLocal.)
         state (atom {:phase :inactive :epoch 0 :active nil :used #{}})
         with-write (fn [f]
                      (when (pos? (.getReadHoldCount lock))
@@ -190,6 +225,8 @@
                      :host-qualifier-provenance :trusted-host-callback-conditional
                      :real-biff-installation :not-established
                      :async-response-drain :registered-continuations-only
+                     :sse-admission :exact-current-request-and-live-lease-only
+                     :sse-physical-termination :not-established
                      :unregistered-transferred-work :not-established
                      :physical-wire-completion :not-established
                      :release-authority :none
@@ -213,18 +250,36 @@
                                       (when (instance? InterruptedException error)
                                         (.interrupt (Thread/currentThread)))
                                       false))))
-                 (let [previous-owner (.get request-owner)]
-                   (.set request-owner (:token active))
+                 (let [previous-owner (.get request-owner)
+                       previous-permit (.get current-sse-permit)]
+                   (.set request-owner (RequestOwner. (:token active)))
+                   ;; A nested protected request may not inherit its parent's
+                   ;; stream permit; restore it only after the nested call.
+                   (.remove current-sse-permit)
                    (try
-                     (let [response ((:handler active) request)]
-                       (if (eager-ring-result? response)
+                     (let [response ((:handler active) request)
+                           permit (.get current-sse-permit)]
+                       (cond
+                         (eager-ring-result? response)
                          ;; Netty may read bytes after the lexical Ring call.
-                         ;; Do not expose a mutable application-owned array.
                          (if (instance? byte-array-class (:body response))
                            (assoc response :body (aclone ^bytes (:body response)))
                            response)
-                         (refuse-opaque-result response)))
+
+                         (and (sse-ring-result? response)
+                              permit
+                              (identical? response (:response permit))
+                              (identical? (.get request-owner) (:owner permit))
+                              (locking continuation-monitor
+                                (identical? (:owner permit)
+                                            (.get continuations (:lease permit)))))
+                         response
+
+                         :else (refuse-opaque-result response)))
                      (finally
+                       (if previous-permit
+                         (.set current-sse-permit previous-permit)
+                         (.remove current-sse-permit))
                        (if previous-owner
                          (.set request-owner previous-owner)
                          (.remove request-owner)))))
@@ -235,7 +290,8 @@
        (let [owner (.get request-owner)
              {:keys [phase active]} @state]
          (when-not (and owner (= :active phase)
-                        (identical? owner (:token active))
+                        (instance? RequestOwner owner)
+                        (identical? (:token active) (.-generation ^RequestOwner owner))
                         (pos? (.getReadHoldCount lock)))
            (reject! :no-current-admitted-request))
          (locking continuation-monitor
@@ -244,6 +300,31 @@
            (let [token (ContinuationToken.)]
              (.put continuations token owner)
              token))))
+
+     :permit-current-sse!
+     (fn [token response]
+       ;; The permit is bound to THIS lexical Ring request, never to user-
+       ;; controlled data or a transferable capability. Only the LEASE may
+       ;; survive handler return; retirement still awaits its real completion.
+       (let [owner (.get request-owner)
+             {:keys [phase active]} @state]
+         (when-not (and owner (= :active phase)
+                        (instance? RequestOwner owner)
+                        (identical? (:token active) (.-generation ^RequestOwner owner))
+                        (pos? (.getReadHoldCount lock)))
+           (reject! :no-current-admitted-request))
+         (when-not (sse-ring-result? response)
+           (reject! :invalid-explicit-sse-response))
+         (locking continuation-monitor
+           (when-not (and (instance? ContinuationToken token)
+                          (identical? owner (.get continuations token)))
+             (reject! :not-current-live-sse-continuation)))
+         (when (.get current-sse-permit)
+           (reject! :current-request-sse-permit-already-bound))
+         (.set current-sse-permit {:owner owner :lease token
+                                   :response response})
+         {:status :current-request-sse-registered
+          :release-authority :none}))
 
      :finish!
      (fn [token]
