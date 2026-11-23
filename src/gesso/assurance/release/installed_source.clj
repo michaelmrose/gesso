@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source
-  "v2262: Source-RECHECKED selected-catalog observation through ONE original,
+  "v2265: Source-RECHECKED selected-catalog observation through ONE original,
    guarded, physically started Biff HTTP generation.
 
    Join the v2261 ORIGINAL abstract catalog checks to the catalog supplied to
@@ -12,11 +12,18 @@
    ONE physical listener. Even a successful report is time-of-inspection
    evidence, NOT admission, install/activation permission, a proof theorem,
    authenticated external deployment, writer coverage, or release authority.
-   The original v2259 release evaluator remains blocked at installation.
+   A second opt-in :assess-current-installation! evaluates the actual selected
+   source and running local Biff listener as candidate/installation PHASES of
+   v2259's diagnostic release evaluator. Its negative physical controls
+   deliberately submit incorrect opaque-generation and system identities to
+   the ORIGINAL configured Biff inspector, then recheck the healthy instance.
+   Activation and completion remain blocked by unobserved subjects. This is
+   a narrower LOCAL qualification, not Stage 11 release eligibility.
    No application command is executed by these read-only checks. Host-owned
    callbacks, catalog completeness, the original Biff implementation, and
    anything outside this in-process instance remain explicit assumptions."
   (:require [gesso.assurance.release.operation-source :as source]
+            [gesso.assurance.release.decision :as decision]
             [gesso.assurance.proof.checked-biff-http-application-configuration
              :as http]))
 
@@ -189,6 +196,137 @@
    :activation-eligibility :not-issued :completion-claim :not-issued
    :transaction-authority :none :runtime-effect-permission :none})
 
+(def local-assessment-type
+  :gesso.assurance.release.installed-source/selected-local-installation-diagnostic)
+(def local-assessment-version 1)
+(def ^:private local-source-premise
+  :gesso.release.premise/source-obligations-open)
+(def ^:private local-listener-premise
+  :gesso.release.premise/trusted-host-listener-callback)
+(def ^:private negative-identity-boundary
+  :gesso.release.local/wrong-physical-identity-rejected)
+
+(defn- local-gate [id requirement kind class mechanism version scope boundary premises]
+  {:id id :requirement requirement :kind kind :class class
+   :mechanism mechanism :mechanism-version version :scope scope
+   :allowed-premises premises :expected-boundary boundary})
+
+(defn- local-intent [source-report installation-id]
+  ;; This is the declared denominator of ONE local installed-instance
+  ;; observation, not the complete R5.1 application release denominator.
+  (let [source-mechanism :gesso.assurance.proof/operation-set
+        source-scope :gesso.release/declared-abstract-catalog-only
+        http-mechanism
+        :gesso.assurance.proof/checked-biff-http-application-configuration
+        http-scope :gesso.release/one-current-in-process-http-instance
+        unconfigured :gesso.release/physical-observation-not-configured
+        requirements {:gesso.release.local/source
+                      :gesso.release/selected-original-catalog
+                      :gesso.release.local/installation
+                      :gesso.release/one-current-in-process-http-instance
+                      :gesso.release.local/activation
+                      :gesso.release/installed-browser-not-established
+                      :gesso.release.local/completion
+                      :gesso.release/release-completion-not-established}
+        gate (fn [id requirement kind class mechanism version scope boundary premises]
+               (local-gate id requirement kind class mechanism version
+                           scope boundary premises))
+        source-positive (gate :gesso.release.local/source-positive
+                              :gesso.release.local/source :positive :structural
+                              source-mechanism "operation-set-v1" source-scope nil
+                              #{local-source-premise})
+        source-negative (gate :gesso.release.local/source-negative
+                              :gesso.release.local/source :negative :structural
+                              source-mechanism "operation-set-v1" source-scope
+                              :gesso.release.source/omitted-original-declaration-detected
+                              #{})
+        install-positive (gate :gesso.release.local/loopback-positive
+                               :gesso.release.local/installation :positive :physical
+                               http-mechanism "selected-start-v1" http-scope nil
+                               #{local-source-premise local-listener-premise})
+        install-negative (fn [id]
+                           (gate id :gesso.release.local/installation
+                                 :negative :physical
+                                 http-mechanism "selected-start-v1" http-scope
+                                 negative-identity-boundary #{}))
+        pending (fn [phase]
+                  [(gate (keyword "gesso.release.local" (str (name phase) "-positive"))
+                         (keyword "gesso.release.local" (name phase))
+                         :positive :qualification unconfigured "unconfigured-v1"
+                         :gesso.release/physical-activation-not-configured nil #{})
+                   (gate (keyword "gesso.release.local" (str (name phase) "-negative"))
+                         (keyword "gesso.release.local" (name phase))
+                         :negative :qualification unconfigured "unconfigured-v1"
+                         :gesso.release/physical-activation-not-configured
+                         :gesso.release.local/adversarial-activation-blocked #{})])]
+    {:claim-id :gesso.release.local/source-to-installed-observation
+     :application-id (:selected-catalog-id source-report)
+     :milestone :gesso.release.local/current-http-instance-only
+     :profile-id :gesso.release.local/source-and-http-only
+     :capabilities (set (vals requirements))
+     :requirements requirements
+     :subjects {:candidate
+                (str "candidate/" (:selected-catalog-fingerprint source-report))
+                :installation installation-id
+                :activation (str "activation-not-observed/" installation-id)
+                :completion (str "completion-not-observed/" installation-id)}
+     :gates {:candidate [source-positive source-negative]
+             :installation
+             [install-positive
+              (install-negative :gesso.release.local/wrong-generation-negative)
+              (install-negative :gesso.release.local/wrong-system-negative)]
+             :activation (pending :activation)
+             :completion (pending :completion)}}))
+
+(defn- local-inventory [intent]
+  {:capabilities (:capabilities intent)
+   :requirements (set (keys (:requirements intent)))
+   :gates (set (map :id (mapcat identity (vals (:gates intent)))))})
+
+(defn- source-negative-qualified? [r]
+  (let [phase (get-in r [:selected-release-diagnostic :decisions :candidate])
+        rows (:rows phase)]
+    (and (= :checks-passed-only (:status phase))
+         (= :checks-passed-only (:candidate-status r))
+         (= :passed (get-in rows [:gesso.release.source/omitted-operation :status]))
+         (= :negative (get-in rows [:gesso.release.source/omitted-operation :kind]))
+         (= :passed (get-in rows [:gesso.release.source/omitted-invariant :status]))
+         (= :negative (get-in rows [:gesso.release.source/omitted-invariant :kind]))
+         (= (+ (count (:operation-ids r))
+               (count (:invariant-ids r)) 3)
+            (count rows))
+         (every? #(= :passed (:status %)) (vals rows)))))
+
+(defn- release-local-evidence [intent phase gate subject premises]
+  {:status :passed
+   :claim-id (:claim-id intent)
+   :phase phase
+   :gate-id (:id gate)
+   :requirement-id (:requirement gate)
+   :subject-id (:subject-id subject)
+   :mechanism (:mechanism gate)
+   :mechanism-version (:mechanism-version gate)
+   :scope (:scope gate)
+   :evidence-id (str (:subject-id subject) "/" (:id gate))
+   :premises premises
+   :observed-boundary (:expected-boundary gate)
+   :forbidden-effects (when (= :negative (:kind gate)) :absent)})
+
+(defn- original-http-rejects-wrong-identity? [issued generation running kind]
+  (let [[candidate-generation candidate-system]
+        (case kind
+          :generation [(Object.) running]
+          :system [generation (assoc running ::wrong-system-identity true)]
+          (reject! :unknown-physical-identity-control))]
+    (try
+      ((:inspect-generation! issued) candidate-generation candidate-system)
+      false
+      (catch clojure.lang.ExceptionInfo e
+        (and (true? (:checked-biff-http-application-configuration/rejection
+                     (ex-data e)))
+             (= :configured-instance-generation-not-current
+                (:reason (ex-data e))))))))
+
 (defn issue-selected-installed-catalog!
   "Issue a ONE-USE selected original catalog + closed Biff HTTP startup.
 
@@ -199,8 +337,11 @@
    :start-once! accepts the original initial Biff map and returns only a
    redacted observation, never the system, handler, or opaque generation.
    :inspect-current! reissues the real HTTP challenge and rechecks the same
-   source/route selection. :stop! releases the managed selected instance.
-   None of these callbacks grants a release decision or permission."
+   source/route selection. :assess-current-installation! additionally runs
+   the original four-phase diagnostic evaluator with fresh candidate and
+   installation observations, actual original-inspector identity negatives,
+   and NO observed activation/completion. :stop! releases the instance.
+   None of these callbacks grants release eligibility or permission."
   [catalog! http-config]
   (pinned!)
   (when-not (and (fn? catalog!)
@@ -220,7 +361,9 @@
         status (atom :issued)
         running (atom nil)
         generation (atom nil)
-        route-ids (atom nil)]
+        route-ids (atom nil)
+        local-intent (local-intent source-report
+                                   (str "local-http/" (java.util.UUID/randomUUID)))]
     (letfn [(stop! []
               (locking monitor
                 (when-not (contains? retained-statuses @status)
@@ -286,6 +429,135 @@
                   (catch Throwable error
                     (stop!)
                     (throw error)))))
+            (assess-current-installation! []
+              (locking monitor
+                (try
+                  (when-not (= :running @status)
+                    (reject! :no-current-issued-running-instance))
+                  ;; These observations and the original managed stop are
+                  ;; serialized by this monitor, but the result is NOT a
+                  ;; future liveness lease or permission to activate.
+                  (let [fresh-source! #(checked-source! catalog! http-config
+                                                         initial-catalog source-report)
+                        source-ok! (fn []
+                                     (let [r (fresh-source!)]
+                                       (when-not (source-negative-qualified? r)
+                                         (reject! :original-candidate-source-not-qualified))
+                                       r))
+                        discover! (fn []
+                                    (source-ok!)
+                                    (inspect-locked!)
+                                    (local-inventory local-intent))
+                        subject! (fn [phase]
+                                   (case phase
+                                     :candidate (do (source-ok!)
+                                                    {:phase phase
+                                                     :claim-id (:claim-id local-intent)
+                                                     :subject-id (get-in local-intent
+                                                                         [:subjects phase])})
+                                     :installation (do (inspect-locked!)
+                                                       {:phase phase
+                                                        :claim-id (:claim-id local-intent)
+                                                        :subject-id (get-in local-intent
+                                                                            [:subjects phase])})
+                                     ;; These phases have no observed physical
+                                     ;; subject and MUST block rather than pass.
+                                     nil))
+                        run-gate! (fn [{:keys [phase gate subject]}]
+                                    (let [id (:id gate)]
+                                      (cond
+                                        (= :candidate phase)
+                                        (let [r (source-ok!)]
+                                          (if (and (source-negative-qualified? r)
+                                                   (contains?
+                                                    #{:gesso.release.local/source-positive
+                                                      :gesso.release.local/source-negative} id))
+                                            (release-local-evidence
+                                             local-intent phase gate subject
+                                             (if (= id :gesso.release.local/source-positive)
+                                               #{local-source-premise} #{}))
+                                            {:status :failed}))
+
+                                        (= :installation phase)
+                                        (let [before (inspect-locked!)]
+                                          (cond
+                                            (= id :gesso.release.local/loopback-positive)
+                                            (release-local-evidence
+                                             local-intent phase gate subject
+                                             #{local-source-premise local-listener-premise})
+
+                                            (contains?
+                                             #{:gesso.release.local/wrong-generation-negative
+                                               :gesso.release.local/wrong-system-negative}
+                                             id)
+                                            (let [kind (if (= id :gesso.release.local/wrong-generation-negative)
+                                                         :generation :system)
+                                                  rejected? (original-http-rejects-wrong-identity?
+                                                             issued @generation @running kind)
+                                                  after (inspect-locked!)]
+                                              (if (and rejected?
+                                                       (= (:selected-http-route-ids before)
+                                                          (:selected-http-route-ids after))
+                                                       (= (:selected-catalog-fingerprint before)
+                                                          (:selected-catalog-fingerprint after)))
+                                                (release-local-evidence
+                                                 local-intent phase gate subject #{})
+                                                {:status :failed}))
+                                            :else {:status :unsupported}))
+                                        :else {:status :unsupported})))
+                        evaluated (decision/assess!
+                                   {:intent local-intent
+                                    :discover! discover!
+                                    :subject! subject!
+                                    :run-gate! run-gate!})
+                        phases (:decisions evaluated)
+                        qualified? (and (= :matched (get-in evaluated
+                                                           [:initial-inventory :status]))
+                                        (= :matched (get-in evaluated
+                                                           [:final-inventory :status]))
+                                        (= :checks-passed-only (get-in phases
+                                                                       [:candidate :status]))
+                                        (= :checks-passed-only (get-in phases
+                                                                       [:installation :status]))
+                                        (= :blocked (get-in phases
+                                                            [:activation :status]))
+                                        (= :not-examined (get-in phases
+                                                                 [:completion :status]))
+                                        (= :blocked (:status evaluated))
+                                        (= :none (:release-authority evaluated)
+                                           (:runtime-effect-permission evaluated))
+                                        (= :not-issued (:installation-eligibility evaluated)
+                                           (:candidate-admission evaluated)
+                                           (:activation-eligibility evaluated)
+                                           (:completion-claim evaluated)))]
+                    (when-not qualified?
+                      (reject! :selected-local-installation-phase-not-qualified))
+                    ;; A final fresh local HTTP challenge is necessary after
+                    ;; the decision evaluator's callbacks and identity tests.
+                    (let [installed (inspect-locked!)]
+                      {:type local-assessment-type
+                       :version local-assessment-version
+                       :status :selected-local-source-and-installation-checks-only
+                       :selected-source (:selected-catalog-fingerprint source-report)
+                       :observed-http-routes (:selected-http-route-ids installed)
+                       :current-local-instance installed
+                       :release-diagnostic evaluated
+                       :accepted-premises (:accepted-premises evaluated)
+                       :conditional? true
+                       :original-application-source-complete :not-established
+                       :original-release-installation-eligibility :not-issued
+                       :release-authority :none
+                       :candidate-admission :not-issued
+                       :installation-eligibility :not-issued
+                       :activation-eligibility :not-issued
+                       :completion-claim :not-issued
+                       :runtime-effect-permission :none}))
+                  (catch Throwable error
+                    ;; An unavailable or inconsistent physical/source check
+                    ;; cannot preserve a prior apparent success in this
+                    ;; one-use local wrapper.
+                    (when (= :running @status) (stop!))
+                    (throw error)))))
             (summary! []
               (locking monitor
                 {:type report-type :version report-version
@@ -298,5 +570,6 @@
                  :runtime-effect-permission :none}))]
       {:start-once! start-once!
        :inspect-current! inspect-current!
+       :assess-current-installation! assess-current-installation!
        :stop! stop!
        :summary! summary!})))
