@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http-probe-shutdown-test
-  "v2295: Permanent live-HTTP qualification of private-probe admission,
+  "v2298: Permanent live-HTTP qualification of private-probe admission,
    synchronous probe drain, and fail-closed retries at the selected
    Biff traffic fence. Controlled installed-source callbacks are explicit
    test doubles, not independent source or release authority.
@@ -7,6 +7,8 @@
    physical stop drains their read leases without a monitor-order deadlock.
    v2295 qualifies original synchronous startup probes through summary!
    and rejects cross-thread stop during either successful or failed startup.
+   v2298 captures the ordinary Ring request / queued diagnostic summary /
+   shutdown deadlock with deterministic lock-order coordination.
 
    After stop begins, even a valid assurance marker cannot bypass
    the closed fence on a surviving physical HTTP listener."
@@ -504,3 +506,123 @@
                          (get-in ((:summary! w)) [:traffic-fence :phase])))))
               (is (= :none (:release-authority ((:summary! w)))))))
           (finally (stop-server! h)))))))
+
+
+(deftest ordinary-ring-request-summary-must-not-deadlock-with-stop-drain
+  ;; This is a NORMAL protected Ring request, not an original assurance
+  ;; probe. It owns the traffic fence's read lease while its handler runs.
+  ;; v2296 removed stop's outer monitor hold, but v2297 also needed to
+  ;; move the fence snapshot OUTSIDE summary!'s outer monitor hold.
+  ;; A third-party summary can otherwise hold monitor while waiting
+  ;; behind a fair Ring fence writer, preventing the admitted handler
+  ;; from obtaining monitor and releasing its own read lease.
+  (let [entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        observed-summary (promise)
+        issued (atom nil)
+        h (host false
+                {:on-original
+                 (fn [request]
+                   (when (= "/ordinary-summary-drain" (:uri request))
+                     (.countDown entered)
+                     (when-not (.await release 8 TimeUnit/SECONDS)
+                       (throw (ex-info "Ordinary request was not released" {})))
+                     ;; Must execute on the admitted HTTP handler's thread,
+                     ;; not a detached future that bypasses its read lease.
+                     (deliver observed-summary
+                              (:status ((:summary! @issued))))))})
+        pending-request (atom nil)
+        stop-thread (atom nil)]
+    (try
+      (with-redefs [installed/issue-selected-installed-catalog! (:issuer h)]
+        (let [w (outer/issue-fenced-checked-biff-http!
+                 (constantly {}) (:config h) (constantly true))
+              stop-result (promise)]
+          (reset! issued w)
+          (is (= :one-original-biff-listener-host-locally-fenced
+                 (:status ((:start-once! w) {}))))
+          (reset! pending-request
+                  (future (request! (:port h) "/ordinary-summary-drain" nil nil)))
+          (is (.await entered 3 TimeUnit/SECONDS)
+              "Ordinary HTTP request is admitted before shutdown starts")
+          (let [t (Thread. (fn []
+                             (deliver stop-result
+                                      (try ((:stop! w))
+                                           (catch Throwable error error))))
+                           "gesso-v2298-ordinary-ring-drain-stop")]
+            (.setDaemon t true)
+            (reset! stop-thread t)
+            (.start t)
+            (is (loop [deadline (+ (System/nanoTime) 3000000000)]
+                  (cond
+                    (and (= Thread$State/WAITING (.getState t))
+                         (some #(= "java.util.concurrent.locks.ReentrantReadWriteLock$WriteLock"
+                                   (.getClassName ^StackTraceElement %))
+                               (.getStackTrace t)))
+                    true
+                    (< (System/nanoTime) deadline)
+                    (do (Thread/sleep 5) (recur deadline))
+                    :else false))
+                "Shutdown must wait for the admitted ordinary request's read lease")
+            ;; A summary from another thread may legitimately queue behind
+            ;; the fair fence writer; it must not hold monitor while queued.
+            (let [summary-thread (promise)
+                  outside-summary (future
+                                    (deliver summary-thread
+                                             (Thread/currentThread))
+                                    ((:summary! w)))
+                  ^Thread snapshot-worker (deref summary-thread 2000 nil)]
+              (is (instance? Thread snapshot-worker))
+              (is (loop [deadline (+ (System/nanoTime) 3000000000)]
+                    (cond
+                      (and snapshot-worker
+                           (= Thread$State/WAITING (.getState snapshot-worker))
+                           (some #(= "java.util.concurrent.locks.ReentrantReadWriteLock$ReadLock"
+                                     (.getClassName ^StackTraceElement %))
+                                 (.getStackTrace snapshot-worker)))
+                      true
+                      (< (System/nanoTime) deadline)
+                      (do (Thread/sleep 5) (recur deadline))
+                      :else false))
+                  "Third-party summary must be queued behind the fair fence writer before release")
+              (is (= :fenced-biff-stop-in-progress
+                     (deref (future
+                              (try ((:stop! w)) :unexpected-second-stop
+                                   (catch clojure.lang.ExceptionInfo error
+                                     (:reason (ex-data error)))))
+                            2000 ::timeout))
+                  "A competing stop cannot begin while the original stop drains")
+              (is (not (realized? stop-result))
+                  "Physical stop must not run before the ordinary request finishes")
+              (.countDown release)
+              (is (= 200 (deref @pending-request 4000 ::timeout))
+                  "Ordinary HTTP handler returns after it queries summary!")
+              (is (= :stopping (deref observed-summary 2000 ::timeout))
+                  "The admitted handler reads the lifecycle state without deadlocking")
+              (is (= :cleanup-unconfirmed
+                     (:status (deref stop-result 4000 ::timeout)))
+                  "Managed cleanup proceeds after the ordinary Ring request drains")
+              (is (contains? #{:stopping :cleanup-unconfirmed}
+                             (:status (deref outside-summary 4000 ::timeout)))
+                  "A queued diagnostic snapshot finishes without blocking cleanup")
+              (is (= :closed
+                     (get-in (deref outside-summary 4000 ::timeout)
+                             [:traffic-fence :phase]))))
+            (is (= [503 503 503] @(:stop-while-closing h))
+                "Original managed stop observes closed private and normal admission")
+            (is (= :closed
+                   (get-in ((:summary! w)) [:traffic-fence :phase])))
+            (is (= :cleanup-unconfirmed (:status ((:summary! w)))))
+            (is (= 503 (request! (:port h) "/ordinary-summary-drain" nil nil))
+                "The surviving physical listener cannot admit another ordinary request")
+            (is (= 503 (request! (:port h) "/anything"
+                                 "x-gesso-local-liveness-probe" "after-stop"))
+                "Original private markers cannot bypass terminal traffic fencing")
+            (is (= 1 (count @(:seen h)))
+                "Only the original ordinary request reached the business handler")
+            (is (= :none (:release-authority ((:summary! w))))))))
+      (finally
+        (.countDown release)
+        (when @pending-request (deref @pending-request 4000 nil))
+        (when @stop-thread (.join ^Thread @stop-thread 4000))
+        (stop-server! h)))))
