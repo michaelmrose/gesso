@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-adapter-start
-  "v1782: Fail-closed Biff HTTP adapter startup for ONE originally issued
+  "v2282: Fail-closed Biff HTTP adapter startup for ONE originally issued
    final-handler consumption probe. Unlike post-start verification, the
    selected adapter is not returned as started until an actual read-only
    loopback challenge reaches the precise final checked Ring wrapper.
@@ -9,14 +9,22 @@
    listener that fails verification, including a stale captured handler,
    synthetic 200, substituted returned Biff map, or connection failure.
 
+   A guarded stop failure is not automatically replayed. A fourth, exact
+   opt-in policy {:idempotent-stop-retry? true} (source-trusted host promise)
+   permits ONE additional explicit original stop attempt through the issued
+   :retry-cleanup! callback, only after an unresolved first attempt. It
+   retains the original system identity, serializes stop and retry, rejects
+   reentrant retries, and NEVER returns a release or activation credential.
+   A returned stop callback alone does not prove external physical closure;
+   callers must still verify the ORIGINAL managed lifecycle and listener.
+
    Only a selected, trusted adapter with a loopback URL locator participates.
    It does NOT prevent independent unwrapped listeners or prove that an
    external production deployment uses this module. The original callback
    can perform effects before failure; no auth, retry, or proof certificate."
   (:require [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
             [gesso.live.application-preflight :as application])
-  (:import (java.util WeakHashMap)
-           (java.util.concurrent.atomic AtomicBoolean)))
+  (:import (java.util WeakHashMap)))
 
 (def module-id
   :gesso.assurance.proof.checked-biff-http-adapter-start/install)
@@ -86,32 +94,74 @@
    challenge BEFORE publishing the started system. The adapter's locator
    receives its returned system and must describe its running LOOPBACK URL.
 
-   The adapter is stopped at most once on failed verification or Biff stop.
-   An adapter that throws AFTER binding a port must implement idempotent
-   :biff.core/stop cleanup. A failed startup is not a proof that no external
-   or earlier side effects took place."
-  [issued-probe adapter-module base-url!]
-  (pinned!)
-  (when-not (and (clean-module? adapter-module) (fn? base-url!))
-    (reject! :invalid-selected-http-adapter-module))
-  (original-probe-check issued-probe)
-  (let [handle (GuardedAdapterHandle.)
+   By default the selected adapter stop callback is attempted AT MOST ONCE.
+   An explicit fourth argument {:idempotent-stop-retry? true} opts into one
+   bounded, manual retry after failed cleanup. This opt-in is a trusted host
+   declaration, not a proof of idempotence or a release authorization.
+   A failed startup cannot promise rollback of any earlier callback effects."
+  ([issued-probe adapter-module base-url!]
+   (issue-checked-http-adapter-start!
+    issued-probe adapter-module base-url! {}))
+  ([issued-probe adapter-module base-url! retry-policy]
+   (pinned!)
+   (when-not (and (clean-module? adapter-module) (fn? base-url!))
+     (reject! :invalid-selected-http-adapter-module))
+   (when-not (and (or (instance? clojure.lang.PersistentArrayMap retry-policy)
+                      (instance? clojure.lang.PersistentHashMap retry-policy))
+                  (nil? (meta retry-policy))
+                  (or (empty? retry-policy)
+                      (= {:idempotent-stop-retry? true} retry-policy)))
+     (reject! :invalid-cleanup-retry-policy))
+   (original-probe-check issued-probe)
+   (let [handle (GuardedAdapterHandle.)
         original-start (:biff.core/start adapter-module)
         original-stop (:biff.core/stop adapter-module)
         started-state (atom :issued)
-        stop-called (AtomicBoolean. false)
         cleanup (atom :not-attempted)
         final-system (atom nil)
+        stop-target (atom nil)
+        stop-attempts (atom 0)
+        stop-monitor (Object.)
+        retry-enabled? (= {:idempotent-stop-retry? true} retry-policy)
+        ;; Always preserve the exact target selected on FIRST stop; never
+        ;; let a later caller swap the original managed Biff system.
+        attempt-stop! (fn []
+                        (let [next-attempt (swap! stop-attempts inc)]
+                          (reset! cleanup :in-progress)
+                          (try
+                            (original-stop @stop-target)
+                            (reset! cleanup :completed)
+                            (catch Throwable _
+                              ;; The callback may have stopped the listener
+                              ;; before throwing. No clean claim is possible.
+                              (reset! cleanup :not-established)))
+                          next-attempt))
         stop-original! (fn [fallback]
-                         (when (.compareAndSet stop-called false true)
-                           (try
-                             (original-stop (or @final-system fallback))
-                             (reset! cleanup :completed)
-                             (catch Throwable _
-                               ;; A throwing stop callback may leave a real
-                               ;; listener running. Never report cleanup as
-                               ;; established in that situation.
-                               (reset! cleanup :not-established)))))
+                         (locking stop-monitor
+                           (when (zero? @stop-attempts)
+                             (reset! stop-target (or @final-system fallback))
+                             (attempt-stop!))))
+        retry-cleanup! (fn []
+                         (locking stop-monitor
+                           (when-not retry-enabled?
+                             (reject! :unissued-cleanup-retry))
+                           (when (zero? @stop-attempts)
+                             (reject! :original-stop-not-attempted))
+                           (when (= :in-progress @cleanup)
+                             (reject! :original-stop-in-progress))
+                           (when-not (contains? #{:stopped :failed} @started-state)
+                             (reject! :original-adapter-not-terminal))
+                           (when (= :not-established @cleanup)
+                             (when (>= @stop-attempts 2)
+                               (reject! :original-stop-retry-budget-exhausted))
+                             (attempt-stop!))
+                           {:status (if (= :completed @cleanup)
+                                      :callback-returned :cleanup-unconfirmed)
+                            :attempts @stop-attempts
+                            :scope :original-selected-stop-callback-only
+                            :physical-listener-closure :not-established
+                            :release-authority :none
+                            :activation-eligibility :not-issued}))
         check-original! (fn []
                           (pinned!)
                           (let [inspection (original-probe-check issued-probe)]
@@ -183,10 +233,16 @@
                                   :starting :starting
                                   :issued :issued)]
                      (assoc (report status)
-                            :selected-adapter-cleanup @cleanup)))]
-    (locking issued
-      (.put issued handle {:module module :summary! summary!}))
-    {:handle handle :module module :summary! summary!}))
+                            :selected-adapter-cleanup @cleanup
+                            :original-stop-attempts @stop-attempts
+                            :stop-retry-policy (if retry-enabled?
+                                                 :explicit-host-idempotence
+                                                 :not-enabled))))]
+     (locking issued
+       (.put issued handle {:module module :summary! summary!
+                            :retry-cleanup! retry-cleanup!}))
+     {:handle handle :module module :summary! summary!
+      :retry-cleanup! retry-cleanup!})))
 
 (defn require-original-issued-http-adapter-start!
   "Recognize one ORIGINAL issued guarded HTTP adapter module, not a copied
@@ -196,12 +252,15 @@
   (when-not (and (or (instance? clojure.lang.PersistentArrayMap candidate)
                      (instance? clojure.lang.PersistentHashMap candidate))
                  (nil? (meta candidate))
-                 (= #{:handle :module :summary!} (set (keys candidate))))
+                 (= #{:handle :module :summary! :retry-cleanup!}
+                    (set (keys candidate))))
     (reject! :invalid-original-guarded-adapter-shape))
   (let [record (issued-entry (:handle candidate))]
     (when-not (and record
                    (identical? (:module candidate) (:module record))
                    (identical? (:summary! candidate) (:summary! record))
+                   (identical? (:retry-cleanup! candidate)
+                               (:retry-cleanup! record))
                    (= module-id (get-in candidate [:module :biff.core/id])))
       (reject! :unissued-or-substituted-guarded-adapter))
     {:type report-type :version report-version
