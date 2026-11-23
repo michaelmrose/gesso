@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http-probe-shutdown-test
-  "v2300: Permanent live-HTTP qualification of private-probe admission,
+  "v2302: Permanent live-HTTP qualification of private-probe admission,
    synchronous probe drain, and fail-closed retries at the selected
    Biff traffic fence. Controlled installed-source callbacks are explicit
    test doubles, not independent source or release authority.
@@ -11,6 +11,8 @@
    shutdown deadlock with deterministic lock-order coordination.
    v2300 qualifies cleanup-retry callbacks that consult the outer lifecycle
    summary from another thread while the one-use retry is in progress.
+   v2302 rejects protected handler and guard self-stop before consuming
+   the one-use external shutdown, including nested Ring dispatch.
 
    After stop begins, even a valid assurance marker cannot bypass
    the closed fence on a surviving physical HTTP listener."
@@ -712,3 +714,100 @@
         (.countDown release)
         (when @retry-worker (deref @retry-worker 4000 nil))
         (stop-server! h)))))
+
+(defn- protected-stop-rejection [action]
+  (try
+    (action)
+    :unexpected-stop-success
+    (catch clojure.lang.ExceptionInfo error
+      (:reason (ex-data error)))))
+
+(deftest ordinary-and-nested-protected-handlers-cannot-consume-stop
+  ;; v2301: A normal Ring handler cannot upgrade its own fence read lease to
+  ;; exclusive shutdown. Even though the lower fence rejects that upgrade,
+  ;; the outer issuer must refuse it BEFORE consuming the one-shot lifecycle.
+  ;; Exercise a direct handler and a same-thread nested wire dispatch, where
+  ;; the inner request must restore the parent's protected-thread context.
+  (let [issued (atom nil)
+        host-ref (atom nil)
+        observed (atom [])
+        hooks {:on-original
+               (fn [request]
+                 (case (:uri request)
+                   "/try-self-stop"
+                   (swap! observed conj
+                          [:direct (protected-stop-rejection
+                                    #((:stop! @issued)))])
+                   "/outer-request"
+                   (do
+                     (let [response (@(:wire @host-ref)
+                                     {:uri "/nested-request"
+                                      :request-method :get
+                                      :headers {}})]
+                       (swap! observed conj [:inner-http (:status response)]))
+                     (swap! observed conj
+                            [:outer (protected-stop-rejection
+                                     #((:stop! @issued)))]))
+                   "/nested-request"
+                   (swap! observed conj
+                          [:inner (protected-stop-rejection
+                                   #((:stop! @issued)))])
+                   nil))}
+        h (host false hooks)]
+    (reset! host-ref h)
+    (try
+      (with-redefs [installed/issue-selected-installed-catalog! (:issuer h)]
+        (let [w (outer/issue-fenced-checked-biff-http!
+                 (constantly {}) (:config h) (constantly true))]
+          (reset! issued w)
+          (is (= :one-original-biff-listener-host-locally-fenced
+                 (:status ((:start-once! w) {}))))
+          (is (= 200 (request! (:port h) "/try-self-stop" nil nil)))
+          (is (= 200 (request! (:port h) "/outer-request" nil nil)))
+          (is (= [[:direct :fenced-biff-stop-during-protected-request]
+                  [:inner :fenced-biff-stop-during-protected-request]
+                  [:inner-http 200]
+                  [:outer :fenced-biff-stop-during-protected-request]]
+                 @observed))
+          (is (= :running (:status ((:summary! w)))))
+          (is (= 200 (request! (:port h) "/after-self-stop" nil nil))
+              "Rejected in-request stops must not interrupt later traffic")
+          (is (= :none (:release-authority ((:summary! w)))))
+          (is (= :cleanup-unconfirmed (:status ((:stop! w))))
+              "A subsequent external stop still has the original authority")
+          (is (= :closed (get-in ((:summary! w)) [:traffic-fence :phase])))
+          (is (= [503 503 503] @(:stop-while-closing h)))
+          (is (= 503 (request! (:port h) "/after-shutdown" nil nil)))
+          (is (= :fenced-biff-start-not-once-only
+                 (protected-stop-rejection #((:start-once! w) {}))))))
+      (finally (stop-server! h)))))
+
+(deftest ordinary-protected-guard-cannot-consume-stop
+  ;; The guard executes under the SAME lexical wire-dispatch context as the
+  ;; business handler. A stop from this guard must not poison the lifecycle
+  ;; even when the guard would otherwise allow the request through.
+  (let [issued (atom nil)
+        guard-observations (atom [])
+        h (host false)]
+    (try
+      (with-redefs [installed/issue-selected-installed-catalog! (:issuer h)]
+        (let [w (outer/issue-fenced-checked-biff-http!
+                 (constantly {}) (:config h)
+                 (fn [request]
+                   (when (= "/guard-stop" (:uri request))
+                     (swap! guard-observations conj
+                            (protected-stop-rejection #((:stop! @issued)))))
+                   true))]
+          (reset! issued w)
+          (is (= :one-original-biff-listener-host-locally-fenced
+                 (:status ((:start-once! w) {}))))
+          (is (= 200 (request! (:port h) "/guard-stop" nil nil)))
+          (is (= [:fenced-biff-stop-during-protected-request]
+                 @guard-observations))
+          (is (= :running (:status ((:summary! w)))))
+          (is (= 200 (request! (:port h) "/guard-allowed-later" nil nil)))
+          (is (= :cleanup-unconfirmed (:status ((:stop! w)))))
+          (is (= :closed (get-in ((:summary! w)) [:traffic-fence :phase])))
+          (is (= 503 (request! (:port h) "/guard-after-stop" nil nil)))
+          (is (= :none (:release-authority ((:summary! w)))))))
+      (finally (stop-server! h)))))
