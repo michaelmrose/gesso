@@ -1,7 +1,10 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-cleanup-retry-test
-  "v2284: Permanent real-Biff/XTDB cleanup-retry regression tests for the
-   original configured issuer. Successful adapter stop callbacks alone are
-   never treated as confirmed original-listener shutdown."
+  "v2313: Permanent real-Biff/XTDB cleanup-retry regressions for the original
+   configured issuer. Successful adapter stop callbacks alone are never
+   treated as confirmed original-listener shutdown. The selected original
+   host listener observer may request lifecycle inspection from another JVM
+   thread during :retrying-cleanup without deadlocking physical recovery."
+  (:import [java.util.concurrent CountDownLatch TimeUnit])
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.proof.checked-biff-http-application-configuration
              :as config]
@@ -261,3 +264,86 @@
       (is (= :configured-cleanup-retry-already-attempted
              (reason (:retry-cleanup! issued))))
       (finally (cleanup! s issued)))))
+
+
+(deftest original-listener-retry-observer-may-inspect-concurrently
+  ;; v2312: The trusted original-listener shutdown observer executes AFTER
+  ;; guarded and probe stop results, while the configured issuer holds its
+  ;; exclusive :retrying-cleanup claim. The observer can synchronously wait
+  ;; for another JVM thread to attempt a generation inspection. Holding the
+  ;; lifecycle monitor through this callback used to deadlock that thread.
+  ;; A real Biff/XTDB executor, original physical stop and captured listener
+  ;; identity are required; this test does not substitute an installed issuer.
+  (let [s (scenario :honest)
+        attempts (atom 0)
+        issued-ref (atom nil)
+        started (atom nil)
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        observation (promise)
+        observer-calls (atom 0)
+        issued (config/issue-configured-checked-http-application!
+                (retry-source
+                 s (fail-first-stop s attempts)
+                 (fn [captured running]
+                   (swap! observer-calls inc)
+                   (.countDown entered)
+                   (deliver observation
+                            (deref (future
+                                     (let [[generation system] @started]
+                                       (reason
+                                        #((:inspect-generation! @issued-ref)
+                                          generation system))))
+                                   1800 ::inspection-timeout))
+                   (when-not (.await release 8 TimeUnit/SECONDS)
+                     (throw (ex-info "Original host observer not released" {})))
+                   (and (identical? captured (listener s))
+                        (identical? running (second @started))
+                        (stopped? s)))))
+        recovery (atom nil)]
+    (reset! issued-ref issued)
+    (try
+      (let [{:keys [system instance-generation]}
+            ((:start-once! issued) {})]
+        (reset! started [instance-generation system])
+        (is (= :verified-configured-start (:status ((:summary! issued)))))
+        (is (= :stop-cleanup-not-established (:status ((:stop! issued)))))
+        (is (= 1 @attempts))
+        (is (false? (stopped? s))
+            "The original physical listener remains after failed first stop")
+        (reset! recovery (future ((:retry-cleanup! issued))))
+        (is (.await entered 4000 TimeUnit/MILLISECONDS)
+            "The original host shutdown observer must be reached")
+        (is (= :configured-instance-generation-not-current
+               (deref observation 3500 ::observation-timeout))
+            "Host observer must obtain a prompt cross-thread inspection rejection")
+        (is (= :configured-retry-in-progress
+               (deref (future (reason #((:stop! issued))))
+                      1900 ::competing-stop-timeout))
+            "A competing stop must not enter while original recovery is active")
+        (is (= :configured-cleanup-retry-already-attempted
+               (deref (future (reason #((:retry-cleanup! issued))))
+                      1900 ::competing-retry-timeout))
+            "The physical retry is consumed before original callbacks run")
+        (is (= :retrying-cleanup (:status ((:summary! issued)))))
+        (is (not (realized? @recovery))
+            "Recovery must not finish before the original observer returns")
+        (.countDown release)
+        (is (= :stopped (:status (deref @recovery 6000 ::recovery-timeout))))
+        (is (= 2 @attempts)
+            "Exactly the first failed stop and one original retry may run")
+        (is (= 1 @observer-calls))
+        (is (stopped? s) "The actual Biff server executor must terminate")
+        (is (= :stopped (:status ((:summary! issued)))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-cleanup-retry-already-attempted
+               (reason (:retry-cleanup! issued))))
+        (is (= :configured-instance-generation-not-current
+               (reason #((:inspect-generation! issued)
+                         instance-generation system))))
+        (is (= 2 @attempts)
+            "A repeated stop or retry cannot re-invoke original cleanup"))
+      (finally
+        (.countDown release)
+        (when @recovery (deref @recovery 6000 nil))
+        (cleanup! s issued)))))
