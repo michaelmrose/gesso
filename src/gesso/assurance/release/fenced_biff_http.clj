@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http
-  "v2268: Install the host-local synchronous traffic fence at the actual
+  "v2280: Fail-closed managed-stop reporting for the host-local traffic fence at the actual
    selected Biff adapter's HTTP dispatch point, not merely beside Biff.
 
    An issued original checked Biff/XTDB startup must complete its real HTTP
@@ -18,6 +18,14 @@
    assessment qualifies the exact handler, guard and current fence epoch.
    An additional real-loopback negative challenge verifies that the selected
    adapter actually serves the fence before enabling normal traffic.
+
+   Shutdown must not claim :stopped unless BOTH the traffic fence has
+   drained/closed and the original managed Biff stop explicitly confirms its
+   own :stopped outcome. An incomplete drain, throwing stop callback or
+   unconfirmed managed cleanup leaves this wrapper :cleanup-unconfirmed,
+   permanently denying traffic. A retry may attempt cleanup again but the
+   original lower-layer issuer may retain unconfirmed terminal state; a
+   wrapper retry alone does not establish physical recovery.
 
    This is opt-in LOCAL qualification of ONE selected synchronous HTTP
    entrypoint, NOT authenticated deployment, complete route/source coverage,
@@ -154,6 +162,7 @@
           raw-system (atom nil)
           guard-function (atom nil)
           issued (atom nil)
+          last-stop-result (atom nil)
           proof-path (str probe-prefix (UUID/randomUUID))
           fenced (fence/issue-local-ring-traffic-fence!
                   {:qualify!
@@ -225,15 +234,39 @@
       (reset! issued local-issued)
       (letfn [(stop! []
                 (locking monitor
-                  (when-not (= :stopped @status)
-                    ;; Do not ignore a reentrant drain failure: the physical
-                    ;; stop must not race an in-flight synchronous request.
-                    ((:close! fenced))
-                    (reset! status :stopping)
-                    (try
-                      ((:stop! local-issued))
-                      (finally (reset! status :stopped))))
-                  {:status :stopped :authority :none}))
+                  (when (= :stopping @status)
+                    (reject! :fenced-biff-stop-in-progress))
+                  (if (= :stopped @status)
+                    {:status :stopped :authority :none}
+                    (do
+                      ;; Deny traffic first, even when physical cleanup
+                      ;; cannot be established. No unconditional :stopped.
+                      (reset! status :stopping)
+                      (let [outcome
+                            (try
+                              (let [closed ((:close! fenced))]
+                                (if-not (and (= :closed (:status closed))
+                                             (= :none (:authority closed)))
+                                  {:status :cleanup-unconfirmed
+                                   :reason :fence-drain-not-confirmed
+                                   :authority :none}
+                                  (let [managed ((:stop! local-issued))]
+                                    (if (and (= :stopped (:status managed))
+                                             (= :none (:authority managed)))
+                                      {:status :stopped :authority :none}
+                                      {:status :cleanup-unconfirmed
+                                       :reason :original-managed-stop-not-confirmed
+                                       :authority :none}))))
+                              (catch Throwable error
+                                (when (instance? InterruptedException error)
+                                  (.interrupt (Thread/currentThread)))
+                                {:status :cleanup-unconfirmed
+                                 :reason :stop-callback-failed
+                                 :error-class (.getName (class error))
+                                 :authority :none}))]
+                        (reset! status (:status outcome))
+                        (reset! last-stop-result outcome)
+                        outcome)))))
               (start-once! [system]
                 (locking monitor
                   (when-not (= :issued @status)
@@ -270,6 +303,7 @@
                 (locking monitor
                   {:type report-type :version report-version
                    :status @status
+                   :stop-result @last-stop-result
                    :traffic-fence ((:summary! fenced))
                    :release-authority :none
                    :installation-eligibility :not-issued
