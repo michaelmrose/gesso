@@ -7,6 +7,7 @@
   (:require [aleph.http :as aleph]
             [gesso.assurance.release.traffic-fence :as release-fence]
             [gesso.assurance.release.aleph-write-lease :as release-lease]
+            [gesso.assurance.release.aleph-sse-lease :as release-sse-lease]
             [clojure.string :as str]
             [aleph.netty :as aleph-netty]
             [clojure.test :refer [deftest is]]
@@ -965,3 +966,181 @@
              (refusal-reason #((:close! fence)))))
       (is (= :none (:release-authority ((:stats lease)))))
       (finally (stop!)))))
+
+;; v2278: The original managed Biff/XTDB SSE route executes THROUGH the
+;; actual socket-facing release fence. The route's own admission callback is
+;; bound to the exact per-request fence continuation, while Aleph's installed
+;; outbound observer and original route-cancellation ledger own its release.
+;; An SSE handler return and even one disconnected peer are not sufficient
+;; to retire the surviving session. This is one local HTTP/1 qualification,
+;; not public-ingress completeness, release permission or HTTP/2 coverage.
+(deftest real-aleph-release-fence-managed-sse-disconnect-and-drain-test
+  (let [standard ((requiring-resolve
+                   'gesso.live.application-preflight.fixture/standard-operations))
+        render ((requiring-resolve
+                 'gesso.live.application-preflight.fixture/render-context) standard)
+        button ((requiring-resolve
+                 'gesso.live.application-preflight.fixture/rendered-operation-button)
+                render :request/claim "/operations/request/claim")
+        fixture (requiring-resolve
+                 'gesso.live.application-preflight.fixture/with-surfaced-application)]
+    (fixture
+     {:request-board [:main button]}
+     (fn [{:keys [assembly]}]
+       (let [host-start (requiring-resolve 'gesso.live.outbox.host/start!)
+             host-stop (requiring-resolve 'gesso.live.outbox.host/stop!)
+             app (host-start
+                  assembly
+                  (fn [_] {:status 200 :headers {} :body "ordinary"})
+                  {:xtdb-config {} :source-id "gesso/v2278-real-aleph-sse"
+                   :rules-context {}
+                   :worker-options {:worker-id "v2278-aleph-sse-worker"
+                                    :poll-ms 25}
+                   :live-options
+                   {:rules [{:when-topic :request
+                             :expand (fn [_ change]
+                                       [(select-keys change
+                                                     [:topic :id :change/kind])])}]
+                    :source-options {:coalesce-window-ms 0
+                                     :max-active-consumers 4}
+                    :dispatch-options {:threads 1 :queue-size 8
+                                       :on-overflow :throw}}})
+             src (:source (:gesso.live/system app))
+             observer (capture/prepare!)
+             pool (java.util.concurrent.Executors/newFixedThreadPool 2)
+             fence (release-fence/issue-local-ring-traffic-fence!
+                    {:qualify! (constantly true) :drain-timeout-ms 80})
+             reconciler (aleph-live/prepare-reconciler!
+                         {:max-pending 4 :max-per-step 4})
+             adapter (release-sse-lease/issue!
+                      {:fence fence :capture observer
+                       :executor pool :reconciler reconciler})
+             route (http/wrap-authorized-sse
+                    app {:path "/live/events" :max-connections 2
+                         :authorize-subscription
+                         (fn [request]
+                           {:topic :request
+                            :id (if (= "client=one" (:query-string request))
+                                  "v2278-one" "v2278-two")})
+                         :on-session-admitted!
+                         (:on-session-admitted! adapter)})
+             candidate ((:prepare! fence)
+                        {:generation :gesso.release.qualification/real-aleph-sse
+                         :guard! (constantly true)
+                         :handler (:handler route)})
+             server (atom nil)
+             sockets (atom [])
+             host-stopped? (atom false)
+             open-client!
+             (fn [id]
+               (let [socket (java.net.Socket.)]
+                 (swap! sockets conj socket)
+                 (.connect socket
+                           (java.net.InetSocketAddress.
+                            "127.0.0.1" (aleph-netty/port @server)) 2000)
+                 (.setSoTimeout socket 5000)
+                 (let [writer (.getOutputStream socket)
+                       request (str "GET /live/events?client=" id " HTTP/1.1\r\n"
+                                    "Host: 127.0.0.1\r\n"
+                                    "Connection: keep-alive\r\n\r\n")
+                       reader (java.io.BufferedReader.
+                               (java.io.InputStreamReader.
+                                (.getInputStream socket)
+                                StandardCharsets/UTF_8))]
+                   (.write writer (.getBytes request StandardCharsets/US_ASCII))
+                   (.flush writer)
+                   (is (re-find #"^HTTP/1\.1 200 " (or (.readLine reader) "")))
+                   (loop []
+                     (let [line (.readLine reader)]
+                       (when-not line
+                         (throw (ex-info "SSE headers ended prematurely" {})))
+                       (when (seq line) (recur))))
+                   {:socket socket :reader reader})))
+             read-update!
+             (fn [reader]
+               (loop [n 0]
+                 (cond (> n 50) false
+                       :else
+                       (let [line (.readLine reader)]
+                         (cond (nil? line) false
+                               (= "event: live-update" line) true
+                               :else (recur (inc n)))))))]
+         (try
+           (reset! server
+                   (aleph/start-server
+                    (:handler fence)
+                    {:port 0 :http-versions [:http1]
+                     :transport :nio :shutdown-timeout 0
+                     :http1-pipeline-transform
+                     (:http1-pipeline-transform observer)}))
+           (let [client (HttpClient/newHttpClient)
+                 url (str "http://127.0.0.1:" (aleph-netty/port @server))]
+             (is (= 503 (.statusCode
+                          (.send client (get-request (str url "/live/events?client=one"))
+                                 (HttpResponse$BodyHandlers/ofString)))))
+             (is (zero? (:attempted ((:stats adapter)))))
+             (is (zero? (:subscription-count (source/stats src))))
+             (is (= :host-selected-only (:status ((:activate! fence) candidate))))
+             (let [one (open-client! "one")
+                   two (open-client! "two")]
+               (is (eventually #(and (= 2 ((:occupied-count route)))
+                                     (= 2 (:subscription-count (source/stats src)))
+                                     (= 2 (:registered ((:stats adapter))))
+                                     (= 2 (:retained-continuations
+                                           ((:summary! fence)))))))
+               (is (= 503 (.statusCode
+                            (.send client
+                                   (get-request (str url "/live/events?client=excess"))
+                                   (HttpResponse$BodyHandlers/ofString))))
+                   "Full original route capacity must not admit a third lease")
+               (is (= 2 (:registered ((:stats adapter)))))
+               (source/emit! src {:topic :request :id "v2278-two"
+                                  :change/kind :updated})
+               (is (read-update! (:reader two))
+                   "The surviving route still delivers real SSE frames")
+               (.setSoLinger ^java.net.Socket (:socket one) true 0)
+               (.close ^java.net.Socket (:socket one))
+               (is (eventually #(and (= 1 ((:occupied-count route)))
+                                     (= 1 (:subscription-count (source/stats src)))
+                                     (= 1 (:retained-continuations
+                                           ((:summary! fence))))))
+                   "One original route release finishes only its own lease")
+               (is (= :registered-continuation-drain-timeout
+                      (refusal-reason #((:retire! fence) candidate)))
+                   "An active SSE peer must block physical retirement")
+               (is (= :draining (:phase ((:summary! fence)))))
+               (is (= 503 (.statusCode
+                            (.send client (get-request (str url "/after-drain"))
+                                   (HttpResponse$BodyHandlers/ofString)))))
+               (.setSoLinger ^java.net.Socket (:socket two) true 0)
+               (.close ^java.net.Socket (:socket two))
+               (is (eventually #(and (zero? ((:occupied-count route)))
+                                     (zero? (:subscription-count (source/stats src)))
+                                     (zero? (:retained-continuations
+                                             ((:summary! fence))))))
+                   "Only actual second physical release allows drain")
+               (is (= :retired (:status ((:retire! fence) candidate))))
+               (is (= :closed (:status ((:close! fence)))))
+               (is (= :closed ((:close! route))))
+               (is (true? ((:drained? route))))
+               (is (zero? (:pending ((:stats observer)))))
+               ((:after-step! reconciler) {:outcome :route-drained})
+               (is (zero? ((:pending-count reconciler))))
+               (let [stats ((:stats adapter))]
+                 (is (= 2 (:registered stats)))
+                 (is (zero? (:admission-errors stats)))
+                 (is (= :none (:release-authority stats)))
+                 (is (= :not-issued (:activation-eligibility stats)))))
+             (.close ^Closeable @server)
+             (host-stop app)
+             (reset! host-stopped? true))
+           (finally
+             (doseq [socket @sockets]
+               (try (.close ^java.net.Socket socket) (catch Throwable _ nil)))
+             (when-let [live @server]
+               (try (.close ^Closeable live) (catch Throwable _ nil)))
+             (try ((:close! route)) (catch Throwable _ nil))
+             (try ((:close! fence)) (catch Throwable _ nil))
+             (.shutdownNow pool)
+             (when-not @host-stopped?
+               (try (host-stop app) (catch Throwable _ nil))))))))))
