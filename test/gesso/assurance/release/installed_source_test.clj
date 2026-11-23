@@ -1,12 +1,16 @@
 (ns gesso.assurance.release.installed-source-test
-  "v2266: Original Claim catalog through an actual, locally started Biff/XTDB
+  "v2304: Original Claim catalog through an actual, locally started Biff/XTDB
    application, with permanent checks of the diagnostic release phase boundary.
 
    This suite uses the existing original Biff HTTP fixture, its actual loopback
    listener and the real source-derived operation checker. It does NOT grant
    installation eligibility, activation, release or execution permission.
    The host's listener-instance callback and catalog completeness remain
-   explicit assumptions; this is one LOCAL in-process observation."
+   explicit assumptions; this is one LOCAL in-process observation.
+
+   v2304 preserves the original physical-stop callback/summary lock-order
+   regression on a real local Biff/XTDB listener, including concurrent-stop
+   exclusion and one-shot cleanup without additional release authority."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gesso.assurance.release.installed-source :as installed]
             [gesso.assurance.proof.checked-biff-http-application-configuration-fixture
@@ -222,3 +226,84 @@
                        (assoc opts :listener-instance! :fake)))))
       (is (nil? @(:server-state s)))
       (finally (clean! s nil)))))
+
+(deftest physical-stop-callback-may-read-selected-lifecycle-without-deadlock
+  ;; A host-managed Biff stop callback can synchronously ask another JVM
+  ;; thread to read this selected issuer's lifecycle summary. The selected
+  ;; source must claim :stopping under its monitor and release the monitor
+  ;; BEFORE invoking the original physical stop. Prior to v2303, this
+  ;; inversion timed out the callback's cross-thread summary and a competing
+  ;; stop, even though the original listener could eventually be stopped.
+  (let [s (scenario)
+        original (fixture/original-source s true)
+        original-stop (get-in original [:adapter-module :biff.core/stop])
+        original-calls (atom 0)
+        instance-ref (atom nil)
+        callback-entered (promise)
+        callback-release (promise)
+        callback-summary (promise)
+        config (-> original
+                   (assoc :listener-instance!
+                          (fn [_] (:server @(:server-state s))))
+                   (assoc-in [:adapter-module :biff.core/stop]
+                             (fn [system]
+                               (swap! original-calls inc)
+                               (deliver callback-entered true)
+                               ;; The observer MUST run on another thread,
+                               ;; reproducing the physical callback's real
+                               ;; monitor inversion, with a bounded wait.
+                               (deliver callback-summary
+                                        (deref (future ((:summary! @instance-ref)))
+                                               2300 ::summary-timeout))
+                               (deref callback-release 5000 ::callback-timeout)
+                               (original-stop system))))
+        catalog (get-in s [:env :catalog-source :catalog])
+        instance (installed/issue-selected-installed-catalog!
+                  (constantly catalog) config)]
+    (reset! instance-ref instance)
+    (try
+      (is (= :selected-source-and-current-local-http-observed-only
+             (:status ((:start-once! instance) {}))))
+      (let [stop-future (future ((:stop! instance)))]
+        (try
+          (is (= true (deref callback-entered 3000 ::callback-not-entered))
+              "The original configured physical-stop callback must execute")
+          (is (= 1 @original-calls))
+          (let [snapshot (deref callback-summary 4000 ::callback-no-snapshot)]
+            (is (map? snapshot)
+                "The original callback can obtain a lifecycle summary")
+            (is (= :stopping (:status snapshot)))
+            (is (= :requires-fresh-inspection
+                   (:current-installation-evidence snapshot)))
+            (is (= :not-issued (:installation-eligibility snapshot)))
+            (is (= :none (:release-authority snapshot))))
+          (is (= :local-physical-stop-in-progress
+                 (deref (future (reason #((:stop! instance))))
+                        1500 ::competing-stop-timeout))
+              "An in-flight original physical stop excludes a second stop")
+          (is (= :stopping
+                 (deref (future (:status ((:summary! instance))))
+                        1500 ::summary-timeout))
+              "An external summary stays responsive during cleanup")
+          (is (= :no-current-issued-running-instance
+                 (deref (future
+                          (reason #((:assess-current-installation! instance))))
+                        1500 ::assessment-timeout))
+              "No installation requalification is permitted during cleanup")
+          (is (not (realized? stop-future))
+              "Physical cleanup cannot finalize while its callback is held")
+          (finally (deliver callback-release true)))
+        (is (= :stopped (:status (deref stop-future 5000 ::stop-timeout))))
+        (is (= :stopped (:status ((:summary! instance)))))
+        (is (= :none (:release-authority ((:summary! instance)))))
+        (is (= :no-current-issued-running-instance
+               (reason #((:inspect-current! instance)))))
+        (is (= :selected-original-http-start-not-once-only
+               (reason #((:start-once! instance) {}))))
+        (is (= :stopped (:status ((:stop! instance))))
+            "A confirmed physical stop remains idempotent")
+        (is (= 1 @original-calls)
+            "A repeated stop must not call physical shutdown again"))
+      (finally
+        (deliver callback-release true)
+        (clean! s instance)))))
