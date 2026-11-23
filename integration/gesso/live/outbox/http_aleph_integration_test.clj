@@ -5,6 +5,8 @@
    completion still require separate evidence before claiming a production
    Aleph adapter."
   (:require [aleph.http :as aleph]
+            [gesso.assurance.release.traffic-fence :as release-fence]
+            [gesso.assurance.release.aleph-write-lease :as release-lease]
             [clojure.string :as str]
             [aleph.netty :as aleph-netty]
             [clojure.test :refer [deftest is]]
@@ -854,3 +856,112 @@
                  (.shutdownNow pool)
                  (when-not @stopped?
                    (try (host-stop app) (catch Throwable _ nil))))))))))))
+
+;; Release integration qualification (v2274).  These checks deliberately use
+;; the real Aleph HTTP/1 listener rather than an EmbeddedChannel: the actual
+;; socket-facing Ring handler and outbound Netty final-write hook must agree.
+;; They qualify only a host-local finite-response path, not a production
+;; activation credential, application-wide ingress inventory or SSE lifecycle.
+(defn- release-write-lease-server! [instrumented?]
+  (let [entered (atom 0)
+        allowed? (atom true)
+        fence (release-fence/issue-local-ring-traffic-fence!
+               {:qualify! (constantly true) :drain-timeout-ms 100})
+        lease (release-lease/prepare! fence)
+        candidate ((:prepare! fence)
+                   {:generation :gesso.release.qualification/real-aleph-http1
+                    :guard! (fn [_] @allowed?)
+                    :handler ((:wrap-handler lease)
+                              (fn [request]
+                                (swap! entered inc)
+                                {:status 200
+                                 :headers {"content-type" "text/plain"}
+                                 :body (str "qualified " (:uri request))}))})
+        server (atom nil)]
+    (try
+      (reset! server
+              (aleph/start-server
+               (:handler fence)
+               (cond-> {:port 0 :http-versions [:http1]
+                        :transport :nio :shutdown-timeout 0}
+                 instrumented?
+                 (assoc :http1-pipeline-transform
+                        (:http1-pipeline-transform lease)))))
+      {:url (str "http://127.0.0.1:" (aleph-netty/port @server))
+       :entered entered :allowed? allowed? :fence fence
+       :lease lease :candidate candidate
+       :stop! (fn [] (.close ^Closeable @server))}
+      (catch Throwable error
+        (when-let [s @server] (.close ^Closeable s))
+        (throw error)))))
+
+(defn- refusal-reason [thunk]
+  (try (thunk) :not-refused
+       (catch clojure.lang.ExceptionInfo error
+         (:reason (ex-data error)))))
+
+(deftest real-aleph-release-lease-finite-traffic-retirement-test
+  (let [{:keys [url fence lease candidate entered allowed? stop!] :as app}
+        (release-write-lease-server! true)
+        client (HttpClient/newHttpClient)
+        request! (fn [path]
+                   (.send client (get-request (str url path))
+                          (HttpResponse$BodyHandlers/ofString)))]
+    (try
+      (let [denied (request! "/before-activation")]
+        (is (= 503 (.statusCode denied)))
+        (is (zero? @entered))
+        (is (zero? (:retained-continuations ((:summary! fence))))))
+      (is (= :host-selected-only (:status ((:activate! fence) candidate))))
+      (let [one (request! "/one")
+            two (request! "/two")]
+        (is (= 200 (.statusCode one) (.statusCode two)))
+        (is (= "qualified /one" (.body one)))
+        (is (= "qualified /two" (.body two))))
+      (is (eventually #(and (= 2 (:matched (:capture ((:stats lease)))))
+                            (= 2 (get-in ((:stats lease)) [:counts :succeeded]))
+                            (zero? (:pending-registered ((:stats lease))))
+                            (zero? (:retained-continuations ((:summary! fence)))))
+          "Two real HTTP/1 final Netty write promises retire exactly two leases"))
+      (is (= 2 @entered))
+      (reset! allowed? false)
+      (is (= 503 (.statusCode (request! "/guard-revoked"))))
+      (is (= 2 @entered) "Denied work may not enter the protected handler")
+      (is (= :retired (:status ((:retire! fence) candidate))))
+      (is (= 503 (.statusCode (request! "/after-retirement"))))
+      (is (= 2 @entered))
+      (is (= :closed (:status ((:close! fence)))))
+      (let [stats ((:stats lease))]
+        (is (= :none (:release-authority stats)))
+        (is (= :not-issued (:activation-eligibility stats)))
+        (is (= :not-issued (:completion-claim stats))))
+      (finally (stop!)))))
+
+(deftest real-aleph-release-lease-missing-pipeline-fails-closed-test
+  (let [{:keys [url fence lease candidate entered stop!]}
+        (release-write-lease-server! false)
+        client (HttpClient/newHttpClient)]
+    (try
+      (is (= :host-selected-only (:status ((:activate! fence) candidate))))
+      (let [response
+            (.send client (get-request (str url "/unobserved-write"))
+                   (HttpResponse$BodyHandlers/ofString))]
+        (is (= 200 (.statusCode response)))
+        (is (= "qualified /unobserved-write" (.body response))))
+      (is (= 1 @entered))
+      (is (= 1 (:pending-registered ((:stats lease)))))
+      (is (= 1 (:retained-continuations ((:summary! fence)))))
+      (is (zero? (:matched (:capture ((:stats lease))))))
+      (is (= :registered-continuation-drain-timeout
+             (refusal-reason #((:retire! fence) candidate)))
+          "Without physical Netty write observation, retirement must not succeed")
+      (is (= :draining (:phase ((:summary! fence)))))
+      (let [response
+            (.send client (get-request (str url "/denied-after-drain"))
+                   (HttpResponse$BodyHandlers/ofString))]
+        (is (= 503 (.statusCode response)))
+        (is (= 1 @entered)))
+      (is (= :registered-continuation-drain-timeout
+             (refusal-reason #((:close! fence)))))
+      (is (= :none (:release-authority ((:stats lease)))))
+      (finally (stop!)))))
