@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http
-  "v2294: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
+  "v2296: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
    selected Biff adapter's HTTP dispatch point, not merely beside Biff.
 
    An issued original checked Biff/XTDB startup must complete its real HTTP
@@ -30,6 +30,14 @@
    permanently denying traffic. A retry may attempt cleanup again but the
    original lower-layer issuer may retain unconfirmed terminal state; a
    wrapper retry alone does not establish physical recovery.
+
+   v2296: Original managed stop must not hold the outer monitor while
+   draining ordinary guarded Ring requests, waiting for registered
+   continuations or invoking host physical-stop callbacks. An admitted
+   application request can call summary! while holding the traffic fence's
+   read lease, so holding monitor across fence/close! would deadlock the
+   request against the stop's exclusive lease. The exclusive :stopping
+   claim already prevents a second lifecycle transition during cleanup.
 
    v2294: Startup also publishes :starting under the lifecycle monitor,
    then releases it for original Biff/XTDB startup and source probes.
@@ -289,42 +297,49 @@
       (reset! guard-function protected-guard)
       (reset! issued local-issued)
       (letfn [(complete-claimed-stop! []
-                ;; This continuation runs only AFTER an exclusive lifecycle
-                ;; claim has published :stopping. In particular, failed
-                ;; startup calls it without making a public stop race against
-                ;; the still-executing original startup callback.
+                ;; Only the thread that claimed :stopping may enter here.
+                ;; First drain admitted private probe leases WITHOUT monitor:
+                ;; their original handler may request our lifecycle summary.
                 (let [write (.writeLock probe-lock)]
                   (.lock write)
                   (try
-                    ;; Release every admitted private probe before cleanup;
-                    ;; do not hold monitor while waiting for its read lease.
+                    ;; Existing private probes are complete before we begin
+                    ;; the underlying fence/managed physical shutdown.
                     (finally (.unlock write))))
-                (locking monitor
-                  (let [outcome
-                        (try
-                          (let [closed ((:close! fenced))]
-                            (if-not (and (= :closed (:status closed))
-                                         (= :none (:authority closed)))
-                              {:status :cleanup-unconfirmed
-                               :reason :fence-drain-not-confirmed
-                               :authority :none}
-                              (let [managed ((:stop! local-issued))]
-                                (if (and (= :stopped (:status managed))
-                                         (= :none (:authority managed)))
-                                  {:status :stopped :authority :none}
-                                  {:status :cleanup-unconfirmed
-                                   :reason :original-managed-stop-not-confirmed
-                                   :authority :none}))))
-                          (catch Throwable error
-                            (when (instance? InterruptedException error)
-                              (.interrupt (Thread/currentThread)))
+                ;; Do not hold monitor across the ordinary Ring fence drain,
+                ;; registered continuation drain or host callbacks. A live
+                ;; admitted handler may synchronously ask :summary!, which
+                ;; acquires monitor while itself holding the Ring read lease.
+                ;; The prior monitor -> fence-write ordering deadlocked that
+                ;; handler's fence-read -> monitor ordering.
+                (let [outcome
+                      (try
+                        (let [closed ((:close! fenced))]
+                          (if-not (and (= :closed (:status closed))
+                                       (= :none (:authority closed)))
                             {:status :cleanup-unconfirmed
-                             :reason :stop-callback-failed
-                             :error-class (.getName (class error))
-                             :authority :none}))]
+                             :reason :fence-drain-not-confirmed
+                             :authority :none}
+                            (let [managed ((:stop! local-issued))]
+                              (if (and (= :stopped (:status managed))
+                                       (= :none (:authority managed)))
+                                {:status :stopped :authority :none}
+                                {:status :cleanup-unconfirmed
+                                 :reason :original-managed-stop-not-confirmed
+                                 :authority :none}))))
+                        (catch Throwable error
+                          (when (instance? InterruptedException error)
+                            (.interrupt (Thread/currentThread)))
+                          {:status :cleanup-unconfirmed
+                           :reason :stop-callback-failed
+                           :error-class (.getName (class error))
+                           :authority :none}))]
+                  ;; Publish the completed result together. Concurrent stop,
+                  ;; restart and retry are excluded by :stopping until now.
+                  (locking monitor
                     (reset! status (:status outcome))
-                    (reset! last-stop-result outcome)
-                    outcome)))
+                    (reset! last-stop-result outcome))
+                  outcome))
               (stop! []
                 ;; The original checked handler may itself call summary!,
                 ;; so never wait for a private lease while holding monitor.
