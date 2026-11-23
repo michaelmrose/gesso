@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1846: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v2283: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -148,9 +148,18 @@
    v1846: Preserve the entire ORIGINAL observed host route-ID inventory, not
    only the subset of selected and uncertified semantic routes. A current
    inspection must match that original startup observation exactly, rejecting
-   even unselected nonsemantic host-route removals or insertions. This is
-   point-in-time, in-process inventory correspondence, NOT complete handler
-   identity or externally deployed router authority."
+   even unselected nonsemantic host-route removals or insertions.
+
+   v2283: Adopt a single explicit v2282 guarded-adapter cleanup retry ONLY
+   for a trusted host that opts in to idempotent stop and supplies both
+   captured listener identity and an original-listener shutdown observer.
+   A callback return alone never establishes configured shutdown: require
+   pinned pre/post original stop boundaries, independently observed original
+   probe cleanup, exact guarded cleanup status and the source-trusted
+   shutdown check of the captured original listener object. The observer is
+   an assumption, not proof of external deployment or arbitrary raw ports.
+   Retry cannot re-run Biff's full module stop, reopen startup, bypass an
+   unresolved source pin, or issue release/activation authority."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -257,7 +266,18 @@
                                 :listener-instance!}
                               #{:contract-source :adapter-module :base-url!
                                 :listener-instance! :typed-trial}}
-                            (set (keys config)))
+                            (disj (set (keys config))
+                                  :idempotent-stop-retry?
+                                  :listener-shutdown-confirmed?))
+                 (or (not (contains? config :idempotent-stop-retry?))
+                     (true? (:idempotent-stop-retry? config)))
+                 ;; A successful raw stop callback is not itself evidence
+                 ;; that the ORIGINAL captured listener has shut down.
+                 ;; Keep the opt-in host assertion separately checkable.
+                 (if (:idempotent-stop-retry? config)
+                   (and (fn? (:listener-instance! config))
+                        (fn? (:listener-shutdown-confirmed? config)))
+                   (not (contains? config :listener-shutdown-confirmed?)))
                  (plain-map? (:contract-source config))
                  (fn? (:base-url! config))
                  (or (not (contains? config :listener-instance!))
@@ -587,19 +607,31 @@
    (:start-once! issued) takes only an initial Biff system; startup modules
    are derived from the captured contract and adapter, checked by v1783,
    and run through the original canonical Gesso/Biff lifecycle. The optional
-   (:stop! issued) stops the selected Biff system at most once. A failed start
-   consumes issuance; it cannot promise rollback of earlier callback effects."
+   (:stop! issued) stops the selected Biff system at most once.
+   With the EXACT opt-in :idempotent-stop-retry? true, and separate
+   :listener-instance! plus :listener-shutdown-confirmed? host callbacks,
+   (:retry-cleanup! issued) may perform ONE guarded-adapter stop retry after
+   a failed original managed stop. It does not rerun the whole Biff stop.
+   Even a returned retry cannot report :stopped unless the original probe
+   and guard agree and the source-trusted original listener observer confirms
+   shutdown. A failed start consumes issuance; physical rollback is not
+   promised and this report is not release authority."
   [source]
   (let [{:keys [contract-source adapter-module base-url! typed-trial
                listener-instance!]}
         (checked-source! source)
+        retry-enabled? (true? (:idempotent-stop-retry? source))
         ;; Issuance itself validates original router, original proof
         ;; construction and the selected adapter before any server startup.
         issued-host (original-host-issuer contract-source)
         issued-probe (original-probe-issuer (:handle issued-host)
                                             contract-source typed-trial)
-        issued-guarded (original-guarded-issuer issued-probe
-                                               adapter-module base-url!)
+        issued-guarded (if retry-enabled?
+                         (original-guarded-issuer
+                          issued-probe adapter-module base-url!
+                          {:idempotent-stop-retry? true})
+                         (original-guarded-issuer
+                          issued-probe adapter-module base-url!))
         modules [app/application-handler-module (:module issued-host)
                  (:module issued-probe) (:module issued-guarded)]
         order [app/application-handler-module-id host/module-id
@@ -607,6 +639,9 @@
         consumed (AtomicBoolean. false)
         state (atom :issued)
         started (atom nil)
+        stop-pinned-before? (atom false)
+        stop-pinned-after? (atom false)
+        cleanup-retry-attempted? (atom false)
         lifecycle-monitor (Object.)
         inspection-in-progress? (atom false)
         instance-generation (StartedInstanceGeneration.)
@@ -893,6 +928,7 @@
                     (case current
                       :starting (reject! :configured-start-in-progress)
                       :stopping (reject! :configured-stop-in-progress)
+                      :retrying-cleanup (reject! :configured-retry-in-progress)
                       :issued
                       (if (compare-and-set! state :issued
                                             :stopped-without-successful-start)
@@ -910,6 +946,7 @@
                             (let [source-pinned?
                                   (try (pinned!) true
                                        (catch Throwable _ false))]
+                            (reset! stop-pinned-before? source-pinned?)
                             (original-biff-stop @started)
                             ;; A returned stop call is not enough: require
                             ;; original guarded adapter and probe cleanup.
@@ -926,6 +963,8 @@
                                   source-pinned-after-stop?
                                   (try (pinned!) true
                                        (catch Throwable _ false))]
+                              (reset! stop-pinned-after?
+                                      source-pinned-after-stop?)
                               (reset! state
                                       (if (and source-pinned?
                                                source-pinned-after-stop?
@@ -941,7 +980,73 @@
                         (recur))
                       ;; A failed startup may have unrolled partially and may
                       ;; still have an external listener: retain uncertainty.
-                      (summary!))))))]
-    {:start-once! start! :stop! stop! :summary! summary!
-     :inspect-running! inspect-running!
+                      (summary!))))))
+        retry-cleanup! (fn []
+                         (locking lifecycle-monitor
+                           (when-not retry-enabled?
+                             (reject! :configured-cleanup-retry-not-enabled))
+                           (when @cleanup-retry-attempted?
+                             (reject! :configured-cleanup-retry-already-attempted))
+                           (when-not (= :stop-cleanup-not-established @state)
+                             (reject! :configured-cleanup-retry-not-eligible))
+                           (when-not (and @stop-pinned-before?
+                                          @stop-pinned-after?
+                                          (some? @original-listener-instance)
+                                          (some? @started))
+                             (reject! :original-configured-stop-integrity-unconfirmed))
+                           (pinned!)
+                           (let [before (try ((:summary! issued-guarded))
+                                             (catch Throwable _ nil))]
+                             (when-not (and (= :stop-cleanup-not-established
+                                               (:status before))
+                                            (= :not-established
+                                               (:selected-adapter-cleanup before))
+                                            (= 1 (:original-stop-attempts before))
+                                            (= :explicit-host-idempotence
+                                               (:stop-retry-policy before)))
+                               (reject! :original-guarded-stop-not-retryable)))
+                           ;; Consume the configured retry BEFORE executing
+                           ;; trusted callbacks; a thrown callback cannot
+                           ;; make this same capability eligible again.
+                           (reset! cleanup-retry-attempted? true)
+                           (reset! state :retrying-cleanup)
+                           (let [confirmed?
+                                 (try
+                                   (let [lower ((:retry-cleanup! issued-guarded))
+                                         guarded-status ((:summary! issued-guarded))
+                                         probe-status ((:summary! issued-probe))
+                                         ;; Reuse only the original captured
+                                         ;; listener object, never a replacement
+                                         ;; returned by a later URL locator.
+                                         listener-confirmed?
+                                         (and (= :callback-returned (:status lower))
+                                              (= 2 (:attempts lower))
+                                              (= :original-selected-stop-callback-only
+                                                 (:scope lower))
+                                              (= :none (:release-authority lower))
+                                              (= :not-issued (:activation-eligibility lower))
+                                              (= :stopped (:status guarded-status))
+                                              (= :completed
+                                                 (:selected-adapter-cleanup guarded-status))
+                                              (= 2 (:original-stop-attempts guarded-status))
+                                              (= :stopped (:module-state probe-status))
+                                              (true? ((:listener-shutdown-confirmed? source)
+                                                      @original-listener-instance
+                                                      @started)))]
+                                     ;; Callback itself can replace original
+                                     ;; proof roots. Re-pin after the LAST
+                                     ;; source-trusted listener observation.
+                                     (and listener-confirmed?
+                                          (try (pinned!) true
+                                               (catch Throwable _ false))))
+                                   (catch Throwable error
+                                     (when (instance? InterruptedException error)
+                                       (.interrupt (Thread/currentThread)))
+                                     false))]
+                             (reset! state (if confirmed?
+                                             :stopped
+                                             :stop-cleanup-not-established))
+                             (summary!))))]
+    {:start-once! start! :stop! stop! :retry-cleanup! retry-cleanup!
+     :summary! summary! :inspect-running! inspect-running!
      :inspect-generation! inspect-generation!}))
