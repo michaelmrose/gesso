@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source
-  "v2303: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
+  "v2305: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
    guarded, physically started Biff HTTP generation.
 
    Join the v2261 ORIGINAL abstract catalog checks to the catalog supplied to
@@ -19,6 +19,16 @@
    the ORIGINAL configured Biff inspector, then recheck the healthy instance.
    Activation and completion remain blocked by unobserved subjects. This is
    a narrower LOCAL qualification, not Stage 11 release eligibility.
+   v2305: The one-shot selected-source cleanup retry must also release its
+   lifecycle monitor before invoking the original configured Biff retry.
+   An original physical retry callback may synchronously consult this
+   issuer's summary from another thread. Complete source/issuer identity
+   rechecks and the original retry-state prerequisite under monitor, then
+   publish :retrying-cleanup before releasing it for original callbacks.
+   Competing retries and stops remain excluded until terminal publication;
+   failed callbacks consume the one original retry without reopening
+   installation or release authority.
+
    v2303: A successful external stop must not retain this source issuer's
    lifecycle monitor while invoking the original checked Biff physical-stop
    callback. An original host callback may synchronously ask another thread
@@ -420,6 +430,9 @@
                       (reset! status terminal))
                     {:status terminal :authority :none}))))
             (retry-cleanup! []
+              ;; Validate source, original issuer and the one-use capability
+              ;; under monitor. No original retry callback may run before
+              ;; :retrying-cleanup becomes visible to all competitors.
               (locking monitor
                 (when-not retry-enabled?
                   (reject! :local-cleanup-retry-not-enabled))
@@ -427,9 +440,8 @@
                   (reject! :local-cleanup-retry-already-attempted))
                 (when-not (= :cleanup-unconfirmed @status)
                   (reject! :local-cleanup-retry-not-eligible))
-                ;; Recheck original source and issuer identity before
-                ;; consuming the one permitted cleanup retry. We deliberately
-                ;; do NOT requalify a possibly stopped HTTP listener as live.
+                ;; Never requalify a possibly stopped HTTP listener as live;
+                ;; only recheck the original frozen catalog and issuer.
                 (checked-source! catalog! http-config
                                  initial-catalog source-report)
                 (when-not (fn? (:retry-cleanup! issued))
@@ -442,35 +454,38 @@
                                  (= :none (:authority before))
                                  (= :not-issued (:certificate before)))
                     (reject! :original-configured-cleanup-not-retryable)))
-                ;; Consume BEFORE any original callbacks, including reentrant
-                ;; host operations and physical listener confirmation.
+                ;; Consume BEFORE any original callback, even when a later
+                ;; callback fails. Both flags belong to the same claim.
                 (reset! cleanup-retry-attempted? true)
-                (reset! status :retrying-cleanup)
-                (let [confirmed?
-                      (try
-                        (let [result ((:retry-cleanup! issued))
-                              after ((:summary! issued))]
-                          (and (= :stopped (:status result) (:status after))
-                               (= http/report-type (:type result) (:type after))
-                               (= http/report-version (:version result) (:version after))
-                               (= :none (:authority result) (:authority after))
-                               (= :not-issued (:certificate result) (:certificate after))
-                               (= :not-admitted (:admission result) (:admission after))
-                               ;; The original configured issuer already
-                               ;; checked the actual guarded/probe cleanup and
-                               ;; source-trusted original-listener shutdown.
-                               ;; Also require catalog continuity afterward.
-                               (do (checked-source! catalog! http-config
-                                                    initial-catalog source-report)
-                                   true)))
-                        (catch Throwable error
-                          (when (instance? InterruptedException error)
-                            (.interrupt (Thread/currentThread)))
-                          false))]
-                  (reset! status (if confirmed? :stopped :cleanup-unconfirmed))
-                  {:status @status
-                   :cleanup-retry :one-original-configured-attempt-consumed
-                   :authority :none})))
+                (reset! status :retrying-cleanup))
+              ;; Never hold monitor during the original physical callback:
+              ;; it may synchronously ask another thread for this wrapper's
+              ;; lifecycle summary while the host is completing its stop.
+              (let [confirmed?
+                    (try
+                      (let [result ((:retry-cleanup! issued))
+                            after ((:summary! issued))]
+                        (and (= :stopped (:status result) (:status after))
+                             (= http/report-type (:type result) (:type after))
+                             (= http/report-version (:version result) (:version after))
+                             (= :none (:authority result) (:authority after))
+                             (= :not-issued (:certificate result) (:certificate after))
+                             (= :not-admitted (:admission result) (:admission after))
+                             ;; Original issuer checked guarded/probe cleanup
+                             ;; and original-listener physical shutdown. Also
+                             ;; require selected catalog continuity afterward.
+                             (do (checked-source! catalog! http-config
+                                                  initial-catalog source-report)
+                                 true)))
+                      (catch Throwable error
+                        (when (instance? InterruptedException error)
+                          (.interrupt (Thread/currentThread)))
+                        false))
+                    outcome (if confirmed? :stopped :cleanup-unconfirmed)]
+                (locking monitor (reset! status outcome))
+                {:status outcome
+                 :cleanup-retry :one-original-configured-attempt-consumed
+                 :authority :none}))
             (inspect-locked! []
               (when-not (= :running @status)
                 (reject! :no-current-issued-running-instance))
