@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http
-  "v2292: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
+  "v2294: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
    selected Biff adapter's HTTP dispatch point, not merely beside Biff.
 
    An issued original checked Biff/XTDB startup must complete its real HTTP
@@ -30,6 +30,12 @@
    permanently denying traffic. A retry may attempt cleanup again but the
    original lower-layer issuer may retain unconfirmed terminal state; a
    wrapper retry alone does not establish physical recovery.
+
+   v2294: Startup also publishes :starting under the lifecycle monitor,
+   then releases it for original Biff/XTDB startup and source probes.
+   External stops cannot race an in-progress installation; only the
+   original startup thread may claim failed-start cleanup. Summary remains
+   callable from a physical HTTP probe without a lock-order deadlock.
 
    v2292: Stop publishes :stopping under the lifecycle monitor, releases
    that monitor while draining in-flight private probe leases, and only then
@@ -282,61 +288,62 @@
                         catalog! wrapped-config)]
       (reset! guard-function protected-guard)
       (reset! issued local-issued)
-      (letfn [(stop! []
-                ;; A trusted original probe may not upgrade its read lease
-                ;; into exclusive shutdown from within the same thread.
+      (letfn [(complete-claimed-stop! []
+                ;; This continuation runs only AFTER an exclusive lifecycle
+                ;; claim has published :stopping. In particular, failed
+                ;; startup calls it without making a public stop race against
+                ;; the still-executing original startup callback.
+                (let [write (.writeLock probe-lock)]
+                  (.lock write)
+                  (try
+                    ;; Release every admitted private probe before cleanup;
+                    ;; do not hold monitor while waiting for its read lease.
+                    (finally (.unlock write))))
+                (locking monitor
+                  (let [outcome
+                        (try
+                          (let [closed ((:close! fenced))]
+                            (if-not (and (= :closed (:status closed))
+                                         (= :none (:authority closed)))
+                              {:status :cleanup-unconfirmed
+                               :reason :fence-drain-not-confirmed
+                               :authority :none}
+                              (let [managed ((:stop! local-issued))]
+                                (if (and (= :stopped (:status managed))
+                                         (= :none (:authority managed)))
+                                  {:status :stopped :authority :none}
+                                  {:status :cleanup-unconfirmed
+                                   :reason :original-managed-stop-not-confirmed
+                                   :authority :none}))))
+                          (catch Throwable error
+                            (when (instance? InterruptedException error)
+                              (.interrupt (Thread/currentThread)))
+                            {:status :cleanup-unconfirmed
+                             :reason :stop-callback-failed
+                             :error-class (.getName (class error))
+                             :authority :none}))]
+                    (reset! status (:status outcome))
+                    (reset! last-stop-result outcome)
+                    outcome)))
+              (stop! []
+                ;; The original checked handler may itself call summary!,
+                ;; so never wait for a private lease while holding monitor.
                 (when (pos? (.getReadHoldCount probe-lock))
                   (reject! :fenced-biff-stop-during-private-probe))
-                ;; Claim stop under the lifecycle monitor, but do not HOLD
-                ;; that monitor while waiting for private probe read leases.
-                ;; A probe is permitted to inspect :summary! in the original
-                ;; checked handler. Holding monitor while acquiring the write
-                ;; lease would deadlock if that probe queried :summary!.
-                ;; Publishing :stopping before the drain denies newly arriving
-                ;; private probes, even though the physical socket is still up.
                 (let [claimed?
                       (locking monitor
-                        (when (contains? #{:stopping :retrying-cleanup} @status)
+                        ;; Do not stop a partially installed original Biff
+                        ;; instance from a second thread. Failed startup owns
+                        ;; its internal cleanup, and publishes :stopping first.
+                        (when (contains? #{:starting :stopping :retrying-cleanup}
+                                         @status)
                           (reject! :fenced-biff-stop-in-progress))
                         (if (= :stopped @status)
                           false
                           (do (reset! status :stopping) true)))]
-                  (if-not claimed?
-                    {:status :stopped :authority :none}
-                    (do
-                      (let [write (.writeLock probe-lock)]
-                        (.lock write)
-                        (try
-                          ;; The exclusive lease drains every existing private
-                          ;; probe. Requests arriving after :stopping cannot
-                          ;; pass the checked handler's private bypass.
-                          (finally (.unlock write))))
-                      (locking monitor
-                        (let [outcome
-                              (try
-                                (let [closed ((:close! fenced))]
-                                  (if-not (and (= :closed (:status closed))
-                                               (= :none (:authority closed)))
-                                    {:status :cleanup-unconfirmed
-                                     :reason :fence-drain-not-confirmed
-                                     :authority :none}
-                                    (let [managed ((:stop! local-issued))]
-                                      (if (and (= :stopped (:status managed))
-                                               (= :none (:authority managed)))
-                                        {:status :stopped :authority :none}
-                                        {:status :cleanup-unconfirmed
-                                         :reason :original-managed-stop-not-confirmed
-                                         :authority :none}))))
-                                (catch Throwable error
-                                  (when (instance? InterruptedException error)
-                                    (.interrupt (Thread/currentThread)))
-                                  {:status :cleanup-unconfirmed
-                                   :reason :stop-callback-failed
-                                   :error-class (.getName (class error))
-                                   :authority :none}))]
-                          (reset! status (:status outcome))
-                          (reset! last-stop-result outcome)
-                          outcome))))))
+                  (if claimed?
+                    (complete-claimed-stop!)
+                    {:status :stopped :authority :none})))
               (retry-cleanup! []
                 (locking monitor
                   (when-not retry-enabled?
@@ -395,37 +402,48 @@
                     (reset! last-stop-result outcome)
                     outcome)))
               (start-once! [system]
+                ;; Claim the one-use startup under monitor, but release it
+                ;; before invoking original source callbacks and the physical
+                ;; loopback qualification. An admitted original probe can
+                ;; legitimately query summary! on a separate HTTP thread.
+                ;; Holding monitor across startup deadlocked that probe with
+                ;; its initiating Biff adapter callback.
                 (locking monitor
                   (when-not (= :issued @status)
                     (reject! :fenced-biff-start-not-once-only))
-                  (reset! status :starting)
-                  (try
-                    ((:start-once! local-issued) system)
-                    (when-not (and (fn? @selected-handler)
-                                   (fn? @wire-handler))
-                      (reject! :original-selected-wire-handler-not-installed))
-                    (let [origin (loopback-origin!
-                                  ((:base-url! configured-source) @raw-system))]
-                      (require-physical-fence! origin proof-path marker-hit))
-                    (let [token ((:prepare! fenced)
-                                 {:generation generation
-                                  :handler @selected-handler
-                                  :guard! protected-guard})]
-                      ((:activate! fenced) token))
-                    (reset! status :running)
-                    {:type report-type :version report-version
-                     :status :one-original-biff-listener-host-locally-fenced
-                     :selected-generation generation
-                     :source-and-local-installation-checks :passed-conditional
-                     :physical-inactive-fence :observed-on-original-listener
-                     :release-authority :none
-                     :installation-eligibility :not-issued
-                     :activation-eligibility :not-issued
-                     :completion-claim :not-issued}
-                    (catch Throwable error
-                      (try (stop!) (catch Throwable _
-                                    (reset! status :cleanup-unconfirmed)))
-                      (throw error)))))
+                  (reset! status :starting))
+                (try
+                  ((:start-once! local-issued) system)
+                  (when-not (and (fn? @selected-handler)
+                                 (fn? @wire-handler))
+                    (reject! :original-selected-wire-handler-not-installed))
+                  (let [origin (loopback-origin!
+                                ((:base-url! configured-source) @raw-system))]
+                    (require-physical-fence! origin proof-path marker-hit))
+                  (let [token ((:prepare! fenced)
+                               {:generation generation
+                                :handler @selected-handler
+                                :guard! protected-guard})]
+                    ((:activate! fenced) token))
+                  (locking monitor (reset! status :running))
+                  {:type report-type :version report-version
+                   :status :one-original-biff-listener-host-locally-fenced
+                   :selected-generation generation
+                   :source-and-local-installation-checks :passed-conditional
+                   :physical-inactive-fence :observed-on-original-listener
+                   :release-authority :none
+                   :installation-eligibility :not-issued
+                   :activation-eligibility :not-issued
+                   :completion-claim :not-issued}
+                  (catch Throwable error
+                    ;; An external stop during :starting is refused. The
+                    ;; original startup thread alone claims terminal cleanup
+                    ;; after any failed source or physical qualification.
+                    (locking monitor (reset! status :stopping))
+                    (try (complete-claimed-stop!)
+                         (catch Throwable _
+                           (reset! status :cleanup-unconfirmed)))
+                    (throw error))))
               (summary! []
                 (locking monitor
                   {:type report-type :version report-version
