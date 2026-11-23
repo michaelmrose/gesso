@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source-test
-  "v2306: Original Claim catalog through an actual, locally started Biff/XTDB
+  "v2309: Original Claim catalog through an actual, locally started Biff/XTDB
    application, with permanent checks of the diagnostic release phase boundary.
 
    This suite uses the existing original Biff HTTP fixture, its actual loopback
@@ -14,7 +14,13 @@
 
    v2306 permanently qualifies real original Biff physical cleanup retry
    callbacks that inspect this selected-source lifecycle on another JVM
-   thread, preserving one-use retry and no-authority semantics."
+   thread, preserving one-use retry and no-authority semantics.
+
+   v2309 permanently qualifies provisional :inspecting and :assessing
+   lifecycle claims on real original Biff/XTDB listeners. Cross-thread
+   callback summaries must remain responsive, concurrent operations must
+   reject promptly, and a failed assessment must physically retire the
+   original listener without ever issuing release authority."
   (:import [java.util.concurrent CountDownLatch ExecutorService TimeUnit])
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gesso.assurance.release.installed-source :as installed]
@@ -418,3 +424,129 @@
         (when @retry-worker (deref @retry-worker 6000 nil))
         (clean! s instance))))
 )
+
+(deftest original-live-inspection-summary-and-exclusive-claim
+  (let [s (scenario)
+        instance-ref (atom nil)
+        intercept? (atom false)
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        observed (promise)
+        inspected (atom nil)
+        config (assoc (fixture/original-source s true)
+                      :listener-instance!
+                      (fn [_]
+                        (when (compare-and-set! intercept? true false)
+                          (.countDown entered)
+                          (deliver observed
+                                   (deref (future ((:summary! @instance-ref)))
+                                          2500 ::summary-timeout))
+                          (.await release 8 TimeUnit/SECONDS))
+                        (:server @(:server-state s))))
+        catalog (get-in s [:env :catalog-source :catalog])
+        instance (installed/issue-selected-installed-catalog!
+                  (constantly catalog) config)]
+    (reset! instance-ref instance)
+    (try
+      (is (= :selected-source-and-current-local-http-observed-only
+             (:status ((:start-once! instance) {}))))
+      (reset! intercept? true)
+      (reset! inspected (future (try ((:inspect-current! instance))
+                                     (catch Throwable error error))))
+      (is (.await entered 4 TimeUnit/SECONDS))
+      ;; The original host callback synchronously awaits a summary on a
+      ;; separate JVM thread. This fails against the pre-v2308 monitor
+      ;; ordering and is not merely an in-memory lifecycle simulation.
+      (let [snapshot (deref observed 3500 ::missing)]
+        (is (map? snapshot) "Listener callback must read lifecycle without timing out")
+        (is (= :inspecting (:status snapshot)))
+        (is (= :none (:release-authority snapshot))))
+      (is (= :local-inspection-in-progress
+             (deref (future (reason #((:stop! instance))))
+                    1800 ::stop-timeout)))
+      (is (= :no-current-issued-running-instance
+             (deref (future (reason #((:assess-current-installation! instance))))
+                    1800 ::assessment-timeout)))
+      (is (not (realized? @inspected)))
+      (.countDown release)
+      (is (= :fresh-original-http-challenge-and-identity-observed
+             (:current-local-listener (deref @inspected 5000 ::inspect-timeout))))
+      (is (= :running (:status ((:summary! instance)))))
+      (is (= :stopped (:status ((:stop! instance)))))
+      (is (= :none (:release-authority ((:summary! instance)))))
+      (finally
+        (.countDown release)
+        (when @inspected (deref @inspected 5000 nil))
+        (clean! s instance)))))
+
+(deftest failed-original-assessment-retires-real-listener-without-monitor
+  (let [s (scenario)
+        instance-ref (atom nil)
+        intercept? (atom false)
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        observation (promise)
+        stop-observation (promise)
+        physical-stop (get-in s [:raw :biff.core/stop])
+        original-config (fixture/original-source s true)
+        config (-> original-config
+                   (assoc :listener-instance!
+                          (fn [_]
+                            (when (compare-and-set! intercept? true false)
+                              (.countDown entered)
+                              (deliver observation
+                                       (deref (future ((:summary! @instance-ref)))
+                                              2500 ::summary-timeout))
+                              (.await release 8 TimeUnit/SECONDS)
+                              (throw (ex-info "Injected failure in current listener check" {})))
+                            (:server @(:server-state s))))
+                   (assoc-in [:adapter-module :biff.core/stop]
+                             (fn [system]
+                               (deliver stop-observation
+                                        (deref (future ((:summary! @instance-ref)))
+                                               2500 ::stop-summary-timeout))
+                               (physical-stop system))))
+        catalog (get-in s [:env :catalog-source :catalog])
+        instance (installed/issue-selected-installed-catalog!
+                  (constantly catalog) config)
+        result (atom nil)]
+    (reset! instance-ref instance)
+    (try
+      (is (= :selected-source-and-current-local-http-observed-only
+             (:status ((:start-once! instance) {}))))
+      (reset! intercept? true)
+      (reset! result (future (try ((:assess-current-installation! instance))
+                                  :unexpected-assessment-success
+                                  (catch Throwable error error))))
+      (is (.await entered 7 TimeUnit/SECONDS))
+      (let [snapshot (deref observation 4000 ::missing)]
+        (is (map? snapshot))
+        (is (= :assessing (:status snapshot)))
+        (is (= :none (:release-authority snapshot))))
+      (is (= :local-assessment-in-progress
+             (deref (future (reason #((:stop! instance))))
+                    1800 ::stop-timeout)))
+      (is (= :no-current-issued-running-instance
+             (deref (future (reason #((:inspect-current! instance))))
+                    1800 ::inspect-timeout)))
+      (is (not (realized? @result)))
+      (.countDown release)
+      (is (instance? Throwable (deref @result 7000 ::assessment-timeout)))
+      ;; Failure-triggered physical cleanup must not monopolize the
+      ;; lifecycle monitor during original configured Biff stop callbacks.
+      (let [snapshot (deref stop-observation 4500 ::missing)]
+        (is (map? snapshot) "Original managed stop callback must see lifecycle")
+        (is (= :stopping (:status snapshot)))
+        (is (= :none (:release-authority snapshot))))
+      (is (= :stopped (:status ((:summary! instance)))))
+      (is (= :no-current-issued-running-instance
+             (reason #((:inspect-current! instance)))))
+      (is (= :selected-original-http-start-not-once-only
+             (reason #((:start-once! instance) {}))))
+      (is (true? (.isShutdown ^ExecutorService
+                            (:executor @(:server-state s)))))
+      (is (= :none (:release-authority ((:summary! instance)))))
+      (finally
+        (.countDown release)
+        (when @result (deref @result 5000 nil))
+        (clean! s instance)))))
