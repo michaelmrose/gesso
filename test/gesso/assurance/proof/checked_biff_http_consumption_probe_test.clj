@@ -1,7 +1,12 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe-test
-  "v1805: A separate Biff server adapter must actually consume the checked
+  "v2319: A separate Biff server adapter must actually consume the checked
    FINAL Ring handler over a real HTTP loopback socket, not just accept a
-   copied Biff system or return a synthetic success status."
+   copied Biff system or return a synthetic success status.
+
+   v2319: A racing probe stop cannot overwrite provisional :starting or
+   force a failed one-use startup. A concurrent retirement while accepted
+   real HTTP dispatch is draining must reject promptly without returning
+   terminal success; the original stop still waits for accepted effects."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [clojure.string :as str]
             [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
@@ -288,6 +293,23 @@
                 (is (true? (deref stop-started 5000 false)))
                 (is (= :in-flight (deref stopping 400 :in-flight))
                     "Stop must not return while an admitted handler can still write")
+                ;; The physical retirement owner has already closed new
+                ;; admission, but its accepted business request is paused.
+                ;; A second stop must reject, not wait behind the write lease
+                ;; or claim this generation's retirement a second time.
+                (let [deadline (+ (System/nanoTime) 3000000000)]
+                  (loop []
+                    (when (and (not= :stopped (:module-state ((:summary! probe))))
+                               (< (System/nanoTime) deadline))
+                      (Thread/sleep 5)
+                      (recur))))
+                (is (= :stopped (:module-state ((:summary! probe))))
+                    "Closed admission remains publicly reported as stopped")
+                (is (= :probe-retirement-in-progress
+                       (deref (future (error-reason
+                                       #((:biff.core/stop (:module probe)) system)))
+                              1800 ::second-stop-timeout))
+                    "Concurrent retirement is refused before drainage finishes")
                 (deliver release :continue)
                 (is (= 200 (deref business 20000 :timed-out)))
                 (is (= :retired (deref stopping 20000 :timed-out)))
@@ -773,3 +795,56 @@
                  (:original-start-listener-endpoint report)))
           (is (not-any? #(contains? report %)
                         [:port :url :base-url :server :system :nonce :request])))))))
+
+(deftest racing-probe-stop-cannot-overwrite-original-host-startup
+  ;; Deterministically pause the *real original* host adoption module's
+  ;; issuance lock while the separately issued consumption-probe start owns
+  ;; :starting. The source functions are never patched or substituted.
+  ;; The original probe used to accept a concurrent stop and overwrite the
+  ;; :starting claim, stranding an otherwise valid one-use installation.
+  (let [env ((earlier-helper 'case-env))
+        contract (:contract env)
+        adopted (host/issue-checked-biff-host-module! contract)
+        issued (probe/issue-http-consumption-probe-module!
+                (:handle adopted) contract nil)
+        modules [app/application-handler-module (:module adopted)]
+        order [app/application-handler-module-id host/module-id]
+        system (binding [*modules* modules]
+                 (app/start-biff-application!
+                  (:application-assembly contract) {} #'*modules* order))
+        host-issuance (helper 'gesso.assurance.proof.checked-biff-host-adoption
+                             'issued)
+        starting (atom nil)]
+    (try
+      (locking host-issuance
+        (reset! starting (future (try ((:biff.core/start (:module issued)) system)
+                                      (catch Throwable error error))))
+        (let [deadline (+ (System/nanoTime) 3000000000)]
+          (loop []
+            (when (and (not= :starting (:module-state ((:summary! issued))))
+                       (< (System/nanoTime) deadline))
+              (Thread/sleep 5)
+              (recur))))
+        (is (= :starting (:module-state ((:summary! issued))))
+            "Original probe startup must have claimed its one-use generation")
+        (is (= :probe-start-in-progress
+               (deref (future
+                        (error-reason
+                         #((:biff.core/stop (:module issued)) system)))
+                      1800 ::competing-stop-timeout))
+            "Stop during original host installation must reject promptly")
+        (is (= :starting (:module-state ((:summary! issued))))
+            "Rejected stop must not overwrite the provisional generation")
+        (is (not (realized? @starting))
+            "Startup must still be waiting for the original host check"))
+      (is (map? (deref @starting 7000 ::startup-timeout))
+          "The original Biff probe startup must still succeed")
+      (is (= :started (:module-state ((:summary! issued))))
+          "Original one-use installed wrapper must remain current")
+      ((:biff.core/stop (:module issued)) system)
+      (is (= :stopped (:module-state ((:summary! issued))))
+          "A later legitimate retirement succeeds")
+      (finally
+        (when @starting (deref @starting 7000 nil))
+        (try ((:biff.core/stop (:module issued)) system)
+             (catch Throwable _ nil))))))
