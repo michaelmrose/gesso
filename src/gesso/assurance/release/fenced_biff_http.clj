@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http
-  "v2299: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
+  "v2301: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
    selected Biff adapter's HTTP dispatch point, not merely beside Biff.
 
    An issued original checked Biff/XTDB startup must complete its real HTTP
@@ -30,6 +30,13 @@
    permanently denying traffic. A retry may attempt cleanup again but the
    original lower-layer issuer may retain unconfirmed terminal state; a
    wrapper retry alone does not establish physical recovery.
+
+   v2301: Reject same-thread shutdown from an ordinary protected Ring
+   dispatch before claiming :stopping. Such a request owns the traffic
+   fence's read lease; the underlying fence correctly refuses a write
+   upgrade, but the outer issuer previously consumed its one-shot stop
+   and stranded the live host as :cleanup-unconfirmed. Track only the
+   lexical wire-dispatch thread and restore nested request context.
 
    v2299: The one-shot cleanup retry claims :retrying-cleanup under the
    lifecycle monitor, but executes the original installed-source retry
@@ -222,6 +229,7 @@
       (reject! :invalid-original-selected-adapter))
     (let [monitor (Object.)
           ^ReentrantReadWriteLock probe-lock (ReentrantReadWriteLock. true)
+          ^ThreadLocal protected-request-thread (ThreadLocal.)
           status (atom :issued)
           selected-handler (atom nil)
           wire-handler (atom nil)
@@ -289,7 +297,20 @@
                                         (do
                                           (when (= proof-path (:uri request))
                                             (swap! marker-hit inc))
-                                          ((:handler fenced) request)))
+                                          ;; A synchronous protected handler
+                                          ;; owns a Ring fence read lease. It
+                                          ;; must not call outer stop! on this
+                                          ;; same thread: a write upgrade is
+                                          ;; impossible and would consume the
+                                          ;; outer service's terminal stop.
+                                          (let [prior (.get protected-request-thread)]
+                                            (.set protected-request-thread true)
+                                            (try
+                                              ((:handler fenced) request)
+                                              (finally
+                                                (if (nil? prior)
+                                                  (.remove protected-request-thread)
+                                                  (.set protected-request-thread prior)))))))
                                       (finally
                                         (when read (.unlock read))))))
                            out ((:biff.core/start raw)
@@ -361,6 +382,8 @@
                 ;; so never wait for a private lease while holding monitor.
                 (when (pos? (.getReadHoldCount probe-lock))
                   (reject! :fenced-biff-stop-during-private-probe))
+                (when (true? (.get protected-request-thread))
+                  (reject! :fenced-biff-stop-during-protected-request))
                 (let [claimed?
                       (locking monitor
                         ;; Do not stop a partially installed original Biff
