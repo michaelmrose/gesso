@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http
-  "v2297: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
+  "v2299: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
    selected Biff adapter's HTTP dispatch point, not merely beside Biff.
 
    An issued original checked Biff/XTDB startup must complete its real HTTP
@@ -30,6 +30,14 @@
    permanently denying traffic. A retry may attempt cleanup again but the
    original lower-layer issuer may retain unconfirmed terminal state; a
    wrapper retry alone does not establish physical recovery.
+
+   v2299: The one-shot cleanup retry claims :retrying-cleanup under the
+   lifecycle monitor, but executes the original installed-source retry
+   callback OUTSIDE it. A managed physical-retry callback can synchronously
+   probe the outer lifecycle summary on another thread; retaining monitor
+   while invoking that callback deadlocked the probe and cleanup.
+   The terminal fence prerequisite is evaluated before the claim; this
+   diagnostic snapshot is not an external release credential.
 
    v2297: Lifecycle summaries must query the fair traffic-fence lock
    BEFORE acquiring the outer lifecycle monitor. Otherwise an unrelated
@@ -368,62 +376,75 @@
                     (complete-claimed-stop!)
                     {:status :stopped :authority :none})))
               (retry-cleanup! []
-                (locking monitor
-                  (when-not retry-enabled?
-                    (reject! :fenced-biff-cleanup-retry-not-enabled))
-                  (when @cleanup-retry-attempted?
-                    (reject! :fenced-biff-cleanup-retry-already-attempted))
-                  (when-not (and (= :cleanup-unconfirmed @status)
-                                 (= :original-managed-stop-not-confirmed
-                                    (:reason @last-stop-result)))
-                    (reject! :fenced-biff-managed-cleanup-not-retryable))
-                  ;; The fence's own terminal state is prerequisite, never
-                  ;; something that a successful physical stop may replace.
-                  ;; A stream or request that failed to drain cannot recover
-                  ;; through this lower-level Biff stop retry.
-                  (when-not (= :closed (:phase ((:summary! fenced))))
-                    (reject! :fenced-biff-traffic-drain-not-confirmed))
-                  (reset! cleanup-retry-attempted? true)
-                  (reset! status :retrying-cleanup)
-                  (let [outcome
-                        (try
-                          (let [before ((:summary! local-issued))]
-                            (if-not (and (= :cleanup-unconfirmed (:status before))
-                                         (= :explicit-host-idempotence
-                                            (:cleanup-retry-policy before))
-                                         (false? (:cleanup-retry-attempted? before))
-                                         (= :none (:release-authority before))
-                                         (fn? (:retry-cleanup! local-issued)))
-                              {:status :cleanup-unconfirmed
-                               :reason :original-installed-cleanup-not-retryable
-                               :authority :none}
-                              (let [returned ((:retry-cleanup! local-issued))
-                                    after ((:summary! local-issued))
-                                    fence-after ((:summary! fenced))]
-                                (if (and (= :stopped (:status returned))
-                                         (= :none (:authority returned))
-                                         (= :stopped (:status after))
-                                         (= :explicit-host-idempotence
-                                            (:cleanup-retry-policy after))
-                                         (true? (:cleanup-retry-attempted? after))
-                                         (= (:selected-source-fingerprint before)
-                                            (:selected-source-fingerprint after))
-                                         (= :none (:release-authority after))
-                                         (= :closed (:phase fence-after)))
-                                  {:status :stopped :authority :none}
-                                  {:status :cleanup-unconfirmed
-                                   :reason :original-installed-retry-not-confirmed
-                                   :authority :none}))))
-                          (catch Throwable error
-                            (when (instance? InterruptedException error)
-                              (.interrupt (Thread/currentThread)))
+                ;; Query the terminal traffic fence independently of monitor.
+                ;; A fence snapshot is a prerequisite, not a release token;
+                ;; :closed is terminal and cannot be reopened by this issuer.
+                ;; In particular, never hold monitor while waiting to obtain
+                ;; the fair fence read lease.
+                (let [fence-phase (:phase ((:summary! fenced)))]
+                  (locking monitor
+                    (when-not retry-enabled?
+                      (reject! :fenced-biff-cleanup-retry-not-enabled))
+                    (when @cleanup-retry-attempted?
+                      (reject! :fenced-biff-cleanup-retry-already-attempted))
+                    (when-not (and (= :cleanup-unconfirmed @status)
+                                   (= :original-managed-stop-not-confirmed
+                                      (:reason @last-stop-result)))
+                      (reject! :fenced-biff-managed-cleanup-not-retryable))
+                    ;; A stream or request that failed to drain cannot
+                    ;; recover through a lower-level physical stop retry.
+                    (when-not (= :closed fence-phase)
+                      (reject! :fenced-biff-traffic-drain-not-confirmed))
+                    ;; Publish the one-use retry claim before invoking any
+                    ;; lower-layer callback. All competing transitions now
+                    ;; reject :retrying-cleanup until the result is stored.
+                    (reset! cleanup-retry-attempted? true)
+                    (reset! status :retrying-cleanup)))
+                ;; A physical cleanup callback may query the outer summary!
+                ;; using a different thread. Holding monitor through that
+                ;; callback deadlocked cleanup against its own observation.
+                (let [outcome
+                      (try
+                        (let [before ((:summary! local-issued))]
+                          (if-not (and (= :cleanup-unconfirmed (:status before))
+                                       (= :explicit-host-idempotence
+                                          (:cleanup-retry-policy before))
+                                       (false? (:cleanup-retry-attempted? before))
+                                       (= :none (:release-authority before))
+                                       (fn? (:retry-cleanup! local-issued)))
                             {:status :cleanup-unconfirmed
-                             :reason :original-installed-retry-failed
-                             :error-class (.getName (class error))
-                             :authority :none}))]
+                             :reason :original-installed-cleanup-not-retryable
+                             :authority :none}
+                            (let [returned ((:retry-cleanup! local-issued))
+                                  after ((:summary! local-issued))
+                                  fence-after ((:summary! fenced))]
+                              (if (and (= :stopped (:status returned))
+                                       (= :none (:authority returned))
+                                       (= :stopped (:status after))
+                                       (= :explicit-host-idempotence
+                                          (:cleanup-retry-policy after))
+                                       (true? (:cleanup-retry-attempted? after))
+                                       (= (:selected-source-fingerprint before)
+                                          (:selected-source-fingerprint after))
+                                       (= :none (:release-authority after))
+                                       (= :closed (:phase fence-after)))
+                                {:status :stopped :authority :none}
+                                {:status :cleanup-unconfirmed
+                                 :reason :original-installed-retry-not-confirmed
+                                 :authority :none}))))
+                        (catch Throwable error
+                          (when (instance? InterruptedException error)
+                            (.interrupt (Thread/currentThread)))
+                          {:status :cleanup-unconfirmed
+                           :reason :original-installed-retry-failed
+                           :error-class (.getName (class error))
+                           :authority :none}))]
+                  ;; Publish status and stop outcome together after the
+                  ;; original physical callback has completed or failed.
+                  (locking monitor
                     (reset! status (:status outcome))
-                    (reset! last-stop-result outcome)
-                    outcome)))
+                    (reset! last-stop-result outcome))
+                  outcome))
               (start-once! [system]
                 ;; Claim the one-use startup under monitor, but release it
                 ;; before invoking original source callbacks and the physical
