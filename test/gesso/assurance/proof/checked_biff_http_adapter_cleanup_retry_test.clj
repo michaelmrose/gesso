@@ -1,8 +1,13 @@
 (ns gesso.assurance.proof.checked-biff-http-adapter-cleanup-retry-test
-  "v2288: Permanent original guarded Biff adapter retry regression.
+  "v2315: Permanent original guarded Biff adapter retry regressions.
    A selected host's explicit idempotence promise permits one physical stop
    callback retry, but a returning callback is NOT listener-closure proof.
-   All invocations retain the original Biff system selected on first stop."
+   All invocations retain the original Biff system selected on first stop.
+
+   v2315: Physical stop and its one permitted retry execute outside the
+   adapter stop monitor. Host-owned physical callbacks can synchronize with
+   other JVM threads attempting duplicate stops and retries. Those callers
+   must respond promptly without reentering cleanup or changing its target."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gesso.assurance.proof.checked-biff-http-adapter-start :as guarded]
             [gesso.assurance.proof.checked-biff-http-application-configuration-fixture
@@ -217,3 +222,70 @@
     (is (= :invalid-original-guarded-adapter-shape
            (reason #(guarded/require-original-issued-http-adapter-start!
                      (assoc issued :extra :credential)))))))
+
+(deftest original-guarded-physical-stop-callback-allows-cross-thread-requests
+  (let [s (scenario :honest)
+        physical-stop (get-in s [:raw :biff.core/stop])
+        calls (atom 0)
+        original-issued (atom nil)
+        entered [(promise) (promise)]
+        release [(promise) (promise)]
+        observations [(promise) (promise)]
+        {:keys [issued scenario]}
+        (issue s (fn [system]
+                   (let [n (swap! calls inc)
+                         idx (dec n)]
+                     (when (< idx 2)
+                       (deliver (nth entered idx) true)
+                       (deliver (nth observations idx)
+                                {:retry (deref (future (reason (:retry-cleanup! @original-issued)))
+                                               1600 ::retry-timeout)
+                                 :stop (deref (future
+                                                ((:biff.core/stop (:module @original-issued))
+                                                 {:not-the-captured-target true})
+                                                :returned)
+                                              1600 ::stop-timeout)})
+                       (deref (nth release idx) 7000 ::callback-timeout))
+                     (if (= n 1)
+                       (throw (ex-info "First original physical stop failed" {}))
+                       (physical-stop system))))
+               (policy))
+        first-job (atom nil)
+        second-job (atom nil)]
+    (reset! original-issued issued)
+    (try
+      (let [system (start! scenario)]
+        (is (= :verified-selected-adapter-start (:status ((:summary! issued)))))
+        (reset! first-job (future ((:biff.core/stop (:module issued)) system)))
+        (is (= true (deref (first entered) 3000 ::not-entered)))
+        (is (= {:retry :original-stop-in-progress :stop :returned}
+               (deref (first observations) 4000 ::missing))
+            "The original first stop callback can inspect competing retries and stops promptly")
+        (is (= :in-progress (:selected-adapter-cleanup ((:summary! issued)))))
+        (is (= 1 (:original-stop-attempts ((:summary! issued)))))
+        (is (not (realized? @first-job)))
+        (deliver (first release) true)
+        (is (not= ::first-timeout (deref @first-job 4000 ::first-timeout)))
+        (is (= :stop-cleanup-not-established (:status ((:summary! issued)))))
+        (reset! second-job (future ((:retry-cleanup! issued))))
+        (is (= true (deref (second entered) 3000 ::not-entered)))
+        (is (= {:retry :original-stop-in-progress :stop :returned}
+               (deref (second observations) 4000 ::missing))
+            "The original retry callback can inspect competing retries and stops promptly")
+        (is (= :in-progress (:selected-adapter-cleanup ((:summary! issued)))))
+        (is (= 2 (:original-stop-attempts ((:summary! issued)))))
+        (is (not (realized? @second-job)))
+        (deliver (second release) true)
+        (is (= :callback-returned (:status (deref @second-job 4000 ::retry-timeout))))
+        (is (= 2 @calls))
+        (is (stopped? s))
+        (is (= :stopped (:status ((:summary! issued)))))
+        (is (= :callback-returned (:status ((:retry-cleanup! issued)))))
+        (is (= 2 @calls))
+        (is (= :not-established (:physical-listener-closure ((:retry-cleanup! issued))))))
+      (finally
+        (deliver (first release) true)
+        (deliver (second release) true)
+        (when @first-job (deref @first-job 4500 nil))
+        (when @second-job (deref @second-job 4500 nil))
+        (raw-stop! s)))))
