@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-adapter-start
-  "v2314: Fail-closed Biff HTTP adapter startup for ONE originally issued
+  "v2316: Fail-closed Biff HTTP adapter startup for ONE originally issued
    final-handler consumption probe. Unlike post-start verification, the
    selected adapter is not returned as started until an actual read-only
    loopback challenge reaches the precise final checked Ring wrapper.
@@ -22,6 +22,13 @@
    this issuer's retry or redundant stop; those operations must observe the
    already-claimed in-progress attempt rather than deadlocking behind the
    physical callback. One frozen target and at most two attempts remain.
+   v2316: A competing Biff stop must not replace the adapter's :starting
+   claim or consume the one-use physical cleanup BEFORE the original start
+   has selected its real system. Compare-and-set each stop transition against
+   its observed state; reject concurrent stop during :starting and the
+   startup-owned :failed-cleaning-up interval. Only the startup owner may
+   select the target of its failed-start physical rollback.
+
    A returned stop callback alone does not prove external physical closure;
    callers must still verify the ORIGINAL managed lifecycle and listener.
 
@@ -239,13 +246,44 @@
                           (reject! :adapter-start-state-diverged))
                         out))
                     (catch Throwable error
-                      (reset! started-state :failed)
-                      (stop-original! system)
+                      ;; The startup owner must retain exclusive physical
+                      ;; rollback ownership. Publishing :failed before its
+                      ;; stop claim used to let a concurrent Biff stop steal
+                      ;; the original target or mask failure as :stopped.
+                      (reset! started-state :failed-cleaning-up)
+                      (try (stop-original! system)
+                           (finally (reset! started-state :failed)))
                       (throw error))))
                 :biff.core/stop
                 (fn [system]
-                  (reset! started-state :stopped)
-                  (stop-original! system))}
+                  ;; A concurrent external stop previously overwrote
+                  ;; :starting and consumed the original physical stop on a
+                  ;; caller-supplied fallback system. The startup thread
+                  ;; could subsequently open a real listener, fail its
+                  ;; final :starting -> :verified transition, and have no
+                  ;; cleanup attempt left to stop the newly opened port.
+                  ;; CAS makes stop-before-start and start-before-stop
+                  ;; exclusive without holding the stop mutex over startup.
+                  (loop []
+                    (case @started-state
+                      :starting
+                      (reject! :adapter-start-in-progress)
+                      :failed-cleaning-up
+                      (reject! :adapter-start-cleanup-in-progress)
+                      :issued
+                      (if (compare-and-set! started-state :issued :stopped)
+                        (stop-original! system)
+                        (recur))
+                      :verified
+                      (if (compare-and-set! started-state :verified :stopped)
+                        (stop-original! system)
+                        (recur))
+                      :failed
+                      (if (compare-and-set! started-state :failed :stopped)
+                        (stop-original! system)
+                        (recur))
+                      :stopped
+                      (stop-original! system))))}
         summary! (fn []
                    (check-original!)
                    (let [status (case @started-state
@@ -257,6 +295,7 @@
                                             :failed-and-cleaned-up
                                             :failed-cleanup-not-established)
                                   :starting :starting
+                                  :failed-cleaning-up :failed-cleaning-up
                                   :issued :issued)]
                      (assoc (report status)
                             :selected-adapter-cleanup @cleanup
