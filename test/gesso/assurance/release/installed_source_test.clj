@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source-test
-  "v2304: Original Claim catalog through an actual, locally started Biff/XTDB
+  "v2306: Original Claim catalog through an actual, locally started Biff/XTDB
    application, with permanent checks of the diagnostic release phase boundary.
 
    This suite uses the existing original Biff HTTP fixture, its actual loopback
@@ -10,7 +10,12 @@
 
    v2304 preserves the original physical-stop callback/summary lock-order
    regression on a real local Biff/XTDB listener, including concurrent-stop
-   exclusion and one-shot cleanup without additional release authority."
+   exclusion and one-shot cleanup without additional release authority.
+
+   v2306 permanently qualifies real original Biff physical cleanup retry
+   callbacks that inspect this selected-source lifecycle on another JVM
+   thread, preserving one-use retry and no-authority semantics."
+  (:import [java.util.concurrent CountDownLatch ExecutorService TimeUnit])
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gesso.assurance.release.installed-source :as installed]
             [gesso.assurance.proof.checked-biff-http-application-configuration-fixture
@@ -307,3 +312,109 @@
       (finally
         (deliver callback-release true)
         (clean! s instance)))))
+
+(deftest original-managed-retry-callback-can-observe-selected-source-lifecycle
+  ;; An original Biff physical stop first fails while the listener remains
+  ;; alive. The sole opted-in host-idempotent retry enters the SAME original
+  ;; Biff adapter, and requests this selected-source wrapper's summary on a
+  ;; distinct JVM thread. Before v2305 the wrapper retained monitor over
+  ;; the callback and the nested observation could not complete.
+  ;;
+  ;; This is a real original Biff/XTDB listener and original configured
+  ;; source/issuer, not a replacement installed-source callback. Time-bounded
+  ;; observations expose deadlocks while cleanup always releases the latch.
+  (let [s (scenario)
+        physical-stop (get-in s [:raw :biff.core/stop])
+        physical-calls (atom 0)
+        instance-ref (atom nil)
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        observed-summary (promise)
+        configured-stop
+        (fn [system]
+          (if (= 1 (swap! physical-calls inc))
+            (throw (ex-info "Injected first original physical stop failure"
+                            {:first-stop-failure true}))
+            (do
+              (.countDown entered)
+              (deliver observed-summary
+                       (deref (future ((:summary! @instance-ref)))
+                              1800 ::summary-timeout))
+              (when-not (.await release 8 TimeUnit/SECONDS)
+                (throw (ex-info "Original physical retry was not released" {})))
+              (physical-stop system))))
+        config (assoc (fixture/original-source s true)
+                      :adapter-module
+                      (assoc (:raw s) :biff.core/stop configured-stop)
+                      :listener-instance!
+                      (fn [_] (:server @(:server-state s)))
+                      :listener-shutdown-confirmed?
+                      (fn [listener _]
+                        (and (identical? listener (:server @(:server-state s)))
+                             (.isShutdown ^ExecutorService
+                                          (:executor @(:server-state s)))))
+                      :idempotent-stop-retry? true)
+        catalog (get-in s [:env :catalog-source :catalog])
+        instance (installed/issue-selected-installed-catalog!
+                  (constantly catalog) config)
+        retry-worker (atom nil)]
+    (reset! instance-ref instance)
+    (try
+      (is (= :selected-source-and-current-local-http-observed-only
+             (:status ((:start-once! instance) {}))))
+      (is (= :cleanup-unconfirmed (:status ((:stop! instance)))))
+      (is (= 1 @physical-calls)
+          "The first original Biff stop fails without stopping the listener")
+      (is (= :cleanup-unconfirmed (:status ((:summary! instance)))))
+      (is (= :explicit-host-idempotence
+             (:cleanup-retry-policy ((:summary! instance)))))
+      (reset! retry-worker (future ((:retry-cleanup! instance))))
+      (is (.await entered 3000 TimeUnit/MILLISECONDS)
+          "The original configured physical retry callback must execute")
+      (let [snapshot (deref observed-summary 3500 ::not-observed)]
+        (is (map? snapshot)
+            "The original physical retry must obtain a cross-thread summary")
+        (is (= :retrying-cleanup (:status snapshot)))
+        (is (true? (:cleanup-retry-attempted? snapshot)))
+        (is (= :explicit-host-idempotence (:cleanup-retry-policy snapshot)))
+        (is (= :requires-fresh-inspection
+               (:current-installation-evidence snapshot)))
+        (is (= :not-issued (:installation-eligibility snapshot)))
+        (is (= :none (:release-authority snapshot))))
+      (is (= :local-cleanup-retry-already-attempted
+             (deref (future (reason #((:retry-cleanup! instance))))
+                    1900 ::duplicate-retry-timeout))
+          "Competing retry is rejected while the physical callback runs")
+      (is (= :local-cleanup-retry-in-progress
+             (deref (future (reason #((:stop! instance))))
+                    1900 ::competing-stop-timeout))
+          "Competing physical stop cannot replace the pending retry")
+      (is (= :no-current-issued-running-instance
+             (deref (future (reason #((:inspect-current! instance))))
+                    1900 ::inspection-timeout))
+          "No stale running-instance evidence can be reused during recovery")
+      (is (not (realized? @retry-worker))
+          "Recovery must wait for the real original callback to finish")
+      (.countDown release)
+      (is (= :stopped (:status (deref @retry-worker 6000 ::retry-timeout))))
+      (is (= 2 @physical-calls)
+          "Exactly one failed stop and one original physical retry ran")
+      (is (= :stopped (:status ((:summary! instance)))))
+      (is (true? (.isShutdown ^ExecutorService
+                            (:executor @(:server-state s))))
+          "Original physical retry must terminate the real server executor")
+      (is (= :none (:release-authority ((:summary! instance)))))
+      (is (= :local-cleanup-retry-already-attempted
+             (reason #((:retry-cleanup! instance))))
+          "The source never grants a second retry after success")
+      (is (= :no-current-issued-running-instance
+             (reason #((:inspect-current! instance)))))
+      (is (= :stopped (:status ((:stop! instance))))
+          "Confirmed terminal stop remains idempotent")
+      (is (= 2 @physical-calls)
+          "Idempotent stop cannot call the physical adapter again")
+      (finally
+        (.countDown release)
+        (when @retry-worker (deref @retry-worker 6000 nil))
+        (clean! s instance))))
+)
