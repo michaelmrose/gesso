@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.traffic-fence
-  "v2267: An enforcing, host-local, synchronous Ring traffic fence.
+  "v2270: An enforcing, host-local Ring fence with explicit continuation leases.
 
    This is a narrow runtime MECHANISM for R5.1 Part XI: no business handler
    can run through the issued Ring entrypoint before an explicitly qualified
@@ -18,11 +18,15 @@
    returned Ring handler MUST actually be installed as the only public
    protected entrypoint; this file cannot discover bypass routes or workers.
 
-   Explicitly synchronous Ring only: deferred responses, body streams, SSE,
-   jobs, and transferred callbacks outlive the lexical read lease and require
-   a separate lifetime protocol. No attempt is made to stop resource owners,
-   roll back committed business effects, or authorize future requests from a
-   cached assessment. The per-request :guard! must check current permissions."
+   The default Ring return path refuses delayed/streaming response bodies.
+   A handler can explicitly pin host-owned continuation work through
+   :retain-current!, then call :finish! on that opaque lease when it has
+   REALLY ended. Retirement and closure first block new traffic and then
+   wait a bounded interval for those registered continuations; an incomplete
+   drain FAILS CLOSED and remains retryable, never reports success. These
+   leases cannot discover unregistered background work, prove byte delivery,
+   or automatically close SSE. Honest caller completion remains a premise.
+   No rollback of committed effects or reuse of past request authorization."
   (:import [java.util IdentityHashMap]
            [java.util.concurrent.locks ReentrantReadWriteLock]))
 
@@ -30,10 +34,16 @@
 (def report-version 1)
 (def ^:private max-staged 64)
 (def ^:private max-generations 65536)
+(def ^:private max-retained-continuations 4096)
+(def ^:private default-drain-timeout-ms 5000)
 (def ^:private unavailable
   {:status 503
    :headers {"cache-control" "no-store"}
    :body "Protected application traffic is unavailable"})
+
+(deftype ^:private ContinuationToken []
+  Object
+  (toString [_] "#<gesso.release/opaque-continuation>"))
 
 (deftype ^:private CandidateToken []
   Object
@@ -50,8 +60,12 @@
 
 (defn- qualifier-input! [input]
   (when-not (and (plain-map? input)
-                 (= #{:qualify!} (set (keys input)))
-                 (fn? (:qualify! input)))
+                 (contains? #{#{:qualify!} #{:qualify! :drain-timeout-ms}}
+                            (set (keys input)))
+                 (fn? (:qualify! input))
+                 (or (not (contains? input :drain-timeout-ms))
+                     (and (integer? (:drain-timeout-ms input))
+                          (<= 1 (:drain-timeout-ms input) 60000))))
     (reject! :trusted-host-qualifier-required))
   (:qualify! input))
 
@@ -64,8 +78,42 @@
     (reject! :invalid-immutable-dispatch-candidate))
   candidate)
 
+(def ^:private eager-response-keys #{:status :headers :body})
+(def ^:private byte-array-class (Class/forName "[B"))
+
+(defn- eager-ring-result? [response]
+  ;; A Ring response that can realize additional behavior AFTER the handler
+  ;; returns does not belong to a synchronous read lease. The narrow opt-in
+  ;; profile accepts only plain, immediately materialized status/headers/body
+  ;; (no callback, session, file, stream or lazy body). Even this profile does
+  ;; NOT establish Netty/socket completion after the handler has returned.
+  (and (plain-map? response)
+       (every? eager-response-keys (keys response))
+       (integer? (:status response))
+       (<= 100 (:status response) 599)
+       (let [headers (:headers response)]
+         (or (nil? headers)
+             (and (plain-map? headers)
+                  (every? (fn [[k v]] (and (string? k) (string? v)))
+                          headers))))
+       (let [body (:body response)]
+         (or (nil? body)
+             (string? body)
+             (keyword? body)
+             (number? body)
+             (instance? byte-array-class body)))))
+
+(defn- refuse-opaque-result [response]
+  (when-let [body (and (map? response) (:body response))]
+    (when (instance? java.lang.AutoCloseable body)
+      (try (.close ^java.lang.AutoCloseable body)
+           (catch Throwable error
+             (when (instance? InterruptedException error)
+               (.interrupt (Thread/currentThread)))))))
+  unavailable)
+
 (defn issue-local-ring-traffic-fence!
-  "Issue one opaque host-local synchronous Ring dispatcher.
+  "Issue one opaque host-local Ring dispatcher with explicit continuation pins.
 
    :prepare! stages an immutable candidate, capturing the CURRENT epoch.
    :activate! atomically selects that candidate only if its epoch is current
@@ -74,17 +122,29 @@
    failure consumes the staged token and keeps the previous binding (whose
    own per-request guard still independently controls its usability).
    Both staged and historically used generation inventories are bounded.
-   :retire! requires the EXACT active candidate token; it drains synchronous
-   requests before denying subsequent traffic. :close! permanently denies all
-   traffic and drops unactivated candidates. Every transition checks for
-   reentrant read->write upgrade and fails rather than deadlocking.
+   :retain-current! may be invoked only by the currently executing admitted
+   Ring handler. It returns an opaque continuation token. Any thread may call
+   :finish! ONCE on that token after the registered operation really ends.
+   Continuations are bounded and do not grant authority to start NEW effects.
+   :retire! and :close! stop new admission before waiting for those tokens;
+   timeout or interrupt leaves a non-serving draining/closing state, to be
+   retried with the same active token or :close!. Synchronous requests drain
+   under the read/write lock before lifecycle transitions take the write lease.
+   Late/deferred response bodies are denied instead of being mistaken for
+   completed synchronous work. The host must explicitly account for any
+   work launched before return; this cannot detect hidden background tasks.
 
    The host MUST NOT call activation from arbitrary application requests.
    None of these methods is a source-bound release credential."
   [input]
   (let [qualify! (qualifier-input! input)
+        drain-timeout-ms (long (or (:drain-timeout-ms input)
+                                   default-drain-timeout-ms))
         ^ReentrantReadWriteLock lock (ReentrantReadWriteLock. true)
         candidates (IdentityHashMap.)
+        ^Object continuation-monitor (Object.)
+        continuations (IdentityHashMap.)
+        ^ThreadLocal request-owner (ThreadLocal.)
         state (atom {:phase :inactive :epoch 0 :active nil :used #{}})
         with-write (fn [f]
                      (when (pos? (.getReadHoldCount lock))
@@ -101,16 +161,37 @@
                     (let [l (.readLock lock)]
                       (.lock l)
                       (try (f) (finally (.unlock l)))))
+        drain! (fn []
+                 (let [deadline (+ (System/nanoTime)
+                                   (* 1000000 drain-timeout-ms))]
+                   (locking continuation-monitor
+                     (loop []
+                       (when (pos? (.size continuations))
+                         (let [remaining (- deadline (System/nanoTime))]
+                           (when-not (pos? remaining)
+                             (reject! :registered-continuation-drain-timeout))
+                           (try
+                             (.wait continuation-monitor
+                                    (max 1 (long (quot (+ remaining 999999)
+                                                       1000000))))
+                             (catch InterruptedException _
+                               (.interrupt (Thread/currentThread))
+                               (reject! :registered-continuation-drain-interrupted)))
+                           (recur)))))))
         summary (fn []
                   (let [{:keys [phase epoch active]} @state]
                     {:type report-type :version report-version
                      :phase phase :epoch epoch
                      :selected-generation (:generation active)
                      :staged-count (.size candidates)
+                     :retained-continuations (locking continuation-monitor
+                                               (.size continuations))
                      :scope :one-host-synchronous-ring-entrypoint-only
                      :host-qualifier-provenance :trusted-host-callback-conditional
                      :real-biff-installation :not-established
-                     :async-response-drain :not-established
+                     :async-response-drain :registered-continuations-only
+                     :unregistered-transferred-work :not-established
+                     :physical-wire-completion :not-established
                      :release-authority :none
                      :installation-eligibility :not-issued
                      :activation-eligibility :not-issued
@@ -118,22 +199,63 @@
                      :runtime-effect-permission :none}))]
     {:handler
      (fn [request]
-       ;; Do not permit a qualifier to call into live traffic while holding
-       ;; the exclusive activation lock. Retire waits for the complete
-       ;; synchronous handler invocation, never for a detached async effect.
+       ;; No business call may be entered while an exclusive lifecycle lease
+       ;; is held by the same thread (including reentrant qualification).
        (if (.isWriteLockedByCurrentThread lock)
          unavailable
          (with-read
            (fn []
-             (let [selected (:active @state)]
-               (if (and selected
-                        (true? (try ((:guard! selected) request)
+             (let [{:keys [phase active]} @state]
+               (if (and (= :active phase)
+                        active
+                        (true? (try ((:guard! active) request)
                                     (catch Throwable error
                                       (when (instance? InterruptedException error)
                                         (.interrupt (Thread/currentThread)))
                                       false))))
-                 ((:handler selected) request)
+                 (let [previous-owner (.get request-owner)]
+                   (.set request-owner (:token active))
+                   (try
+                     (let [response ((:handler active) request)]
+                       (if (eager-ring-result? response)
+                         ;; Netty may read bytes after the lexical Ring call.
+                         ;; Do not expose a mutable application-owned array.
+                         (if (instance? byte-array-class (:body response))
+                           (assoc response :body (aclone ^bytes (:body response)))
+                           response)
+                         (refuse-opaque-result response)))
+                     (finally
+                       (if previous-owner
+                         (.set request-owner previous-owner)
+                         (.remove request-owner)))))
                  unavailable))))))
+
+     :retain-current!
+     (fn []
+       (let [owner (.get request-owner)
+             {:keys [phase active]} @state]
+         (when-not (and owner (= :active phase)
+                        (identical? owner (:token active))
+                        (pos? (.getReadHoldCount lock)))
+           (reject! :no-current-admitted-request))
+         (locking continuation-monitor
+           (when (>= (.size continuations) max-retained-continuations)
+             (reject! :too-many-registered-continuations))
+           (let [token (ContinuationToken.)]
+             (.put continuations token owner)
+             token))))
+
+     :finish!
+     (fn [token]
+       ;; Crucially, no read/write lease: a closing thread may be waiting
+       ;; under the exclusive lease for an asynchronous completion thread.
+       (locking continuation-monitor
+         (when-not (and (instance? ContinuationToken token)
+                        (.containsKey continuations token))
+           (reject! :unknown-or-already-finished-continuation))
+         (.remove continuations token)
+         (.notifyAll continuation-monitor)
+         {:status :finished :authority :none}))
 
      :prepare!
      (fn [candidate]
@@ -142,8 +264,10 @@
            (let [candidate (candidate-input! candidate)
                  {:keys [phase epoch used]} @state
                  generation (:generation candidate)]
-             (when (= :closed phase)
+             (when (contains? #{:closing :closed} phase)
                (reject! :permanently-closed))
+             (when (= :draining phase)
+               (reject! :previous-generation-still-draining))
              (when (or (contains? used generation)
                        (some #(= generation (:generation %))
                              (iterator-seq (.iterator (.values candidates)))))
@@ -176,12 +300,17 @@
            (let [candidate (.remove candidates token)
                  {:keys [phase epoch active used]} @state
                  generation (:generation candidate)]
-             (when (= :closed phase)
+             (when (contains? #{:closing :closed} phase)
                (reject! :permanently-closed))
+             (when (= :draining phase)
+               (reject! :previous-generation-still-draining))
              (when-not (= epoch (:expected-epoch candidate))
                (reject! :stale-predecessor-generation))
              (when (contains? used generation)
                (reject! :reused-generation))
+             (when (locking continuation-monitor
+                     (pos? (.size continuations)))
+               (reject! :registered-continuations-prevent-replacement))
              (when (>= (count used) max-generations)
                (reject! :generation-inventory-exhausted))
              (when (= epoch Long/MAX_VALUE)
@@ -219,12 +348,16 @@
        (with-write
          (fn []
            (let [{:keys [phase epoch active] :as now} @state]
-             (when-not (and (= :active phase)
+             (when-not (and (contains? #{:active :draining} phase)
                             (instance? CandidateToken token)
                             (identical? token (:token active)))
                (reject! :not-the-current-active-generation))
              (when (= epoch Long/MAX_VALUE)
                (reject! :generation-counter-exhausted))
+             ;; Deny new requests BEFORE waiting, and retain the old token
+             ;; if a bounded drain times out. Retry only with that token.
+             (reset! state (assoc now :phase :draining))
+             (drain!)
              (reset! state (assoc now :phase :inactive :epoch (inc epoch)
                                   :active nil))
              {:status :retired :generation (:generation active)
@@ -235,8 +368,12 @@
        (with-write
          (fn []
            (when-not (= :closed (:phase @state))
+             ;; Incomplete closure is NOT success. This phase refuses new
+             ;; traffic; retry after the owner finishes its continuation.
              (.clear candidates)
-             (reset! state (assoc @state :phase :closed :active nil)))
+             (swap! state assoc :phase :closing)
+             (drain!)
+             (swap! state assoc :phase :closed :active nil))
            {:status :closed :authority :none})))
 
      :summary! (fn [] (with-read summary))}))
