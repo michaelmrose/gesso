@@ -1,8 +1,10 @@
 (ns gesso.assurance.release.fenced-biff-http-probe-shutdown-test
-  "v2290: Permanent live-HTTP qualification of private-probe admission,
+  "v2293: Permanent live-HTTP qualification of private-probe admission,
    synchronous probe drain, and fail-closed retries at the selected
    Biff traffic fence. Controlled installed-source callbacks are explicit
    test doubles, not independent source or release authority.
+   v2293 permanently checks that private probes can call summary! while
+   physical stop drains their read leases without a monitor-order deadlock.
 
    After stop begins, even a valid assurance marker cannot bypass
    the closed fence on a surviving physical HTTP listener."
@@ -313,3 +315,85 @@
              (is (.isShutdown (:executor @(:server-state s))))))
          (finally
            (try (stop-original (or @system {})) (catch Throwable _ nil))))))))
+
+(deftest private-probe-summary-must-not-deadlock-with-stop-drain
+  ;; A private probe may call summary! while it owns its original-handler
+  ;; read lease. Stop must publish :stopping without retaining the monitor
+  ;; while it waits for that lease. The old ordering (monitor -> write lock)
+  ;; deadlocked against the probe's (read lock -> monitor) ordering.
+  (let [entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        probe-summary (promise)
+        issued (atom nil)
+        hooks {:on-original
+               (fn [request]
+                 (when (= "summary-race"
+                          (get-in request [:headers "x-gesso-local-liveness-probe"]))
+                   (.countDown entered)
+                   (when-not (.await release 8 TimeUnit/SECONDS)
+                     (throw (ex-info "Private probe was never released" {})))
+                   (deliver probe-summary (:status ((:summary! @issued))))))}
+        h (host false hooks)
+        pending-request (atom nil)
+        stop-thread (atom nil)]
+    (try
+      (with-redefs [installed/issue-selected-installed-catalog! (:issuer h)]
+        (let [w (outer/issue-fenced-checked-biff-http!
+                 (constantly {}) (:config h) (constantly true))
+              stop-result (promise)]
+          (reset! issued w)
+          (is (= :one-original-biff-listener-host-locally-fenced
+                 (:status ((:start-once! w) {}))))
+          (reset! pending-request
+                  (future (request! (:port h) "/anything"
+                                    "x-gesso-local-liveness-probe" "summary-race")))
+          (is (.await entered 3 TimeUnit/SECONDS)
+              "Private probe must enter the original handler before stop")
+          (let [t (Thread. (fn []
+                             (deliver stop-result
+                                      (try ((:stop! w))
+                                           (catch Throwable error error))))
+                           "gesso-v2293-probe-drain-stop")]
+            (.setDaemon t true)
+            (reset! stop-thread t)
+            (.start t)
+            (is (loop [deadline (+ (System/nanoTime) 3000000000)]
+                  (cond
+                    (and (= Thread$State/WAITING (.getState t))
+                         (some #(= "java.util.concurrent.locks.ReentrantReadWriteLock$WriteLock"
+                                   (.getClassName ^StackTraceElement %))
+                               (.getStackTrace t)))
+                    true
+                    (< (System/nanoTime) deadline)
+                    (do (Thread/sleep 5) (recur deadline))
+                    :else false))
+                "Stop must be blocked draining the admitted private probe")
+            (is (= :stopping
+                   (deref (future (:status ((:summary! w)))) 2000 ::timeout))
+                "Lifecycle summary must not wait on stop's monitor")
+            (is (= :fenced-biff-stop-in-progress
+                   (deref (future
+                            (try ((:stop! w)) :unexpected-success
+                                 (catch clojure.lang.ExceptionInfo error
+                                   (:reason (ex-data error)))))
+                          2000 ::timeout))
+                "Concurrent stops must be rejected while draining")
+            (.countDown release)
+            (is (= 200 (deref @pending-request 3000 ::timeout))
+                "The original HTTP probe can finish after shutdown starts")
+            (is (= :stopping (deref probe-summary 3000 ::timeout))
+                "The admitted probe must obtain summary under its read lease")
+            (is (= :cleanup-unconfirmed
+                   (:status (deref stop-result 3000 ::timeout)))
+                "Managed stop resumes after the read lease is released")
+            (is (= [503 503 503] @(:stop-while-closing h)))
+            (is (= :closed (get-in ((:summary! w)) [:traffic-fence :phase])))
+            (is (= 503 (request! (:port h) "/anything"
+                                 "x-gesso-local-liveness-probe" "after-stop")))
+            (is (= 1 (count @(:seen h)))
+                "Only the admitted private probe reached the original handler"))))
+      (finally
+        (.countDown release)
+        (when @pending-request (deref @pending-request 3000 nil))
+        (when @stop-thread (.join ^Thread @stop-thread 3000))
+        (stop-server! h)))))
