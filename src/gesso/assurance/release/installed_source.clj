@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.installed-source
-  "v2285: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
+  "v2303: Verified original cleanup retry; source-RECHECKED selected-catalog observation through ONE original,
    guarded, physically started Biff HTTP generation.
 
    Join the v2261 ORIGINAL abstract catalog checks to the catalog supplied to
@@ -19,6 +19,17 @@
    the ORIGINAL configured Biff inspector, then recheck the healthy instance.
    Activation and completion remain blocked by unobserved subjects. This is
    a narrower LOCAL qualification, not Stage 11 release eligibility.
+   v2303: A successful external stop must not retain this source issuer's
+   lifecycle monitor while invoking the original checked Biff physical-stop
+   callback. An original host callback may synchronously ask another thread
+   to inspect this issuer's summary; holding monitor across that callback
+   creates a cross-thread deadlock. Publish :stopping exclusively under
+   monitor, perform physical cleanup outside it, then publish the terminal
+   result and revoke the retained installation evidence under monitor.
+   Concurrent stops are rejected during the in-flight original callback.
+   Startup/assessment-internal failure cleanup is a separate path and does
+   not gain general asynchronous or release authority from this revision.
+
    v2285: Optionally forward ONE verified original configured Biff cleanup
    retry to a previously unconfirmed local instance. The original selected
    host must explicitly declare an idempotent stop and an original-listener
@@ -375,23 +386,39 @@
         local-intent (local-intent source-report
                                    (str "local-http/" (java.util.UUID/randomUUID)))]
     (letfn [(stop! []
-              (locking monitor
-                (when (= :retrying-cleanup @status)
-                  (reject! :local-cleanup-retry-in-progress))
-                (when-not (contains? retained-statuses @status)
-                  (reject! :invalid-local-instance-state))
-                (if (= :stopped @status)
+              ;; Claim a single physical stop under monitor, but NEVER hold
+              ;; that monitor across original-host callbacks. Those callbacks
+              ;; may synchronously query our diagnostic summary on a separate
+              ;; thread while performing physical listener shutdown.
+              (let [claimed?
+                    (locking monitor
+                      (when (= :retrying-cleanup @status)
+                        (reject! :local-cleanup-retry-in-progress))
+                      (when (= :stopping @status)
+                        (reject! :local-physical-stop-in-progress))
+                      (when-not (contains? retained-statuses @status)
+                        (reject! :invalid-local-instance-state))
+                      (if (= :stopped @status)
+                        false
+                        (do (reset! status :stopping) true)))]
+                (if-not claimed?
                   {:status :stopped :authority :none}
-                  (do
-                    (reset! status :stopping)
-                    (let [result (try ((:stop! issued))
-                                      (catch Throwable _ nil))
-                          stopped? (= :stopped (:status result))]
+                  (let [result (try ((:stop! issued))
+                                    (catch Throwable error
+                                      (when (instance? InterruptedException error)
+                                        (.interrupt (Thread/currentThread)))
+                                      nil))
+                        stopped? (= :stopped (:status result))
+                        terminal (if stopped? :stopped :cleanup-unconfirmed)]
+                    ;; Retire the physical evidence and publish terminal state
+                    ;; together. A competing transition cannot enter while
+                    ;; :stopping is still visible.
+                    (locking monitor
                       (reset! running nil)
                       (reset! generation nil)
                       (reset! route-ids nil)
-                      (reset! status (if stopped? :stopped :cleanup-unconfirmed))
-                      {:status @status :authority :none})))))
+                      (reset! status terminal))
+                    {:status terminal :authority :none}))))
             (retry-cleanup! []
               (locking monitor
                 (when-not retry-enabled?
