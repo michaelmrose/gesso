@@ -1,5 +1,5 @@
 (ns gesso.assurance.release.fenced-biff-http
-  "v2280: Fail-closed managed-stop reporting for the host-local traffic fence at the actual
+  "v2286: Fail-closed bounded original managed-cleanup recovery for the host-local traffic fence at the actual
    selected Biff adapter's HTTP dispatch point, not merely beside Biff.
 
    An issued original checked Biff/XTDB startup must complete its real HTTP
@@ -26,6 +26,14 @@
    permanently denying traffic. A retry may attempt cleanup again but the
    original lower-layer issuer may retain unconfirmed terminal state; a
    wrapper retry alone does not establish physical recovery.
+
+   v2286: Opt-in :retry-cleanup! consumes ONE attempt after a confirmed fence
+   close and an explicitly unconfirmed original managed stop. It delegates
+   ONLY to the installed-source original verified retry boundary, then checks
+   the same installed-source state and closed fence again. It never restarts
+   the listener, changes selected handler identity, or reopens traffic. Host
+   idempotence and original-listener shutdown observation are explicit inputs;
+   their truth is not independently proved by this outer wrapper.
 
    This is opt-in LOCAL qualification of ONE selected synchronous HTTP
    entrypoint, NOT authenticated deployment, complete route/source coverage,
@@ -132,6 +140,10 @@
    startup closes the fence and attempts original physical cleanup. There is
    no independent host :activate! callback or reactivation after retirement.
 
+   Explicit recovery requires BOTH :idempotent-stop-retry? true and the
+   :listener-shutdown-confirmed? callback in configured-source. Successful
+   recovery is an original managed cleanup observation, not a release claim.
+
    The single selected raw adapter MUST use the supplied Ring handler to
    serve its physical listener; source callbacks and external listeners are
    not independently authenticated by this wrapper. The startup result and
@@ -140,9 +152,14 @@
   (when-not (and (fn? catalog!)
                  (fn? request-guard!)
                  (plain-map? configured-source)
-                 (= #{:contract-source :adapter-module :base-url!
-                      :listener-instance! :typed-trial}
-                    (set (keys configured-source)))
+                 (let [required #{:contract-source :adapter-module :base-url!
+                                  :listener-instance! :typed-trial}
+                       keys (set (keys configured-source))]
+                   (or (= required keys)
+                       (and (= (conj required :idempotent-stop-retry?
+                                     :listener-shutdown-confirmed?) keys)
+                            (true? (:idempotent-stop-retry? configured-source))
+                            (fn? (:listener-shutdown-confirmed? configured-source)))))
                  (fn? (:base-url! configured-source))
                  (fn? (:listener-instance! configured-source)))
     (reject! :invalid-original-fenced-biff-input))
@@ -163,6 +180,8 @@
           guard-function (atom nil)
           issued (atom nil)
           last-stop-result (atom nil)
+          cleanup-retry-attempted? (atom false)
+          retry-enabled? (true? (:idempotent-stop-retry? configured-source))
           proof-path (str probe-prefix (UUID/randomUUID))
           fenced (fence/issue-local-ring-traffic-fence!
                   {:qualify!
@@ -234,7 +253,7 @@
       (reset! issued local-issued)
       (letfn [(stop! []
                 (locking monitor
-                  (when (= :stopping @status)
+                  (when (contains? #{:stopping :retrying-cleanup} @status)
                     (reject! :fenced-biff-stop-in-progress))
                   (if (= :stopped @status)
                     {:status :stopped :authority :none}
@@ -267,6 +286,63 @@
                         (reset! status (:status outcome))
                         (reset! last-stop-result outcome)
                         outcome)))))
+              (retry-cleanup! []
+                (locking monitor
+                  (when-not retry-enabled?
+                    (reject! :fenced-biff-cleanup-retry-not-enabled))
+                  (when @cleanup-retry-attempted?
+                    (reject! :fenced-biff-cleanup-retry-already-attempted))
+                  (when-not (and (= :cleanup-unconfirmed @status)
+                                 (= :original-managed-stop-not-confirmed
+                                    (:reason @last-stop-result)))
+                    (reject! :fenced-biff-managed-cleanup-not-retryable))
+                  ;; The fence's own terminal state is prerequisite, never
+                  ;; something that a successful physical stop may replace.
+                  ;; A stream or request that failed to drain cannot recover
+                  ;; through this lower-level Biff stop retry.
+                  (when-not (= :closed (:phase ((:summary! fenced))))
+                    (reject! :fenced-biff-traffic-drain-not-confirmed))
+                  (reset! cleanup-retry-attempted? true)
+                  (reset! status :retrying-cleanup)
+                  (let [outcome
+                        (try
+                          (let [before ((:summary! local-issued))]
+                            (if-not (and (= :cleanup-unconfirmed (:status before))
+                                         (= :explicit-host-idempotence
+                                            (:cleanup-retry-policy before))
+                                         (false? (:cleanup-retry-attempted? before))
+                                         (= :none (:release-authority before))
+                                         (fn? (:retry-cleanup! local-issued)))
+                              {:status :cleanup-unconfirmed
+                               :reason :original-installed-cleanup-not-retryable
+                               :authority :none}
+                              (let [returned ((:retry-cleanup! local-issued))
+                                    after ((:summary! local-issued))
+                                    fence-after ((:summary! fenced))]
+                                (if (and (= :stopped (:status returned))
+                                         (= :none (:authority returned))
+                                         (= :stopped (:status after))
+                                         (= :explicit-host-idempotence
+                                            (:cleanup-retry-policy after))
+                                         (true? (:cleanup-retry-attempted? after))
+                                         (= (:selected-source-fingerprint before)
+                                            (:selected-source-fingerprint after))
+                                         (= :none (:release-authority after))
+                                         (= :closed (:phase fence-after)))
+                                  {:status :stopped :authority :none}
+                                  {:status :cleanup-unconfirmed
+                                   :reason :original-installed-retry-not-confirmed
+                                   :authority :none}))))
+                          (catch Throwable error
+                            (when (instance? InterruptedException error)
+                              (.interrupt (Thread/currentThread)))
+                            {:status :cleanup-unconfirmed
+                             :reason :original-installed-retry-failed
+                             :error-class (.getName (class error))
+                             :authority :none}))]
+                    (reset! status (:status outcome))
+                    (reset! last-stop-result outcome)
+                    outcome)))
               (start-once! [system]
                 (locking monitor
                   (when-not (= :issued @status)
@@ -304,9 +380,14 @@
                   {:type report-type :version report-version
                    :status @status
                    :stop-result @last-stop-result
+                   :cleanup-retry-policy (if retry-enabled?
+                                           :explicit-host-idempotence
+                                           :one-shot-only)
+                   :cleanup-retry-attempted? @cleanup-retry-attempted?
                    :traffic-fence ((:summary! fenced))
                    :release-authority :none
                    :installation-eligibility :not-issued
                    :activation-eligibility :not-issued
                    :completion-claim :not-issued}))]
-        {:start-once! start-once! :stop! stop! :summary! summary!}))))
+        {:start-once! start-once! :stop! stop!
+         :retry-cleanup! retry-cleanup! :summary! summary!}))))
