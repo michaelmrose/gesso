@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-adapter-start
-  "v2282: Fail-closed Biff HTTP adapter startup for ONE originally issued
+  "v2314: Fail-closed Biff HTTP adapter startup for ONE originally issued
    final-handler consumption probe. Unlike post-start verification, the
    selected adapter is not returned as started until an actual read-only
    loopback challenge reaches the precise final checked Ring wrapper.
@@ -15,6 +15,13 @@
    :retry-cleanup! callback, only after an unresolved first attempt. It
    retains the original system identity, serializes stop and retry, rejects
    reentrant retries, and NEVER returns a release or activation credential.
+
+   v2314: Atomically claim each original physical stop under the private
+   monitor, but run host adapter stop callbacks WITHOUT holding the monitor.
+   A host callback may synchronously wait on a different thread to request
+   this issuer's retry or redundant stop; those operations must observe the
+   already-claimed in-progress attempt rather than deadlocking behind the
+   physical callback. One frozen target and at most two attempts remain.
    A returned stop callback alone does not prove external physical closure;
    callers must still verify the ORIGINAL managed lifecycle and listener.
 
@@ -125,36 +132,55 @@
         retry-enabled? (= {:idempotent-stop-retry? true} retry-policy)
         ;; Always preserve the exact target selected on FIRST stop; never
         ;; let a later caller swap the original managed Biff system.
-        attempt-stop! (fn []
-                        (let [next-attempt (swap! stop-attempts inc)]
-                          (reset! cleanup :in-progress)
-                          (try
-                            (original-stop @stop-target)
-                            (reset! cleanup :completed)
-                            (catch Throwable _
-                              ;; The callback may have stopped the listener
-                              ;; before throwing. No clean claim is possible.
-                              (reset! cleanup :not-established)))
-                          next-attempt))
+        ;; Each stop claim is serialized and publishes :in-progress before
+        ;; any original callback executes. The callback itself MUST run
+        ;; outside stop-monitor: it can synchronously call back into this
+        ;; issuer from another thread during physical listener cleanup.
+        claim-attempt! (fn []
+                         (swap! stop-attempts inc)
+                         (reset! cleanup :in-progress))
+        run-claimed-stop! (fn []
+                            (try
+                              (original-stop @stop-target)
+                              (reset! cleanup :completed)
+                              (catch Throwable error
+                                (when (instance? InterruptedException error)
+                                  (.interrupt (Thread/currentThread)))
+                                ;; The callback may have closed the listener
+                                ;; before throwing. No clean claim is possible.
+                                (reset! cleanup :not-established))))
         stop-original! (fn [fallback]
-                         (locking stop-monitor
-                           (when (zero? @stop-attempts)
-                             (reset! stop-target (or @final-system fallback))
-                             (attempt-stop!))))
+                         (let [claimed?
+                               (locking stop-monitor
+                                 (when (zero? @stop-attempts)
+                                   (reset! stop-target (or @final-system fallback))
+                                   (claim-attempt!)
+                                   true))]
+                           (when claimed?
+                             (run-claimed-stop!))))
         retry-cleanup! (fn []
-                         (locking stop-monitor
-                           (when-not retry-enabled?
-                             (reject! :unissued-cleanup-retry))
-                           (when (zero? @stop-attempts)
-                             (reject! :original-stop-not-attempted))
-                           (when (= :in-progress @cleanup)
-                             (reject! :original-stop-in-progress))
-                           (when-not (contains? #{:stopped :failed} @started-state)
-                             (reject! :original-adapter-not-terminal))
-                           (when (= :not-established @cleanup)
-                             (when (>= @stop-attempts 2)
-                               (reject! :original-stop-retry-budget-exhausted))
-                             (attempt-stop!))
+                         (let [claimed?
+                               (locking stop-monitor
+                                 (when-not retry-enabled?
+                                   (reject! :unissued-cleanup-retry))
+                                 (when (zero? @stop-attempts)
+                                   (reject! :original-stop-not-attempted))
+                                 (when (= :in-progress @cleanup)
+                                   (reject! :original-stop-in-progress))
+                                 (when-not (contains? #{:stopped :failed}
+                                                      @started-state)
+                                   (reject! :original-adapter-not-terminal))
+                                 (when (= :not-established @cleanup)
+                                   (when (>= @stop-attempts 2)
+                                     (reject! :original-stop-retry-budget-exhausted))
+                                   (claim-attempt!)
+                                   true))]
+                           ;; A second thread may call this during the
+                           ;; original physical stop. It observes the claimed
+                           ;; :in-progress attempt without waiting for the
+                           ;; application callback to return.
+                           (when claimed?
+                             (run-claimed-stop!))
                            {:status (if (= :completed @cleanup)
                                       :callback-returned :cleanup-unconfirmed)
                             :attempts @stop-attempts
