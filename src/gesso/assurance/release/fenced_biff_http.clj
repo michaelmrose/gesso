@@ -9,7 +9,11 @@
    original checked wrapper, as required by the original Biff proof chain.
 
    Original *private, read-only* consumption/liveness and route-observation
-   probes are allowed through before fence activation. Reserved path ownership
+   probes are allowed through before fence activation, and while the selected
+   host is running. After shutdown begins, even private probes MUST be
+   refused: an unconfirmed physical stop may leave the original socket live,
+   and no probe marker is an authority to bypass a retired fence.
+   Reserved path ownership
    for the consumption nonce prefix is a host-source assumption: an otherwise
    uncertified application route that mimics that reserved UUID path is not
    independently ruled out by the installed catalog evidence. The original final
@@ -26,6 +30,14 @@
    permanently denying traffic. A retry may attempt cleanup again but the
    original lower-layer issuer may retain unconfirmed terminal state; a
    wrapper retry alone does not establish physical recovery.
+
+   v2289: Private source probes enter the original final checked handler
+   ONLY during :starting or :running, under a private read lease. Stop
+   acquires the exclusive lease, draining those probes before physical
+   cleanup. The previously unconditional bypass allowed a crafted assurance
+   header to invoke that handler even after the
+   fence was closed but an original listener survived a failed stop. Post-stop
+   and retrying traffic now always enters the permanently closed fence.
 
    v2286: Opt-in :retry-cleanup! consumes ONE attempt after a confirmed fence
    close and an explicitly unconfirmed original managed stop. It delegates
@@ -48,7 +60,8 @@
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
            [java.time Duration]
-           [java.util UUID]))
+           [java.util UUID]
+           [java.util.concurrent.locks ReentrantReadWriteLock]))
 
 (def report-type :gesso.assurance.release.fenced-biff-http/local-physical-fence)
 (def report-version 1)
@@ -172,6 +185,7 @@
                    (fn? (:biff.core/stop raw)))
       (reject! :invalid-original-selected-adapter))
     (let [monitor (Object.)
+          ^ReentrantReadWriteLock probe-lock (ReentrantReadWriteLock. true)
           status (atom :issued)
           selected-handler (atom nil)
           wire-handler (atom nil)
@@ -225,12 +239,23 @@
                        (reject! :original-final-checked-handler-unavailable))
                      (reset! selected-handler original)
                      (let [wire (fn [request]
-                                  (if (original-private-probe? request)
-                                    (original request)
-                                    (do
-                                      (when (= proof-path (:uri request))
-                                        (swap! marker-hit inc))
-                                      ((:handler fenced) request))))
+                                  (let [private? (original-private-probe? request)
+                                        read (when private? (.readLock probe-lock))]
+                                    ;; Starting/running private probes acquire
+                                    ;; a read lease through the original call.
+                                    ;; Stop must drain all reads before cleanup.
+                                    (when read (.lock read))
+                                    (try
+                                      (if (and private?
+                                               (contains? #{:starting :running}
+                                                          @status))
+                                        (original request)
+                                        (do
+                                          (when (= proof-path (:uri request))
+                                            (swap! marker-hit inc))
+                                          ((:handler fenced) request)))
+                                      (finally
+                                        (when read (.unlock read))))))
                            out ((:biff.core/start raw)
                                 (assoc system app/biff-ring-handler-key wire))]
                        (when-not (and (map? out)
@@ -252,15 +277,23 @@
       (reset! guard-function protected-guard)
       (reset! issued local-issued)
       (letfn [(stop! []
+                ;; A trusted original probe may not upgrade its read lease
+                ;; into exclusive shutdown from within the same thread.
+                (when (pos? (.getReadHoldCount probe-lock))
+                  (reject! :fenced-biff-stop-during-private-probe))
                 (locking monitor
                   (when (contains? #{:stopping :retrying-cleanup} @status)
                     (reject! :fenced-biff-stop-in-progress))
                   (if (= :stopped @status)
                     {:status :stopped :authority :none}
                     (do
-                      ;; Deny traffic first, even when physical cleanup
-                      ;; cannot be established. No unconditional :stopped.
-                      (reset! status :stopping)
+                      ;; Drain any original private probes under an exclusive
+                      ;; lease, publish :stopping, then perform the physical
+                      ;; cleanup. No later private probe may bypass the fence.
+                      (let [write (.writeLock probe-lock)]
+                        (.lock write)
+                        (try (reset! status :stopping)
+                             (finally (.unlock write))))
                       (let [outcome
                             (try
                               (let [closed ((:close! fenced))]
