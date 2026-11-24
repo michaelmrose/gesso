@@ -17,6 +17,7 @@
             [gesso.live.outbox.claim-race-fixture :refer [mapping version command]]
             [gesso.live.outbox.claim-browser-fixture :as browser]
             [gesso.live.outbox.claim-semantic-fixture :as semantics]
+            [gesso.assurance.observed-correspondence :as correspondence]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.read-frontier :as frontier]
@@ -52,6 +53,10 @@
         recovery-trace (atom [])
         initial-state (atom nil)
         recovery-state (atom nil)
+        comparisons (atom [])
+        record-step! (fn [helper alternative before after]
+                       (swap! comparisons conj {:construction (semantics/source helper alternative)
+                                                :before before :inputs {} :after after}))
         submissions (atom [])
         writers (atom [])
         seed-admitted? (atom false)
@@ -392,6 +397,8 @@
                      final (:state final-state)
                      accepted (semantics/observe! helper :accept initial recovered)
                      refused (semantics/observe! loser-helper :refuse recovered final)]
+                 (record-step! helper :accept initial recovered)
+                 (when valid? (record-step! loser-helper :refuse recovered final))
                  (is (:matches? accepted))
                  (is (neg? (xtdb/compare-bases (:basis @initial-state) (:basis @recovery-state))))
                  (is (if valid? (neg? (xtdb/compare-bases (:basis @recovery-state) (:basis final-state)))
@@ -445,6 +452,7 @@
                (let [before (:state (semantics/snapshot-at-frontier! node))
                      replay (invoke session id "winner-replay")
                      after (:state (semantics/snapshot-at-frontier! node))]
+                 (record-step! helper :replay-accepted before after)
                  (is (:matches? (semantics/observe! helper :replay-accepted before after)))
                  (is (not (:matches? (semantics/observe! helper :replay-rejected before after))))
                  (is (not (:matches? (semantics/observe! helper :replay-accepted before (assoc after :request/revision 2)))))
@@ -455,6 +463,7 @@
                  (when valid?
                    (let [replay (invoke loser-session loser-id "loser-replay")
                          refused-after (:state (semantics/snapshot-at-frontier! node))]
+                     (record-step! loser-helper :replay-rejected after refused-after)
                      (is (:matches? (semantics/observe! loser-helper :replay-rejected after refused-after)))
                      (is (not (:matches? (semantics/observe! loser-helper :replay-accepted after refused-after))))
                      (is (= :rejected (get-in replay [:settlement :resolution])))
@@ -537,6 +546,22 @@
                                                                             (assoc-in op [2 :status] :open) op)) accepted) nil)))))
                      (is (= before (semantics/snapshot-at-frontier! node)))))
                  (when valid?
+                   (let [report (correspondence/check-declared-observations!
+                                 {:catalog (semantics/catalog) :observations @comparisons})
+                         committed (set (map (comp :alternative :identity)
+                                             (filter #(= :committed (:result %)) @submissions)))
+                         replay-ids #{(semantics/alternative-id helper :replay-accepted)
+                                      (semantics/alternative-id loser-helper :replay-rejected)}]
+                     (is (:all-supplied-observations-match? report))
+                     (is (empty? (:divergent-operation-ids report)))
+                     (is (= (into committed replay-ids) (:observed-operation-ids report)))
+                     (is (= 4 (count (:unobserved-operation-ids report))))
+                     (is (= 4 (count (:observations report))))
+                     (is (get-in report [:induction-ledger :all-declared-invariants-conditionally-inductive?]))
+                     (is (= :all-original-obligations-remain-open
+                            (get-in report [:induction-ledger :original-obligation-status])))
+                     (is (= :not-established (:installed-executor-correspondence report)))
+                     (is (= :none (:authority report))))
                    (revoke! (get-in credentials [session :session-id]))
                    (is (= 403 (:status (request! (headers-for session) id "revoked-replay" true))))
                    (is (= 2 (count @observed)))))))

@@ -15,7 +15,11 @@
    certificate or transaction permission is issued."
   (:require [clojure.set :as set]
             [gesso.assurance.application-induction :as application]
-            [gesso.model.transition-conformance :as conformance]))
+            [gesso.model.transition-conformance :as conformance]
+            [gesso.assurance.proof.induction-ledger :as ledger]
+            [gesso.assurance.transition :as construction]
+            [gesso.assurance.proof.transition :as abstract]
+            [gesso.assurance.proof.independent-transition-semantics :as independent]))
 
 (def report-version 1)
 (def report-type :gesso.assurance.observed-correspondence/application-step-report)
@@ -213,3 +217,58 @@
                    (= prior current))
       (reject! :stale-or-forged-diagnostic-report []))
     current))
+
+(def ^:private original-ledger-check ledger/check-induction-ledger!)
+(def ^:private original-build construction/build-guarded-replacement!)
+(def ^:private original-observe abstract/observe-transition!)
+(def ^:private original-independent-observe independent/observe-transition!)
+
+(defn check-declared-observations!
+  "Join original catalog and supplied state comparisons, WITHOUT issued plans.
+   This is weaker than check-observed-correspondence!: exact construction
+   identity and abstract relation agreement, not physical provenance, installed
+   executor identity or a complete history. Missing observations remain visible."
+  [{:keys [catalog observations] :as source}]
+  (exact! source #{:catalog :observations} [])
+  (when-not (and (vector? observations) (seq observations) (<= (count observations) 128))
+    (reject! :invalid-observation-selection [:observations]))
+  (when-not (and (identical? original-ledger-check ledger/check-induction-ledger!)
+                 (identical? original-build construction/build-guarded-replacement!)
+                 (identical? original-observe abstract/observe-transition!)
+                 (identical? original-independent-observe independent/observe-transition!))
+    (reject! :substituted-upstream-checker []))
+  (let [evidence (original-ledger-check catalog)
+        entries (into {} (map (juxt :id :construction)) (:operations catalog))
+        rows (mapv
+              (fn [{:keys [construction before inputs after] :as observation}]
+                (exact! observation #{:construction :before :inputs :after} [:observations])
+                (let [id (get-in construction [:subject :id])]
+                  (when-not (and (contains? entries id) (= construction (get entries id)))
+                    (reject! :observation-not-bound-to-declared-construction [:observations id]))
+                  (let [transition (:transition (original-build construction))
+                        a (original-observe transition before inputs after)
+                        b (original-independent-observe transition before inputs after)
+                        fields [:guard-holds? :assignments-hold? :frame-holds? :matches?]]
+                    (when-not (= (select-keys a fields) (select-keys b fields))
+                      (reject! :observation-interpreter-disagreement [:observations id]))
+                    {:operation-id id :observation observation
+                     :transition-fingerprint (:transition-fingerprint a)
+                     :subject-fingerprint (:subject-fingerprint a)
+                     :checks (select-keys a fields)}))) observations)
+        observed (set (map :operation-id rows))]
+    {:type ::declared-observation-report
+     :version 1
+     :checking :original-catalog-and-exact-declared-constructions-rechecked
+     :scope :supplied-declared-state-comparisons-only
+     :induction-ledger evidence
+     :observations rows
+     :observed-operation-ids observed
+     :unobserved-operation-ids (set/difference (:declared-operation-ids evidence) observed)
+     :divergent-operation-ids (set (map :operation-id (remove #(get-in % [:checks :matches?]) rows)))
+     :all-supplied-observations-match? (every? #(get-in % [:checks :matches?]) rows)
+     :physical-observation-provenance :caller-supplied-unauthenticated
+     :installed-executor-correspondence :not-established
+     :physical-write-path-completeness :not-established
+     :transaction-internal-prestate :not-established
+     :universal-xtdb-refinement :not-established
+     :certificate :not-issued :transaction-authority :none :authority :none}))

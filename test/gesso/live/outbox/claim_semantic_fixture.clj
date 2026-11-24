@@ -276,3 +276,40 @@
               (require! false))
             {:kind :worker :intent-id id :status status :command-id (:gesso.live.outbox/command-id row)})
           (require! false))))))
+
+(defn- eq [field value] [:= [:read field] [:literal value]])
+(defn- conjunction [fields]
+  (into [:and] (map (fn [[field value]] (eq field value))) fields))
+
+(def open-state
+  {:request/status :open :request/revision 0 :assignment/helper nil
+   :journal/one nil :journal/two nil})
+
+(defn- winner-case [helper own other]
+  [:and (conjunction {:request/status :claimed :request/revision 1
+                      :assignment/helper helper own :accepted})
+   [:or (eq other nil) (eq other :rejected)]])
+
+(def ^:private ownership
+  {:readers (set (keys open-state))
+   :expression [:or (conjunction open-state)
+                (winner-case "helper-1" :journal/one :journal/two)
+                (winner-case "helper-2" :journal/two :journal/one)]})
+
+(def revision
+  {:readers #{:request/revision}
+   :expression [:>= [:read :request/revision] [:literal 0]]})
+
+(def alternatives [:accept :refuse :replay-accepted :replay-rejected])
+
+(defn catalog []
+  (let [operations (vec (for [helper (sort (keys helpers)) alternative alternatives]
+                          {:id (alternative-id helper alternative)
+                           :construction (source helper alternative)}))]
+    {:id :fixture/claim-epoch
+     :declared-operation-ids (set (map :id operations))
+     :initial-condition {:readers (set (keys open-state))
+                         :expression [:and (conjunction open-state) (:expression revision)]}
+     :invariants {:claim/ownership-and-journal ownership :claim/nonnegative-revision revision}
+     :operations operations}))
+
