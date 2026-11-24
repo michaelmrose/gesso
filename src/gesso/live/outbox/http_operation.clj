@@ -7,6 +7,7 @@
             [gesso.http :as http]
             [gesso.live.application-preflight :as application]
             [gesso.live.outbox.http-route :as route]
+            [gesso.live.outbox.model-publication :as publication]
             [gesso.live.optimistic.choreo :as choreo]
             [gesso.live.optimistic.server :as server]
             [gesso.live.ui :as ui]
@@ -89,7 +90,8 @@
    executor or response builder is accepted. Other paths remain trusted
    fallback code; complete writer coverage is not established. The returned
    marker is a settlement handoff, not evidence of browser receipt."
-  [assembly fallback options]
+  ([assembly fallback options] (wrap-handler assembly fallback options nil))
+  ([assembly fallback options bind-publication]
   (when-not (and (map? options) (= #{:authorize-request?} (set (keys options)))
                  (fn? (:authorize-request? options)))
     (reject! :invalid-command-options {}))
@@ -114,11 +116,15 @@
                                 (catch Exception _ false)))
                 (response 400)
                 (let [context (-> request
-                                  (dissoc :params :query-params :route-params :path-params)
+                                  (dissoc :params :query-params :route-params :path-params
+                                          publication/preparation-key)
                                   (assoc :form-params form :path-params captured))]
                   (if-not (true? (authorize? context))
                     (response 403)
-                    (let [send (server/run-command prepared context command)
+                    (let [context (cond-> context
+                                    bind-publication
+                                    (assoc publication/preparation-key (bind-publication command)))
+                          send (server/run-command prepared context command)
                           result (http/html-response (ui/optimistic-settlement-marker (:settlement send)))]
                       ;; Serialize before recording handoff. No exception from
                       ;; execution or serialization becomes a fabricated rejection.
@@ -126,4 +132,4 @@
                       (update result :headers assoc "cache-control" "no-store"
                               "HX-Reswap" "none"))))))
             (response 400)))
-        (fallback request)))))
+        (fallback (dissoc request publication/preparation-key)))))))

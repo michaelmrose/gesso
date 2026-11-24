@@ -10,7 +10,6 @@
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.core :as live]
             [gesso.live.model :as model]
-            [gesso.live.outbox :as outbox]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.model-publication :as publication]
@@ -177,6 +176,7 @@
 (deftest assembled-streams-share-capacity-and-use-original-model-policy
   (let [seen (atom []) queries (atom []) invocations (atom []) fallback (atom 0)
         intent-id (random-uuid)
+        prepared-intents (atom nil)
         command (protocol/command {:command-id (identity/command-id "v2366-command")
                                    :execution-id (identity/execution-id "v2366-execution")
                                    :operation :request/claim :arguments {:request-id "r1"}
@@ -186,10 +186,10 @@
         execute! (fn [{:keys [ctx arguments] :as invocation}]
                    (swap! invocations conj invocation)
                    (let [id (:request-id arguments)
-                         plan (outbox/prepare! {:intent-ids [intent-id]
-                                                 :source-id (get ctx managed/source-id-key)
-                                                 :operation :request/claim :purpose :gesso.live/refresh}
-                                                [{:topic :request :id id :change/kind :updated}])
+                         plan (publication/prepare! ctx {:intent-ids [intent-id]
+                                                        :purpose :gesso.live/refresh}
+                                                   [{:topic :request :request/location-id id :change/kind :updated}])
+                         _ (reset! prepared-intents (:intents plan))
                          tx (xt/execute-tx (:xtdb/connectable ctx)
                                            (into (vec (:guard-ops plan))
                                                  [[:put-docs :requests {:xt/id id :status :claimed}]
@@ -303,6 +303,13 @@
                       (finally (future-cancel a) (future-cancel b))))
                   (is (= [{:status :claimed}] (xt/q node ["SELECT status FROM requests WHERE _id = ?" "r1"])))
                   (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id])))
+                  (is (= {:gesso.live.outbox/source-id (:source-id (config))
+                          :gesso.live.outbox/operation :request/claim
+                          :gesso.live.outbox/command-id "v2366-command"
+                          :gesso.live.outbox/subject-id "r1"}
+                         (select-keys (first @prepared-intents)
+                                      [:gesso.live.outbox/source-id :gesso.live.outbox/operation
+                                       :gesso.live.outbox/command-id :gesso.live.outbox/subject-id])))
                   (is (zero? @fallback))
                   (host/stop! started)
                   (is ((:drained? status)))
@@ -369,3 +376,35 @@
             (fn [assembly]
               (is (= :unsupported-subject-graph
                      (reason #(publication/rules! assembly subject-mapping)))))))))))
+
+(deftest assembled-publication-prepares-only-command-declared-model-changes
+  (with-assembly
+    (fn [assembly]
+      (let [profile (publication/profile! assembly subject-mapping)
+            bind (:bind-command profile)
+            command {:operation :request/claim :command-id (identity/command-id "command-2369")}
+            ctx {publication/preparation-key (bind "owned-source" command)}
+            spec {:intent-ids [(random-uuid)] :purpose :gesso.live/refresh}
+            change {:topic :request :request/location-id "location-1" :private "not persisted"}
+            result (publication/prepare! ctx spec [change])
+            intent (first (:intents result))]
+        (is (= "location-1" (:gesso.live.outbox/subject-id intent)))
+        (is (= "owned-source" (:gesso.live.outbox/source-id intent)))
+        (is (= :request/claim (:gesso.live.outbox/operation intent)))
+        (is (= "command-2369" (:gesso.live.outbox/command-id intent)))
+        (is (not (contains? intent :private)))
+        (is (= 1 (count (:guard-ops result))))
+        (doseq [[ctx' spec' changes expected]
+                [[{} spec [change] :missing-command-preparation]
+                 [ctx (assoc spec :source-id "forged") [change] :invalid-command-intent-spec]
+                 [ctx (assoc spec :operation :request/cancel) [change] :invalid-command-intent-spec]
+                 [ctx (assoc spec :command-id "forged") [change] :invalid-command-intent-spec]
+                 [ctx spec [] :missing-model-changes]
+                 [ctx spec [(dissoc change :request/location-id)] :invalid-subject]
+                 [ctx spec [(assoc change :id "another-location")] :conflicting-subject-field]
+                 [ctx spec [(assoc change :topic :audit)] :undeclared-operation-topic]
+                 [{publication/preparation-key (bind "owned-source" (assoc command :operation :request/cancel))}
+                  spec [change] :undeclared-operation-topic]
+                 [{publication/preparation-key (bind "owned-source" (assoc command :operation :request/reassign))}
+                  spec [(assoc change :topic :external/audit)] :unknown-change-topic]]]
+          (is (= expected (reason #(publication/prepare! ctx' spec' changes)))))))))

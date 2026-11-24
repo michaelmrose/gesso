@@ -228,7 +228,7 @@
              ;; The request cannot select a different XTDB provider through
              ;; any recognized alias. Do not expose the worker/stop handle.
              (handler (merge (dissoc request :xtdb/read-connectable :xtdb/conn :xtdb/node
-                                     :biff.xtdb/connection-pool)
+                                     :biff.xtdb/connection-pool publication/preparation-key)
                              (:context before)))
              (finally (signal! (swap! state update :active dec))))
            unavailable)))
@@ -316,7 +316,9 @@
    unless :assembled-publication is selected. That profile requires an
    explicit :subject-keys mapping for the admitted graph and replaces
    :live-options :rules (which must be absent). Only unconditional graphs
-   reconstructible from one durable subject per topic are admitted. All
+   reconstructible from one durable subject per topic are admitted. When
+   assembled operations are also selected, their trusted executors receive
+   a command-bound publication preparer using that same subject mapping. All
    streams share one connection budget and recovery controller. Do not
    combine :assembled-sse with the legacy :authorized-sse profile.
    Other routes retain their existing trusted delegate.
@@ -333,9 +335,10 @@
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
   (require-unshadowed-sse-path! assembly config)
-  (let [config (if (contains? config :assembled-publication)
-                 (assoc-in config [:live-options :rules]
-                           (publication/rules! assembly (:assembled-publication config)))
+  (let [profile (when (contains? config :assembled-publication)
+                  (publication/profile! assembly (:assembled-publication config)))
+        config (if profile
+                 (assoc-in config [:live-options :rules] (:rules profile))
                  config)
         sse-plan (when (contains? config :assembled-sse)
                    (assembled-sse/prepare! assembly (:assembled-sse config)))
@@ -343,7 +346,9 @@
                   (fragment-http/wrap-handler assembly handler (:assembled-fragments config))
                   handler)
         handler (if (contains? config :assembled-operations)
-                  (operation-http/wrap-handler assembly handler (:assembled-operations config))
+                  (operation-http/wrap-handler
+                   assembly handler (:assembled-operations config)
+                   (when profile #((:bind-command profile) (:source-id config) %)))
                   handler)
         route* (atom nil)
         recovery* (atom nil)
