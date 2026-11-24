@@ -746,6 +746,50 @@
       (is (eventually #(sse/closed? started)))
       (finally (sse/cancel! started)))))
 
+(deftest concurrent-producers-cannot-handoff-after-observed-authority-refusal-test
+  (doseq [denial [false (ex-info "policy unavailable" {})]]
+    (let [observed (promise)
+          release (promise)
+          error (promise)
+          calls (atom 0)
+          tasks (atom 0)
+          via-call m/via-call]
+      ;; Delay delivery of the first policy result to its producer, after
+      ;; the actual callback (and refusal publication) has completed.
+      ;; The other producer is free to authorize and attempt its handoff.
+      (with-redefs [m/via-call
+                    (fn [executor thunk]
+                      (let [first? (= 1 (swap! tasks inc))]
+                        (via-call executor
+                                  (fn []
+                                    (when-not first? (deref observed 5000 nil))
+                                    (try (thunk)
+                                         (finally
+                                           (when first?
+                                             (deliver observed true)
+                                             (deref release 5000 nil))))))))]
+        (let [started (sse/start!
+                       (m/seed [live-event])
+                       {:keepalive-ms 100
+                        :frame-authorized? (fn []
+                                             (if (= 1 (swap! calls inc))
+                                               (if (instance? Throwable denial)
+                                                 (throw denial)
+                                                 denial)
+                                               true))
+                        :on-error (fn [e _] (deliver error e))})]
+          (try
+            (is (true? (deref observed timeout-ms false)))
+            (is (nil? (take-value (:stream started)))
+                "The other producer cannot write while the first refusal continuation is delayed.")
+            (is (= :gesso.live.sse/frame-authority-refused
+                   (:error/type (ex-data (deref error timeout-ms nil)))))
+            (is (eventually #(sse/closed? started)))
+            (is (= 2 @calls))
+            (finally
+              (deliver release true)
+              (sse/cancel! started))))))))
+
 (deftest keepalive-emits-debug-event-test
   (let [events (atom [])
         started (sse/start!

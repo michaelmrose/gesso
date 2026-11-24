@@ -462,9 +462,37 @@
 ;; Writing frames to Manifold stream
 ;; -----------------------------------------------------------------------------
 
+(defn- frame-authority-refused []
+  (ex "gesso.live SSE frame authority refused."
+      {:error/type :gesso.live.sse/frame-authority-refused}))
+
+(defn- observe-frame-authority!
+  "Publish a refusal on the policy executor before its asynchronous task
+   continuation can be delayed. A successful concurrent check cannot clear it."
+  [authorize? fence]
+  (let [refuse! #(when fence (locking fence (reset! fence true)))]
+    (try
+      (let [allowed? (true? (authorize?))]
+        (when-not allowed? (refuse!))
+        allowed?)
+      (catch Throwable error
+        (refuse!)
+        (throw error)))))
+
+(defn- handoff-frame!
+  "Order local put initiation against observed policy refusal. Never hold
+   the fence across provider work or the asynchronous put result."
+  [out frame fence]
+  (if fence
+    (locking fence
+      (when @fence (throw (frame-authority-refused)))
+      (s/put! out frame))
+    (s/put! out frame)))
+
 (defn- put-frame-task*
   [out frame options]
-  (let [debug-fn (:debug-fn options)]
+  (let [debug-fn (:debug-fn options)
+        fence (::frame-authority-fence options)]
     (m/sp
       (debug!
        debug-fn
@@ -477,11 +505,10 @@
       ;; Policy may perform blocking provider work; do not run on the source
       ;; delivery executor. Failure terminates the existing stream lifecycle.
       (when-let [authorize? (:frame-authorized? options)]
-        (when-not (true? (m/? (m/via-call m/blk authorize?)))
-          (throw (ex "gesso.live SSE frame authority refused."
-                     {:error/type :gesso.live.sse/frame-authority-refused}))))
+        (when-not (m/? (m/via-call m/blk #(observe-frame-authority! authorize? fence)))
+          (throw (frame-authority-refused))))
       (let [timed-out (Object.)
-            pending (s/put! out frame)
+            pending (handoff-frame! out frame fence)
             ;; Timeout the actual deferred, including an unbuffered put that
             ;; may otherwise be unresolved for the HTTP connection lifetime.
             ;; A timeout is an UNKNOWN write outcome, not proof no bytes got
@@ -605,7 +632,9 @@
      :frame-authorized?
        Optional zero-argument policy, evaluated before each frame handoff
        (including keepalives). Only true admits; denial terminates the stream.
-       This cannot retract a previously handed-off frame.
+       A refusal observed by either producer fences subsequent local frame
+       handoffs, even when another check succeeded. This cannot retract a
+       previously handed-off frame or synchronize database revocation to wire.
      :frame-write-timeout-ms
        Positive integer 1..300000 (default 60000); if a frame or keepalive
        cannot be written before the deadline, the SSE transport fails closed.
@@ -614,7 +643,9 @@
   ([live-events]
    (start! live-events nil))
   ([live-events options]
-   (let [options' (prepare-options! options)
+   (let [prepared (prepare-options! options)
+         options' (assoc prepared ::frame-authority-fence
+                         (when (:frame-authorized? prepared) (atom false)))
          debug-fn (:debug-fn options')
          out (s/stream)
          closed? (atom false)
