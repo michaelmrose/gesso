@@ -742,17 +742,15 @@
             root
             refresh-event-name
             detail)
-           ;; Explicit grants are for the immediate HTMX trigger turn. A
-           ;; cancelled configRequest, missing listener or deferred trigger
-           ;; must not strand the generation or leave a reusable grant.
-           (when grant
-             (.then (js/Promise.resolve nil)
-                    (fn [_] (abandon-pending-refresh! runtime @shell-ref root pending))))
+           ;; Both policies require immediate managed trigger binding.
+           ;; Cancellation or a missing listener must not strand a generation.
+           (.then (js/Promise.resolve nil)
+                  (fn [_] (abandon-pending-refresh! runtime @shell-ref root pending)))
            :triggered
            (catch :default error
-             (if (and grant (identical? pending (weak-get (:pending-refreshes runtime) root)))
+             (if (identical? pending (weak-get (:pending-refreshes runtime) root))
                (do (abandon-pending-refresh! runtime @shell-ref root pending)
-                   (.warn js/console "Gesso explicit Refresh trigger failed." error)
+                   (.warn js/console "Gesso managed refresh trigger failed." error)
                    :failed)
                (do (delete-if-same! (:pending-refreshes runtime) root pending)
                    (throw error)))))))
@@ -1228,6 +1226,20 @@
   [root pending]
   (or (:grant pending) (explicit-refresh-root? root)))
 
+(defn- stale-managed-trigger?
+  [runtime root event pending]
+  (let [config (or (detail-field event "requestConfig") (event-detail event))
+        trigger (some-> config (aget "triggeringEvent"))
+        detail (some-> trigger .-detail)]
+    (and root
+         (= refresh-event-name (some-> trigger .-type))
+         (not (and pending
+                   (unique-current-root? runtime root)
+                   (root-issued-request? root event)
+                   (identical? root (some-> trigger .-target))
+                   (= (:fragment-id pending) (some-> detail (aget "fragmentId")))
+                   (= (:request-generation pending) (some-> detail (aget "requestGeneration"))))))))
+
 (defn on-config-request!
   "Attach the adapter-approved authoritative progression requirement to one
    managed HTMX fragment refresh."
@@ -1243,6 +1255,9 @@
 
       (and (explicit-boundary? root pending)
            (not (explicit-request-authorized? runtime root event pending)))
+      (prevent-event! event)
+
+      (stale-managed-trigger? runtime root event pending)
       (prevent-event! event)
 
       pending
@@ -1265,7 +1280,7 @@
           (throw error)))))
   true)
 
-(defn- expire-unsent-explicit-request!
+(defn- expire-unsent-request!
   [runtime root record event]
   (when (and (identical? record (weak-get (:active-requests runtime) root))
              (not @(:before-send-observed? record)))
@@ -1295,6 +1310,9 @@
            (not (explicit-request-authorized? runtime root event pending)))
       (prevent-event! event)
 
+      (stale-managed-trigger? runtime root event pending)
+      (prevent-event! event)
+
       pending
       (let [disposition (atom :undecided)]
         (try
@@ -1302,10 +1320,10 @@
                 _ (require-nonblank-string!
                    "Physical HTMX request id"
                    request-id)
-                record (cond-> (assoc pending
-                                      :request-id request-id
-                                      :xhr (xhr-from-event event))
-                         (:grant pending) (assoc :before-send-observed? (atom false)))
+                record (assoc pending
+                              :request-id request-id
+                              :xhr (xhr-from-event event)
+                              :before-send-observed? (atom false))
                 physical
                 (physical-context runtime event root record disposition)
                 result
@@ -1318,10 +1336,9 @@
               (unregister-active-request! runtime root record)
               (do
                 (register-active-request! runtime root record)
-                (when (:grant record)
-                  (.then (js/Promise.resolve nil)
-                         (fn [_] (expire-unsent-explicit-request!
-                                  runtime root record event))))))
+                (.then (js/Promise.resolve nil)
+                       (fn [_] (expire-unsent-request!
+                                runtime root record event)))))
             result)
           (catch :default error
             (prevent-event! event)

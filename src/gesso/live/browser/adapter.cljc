@@ -1657,7 +1657,11 @@
         requirements (requirement-set event)
         fragment
         (or (get-in state [:fragments fragment-id])
-            (empty-fragment))]
+            (empty-fragment))
+        ;; Headerless automatic observations also represent uncovered debt.
+        fragment' (cond-> fragment
+                    (not (contains? event :requirement))
+                    (assoc :queued-advisory? true))]
     (cond
       (active-request-covers-requirement? fragment event)
       ;; Once HTMX has bound a physical request, configRequest has already
@@ -1668,19 +1672,15 @@
       [state []]
 
       (:inflight fragment)
-      [(-> state
-           (assoc-in
-            [:fragments fragment-id :queued-refresh?]
-            true)
-           (update-in
-            [:fragments fragment-id :queued-requirements]
-            into
-            requirements))
+      [(assoc-in state [:fragments fragment-id]
+                 (-> fragment'
+                     (assoc :queued-refresh? true)
+                     (update :queued-requirements into requirements)))
        []]
 
       :else
       (begin-fragment-request
-       (assoc-in state [:fragments fragment-id] fragment)
+       (assoc-in state [:fragments fragment-id] fragment')
        fragment-id
        requirements))))
 

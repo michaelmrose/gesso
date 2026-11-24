@@ -827,6 +827,48 @@
                  (catch :default error (is false (str error)))
                  (finally (done))))))))
 
+(deftest automatic-cancellation-retires-generation-and-retains-debt-test
+  (async done
+    (let [requirement (progression/requirement {:tx-id 42 :system-time "2026-08-25T20:00:42Z"})
+          scenarios
+          (mapv (fn [bound?]
+                  (let [{:keys [runtime root htmx-fixture] :as fixture}
+                        (runtime-fixture "automatic")
+                        xhr (:xhr (make-xhr 200))]
+                    (begin-refresh! runtime "automatic")
+                    (begin-refresh! runtime "automatic" requirement)
+                    (when bound? (bind-request! runtime root xhr))
+                    (assoc fixture :xhr xhr :bound? bound?
+                           :old-detail (:detail (first @(:calls htmx-fixture))))))
+                [false true])]
+      ;; Allow the independently authorized successor's checkpoint to run too.
+      (js/setTimeout
+       (fn []
+         (try
+           (doseq [{:keys [runtime root htmx-fixture xhr bound? old-detail]} scenarios]
+             (is (= (if bound? 2 1) (count @(:calls htmx-fixture))))
+             (is (nil? (core/active-request runtime root)))
+             (let [fragment (get-in (core/state runtime) [:fragments "automatic"])]
+               (is (nil? (:inflight fragment)))
+               (is (nil? (core/pending-refresh runtime root)))
+               (is (= #{requirement} (:queued-requirements fragment)))
+               (is (true? (:queued-advisory? fragment)))
+               (is (false? (:queued-refresh? fragment))))
+             (let [count-before (count @(:calls htmx-fixture))]
+               (begin-refresh! runtime "automatic" requirement)
+               (is (= (inc count-before) (count @(:calls htmx-fixture))))
+               (let [pending (core/pending-refresh runtime root)
+                     trigger #js {:type core/refresh-event-name :target root :detail old-detail}
+                     stale (make-event "htmx:beforeRequest"
+                                       {:elt root :xhr xhr
+                                        :extra-detail {:requestConfig #js {:triggeringEvent trigger}}})]
+                 (core/on-before-request! runtime (:event stale))
+                 (is @(:prevented? stale))
+                 (is (= pending (core/pending-refresh runtime root))))))
+           (catch :default error (is false (str error)))
+           (finally (done))))
+       0))))
+
 (deftest unknown-acquisition-policy-fails-before-admission-test
   (let [root (make-element {:fragment-id "bad"
                             :attrs {"hx-trigger" core/refresh-event-name
@@ -1494,6 +1536,7 @@
         ;; semantic value.
         (is (false? (:enabled? resource))))
 
+      (core/on-before-send! runtime (:event (make-event "htmx:beforeSend" {:elt root :xhr xhr})))
       (after-swap! runtime root xhr)
 
       ;; continuity/restore! returns a Promise even for disabled resources.
