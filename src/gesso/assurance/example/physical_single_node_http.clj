@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v2335: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2337: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -26,7 +26,8 @@
    deployed host. The bootstrap transaction remains a separate writer path."
   (:require [com.biffweb.core :as biff]
             [gesso.assurance.example.physical-single-node-proving :as physical]
-            [gesso.http :as http])
+            [gesso.http :as http]
+            [manifold.stream :as stream])
   (:import (com.sun.net.httpserver HttpHandler HttpServer)
            (java.net InetSocketAddress)
            (java.nio.charset StandardCharsets)))
@@ -208,7 +209,15 @@
                                             (long (alength bytes)))
                       (with-open [output (.getResponseBody exchange)]
                         (.write output bytes)))
-                    (.sendResponseHeaders exchange 501 -1)))
+                    (do
+                      ;; This adapter cannot consume a streaming body. It
+                      ;; owns the rejected response and must close it now,
+                      ;; rather than leak an admitted Live source interest.
+                      (cond
+                        (stream/stream? body) (stream/close! body)
+                        (instance? java.lang.AutoCloseable body)
+                        (.close ^java.lang.AutoCloseable body))
+                      (.sendResponseHeaders exchange 501 -1))))
                 (catch Exception _
                   ;; The JDK bridge must not fabricate a successful command
                   ;; response on exceptions or a non-string SSE body.

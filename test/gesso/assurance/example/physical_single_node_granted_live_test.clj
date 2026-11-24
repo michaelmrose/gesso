@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-granted-live-test
-  "v2334: One actual Biff-installed diagnostic handler combines source-derived
+  "v2337: One actual Biff-installed diagnostic handler combines source-derived
    principal operation grants, authoritative XTDB writes and advisory Live.
    The fixture also rechecks the original reader identity before each outgoing
    advisory SSE event and closes the stream if the recheck fails. It does not
@@ -525,6 +525,67 @@
     (is (instance? clojure.lang.IAtom @state*))
     (is (nil? @@state*))
     (is (.isStopped ^org.eclipse.jetty.server.Server @server*))))
+
+(deftest disconnected-sse-sessions-retire-before-fixture-shutdown
+  (let [count* (atom nil)
+        final-session (atom nil)]
+    (fixture/with-granted-live-proving-application!
+     (policy (constantly (authenticated :actor/releaser)))
+     (fn [{:keys [handler outstanding-sse-count]}]
+       (reset! count* outstanding-sse-count)
+       (is (zero? (outstanding-sse-count)))
+       (let [real-start @#'live/start-sse!
+             captured (atom nil)]
+         (with-redefs [live/start-sse!
+                       (fn [& args]
+                         (let [session (apply real-start args)]
+                           (reset! captured session)
+                           session))]
+           (dotimes [_ 5]
+             (let [response (handler (request :get fixture/events-uri))
+                   session @captured]
+               (is (= 200 (:status response)))
+               (is (= 1 (outstanding-sse-count)))
+               (stream/close! (:body response))
+               (is (eventually #(and (zero? (outstanding-sse-count))
+                                     (true? ((:source-closed? session))))))))
+           (handler (request :get fixture/events-uri))
+           (reset! final-session @captured)
+           (is (= 1 (outstanding-sse-count)))))))
+    (is (stream/closed? (:stream @final-session)))
+    (is (true? ((:source-closed? @final-session))))
+    (is (zero? (@count*)))))
+
+(deftest sse-closed-before-registration-is-not-retained
+  (fixture/with-granted-live-proving-application!
+   (policy (constantly (authenticated :actor/releaser)))
+   (fn [{:keys [handler outstanding-sse-count]}]
+     (let [real-start @#'live/start-sse!]
+       (with-redefs [live/start-sse!
+                     (fn [& args]
+                       (let [session (apply real-start args)]
+                         (live/cancel-sse! session)
+                         session))]
+         (let [response (handler (request :get fixture/events-uri))]
+           (is (stream/closed? (:body response)))
+           (is (eventually #(zero? (outstanding-sse-count))))))))))
+
+(deftest short-http-listener-releases-an-admitted-but-unsupported-sse-response
+  (fixture/with-biff-loopback-granted-live-proving-application!
+   (policy (constantly (authenticated :actor/releaser)))
+   (fn [{:keys [loopback-base-url outstanding-sse-count]}]
+     (let [real-start @#'live/start-sse!
+           captured (atom nil)]
+       (with-redefs [live/start-sse!
+                     (fn [& args]
+                       (let [session (apply real-start args)]
+                         (reset! captured session)
+                         session))]
+         (is (= 501 (socket-status loopback-base-url :get fixture/events-uri)))
+         (is (some? @captured))
+         (is (eventually #(and (stream/closed? (:stream @captured))
+                               (true? ((:source-closed? @captured)))
+                               (zero? (outstanding-sse-count))))))))))
 
 (deftest original-biff-lifecycle-starts-and-stops-a-real-protected-loopback-listener
   ;; Unlike the separately managed JDK bridge used by earlier tests, this

@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2335: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2337: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -28,7 +28,8 @@
             [gesso.assurance.example.physical-single-node-principal :as principal]
             [gesso.http :as http]
             [gesso.live.core :as live]
-            [gesso.live.ui :as live.ui]))
+            [gesso.live.ui :as live.ui]
+            [manifold.stream :as stream]))
 
 (def panel-uri "/__gesso_proving/live")
 (def fragment-uri "/__gesso_proving/live/fragment")
@@ -225,6 +226,40 @@
         ;; *requested* recovery, not tested browser adoption or durable fanout.
         (not accepted?) (assoc-in [:headers "HX-Refresh"] "true")))))
 
+(defn- register-sse! [registry started]
+  ;; Retain outstanding physical sessions, not the history of connections.
+  ;; Both the response and the eager source interest must be closed. Manifold
+  ;; invokes callbacks registered after closure, covering early termination.
+  (let [id (Object.)
+        out (:stream started)
+        retire! (fn []
+                  (when (and (stream/closed? out)
+                             (true? ((:source-closed? started))))
+                    (swap! registry update :sessions dissoc id)))
+        [before _] (swap-vals! registry
+                               (fn [state]
+                                 (if (:accepting? state)
+                                   (assoc-in state [:sessions id] started)
+                                   state)))]
+    (if (:accepting? before)
+      (try
+        (stream/on-closed out retire!)
+        ((:source-on-closed! started) retire!)
+        (retire!)
+        started
+        (catch Throwable error
+          ;; Keep a failed-cleanup handle until physical release is observed.
+          (try (live/cancel-sse! started)
+               (catch Throwable cleanup
+                 (when-not (identical? error cleanup)
+                   (.addSuppressed error cleanup))))
+          (retire!)
+          (throw error)))
+      (do
+        ;; A late request racing fixture teardown cannot install a new owner.
+        (live/cancel-sse! started)
+        (reject! :live-session-registry-closed)))))
+
 (defn- build-handler [app live-system registered-streams assets principal-source]
   (let [original (:handler app)
         scope {:topic :gesso-proving-reservation :id (:slot-id app)}]
@@ -261,8 +296,7 @@
                                     {:encoder
                                      (principal/guarded-test-event-encoder!
                                       principal-source request)})))]
-              (swap! registered-streams conj started)
-              (:response started))
+              (:response (register-sse! registered-streams started)))
             (unsupported 405))
 
           (and (= :post method) (contains? operation-uris uri))
@@ -283,7 +317,7 @@
   (when principal-source
     (principal/checked-test-policy! principal-source))
   (let [live-system (live/create)
-        registered-streams (atom [])
+        registered-streams (atom {:accepting? true :sessions {}})
         guarded* (atom nil)]
     (try
       (let [assets (browser-assets!)]
@@ -342,6 +376,7 @@
                   (assoc app
                          :live-handler installed
                          :live-system live-system
+                         :outstanding-sse-count (fn [] (count (:sessions @registered-streams)))
                          :live-report
                          (cond-> (report app)
                            principal-source
@@ -368,9 +403,12 @@
                   (assoc :principal-handler guarded
                          :principal-source principal-source)))))))
       (finally
-        (doseq [started @registered-streams]
-          (live/cancel-sse! started))
-        (live/close! live-system)))))
+        (let [[before _] (swap-vals! registered-streams assoc :accepting? false)]
+          (try
+            (doseq [started (vals (:sessions before))]
+              (live/cancel-sse! started))
+            (finally
+              (live/close! live-system))))))))
 
 (defn with-live-proving-application!
   "Run the existing unguarded diagnostic Live/Biff/XTDB fixture. The exact
