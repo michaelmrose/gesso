@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2329: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2330: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -56,7 +56,9 @@
   #{:v1495-delegated-http-outcome-not-authenticated
     :actual-network-consumption-of-biff-adopted-handler-not-established
     :http-listener-and-client-connection-not-observed
-    :request-principal-authorization-and-csrf-not-checked
+    :host-principal-authenticity-and-csrf-not-established
+    :read-scope-not-independent-of-mutation-principal-grants
+    :existing-sse-stream-revocation-not-established
     :postcommit-publication-not-atomic-with-xtdb
     :authoritative-progression-basis-not-attached-to-invalidation
     :browser-adapter-execution-not-observed
@@ -185,6 +187,7 @@
    :biff-network-consumption :not-established
    :commit-provenance :not-authenticated
    :complete-writer-coverage :not-established
+   :live-read-and-sse-authorization :unselected-in-plain-fixture
    :physical-refinement :not-established
    :certificate :not-issued
    :admission :not-admitted
@@ -289,10 +292,26 @@
            (let [delegated (if principal-source
                              (principal/guarded-test-handler!
                               principal-source app original-handler)
-                             original-handler)]
+                             original-handler)
+                 live-handler (build-handler (assoc app :handler delegated)
+                                             live-system registered-streams assets)
+                 ;; Original physical read route comes from the original
+                 ;; HTTP owner; Live GET routes come from this Live owner.
+                 ;; In the granted fixture, NO panel, fragment, source view
+                 ;; or SSE subscription may be reached anonymously. Browser
+                 ;; JS assets remain public but cannot read protected data.
+                 physical-views (into #{}
+                                      (for [[uri operation] (:http-routes app)
+                                            :when (= operation :read-only)] uri))
+                 read-uris (into physical-views
+                                 [panel-uri fragment-uri events-uri])]
+             (when-not (= 1 (count physical-views))
+               (reject! :incomplete-original-physical-read-routes))
              (reset! guarded* (when principal-source delegated))
-             (build-handler (assoc app :handler delegated)
-                            live-system registered-streams assets)))
+             (if principal-source
+               (principal/guarded-test-read-handler!
+                principal-source app read-uris live-handler)
+               live-handler)))
          (fn [app]
            (let [installed (:biff.ring/handler (:system app))
                  guarded @guarded*]
@@ -325,7 +344,13 @@
                                   :grant-policy-id (:policy-id principal-source)
                                   :grant-catalog-id (:catalog-id principal-source)
                                   :live-subscription-authorization
-                                  :not-checked))
+                                  :request-time-check-of-selected-granted-principal
+                                  :live-read-authorization
+                                  :request-time-check-of-selected-granted-principal
+                                  :live-read-policy
+                                  :all-principals-named-in-mutation-grants
+                                  :ongoing-sse-authorization-and-revocation
+                                  :not-established))
                          :live-fragment (live-fragment))
                   principal-source
                   (assoc :principal-handler guarded
@@ -350,9 +375,11 @@
   "Run one Biff-installed handler whose Live POSTs delegate through the
    checked source-derived principal-grant wrapper BEFORE reaching XTDB.
    The supplied :principal-handler is the installed Live handler's INNER
-   delegate, not an alternative serving handler. Source checking and grants
-   do not authenticate the trusted caller callback, authorize SSE readers,
-   or issue certified application/production guarantees. Test-only fixture."
+   mutation delegate, not an alternative serving handler. A separate outer
+   GET guard admits the physical view, Live panel/fragment and SSE stream
+   only to principals present in :grants. Source checking and grants do not
+   authenticate the trusted callback, revoke existing SSE streams, provide
+   general read-right declarations, or certify production. Test-only fixture."
   ([principal-source f]
    (with-granted-live-proving-application!
     (str "v2329-" (random-uuid)) principal-source f))

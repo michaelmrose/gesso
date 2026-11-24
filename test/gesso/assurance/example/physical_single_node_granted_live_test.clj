@@ -1,8 +1,10 @@
 (ns gesso.assurance.example.physical-single-node-granted-live-test
-  "v2329: One actual Biff-installed diagnostic handler combines source-derived
+  "v2330: One actual Biff-installed diagnostic handler combines source-derived
    principal operation grants, authoritative XTDB writes and advisory Live.
-   No fixture in this namespace authenticates the principal callback, checks
-   SSE disclosure/CSRF, runs Biff's real Netty listener or issues certificates."
+   This fixture now also checks granted-principal membership at initial GET
+   view/fragment/SSE acquisition, but does not authenticate its callback,
+   revoke an established SSE stream, provide general read policy, enforce
+   CSRF, run Biff's Netty listener or issue certificates."
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.example.physical-single-node-live :as fixture]
             [gesso.assurance.example.physical-single-node-proving :as physical]
@@ -55,8 +57,14 @@
                 (:principal-acquisition live-report)))
          (is (= :proving/granted-live (:grant-policy-id live-report)))
          (is (= :slot/reservation-lifecycle (:grant-catalog-id live-report)))
-         (is (= :not-checked
+         (is (= :request-time-check-of-selected-granted-principal
                 (:live-subscription-authorization live-report)))
+         (is (= :request-time-check-of-selected-granted-principal
+                (:live-read-authorization live-report)))
+         (is (= :all-principals-named-in-mutation-grants
+                (:live-read-policy live-report)))
+         (is (= :not-established
+                (:ongoing-sse-authorization-and-revocation live-report)))
          (is (= :none (:authority live-report)))
          (with-redefs [tx/transact! (fn [& args]
                                       (swap! writes inc)
@@ -92,7 +100,69 @@
          (let [fresh (installed (request :get panel))]
            (is (= 200 (:status fresh)))
            (is (.contains ^String (:body fresh) "data-slot-status=\"available\""))
+           (is (= 6 @acquisitions)
+               "Selected read access is acquired and checked separately")
            (is (= 2 (:revision (read!)))))))))))
+
+(deftest selected-read-and-sse-routes-reject-unauthorized-before-source-access
+  ;; In the combined fixture the selected test policy only authorizes
+  ;; principals present in the original mutation grants. Denied SSE requests
+  ;; must not allocate Live streams; denied reads must not reach XTDB.
+  (let [who (atom :anonymous)
+        acquisitions (atom 0)]
+    (fixture/with-granted-live-proving-application!
+     (policy (fn [_]
+               (swap! acquisitions inc)
+               (if (= @who :anonymous)
+                 {:status :anonymous}
+                 (authenticated @who))))
+     (fn [{:keys [handler read! system live-report]}]
+       (is (identical? handler (:biff.ring/handler system)))
+       (let [orig-start @#'live/start-sse!
+             stream-starts (atom 0)
+             read-uris ["/__gesso_proving/slot" panel fixture/fragment-uri
+                        fixture/events-uri]]
+         (with-redefs [live/start-sse!
+                       (fn [& args]
+                         (swap! stream-starts inc)
+                         (apply orig-start args))]
+           (doseq [[principal expected] [[:anonymous 401]
+                                         [:actor/outsider 403]]]
+             (reset! who principal)
+             (doseq [uri read-uris]
+               (is (= expected (:status (handler (request :get uri))))
+                   (str "Denied original Biff read access: " principal " " uri)))
+             (is (zero? @stream-starts)
+                 "No Live subscription may start on denied initial GET"))
+           (is (= 8 @acquisitions)
+               "One trusted acquisition per selected original read route")
+           (is (zero? (:revision (read!))))
+           (reset! who :actor/reserver)
+           (doseq [uri ["/__gesso_proving/slot" panel fixture/fragment-uri]]
+             (is (= 200 (:status (handler (request :get uri))))))
+           (is (= 11 @acquisitions))
+           (let [stream-response (handler (request :get fixture/events-uri))]
+             (is (= 200 (:status stream-response)))
+             (is (= 1 @stream-starts)
+                 "One real SSE stream starts after principal acceptance"))
+           (is (= 12 @acquisitions))
+           (is (= :not-established
+                  (:ongoing-sse-authorization-and-revocation live-report)))))))))
+
+(deftest malformed-read-acquisition-rejects-before-sse-allocation
+  (fixture/with-granted-live-proving-application!
+   (policy (constantly {:status :authenticated
+                        :principal-id "forged"}))
+   (fn [{:keys [handler read!]}]
+     (let [calls (atom 0)
+           orig-start @#'live/start-sse!]
+       (with-redefs [live/start-sse! (fn [& args]
+                                      (swap! calls inc)
+                                      (apply orig-start args))]
+         (is (thrown? clojure.lang.ExceptionInfo
+                      (handler (request :get fixture/events-uri))))
+         (is (zero? @calls))
+         (is (zero? (:revision (read!)))))))))
 
 (deftest postcommit-live-failure-still-preserves-protected-write
   (fixture/with-granted-live-proving-application!
@@ -164,6 +234,38 @@
       (.getResponseCode connection)
       (finally (.disconnect connection)))))
 
+(deftest real-socket-denies-selected-read-routes-before-sse-allocation
+  ;; Exercise the actual Biff-selected handler over a real loopback socket.
+  ;; The socket is an explicit test bridge, not Biff's production listener.
+  (let [who (atom :anonymous)
+        acquired (atom 0)
+        starts (atom 0)]
+    (fixture/with-granted-live-proving-application!
+     (policy (fn [_]
+               (swap! acquired inc)
+               (if (= @who :anonymous)
+                 {:status :anonymous}
+                 (authenticated @who))))
+     (fn [{:keys [system read!]}]
+       (let [original-start @#'live/start-sse!]
+         (with-redefs [live/start-sse! (fn [& args]
+                                        (swap! starts inc)
+                                        (apply original-start args))]
+           (with-socket! (:biff.ring/handler system)
+             (fn [base]
+               (doseq [uri [panel fixture/fragment-uri fixture/events-uri
+                            "/__gesso_proving/slot"]]
+                 (is (= 401 (socket-status base :get uri))))
+               (is (zero? @starts))
+               (is (zero? (:revision (read!))))
+               (reset! who :actor/outsider)
+               (is (= 403 (socket-status base :get fixture/events-uri)))
+               (is (zero? @starts))
+               (reset! who :actor/reserver)
+               (is (= 200 (socket-status base :get panel)))
+               (is (zero? @starts))
+               (is (= 6 @acquired))))))))))
+
 (deftest real-socket-biff-selected-handler-enforces-grants-and-publishes
   (let [principal (atom :actor/releaser)
         acquired (atom 0)]
@@ -194,4 +296,4 @@
                (is (= 200 (socket-status base :post release)))
                (is (= 2 (:revision (read!))))
                (is (= 2 @emissions)))))
-         (is (= 4 @acquired)))))))
+         (is (= 5 @acquired)))))))

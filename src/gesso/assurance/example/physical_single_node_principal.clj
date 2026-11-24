@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-principal
-  "v2328: Original-Biff-installed source-checked principal admission for v1495
+  "v2330: Original-Biff-installed source-checked principal admission for v1495
    single-node Biff/Ring -> XTDB proving fixture.
 
    An application-supplied declaration names the original reservation catalog,
@@ -19,8 +19,13 @@
    NOT established. The wrapped handler IS the exact handler installed at original Biff
    startup in this fixture, rather than a late wrapper; however it is NOT
    a verified network listener, and CSRF protection is NOT provided. Never expose this fixture publicly.
-   No proof certificate, admission, authorization theorem, or physical
-   refinement is issued."
+   In the combined Live proving fixture, a second read-boundary wrapper
+   conservatively permits view/fragment/SSE access only to principals present
+   in the selected mutation-grant source. This is an explicit TEST-ONLY
+   visibility choice, NOT a general operation-to-read policy; the host callback
+   is still trusted, and continuous SSE authorization after connection or
+   principal revocation is NOT established. No proof certificate, admission,
+   authorization theorem, or physical refinement is issued."
   (:require [clojure.set :as set]
             [gesso.assurance.example.physical-single-node-http :as http]
             [gesso.assurance.example.physical-single-node-proving :as physical]
@@ -176,6 +181,40 @@
             (denied-response 403)
             :else (original-handler request)))
         (original-handler request)))))
+
+(defn guarded-test-read-handler!
+  "Guard a closed, selected set of GET routes in the combined Live fixture.
+   A principal listed in the verified mutation-grant source may READ the
+   diagnostic slot. Anonymous and unknown principals are denied BEFORE any
+   handler read or SSE stream allocation. The original HTTP owner supplies
+   its read-only route; the Live owner supplies its panel/fragment/SSE routes.
+   This is a narrow test policy: it cannot infer fine-grained read rights,
+   validate host authentication, or revoke an already-open SSE stream."
+  [source app read-uris handler]
+  (when-not (and (fn? handler)
+                 (set? read-uris)
+                 (nil? (meta read-uris))
+                 (seq read-uris)
+                 (every? #(and (string? %) (re-matches #"/[a-zA-Z0-9_./-]+" %))
+                         read-uris))
+    (reject! :invalid-selected-read-boundary))
+  (admitted-policy! source app)
+  (let [acquire! (:acquire-principal! source)
+        readers (set (keys (:grants source)))]
+    (fn [request]
+      (if (and (map? request)
+               (= :get (:request-method request))
+               (contains? read-uris (:uri request))
+               (not (contains? request :path-params))
+               (not (contains? request :route-params)))
+        (let [who (acquired-principal! acquire! request)]
+          (cond
+            (nil? who) (denied-response 401)
+            (not (contains? readers who)) (denied-response 403)
+            :else (handler request)))
+        ;; Forged route parameters still reach the original handler, which
+        ;; independently rejects them with 400 before physical access.
+        (handler request)))))
 
 (defn with-principal-proving-application!
   "Run f with a real v1495 embedded-XTDB app and :principal-handler.
