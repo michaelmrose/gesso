@@ -12,7 +12,7 @@
    explicit source/worker/XTDB/Live configuration. Callers cannot supply or
    reorder modules, replace the managed source, or pass an independently
    owned Live source/dispatcher to confuse resource ownership. This is a
-   reusable local host, NOT an automatically deployed HTTP listener, a proof
+   reusable local host with an explicitly selected JDK HTTP listener, not a proof
    of authorized source provenance, or certification of all application
    writers. Empty XTDB config is explicitly an in-memory node; durable
    restarts require a caller-provided persistent XTDB configuration."
@@ -21,12 +21,15 @@
             [gesso.live.application-preflight :as application]
             [gesso.live.core :as live]
             [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox.http-jdk :as jdk]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [xtdb.node :as xtn]))
 
 (def xtdb-module-id :gesso.live.outbox.host/xtdb)
 (def live-module-id :gesso.live.outbox.host/live)
 (def config-key :gesso.live.outbox.host/config)
+(def listener-module-id :gesso.live.outbox.host/jdk-http)
+(def listener-key :gesso.live.outbox.host/listener)
 
 (def start-order
   [application/application-handler-module-id
@@ -41,7 +44,7 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms})
+    :stop-timeout-ms :http-jdk})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
 
@@ -50,6 +53,8 @@
     (reject! :invalid-config {}))
   (when-let [unknown (seq (remove allowed-config (keys config)))]
     (reject! :unknown-config-fields {:fields (vec unknown)}))
+  (when (and (contains? config :http-jdk) (not (map? (:http-jdk config))))
+    (reject! :invalid-http-jdk-options {}))
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -113,14 +118,37 @@
    :biff.core/start start-live!
    :biff.core/stop stop-live!})
 
+(defn- stop-listener! [listener]
+  (let [result ((:stop-listener! listener))]
+    (when-not (= {:outcome :drained} result)
+      (reject! :listener-not-drained {:outcome (:outcome result)}))))
+
+(def ^:private listener-module
+  {:biff.core/id listener-module-id
+   :biff.core/start
+   (fn [system]
+     ;; Install the checked Biff handler itself, not the pre-wrapper delegate.
+     ;; Admission remains :starting until every module has completed startup.
+     (assoc system listener-key
+            (managed/acquire-startup-resource!
+             listener-module-id
+             #(jdk/start! (:biff.ring/handler system)
+                          (get-in system [config-key :http-jdk]))
+             stop-listener!)))
+   :biff.core/stop (fn [system] (stop-listener! (get system listener-key)))})
+
 ;; This is the exact, host-owned inventory, not a caller-supplied fixture.
 (def ^:private modules
   [application/application-handler-module xtdb-module live-module managed/module])
 
+(def ^:private network-modules
+  [application/application-handler-module xtdb-module live-module
+   listener-module managed/module])
+
 (defn module-ids
-  "Return the four immutable module IDs this concrete host installs."
-  []
-  (mapv :biff.core/id modules))
+  "Return the exact host inventory; true selects the owned JDK listener."
+  ([] (module-ids false))
+  ([network?] (mapv :biff.core/id (if network? network-modules modules))))
 
 (defn- request-admission [handler timeout-ms]
   ;; Own synchronous Ring invocations, NOT returned asynchronous bodies or
@@ -201,7 +229,13 @@
 
    Returns a native Biff system; call stop! on that exact system before
    discarding it. Checked startup failures retain the v2103/v2105 rollback
-   and :cleanup/handle semantics. No HTTP listener is opened by this host."
+   and :cleanup/handle semantics. With :http-jdk (an options map for the
+   existing JDK adapter), Biff owns a real listener before the worker starts.
+   The listener is drained before Live/XTDB stop, including physical writers
+   that outlive Ring return. A listener timeout retains providers for retry.
+   Without :http-jdk no socket is opened. This does not install an authorized
+   SSE route or cancel arbitrary application streams; their owners must retire
+   them explicitly before listener drain can finish."
   [assembly handler config]
   (validate-config! config)
   (when-not (fn? handler)
@@ -216,8 +250,11 @@
                          managed/context-key (:rules-context config)}
                   (contains? config :stop-timeout-ms)
                   (assoc managed/stop-timeout-key (:stop-timeout-ms config)))]
-    (let [started (managed/start-biff-application!
-                   assembly initial #'modules start-order)
+    (let [network? (contains? config :http-jdk)
+          started (managed/start-biff-application!
+                   assembly initial
+                   (if network? #'network-modules #'modules)
+                   (module-ids network?))
           native-stop (:biff.core/stop-system started)
           stop-lock (Object.)]
       ;; Wrap the actual native stop chain, not just host/stop!: a caller of

@@ -1,6 +1,6 @@
 (ns gesso.live.outbox.host-test
   "v2106: concrete canonical Biff host inventory and physically owned XTDB,
-   Live, outbox worker and handler. No production HTTP listener is started."
+   Live, outbox worker, handler and explicitly selected JDK listener."
   (:require [clojure.test :refer [deftest is testing]]
             [com.biffweb.core :as biff]
             [gesso.live.consistency.xtdb :as live.xtdb]
@@ -13,11 +13,15 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.host :as host]
+            [gesso.live.outbox.http-jdk :as jdk]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.source :as source]
             [manifold.stream :as stream]
             [xtdb.api :as xt]
-            [xtdb.node :as xtn]))
+            [xtdb.node :as xtn])
+  (:import [java.net URI]
+           [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
+           [java.time Duration]))
 
 (defn- setup [f]
   (let [ops (standard-operations)
@@ -286,3 +290,109 @@
                    (throw (ex-info "Host teardown failed" failure))))))))
        (is (live/closed? source))
        (is (= 503 (:status (handler {:uri "/after"}))))))))
+
+(defn- network-request [listener path]
+  (-> (HttpRequest/newBuilder (URI/create (str (:base-url listener) path)))
+      (.timeout (Duration/ofSeconds 5))
+      (.build)))
+
+(deftest canonical-network-host-owns-actual-checked-listener-and-startup-fence
+  (setup
+   (fn [assembly render]
+     (let [listener* (atom nil)
+           early* (atom nil)
+           seen (atom nil)
+           real-jdk jdk/start!
+           real-worker lifecycle/start!
+           client (HttpClient/newHttpClient)
+           started (with-redefs [jdk/start! (fn [& args]
+                                              (let [listener (apply real-jdk args)]
+                                                (reset! listener* listener)
+                                                listener))
+                                 lifecycle/start! (fn [& args]
+                                                    (reset! early*
+                                                            (.send client (network-request @listener* "/early")
+                                                                   (HttpResponse$BodyHandlers/ofString)))
+                                                    (apply real-worker args))]
+                     (host/start! assembly
+                                  (fn [request]
+                                    (reset! seen request)
+                                    (render request))
+                                  (assoc (config) :http-jdk {})))
+           listener (get started host/listener-key)]
+       (try
+         (is (identical? listener @listener*))
+         (is (= 503 (.statusCode @early*)))
+         (is (nil? @seen))
+         (is (= [application/application-handler-module-id host/xtdb-module-id
+                 host/live-module-id host/listener-module-id managed/module-id]
+                (host/module-ids true)))
+         (let [response (.send client (network-request listener "/ready?x=1")
+                               (HttpResponse$BodyHandlers/ofString))]
+           (is (= 200 (.statusCode response)))
+           (is (.contains (.body response) "/operations/request/claim"))
+           (is (= "/ready" (:uri @seen)))
+           (is (= "x=1" (:query-string @seen)))
+           (is (identical? (:xtdb/connectable started) (:xtdb/connectable @seen)))
+           (is (identical? (:gesso.live/system started) (:gesso.live/system @seen))))
+         (finally (biff/stop started)))
+       (is ((:drained? listener)))
+       (is (live/closed? (:gesso.live/system started)))
+       (is (thrown? java.io.IOException
+                    (.send client (network-request listener "/late")
+                           (HttpResponse$BodyHandlers/ofString))))))))
+
+(deftest canonical-network-startup-rolls-back-listener-on-worker-failure
+  (setup
+   (fn [assembly render]
+     (let [listener* (atom nil)
+           node* (atom nil)
+           live* (atom nil)
+           real-jdk jdk/start!
+           real-node xtn/start-node
+           real-live live/create
+           failure (with-redefs [jdk/start! (fn [& args]
+                                              (let [listener (apply real-jdk args)]
+                                                (reset! listener* listener) listener))
+                                 xtn/start-node (fn [& args]
+                                                  (let [node (apply real-node args)]
+                                                    (reset! node* node) node))
+                                 live/create (fn [& args]
+                                               (let [source (apply real-live args)]
+                                                 (reset! live* source) source))
+                                 lifecycle/start! (fn [& _] (throw (ex-info "worker start failed" {})))]
+                     (problem #(host/start! assembly render (assoc (config) :http-jdk {}))))]
+       (is (= :gesso.live.outbox/checked-startup-failed (:error/type failure)))
+       (is (= :drained (:rollback/status failure)))
+       (is (some? @listener*))
+       (is ((:drained? @listener*)))
+       (is (live/closed? @live*))
+       (is (thrown? Exception (xt/q @node* ["SELECT 1 AS x"])))))))
+
+(deftest canonical-network-host-retains-providers-until-physical-writer-drains
+  (setup
+   (fn [assembly _]
+     (let [body (stream/stream 4)
+           started (host/start! assembly
+                                (fn [_] {:status 200 :headers {"content-type" "text/event-stream"}
+                                         :body body})
+                                (assoc (config) :http-jdk {:drain-timeout-ms 0}))
+           listener (get started host/listener-key)
+           node (:xtdb/connectable started)
+           source (:gesso.live/system started)
+           client (HttpClient/newHttpClient)]
+       (try
+         (with-open [input (.body (.send client (network-request listener "/held")
+                                        (HttpResponse$BodyHandlers/ofInputStream)))]
+           (is (eventually #(= 1 ((:active-count listener)))))
+           (is (= :listener-not-drained (:reason (problem #(biff/stop started)))))
+           (is (false? ((:drained? listener))))
+           (is (false? (live/closed? source)))
+           (is (= [{:x 1}] (xt/q node ["SELECT 1 AS x"])))
+           (is (= 503 (:status ((:biff.ring/handler started) {:uri "/late"})))))
+         (finally
+           (stream/close! body)
+           (is (eventually #((:drained? listener))))
+           (host/stop! started)))
+       (is (live/closed? source))
+       (is (thrown? Exception (xt/q node ["SELECT 1 AS x"])))))))
