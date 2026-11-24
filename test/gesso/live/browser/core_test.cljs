@@ -1555,6 +1555,53 @@
         (is (nil? (core/active-request runtime root)))
         (is (empty? (:continuity (core/state runtime))))))))
 
+(deftest managed-swap-requires-explicit-replacement-mode-test
+  (doseq [{:keys [spec override default-style allowed?]}
+          [{:spec "outerHTML" :allowed? true}
+           {:spec "innerHTML" :allowed? true}
+           {:spec "  innerHTML  swap:0ms settle:20ms " :allowed? true}
+           {:spec "outerHTML" :override "innerHTML" :allowed? true}
+           {:spec "innerHTML" :override "outerHTML" :allowed? true}
+           {:spec "none" :allowed? false}
+           {:spec "delete" :allowed? false}
+           {:spec "beforebegin" :allowed? false}
+           {:spec "afterend" :allowed? false}
+           {:spec "beforeend" :allowed? false}
+           {:spec "afterbegin" :allowed? false}
+           {:spec "morph" :allowed? false}
+           {:spec "OUTERHTML" :allowed? false}
+           {:spec "swap:0ms" :default-style "delete" :allowed? false}
+           {:spec "settle:20ms outerHTML" :default-style "outerHTML" :allowed? false}
+           {:spec "outerHTML" :override "none" :allowed? false}
+           {:spec "outerHTML" :override "afterend swap:0ms" :allowed? false}
+           {:spec "innerHTML" :override "morph" :allowed? false}]]
+    (let [captures (atom 0)
+          {:keys [runtime root htmx-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          old-attr (.-getAttribute root)
+          requirement (progression/requirement
+                       {:tx-id 805 :system-time "2026-08-26T08:10:05Z"})]
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (aset root "getAttribute" (fn [name] (if (= name "hx-swap") spec (old-attr name))))
+      (aset (:htmx htmx-fixture) "config" #js {:defaultSwapStyle (or default-style "innerHTML")})
+      (let [fixture (make-event "htmx:beforeSwap"
+                                {:elt root :target root :xhr xhr :should-swap true
+                                 :extra-detail {:swapOverride override}})]
+        (core/on-before-swap! runtime (:event fixture))
+        (is (= (not allowed?) @(:prevented? fixture)) (pr-str [spec override default-style]))
+        (is (= allowed? (aget (:detail fixture) "shouldSwap")))
+        (is (= (if allowed? 1 0) @captures)))
+      (when allowed? (after-swap! runtime root xhr))
+      (after-request! runtime root xhr true)
+      (is (= (if allowed? #{} #{requirement})
+             (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+      (is (nil? (core/active-request runtime root)))
+      (is (= (if allowed? [true] [])
+             (mapv :restore-issued? (vals (:continuity (core/state runtime)))))))))
+
 (deftest managed-swap-refuses-request-side-oob-selection-test
   (doseq [{:keys [local parent grandparent allowed?]}
           [{:allowed? true}

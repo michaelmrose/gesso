@@ -1480,8 +1480,11 @@
   "The managed fragment lifecycle currently requires installation before
    HTMX afterRequest. HTMX 2.0.7 may schedule a swap timer or View Transition
    after that event. Refuse those schedules at beforeSwap, before admitting
-   a semantic swap. Require the issuing root's explicit swap specification
-   (or the response override); do not guess inherited HTMX configuration."
+   a semantic swap. Only explicit innerHTML and outerHTML replacement modes
+   are admitted; no-op, insertion, deletion, extension-defined and implicit
+   default modes are not evidence of a complete fragment replacement.
+   Require the issuing root's explicit swap specification (or the response
+   override); do not guess inherited HTMX configuration."
   [runtime root event]
   (let [override (detail-field event "swapOverride")
         spec (if (and (some? override) (not= "" override))
@@ -1496,7 +1499,8 @@
       (let [tokens (str/split (str/trim spec) #"\s+")
             delay (last (filter #(str/starts-with? % "swap:") tokens))
             transition (last (filter #(str/starts-with? % "transition:") tokens))]
-        (and (if delay
+        (and (contains? #{"innerHTML" "outerHTML"} (first tokens))
+             (if delay
                (contains? #{"swap:0" "swap:0ms" "swap:0s" "swap:0m"} delay)
                (zero? (js/Number (or (some-> config (aget "defaultSwapDelay")) 0))))
              (if transition
@@ -1556,7 +1560,7 @@
             (do
               (cancel-swap-event! event)
               (.warn js/console
-                     "Gesso managed fragment swap refused: synchronous swap configuration required."))
+                     "Gesso managed fragment swap refused: synchronous replacement mode required."))
 
             :else
             (let [candidate (event-authoritative-candidate runtime event)
