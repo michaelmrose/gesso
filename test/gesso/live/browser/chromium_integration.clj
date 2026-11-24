@@ -4340,6 +4340,84 @@
         (is (empty? (fixture/pending-request-ids server)))
         (is (true? (chromium/assert-clean! context)))))))
 
+(deftest automatic-acquisition-grant-survives-competing-real-htmx-requests-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (let [a (progression/requirement {:tx-id 1701 :system-time "2026-08-29T05:00:01Z"})
+            b (progression/requirement {:tx-id 1702 :system-time "2026-08-29T05:00:02Z"})
+            request! (fn [] (fixture/await-pending! server #(= fragment-path (:path %)) 5000))
+            carried (fn [request]
+                      (some-> (request-header request progression.http/request-header-name)
+                              progression.http/decode-request-progression))
+            text! (fn [] (chromium/evaluate page "() => document.getElementById('fixture-fragment').textContent"))]
+        (fixture/script! server :get fragment-path
+                         [(fixture/hold (fragment-response "opened"))
+                          (fixture/hold (fragment-response "adopted-A"))
+                          (fixture/hold (fragment-response "adopted-B"))
+                          (fixture/hold (fragment-response "UNEXPECTED"))])
+        (chromium/navigate! page (fixture/url server page-path))
+        (chromium/wait-for-js! page "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted")
+        (fixture/await-sse-client! server client-id 5000)
+        (let [opening (request!)]
+          (is (nil? (carried opening)))
+          (fixture/release! server (:request-id opening)))
+        (chromium/wait-for-js! page "() => window.__gessoFixture.fragmentAfterRequests === 1 && document.getElementById('fixture-fragment').textContent === 'opened'")
+        ;; Observe the actual configRequest disposition, not just a possibly
+        ;; premature server count. The observer runs after runtime startup.
+        (chromium/evaluate
+         page
+         "() => {
+            const f = window.__gessoFixture;
+            const root = document.querySelector('[data-gesso-live-fragment]');
+            f.grantConfigs = [];
+            f.directRead = () => htmx.ajax('GET', root.getAttribute('hx-get'), {
+              source: root, target: document.getElementById('fixture-fragment')
+            });
+            document.addEventListener('htmx:configRequest', event => {
+              if (event.detail.elt !== root) return;
+              f.grantConfigs.push({cancelled: event.defaultPrevented,
+                trigger: event.detail.triggeringEvent?.type || null});
+            });
+          }")
+        (chromium/evaluate page "() => { window.__gessoFixture.directRead(); }")
+        (is (true? (chromium/evaluate page "() => { const c = window.__gessoFixture.grantConfigs; return c.length === 1 && c[0].cancelled && c[0].trigger === null; }")))
+        (is (= 1 (count (fragment-requests server))))
+        ;; Capture phase precedes HTMX's ordinary trigger listener. Attempt
+        ;; to steal the exact pending generation with a real ungranted GET.
+        (chromium/evaluate
+         page
+         "() => {
+            const f = window.__gessoFixture;
+            const root = document.querySelector('[data-gesso-live-fragment]');
+            root.addEventListener('gesso:live-refresh', event => {
+              f.savedGrant = event.detail;
+              f.directRead();
+            }, {capture: true, once: true});
+          }")
+        (is (= 1 (emit-progression! server a)))
+        (let [first-read (request!)]
+          (is (= a (carried first-read)))
+          (is (true? (chromium/evaluate page "() => { const c = window.__gessoFixture.grantConfigs; return c.length === 3 && c[1].cancelled && c[1].trigger === null && !c[2].cancelled && c[2].trigger === 'gesso:live-refresh'; }")))
+          (is (= 2 (count (fragment-requests server))))
+          (is (= 1 (emit-progression! server b)))
+          (chromium/wait-for-js! page "() => window.__gessoFixture.sseMessages === 2")
+          (is (= 2 (count (fragment-requests server))))
+          (is (= "opened" (text!)))
+          (fixture/release! server (:request-id first-read)))
+        (let [second-read (request!)]
+          (is (= b (carried second-read)))
+          (fixture/release! server (:request-id second-read)))
+        (chromium/wait-for-js! page "() => window.__gessoFixture.fragmentAfterRequests === 3 && document.getElementById('fixture-fragment').textContent === 'adopted-B'")
+        ;; Replay the actual previously issued detail, not merely a guessed
+        ;; generation. HTMX may process the event, but must not send a GET.
+        (chromium/evaluate page "() => htmx.trigger(document.querySelector('[data-gesso-live-fragment]'), 'gesso:live-refresh', window.__gessoFixture.savedGrant)")
+        (is (true? (chromium/evaluate page "() => { const c = window.__gessoFixture.grantConfigs; return c.length === 5 && !c[3].cancelled && c[4].cancelled && c[4].trigger === 'gesso:live-refresh'; }")))
+        (is (= 3 (count (fragment-requests server))))
+        (is (= 3 (chromium/evaluate page "() => window.__gessoFixture.fragmentBeforeRequests")))
+        (is (= "adopted-B" (text!)))
+        (is (empty? (fixture/pending-request-ids server)))
+        (is (true? (chromium/assert-clean! context)))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
