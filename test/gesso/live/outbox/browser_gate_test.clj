@@ -4,7 +4,7 @@
    These are JVM unit tests and do NOT count as real Chromium convergence."
   (:require [clojure.test :as t :refer [deftest is]]
             [gesso.live.outbox.browser-gate :as gate]
-            [gesso.live.outbox.command-race-test :as claim]))
+            [gesso.live.outbox.claim-physical-test :as claim]))
 
 (defn- reason [f]
   (try (f) nil
@@ -103,7 +103,7 @@
                     gesso.assurance.example.physical-single-node-durable-live-test/managed-worker-delivers-protected-http-writes-without-manual-processing
                     gesso.assurance.example.physical-single-node-durable-live-test/managed-worker-scope-retirement-precedes-provider-close-on-exception
                     gesso.assurance.example.physical-single-node-durable-live-test/closed-application-reopens-persisted-reservation-and-recovers-pending-intent
-                    gesso.live.outbox.command-race-test/distinct-claim-commands-contend-for-one-primary-assignment])))
+                    gesso.live.outbox.claim-physical-test/distinct-claim-commands-contend-for-one-primary-assignment])))
     ;; Positive but incomplete test counts used to satisfy the gate.
     (with-redefs [t/test-vars (fn [vars]
                                (doseq [_ (butlast vars)] (count-test!)))]
@@ -133,7 +133,7 @@
 (deftest claim-selection-is-mode-bound-and-required-test
   (let [modes (atom [])
         claim-var #'claim/distinct-claim-commands-contend-for-one-primary-assignment
-        case-id 'gesso.live.outbox.command-race-test/distinct-claim-commands-contend-for-one-primary-assignment]
+        case-id 'gesso.live.outbox.claim-physical-test/distinct-claim-commands-contend-for-one-primary-assignment]
     (with-redefs [t/test-vars (fn [vars]
                                (doseq [v vars]
                                  (when (= claim-var v)

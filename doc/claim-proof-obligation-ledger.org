@@ -397,3 +397,36 @@ and add adversarial same-subject controls before claiming a report-level
 correspondence. Keep production writer inventory, HumanHelp, browser gate,
 formal soundness and liveness separate. No original CLM obligation or full
 work package is retired by this documentation checkpoint.
+
+* v2501 reconciliation — conditional induction and selected writer boundary
+
+The v2489 checkpoint remains historical. The same closed installed fixture now
+has an independent eight-alternative semantic catalog (two helpers, accept,
+guarded refusal, accepted replay and rejected replay). The abstract refusal
+writes its own journal slot; replay frames all declared state. The v2495
+initial and preservation checkers establish conditional induction for the
+ownership/journal and nonnegative-revision invariants of that catalog. This
+is neither independent rule soundness nor a certificate for the installed
+application.
+
+| Revision | Selected correspondence evidence | Remaining boundary |
+|----------+----------------------------------+--------------------|
+| v2490–v2491 | Source-derived transition observations; completed-basis projection and explicit no-write replay | Not transaction-internal prestate or full implementation refinement |
+| v2492–v2495 | Bounded oracle, guarded literal substitution, unified preservation and whole-disjunct initial implication | Conditional abstract induction only; independent checker soundness open |
+| v2496–v2497 | Command attempts, seed, manifest and lease/acknowledgment accounting | Selected observed synchronous histories only |
+| v2498–v2499 | Installed connectable-scoped admission and source-derived required pre-write assertions/projected values | Trusted mapping and policy; no raw or external writer closure |
+| v2500 | Atomic principal/operation slot assertion for contracted accept/refuse; distinct-ID race and removal control | String principals, per operation, current ledger retention, all relevant writers must obey |
+
+The current physical race and snapshot test vars live in
+=gesso.live.outbox.claim-physical-test=; the earlier legacy tests remain in
+=gesso.live.outbox.command-race-test=. Both existing qualification gate
+selections use the relocated race var. The old standalone browser command
+still delegates to the same strict browser execution. The new namespace
+does not duplicate the race in ordinary test discovery.
+
+The next correspondence step is to reconcile original semantic source
+identity, the installed policy, and observed transaction evidence with the
+existing assurance report boundary. Retain explicit open obligations for
+initialization coverage, independent SQL/transaction semantics, complete
+physical writer mediation, rule soundness, browser convergence, HumanHelp
+and liveness. No original CLM obligation or package is retired here.

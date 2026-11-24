@@ -23,7 +23,7 @@
             [gesso.live.browser.chromium :as chromium]
             [gesso.live.outbox.browser-integration :as integration]
             [gesso.live.outbox.browser-restart-test :as restart]
-            [gesso.live.outbox.command-race-test :as claim]
+            [gesso.live.outbox.claim-physical-test :as claim]
             [gesso.live.outbox.frontier-recovery-test :as frontier]
             [gesso.live.outbox.http-fragment-test :as installed])
   (:import [com.sun.net.httpserver HttpHandler HttpServer]
