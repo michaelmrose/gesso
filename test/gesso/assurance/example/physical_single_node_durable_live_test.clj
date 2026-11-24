@@ -1,9 +1,11 @@
 (ns gesso.assurance.example.physical-single-node-durable-live-test
-  "v2344: Explicit atomic publication mode through the installed session handler."
+  "v2345: Explicit atomic publication mode through the installed session handler."
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.example.physical-single-node-live :as fixture]
             [gesso.assurance.example.physical-single-node-proving :as physical]
             [gesso.assurance.example.physical-single-node-session :as session]
+            [gesso.live.core :as live]
+            [gesso.live.outbox.cycle :as cycle]
             [manifold.stream :as stream]
             [xtdb.api :as xt])
   (:import (java.net HttpURLConnection URL)))
@@ -84,3 +86,93 @@
               (is (= 2 (count (rows node))))
               (is (every? #(= :dispatch-accepted (:gesso.live.outbox/status %)) (rows node)))
               (finally (stream/close! body))))))))))
+
+(defn- eventually [pred]
+  (loop [n 0]
+    (cond (pred) true
+          (>= n 250) false
+          :else (do (Thread/sleep 20) (recur (inc n))))))
+
+(deftest managed-worker-delivers-protected-http-writes-without-manual-processing
+  (let [status* (atom nil)]
+    (session/with-session-policy!
+     policy
+     (fn [{:keys [source issue!]}]
+       (let [reader (issue! :actor/reader)
+             writer (issue! :actor/writer)]
+         (fixture/with-managed-durable-granted-live-proving-application!
+          "managed-reservation" source :biff-jetty-http1
+          {:worker-id "managed-reservation-test" :poll-ms 20 :max-items 8}
+          (fn [{:keys [handler system node read! loopback-base-url
+                       outbox-worker-status live-report] :as app}]
+            (reset! status* outbox-worker-status)
+            (is (identical? handler (:biff.ring/handler system)))
+            (is (not (contains? app :process-outbox!)))
+            (is (= :atomic-intent-then-scoped-managed-worker
+                   (:notification-timing live-report)))
+            (let [response (handler {:request-method :get :uri fixture/events-uri
+                                     :headers (headers reader)})
+                  body (:body response)]
+              (try
+                (is (= 200 (:status response)))
+                (is (= 403 (:status (post! loopback-base-url reserve (headers reader)))))
+                (is (empty? (rows node)))
+                (doseq [[uri revision] [[reserve 1] [release 2]]]
+                  (is (= {:status 200 :publication "intent-recorded"}
+                         (post! loopback-base-url uri (headers writer))))
+                  (is (= revision (:revision (read!))))
+                  (is (string? @(stream/try-take! body ::closed 5000 ::timeout)))
+                  (is (eventually #(and (= revision (:total-dispatch-accepted
+                                                    (outbox-worker-status)))
+                                        (= revision (count (rows node)))
+                                        (every? (fn [row]
+                                                  (= :dispatch-accepted
+                                                     (:gesso.live.outbox/status row)))
+                                                (rows node))))))
+                (is (not= :failed (:status (outbox-worker-status))))
+                (finally (stream/close! body)))))))))
+    (is (= :stopped (:status (@status*))))
+    (is (true? (:stop-requested? (@status*))))))
+
+(deftest managed-worker-scope-retirement-precedes-provider-close-on-exception
+  (let [entered (promise)
+        release-cycle (promise)
+        callback-exiting (promise)
+        status* (atom nil)
+        provider* (atom nil)
+        real-cycle @#'cycle/process-cycle!
+        expected (ex-info "intentional callback exit" {})]
+    (with-redefs [cycle/process-cycle!
+                  (fn [node live-system & args]
+                    (deliver entered true)
+                    @release-cycle
+                    (apply real-cycle node live-system args))]
+      (let [task (future
+                   (try
+                     (session/with-session-policy!
+                      policy
+                      (fn [{:keys [source]}]
+                        (fixture/with-managed-durable-granted-live-proving-application!
+                         "managed-drain" source :no-listener
+                         {:worker-id "managed-drain-test" :poll-ms 20}
+                         (fn [{:keys [node live-system outbox-worker-status]}]
+                           (reset! provider* [node live-system])
+                           (reset! status* outbox-worker-status)
+                           (when-not (= true (deref entered 5000 ::timeout))
+                             (throw (ex-info "worker did not enter" {})))
+                           (deliver callback-exiting true)
+                           (throw expected)))))
+                     (catch Throwable e e)))]
+        (try
+          (is (= true (deref callback-exiting 10000 ::timeout)))
+          (is (eventually #(true? (:stop-requested? (@status*)))))
+          ;; Cross the first drain timeout. Neither provider may close while
+          ;; the cycle remains blocked, even on exceptional callback exit.
+          (is (= ::blocked (deref task 1200 ::blocked)))
+          (let [[node live-system] @provider*]
+            (is (not (live/closed? live-system)))
+            (is (empty? (rows node))))
+          (finally (deliver release-cycle true)))
+        (is (identical? expected (deref task 10000 ::timeout)))
+        (is (= :stopped (:status (@status*))))
+        (is (live/closed? (second @provider*)))))))

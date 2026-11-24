@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2344: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2345: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -29,6 +29,7 @@
             [gesso.http :as http]
             [gesso.live.core :as live]
             [gesso.live.outbox.cycle :as cycle]
+            [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.ui :as live.ui]
             [manifold.stream :as stream]))
 
@@ -532,3 +533,48 @@
   [slot-id source listener-selection f]
   (principal/checked-test-policy! source)
   (with-live-application* slot-id source listener-selection :durable-outbox f))
+
+(defn- retire-scoped-worker! [handle]
+  ;; Unlike a long-lived host with a retryable stop handle, the enclosing
+  ;; fixture has lexical XTDB/Live ownership. Do not unwind that ownership
+  ;; while a cycle is running, even after a drain timeout or interruption.
+  ;; There is deliberately no bounded total shutdown guarantee here.
+  (let [interrupted? (volatile! (Thread/interrupted))]
+    (try
+      (loop []
+        (let [outcome (try (:outcome (lifecycle/retire! handle 1000))
+                           (catch InterruptedException _
+                             (vreset! interrupted? true)
+                             (Thread/interrupted)
+                             :interrupted))]
+          (when (#{:timed-out :interrupted} outcome)
+            (recur))))
+      (finally
+        (when @interrupted? (.interrupt (Thread/currentThread)))))))
+
+(defn with-managed-durable-granted-live-proving-application!
+  "Use the existing polling outbox lifecycle inside the Biff application's
+   callback scope. Trusted worker options are checked before opening providers.
+   The callback receives read-only :outbox-worker-status, not a second manual
+   dispatcher or restart handle. Retire before leaving the Biff callback,
+   including exceptional exit, so an in-flight cycle cannot outlive XTDB or
+   Live. Shutdown can wait indefinitely for a blocked provider. This is NOT
+   native checked Biff worker-module adoption, ingress drain, process restart
+   persistence, or release qualification."
+  [slot-id source listener-selection worker-options f]
+  (when-not (fn? f) (reject! :invalid-application-callback))
+  (lifecycle/validate-worker-options! worker-options)
+  (with-durable-granted-live-proving-application!
+   slot-id source listener-selection
+   (fn [app]
+     (let [handle (lifecycle/start! (:node app) (:live-system app)
+                                    (:biff-context app) physical/outbox-source-id
+                                    worker-options)]
+       (try
+         (f (-> app
+                (dissoc :process-outbox!)
+                (assoc :outbox-worker-status #(lifecycle/status handle))
+                (update :live-report assoc
+                        :notification-timing :atomic-intent-then-scoped-managed-worker
+                        :outbox-worker-lifecycle :retired-before-provider-scope-exit)))
+         (finally (retire-scoped-worker! handle)))))))
