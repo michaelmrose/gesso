@@ -87,12 +87,14 @@
                                (reset! observed (mapv #(symbol (str (ns-name (:ns (meta %))))
                                                              (str (:name (meta %)))) vars))
                                (doseq [_ vars] (count-test!)))]
-      (is (= 7 (:test (gate/run-readiness!))))
-      (is (= 7 (count (distinct @observed))))
+      (is (= 9 (:test (gate/run-readiness!))))
+      (is (= 9 (count (distinct @observed))))
       (is (every? (set @observed)
                   '[gesso.live.outbox.http-fragment-test/assembled-streams-share-capacity-and-use-original-model-policy
                     gesso.live.outbox.http-fragment-test/installed-model-command-recovers-submitted-transaction-without-replay-write
-                    gesso.live.outbox.frontier-recovery-test/submitted-receipt-survives-cycle-interruption-and-rescan-test])))
+                    gesso.live.outbox.frontier-recovery-test/submitted-receipt-survives-cycle-interruption-and-rescan-test
+                    gesso.assurance.example.physical-single-node-session-test/actual-jetty-requests-require-server-issued-session-and-csrf
+                    gesso.assurance.example.physical-single-node-durable-live-test/managed-worker-delivers-protected-http-writes-without-manual-processing])))
     ;; Positive but incomplete test counts used to satisfy the gate.
     (with-redefs [t/test-vars (fn [vars]
                                (doseq [_ (butlast vars)] (count-test!)))]

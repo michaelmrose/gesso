@@ -18,6 +18,8 @@
    gate never changes or bypasses those policies."
   (:require [clojure.string :as str]
             [clojure.test :as test]
+            [gesso.assurance.example.physical-single-node-durable-live-test :as durable]
+            [gesso.assurance.example.physical-single-node-session-test :as session]
             [gesso.live.browser.chromium :as chromium]
             [gesso.live.outbox.browser-integration :as integration]
             [gesso.live.outbox.browser-restart-test :as restart]
@@ -147,7 +149,9 @@
     #'integration/two-source-events-refresh-one-http-sse-connection-test
     #'installed/assembled-streams-share-capacity-and-use-original-model-policy
     #'installed/installed-model-command-recovers-submitted-transaction-without-replay-write
-    #'frontier/submitted-receipt-survives-cycle-interruption-and-rescan-test]))
+    #'frontier/submitted-receipt-survives-cycle-interruption-and-rescan-test
+    #'session/actual-jetty-requests-require-server-issued-session-and-csrf
+    #'durable/managed-worker-delivers-protected-http-writes-without-manual-processing]))
 
 (defn run-browser!
   "The STRICT real-browser scenario, not the HTTP-only readiness selection."
