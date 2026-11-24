@@ -501,3 +501,31 @@
       (is (= (assoc (zipmap decision/phases (repeat :matched)) phase expected)
              (:final-subjects report)))
       (is (= :none (:release-authority report))))))
+
+(deftest partial-release-evidence-reobserves-acquired-subjects
+  (doseq [drift-phase [:candidate :installation]
+          drift? [false true]]
+    (let [final? (atom false)
+          reads (atom 0)
+          report (decision/assess!
+                  (assoc (options)
+                         :discover! (fn []
+                                      (when (= 2 (swap! reads inc))
+                                        (reset! final? true))
+                                      (inventory))
+                         :subject! (fn [phase]
+                                     (when-not (= :activation phase)
+                                       (cond-> (phase-subject phase)
+                                         (and @final? drift? (= drift-phase phase))
+                                         (assoc :subject-id "retired-subject"))))))
+          expected (cond-> {:candidate :matched :installation :matched}
+                     drift? (assoc drift-phase :subject-diverged))]
+      (is (= :blocked (:status report)))
+      (is (= :checks-passed-only (get-in report [:decisions :candidate :status])))
+      (is (= :checks-passed-only (get-in report [:decisions :installation :status])))
+      (is (= :blocked (get-in report [:decisions :activation :status])))
+      (is (= :not-examined (get-in report [:decisions :completion :status])))
+      (is (= expected (:final-subjects report)))
+      (is (= (when drift? {drift-phase :subject-diverged})
+             (get-in report [:blockers :final-subjects])))
+      (is (= :none (:release-authority report))))))

@@ -278,8 +278,8 @@
    reduce the requested denominator. Stop at the first blocked phase; later
    phases are explicitly unexamined, not passed. Reacquire source inventory
    before and after checking, and reacquire subjects on each phase, to detect
-   drift in this bounded invocation. Reobserve every passing phase after
-   the final inventory read before reporting a fully passing evaluation.
+   drift in this bounded invocation. Reobserve every acquired phase subject
+   after the final inventory read, even when later phases block.
    These reads are not atomic with one another or a real network activation;
    activation is never performed by assess!."
   [{:keys [intent discover! subject! run-gate!] :as options}]
@@ -316,13 +316,13 @@
           ;; A completion gate (or the final inventory callback) may change
           ;; an earlier subject after its last predecessor check. Do not
           ;; treat historical passing rows as a current passing evaluation.
-          final-subjects (when (and stable? phase-ok?)
+          final-subjects (when stable?
                            (into {} (map (fn [{:keys [phase subject]}]
                                           (let [observed (current-subject subject! intent phase)]
                                             [phase (if (= {:status :matched :observation subject} observed)
                                                      :matched
                                                      (:status observed))]))
-                                        decisions)))
+                                        (filter :subject decisions))))
           subjects-ok? (and (some? final-subjects)
                             (every? #{:matched} (vals final-subjects)))
           accepted (into #{} (mapcat :accepted-premises) decisions)]

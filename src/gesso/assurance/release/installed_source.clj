@@ -126,6 +126,8 @@
                    (= (:source-open-meta-obligations expected)
                       (:source-open-meta-obligations r))
                    (= :matched (:status inventory) (:status final-inventory))
+                   (= :matched (get-in r [:selected-release-diagnostic
+                                         :final-subjects :candidate]))
                    (seq positive-rows)
                    (= (+ (count (:operation-ids r))
                          (count (:invariant-ids r)) 1)
@@ -723,6 +725,8 @@
                                                            [:initial-inventory :status]))
                                         (= :matched (get-in evaluated
                                                            [:final-inventory :status]))
+                                        (= {:candidate :matched :installation :matched}
+                                           (:final-subjects evaluated))
                                         (= :checks-passed-only (get-in phases
                                                                        [:candidate :status]))
                                         (= :checks-passed-only (get-in phases

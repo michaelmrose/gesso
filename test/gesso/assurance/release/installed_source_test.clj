@@ -76,6 +76,7 @@
          (get-in diagnostic [:decisions :completion :status])))
   (is (= :matched (get-in diagnostic [:initial-inventory :status])))
   (is (= :matched (get-in diagnostic [:final-inventory :status])))
+  (is (= {:candidate :matched :installation :matched} (:final-subjects diagnostic)))
   (is (= :blocked (:status diagnostic)))
   (is (true? (:conditional? diagnostic)))
   (no-authority! diagnostic))
