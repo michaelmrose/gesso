@@ -29,6 +29,7 @@
             [gesso.live.outbox.http-recovery :as recovery]
             [gesso.live.outbox.http-sse :as assembled-sse]
             [gesso.live.outbox.lifecycle :as lifecycle]
+            [gesso.live.outbox.model-publication :as publication]
             [xtdb.node :as xtn]))
 
 (def xtdb-module-id :gesso.live.outbox.host/xtdb)
@@ -52,7 +53,7 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse})
+    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
 
@@ -83,8 +84,11 @@
       (reject! :invalid-live-options {}))
     (when-let [extra (seq (remove allowed-live-options (keys options)))]
       (reject! :unowned-live-component {:fields (vec extra)}))
-    (when-not (vector? (:rules options))
-      (reject! :invalid-live-rules {}))
+    (if (contains? config :assembled-publication)
+      (when (contains? options :rules)
+        (reject! :conflicting-publication-rules {}))
+      (when-not (vector? (:rules options))
+        (reject! :invalid-live-rules {})))
     (doseq [key [:source-options :dispatch-options]
             :when (contains? options key)]
       (when-not (map? (get options key))
@@ -309,7 +313,10 @@
    using a trusted :resolve-id callback and mandatory model authorization.
    Optional :assembled-sse mounts the compiled acquisition stream inventory,
    using the model scope authorization. Publication rules remain explicit
-   because durable change subjects need not equal model scope IDs. All
+   unless :assembled-publication is selected. That profile requires an
+   explicit :subject-keys mapping for the admitted graph and replaces
+   :live-options :rules (which must be absent). Only unconditional graphs
+   reconstructible from one durable subject per topic are admitted. All
    streams share one connection budget and recovery controller. Do not
    combine :assembled-sse with the legacy :authorized-sse profile.
    Other routes retain their existing trusted delegate.
@@ -326,7 +333,11 @@
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
   (require-unshadowed-sse-path! assembly config)
-  (let [sse-plan (when (contains? config :assembled-sse)
+  (let [config (if (contains? config :assembled-publication)
+                 (assoc-in config [:live-options :rules]
+                           (publication/rules! assembly (:assembled-publication config)))
+                 config)
+        sse-plan (when (contains? config :assembled-sse)
                    (assembled-sse/prepare! assembly (:assembled-sse config)))
         handler (if (contains? config :assembled-fragments)
                   (fragment-http/wrap-handler assembly handler (:assembled-fragments config))

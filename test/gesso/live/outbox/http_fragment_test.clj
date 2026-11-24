@@ -13,6 +13,8 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.lifecycle :as lifecycle]
+            [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.invalidation :as invalidation]
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http-sse :as sse]
             [gesso.live.outbox.http-operation :as operation-http]
@@ -67,6 +69,11 @@
   {:xtdb-config {} :source-id "v2364-fragment-host"
    :rules-context {} :worker-options {:worker-id "v2364" :poll-ms 20}
    :live-options {:rules []}})
+
+(def ^:private subject-mapping
+  {:subject-keys {:request :request/location-id
+                  :request-assignment :request/location-id
+                  :audit :request/location-id}})
 
 (defn- reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
@@ -206,17 +213,11 @@
                                            [:section {:id id} (name (or status :open))])]
       (with-assembly "/fragments/request-list/:id" "/streams/request-list/:id" execute!
         (fn [assembly]
-          (let [compiled (get-in assembly [:operation-acquisition-assembly :acquisition-assembly :live-app])
-                ;; Explicit trusted mapping: this fixture's outbox subject is
-                ;; its location ID. Do not infer this for arbitrary models.
-                rules [{:when-topic :request
-                        :expand (fn [ctx change]
-                                  (model/expand-change compiled ctx
-                                                       (assoc change :request/location-id (:id change))))}]
-                started (host/start! assembly
+          (let [started (host/start! assembly
                                      (fn [_] (swap! fallback inc) (g/html-response [:div "fallback"]))
                                      (assoc (config) :http-jdk {}
-                                            :live-options {:rules rules}
+                                            :live-options {}
+                                            :assembled-publication subject-mapping
                                             :assembled-operations {:authorize-request? #(= "allowed" (get-in % [:headers "authorization"]))}
                                             :assembled-fragments {:resolve-id resolve-id}
                                             :assembled-sse {:resolve-id resolve-id :max-connections 2
@@ -324,3 +325,47 @@
              (reason #(host/start! assembly identity
                                    (assoc (config) :assembled-sse {:resolve-id identity}
                                           :authorized-sse {}))))))))
+
+(deftest assembled-publication-uses-original-graph-and-rejects-incomplete-mappings
+  (with-assembly
+    (fn [assembly]
+      (let [rules (publication/rules! assembly subject-mapping)
+            compiled (get-in assembly [:operation-acquisition-assembly :acquisition-assembly :live-app])
+            scope-keys #(set (map (juxt :topic :id) %))]
+        (doseq [topic (keys (:subject-keys subject-mapping))
+                id ["location-1" :location/one 42 (random-uuid)]]
+          (is (= (scope-keys (model/expand-change compiled {:topic topic :request/location-id id}))
+                 (scope-keys (invalidation/expand rules {} {:topic topic :id id})))))
+        (doseq [change [{:topic :unknown :id "r1"}
+                        {:topic :request :id "r1" :request/location-id "r2"}
+                        {:topic :request :id ""}]]
+          (is (thrown? clojure.lang.ExceptionInfo (invalidation/expand rules {} change))))
+        (doseq [[options expected]
+                [[{} :invalid-subject-mapping]
+                 [(update subject-mapping :subject-keys dissoc :audit) :incomplete-topic-mapping]
+                 [(assoc-in subject-mapping [:subject-keys :unknown] :id) :incomplete-topic-mapping]
+                 [(assoc-in subject-mapping [:subject-keys :request] :id) :unsupported-subject-graph]]]
+          (is (= expected (reason #(publication/rules! assembly options)))))
+        (let [starts (atom 0)]
+          (with-redefs [managed/start-biff-application! (fn [& _] (swap! starts inc))]
+            (is (= :conflicting-publication-rules
+                   (reason #(host/start! assembly identity
+                                         (assoc (config) :assembled-publication subject-mapping)))))
+            (is (= :incomplete-topic-mapping
+                   (reason #(host/start! assembly identity
+                                         (assoc (config) :live-options {}
+                                                :assembled-publication {:subject-keys {}})))))
+            (is (zero? @starts))))))))
+
+(deftest assembled-publication-refuses-graphs-that-need-more-than-a-durable-subject
+  (let [compiled-var (ns-resolve 'gesso.live.application-preflight.fixture 'compiled-live)
+        original @compiled-var]
+    (doseq [transform [(fn [app] (assoc-in app [:graph :request 0 :when] (constantly true)))
+                       (fn [app] (assoc-in app [:graph :request 0 :id-key] :request/other-id))]]
+      (with-redefs-fn
+        {compiled-var #(model/compile-live-app (transform (original)))}
+        (fn []
+          (with-assembly
+            (fn [assembly]
+              (is (= :unsupported-subject-graph
+                     (reason #(publication/rules! assembly subject-mapping)))))))))))
