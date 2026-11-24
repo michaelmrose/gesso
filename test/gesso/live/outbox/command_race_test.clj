@@ -12,6 +12,7 @@
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.read-frontier :as frontier]
             [gesso.model.command :as model-command]
             [xtdb.node :as xtn]
             [ring.util.codec :as codec]
@@ -102,9 +103,9 @@
                                     :outcome {:outcome :request/claimed :winner attempt}
                                     :now "2026-11-24T00:00:00Z"}))
                    :project! (fn [{:keys [ctx execution-id]} result]
-                               (let [basis (xtdb/latest-completed-basis ctx)
-                                     row (first (xtdb/q-from ctx ["SELECT status, winner FROM requests WHERE _id = ?" "r1"]
-                                                              {:snapshot-token (xtdb/basis-snapshot-token basis)}))]
+                               (let [{:keys [basis rows]} (frontier/q-with-basis!
+                                                           ctx ["SELECT status, winner FROM requests WHERE _id = ?" "r1"])
+                                     row (first rows)]
                                  (swap! projections conj {:execution (identity/raw-value execution-id)
                                                          :status (:status result) :outcome (:outcome result)})
                                  {:resolution (if (= :incorporated (:status result)) :confirmed :already-incorporated)

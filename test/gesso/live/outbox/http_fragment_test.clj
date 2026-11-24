@@ -14,6 +14,7 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.read-frontier :as frontier]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.invalidation :as invalidation]
             [gesso.live.outbox.host :as host]
@@ -209,9 +210,9 @@
                                  (when (= :incorporated (:status result))
                                    (reset! prepared-intents (get-in result [:transaction :outbox/intents])))
                                  (let [id (:request-id arguments)
-                                       basis (xtdb/latest-completed-basis ctx)
-                                       row (first (xtdb/q-from ctx ["SELECT status FROM requests WHERE _id = ?" id]
-                                                                {:snapshot-token (xtdb/basis-snapshot-token basis)}))]
+                                       {:keys [basis rows]} (frontier/q-with-basis!
+                                                             ctx ["SELECT status FROM requests WHERE _id = ?" id])
+                                       row (first rows)]
                                    {:resolution (if (= :incorporated (:status result)) :confirmed :already-incorporated)
                                     :outcome (get-in result [:outcome :outcome])
                                     :authoritative (protocol/authoritative

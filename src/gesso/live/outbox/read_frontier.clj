@@ -35,3 +35,32 @@
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
         (throw e)))))
+
+(defn q-with-basis!
+  "Read a trusted projection query at one explicit completed transaction basis.
+   First await the submitted frontier on the selected local node, then obtain
+   a completed basis from that same node. Pin the actual query to that basis,
+   retaining the await token. Returns {:basis ... :rows ...}; never invents
+   a basis for an empty node. This is a single-query system-time observation,
+   not a multi-query valid-time snapshot or proof of application projection."
+  [ctx query]
+  (let [node (xtdb/connectable-from ctx)]
+    (try
+      (let [opts (query-options! node)
+            ready (xtdb/q-from node ["SELECT 1 AS ready"] opts)]
+        (when-not (= [{:ready 1}] ready)
+          (throw (ex-info "Cannot establish projection readiness."
+                          {:error/type ::invalid-projection-read
+                           :reason :invalid-readiness-observation})))
+        (let [completed (xtdb/latest-completed-basis node)]
+          (when-not completed
+            (throw (ex-info "No completed transaction basis for projection."
+                            {:error/type ::invalid-projection-read
+                             :reason :missing-completed-basis})))
+          {:basis completed
+           :rows (xtdb/q-from node query
+                              (assoc opts :snapshot-token
+                                     (xtdb/basis-snapshot-token completed)))}))
+      (catch InterruptedException e
+        (.interrupt (Thread/currentThread))
+        (throw e)))))
