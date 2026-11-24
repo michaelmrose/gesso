@@ -253,6 +253,7 @@
                 (:commands fragment))
       (reject! :reserved-durable-model-table {}))
     (let [derive (::derive-model-fragment (meta (get ctx preparation-key)))
+          _ (resolved/require-plan-outcome-coverage! (:outcome contract) outcome)
           record (resolution/command-record (command-binding! ctx) outcome now)
           incorporated (model-tx/normalize-plan
                         (-> fragment
@@ -401,7 +402,8 @@
         target? (contains? options :target-contract!)
         operation? (contains? options :command-operation-contract!)
         predicate? (contains? options :predicate-contract!)
-        post-state? (contains? options :post-state-contract!)]
+        post-state? (contains? options :post-state-contract!)
+        outcome? (contains? options :outcome-contract!)]
     (when-not (= table? target?)
       (reject! :incomplete-document-target-contract {}))
     (when table?
@@ -422,7 +424,12 @@
       (when-not target?
         (reject! :post-state-contract-requires-document-targets {}))
       (when-not (fn? (:post-state-contract! options))
-        (reject! :invalid-post-state-callback {}))))
+        (reject! :invalid-post-state-callback {})))
+    (when outcome?
+      (when-not (and operation? post-state?)
+        (reject! :outcome-contract-requires-operation-and-post-state {}))
+      (when-not (fn? (:outcome-contract! options))
+        (reject! :invalid-outcome-callback {}))))
   options)
 
 (defn execute-resolved!
@@ -458,17 +465,20 @@
    :predicate-contract! (ctx binding) requires document targets and checks
    exact canonical guard and update conditions, not arbitrary SQL assertions.
    Optional :post-state-contract! (ctx binding) requires document targets
-   and checks canonical domain command values, not physical readback. Raw SQL
+   and checks canonical domain command values, not physical readback.
+   Optional :outcome-contract! (ctx binding) additionally requires operation
+   and post-state contracts and checks the exact durable command outcome,
+   including a guarded abort construction. It does not verify projection. Raw SQL
    construction cannot satisfy this selected contract. Replay does not
    invoke the declaration or constructor. Callback policy is still trusted."
   [{:keys [ctx operation] :as invocation}
    {:keys [mode construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract!] :as options}]
+           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract!] :as options}]
   (when-not (and (map? options)
                  (#{#{:mode :construct! :may-disclose? :project!}
                     #{:mode :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys options)) :construction-contract :target-contract!
-                        :command-operation-contract! :predicate-contract! :post-state-contract!))
+                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract!))
                  (or (not (contains? options :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (#{:submit :reconcile} mode)
@@ -496,7 +506,10 @@
                                              targets binding))
                               :post-state (when post-state-contract!
                                             (resolved/require-post-state-contract!
-                                             (post-state-contract! ctx binding) targets))}))
+                                             (post-state-contract! ctx binding) targets))
+                              :outcome (when outcome-contract!
+                                         (resolved/require-outcome-contract!
+                                          (outcome-contract! ctx binding) binding))}))
                 {:keys [spec changes domain-ops model-plan outcome now] :as construction}
                 (construct! invocation)
                 plan (case (when (map? construction) (set (keys construction)))
@@ -533,12 +546,12 @@
    Only the exact returned function is recognized by host admission. This
    is local wiring validation, not certification of business policy."
   [{:keys [operation submission-mode! construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract!] :as config}]
+           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract!] :as config}]
   (when-not (and (map? config)
                  (#{#{:operation :submission-mode! :construct! :may-disclose? :project!}
                     #{:operation :submission-mode! :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys config)) :construction-contract :target-contract!
-                        :command-operation-contract! :predicate-contract! :post-state-contract!))
+                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract!))
                  (or (not (contains? config :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (qualified-keyword? operation)
@@ -563,7 +576,9 @@
                                  predicate-contract!
                                  (assoc :predicate-contract! predicate-contract!)
                                  post-state-contract!
-                                 (assoc :post-state-contract! post-state-contract!))))]
+                                 (assoc :post-state-contract! post-state-contract!)
+                                 outcome-contract!
+                                 (assoc :outcome-contract! outcome-contract!))))]
     (locking registered-executors
       (.put registered-executors executor
             {:reference (WeakReference. executor) :operation operation}))

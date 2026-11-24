@@ -539,6 +539,10 @@
                                                                       [:requests id :created-at "t0"]
                                                                       [:requests id :updated-at "t0"]
                                                                       [:requests id :request/location-id "r1"]}}))
+              :outcome-contract! (fn [_ _]
+                                   (swap! trace conj :declare-outcome)
+                                   {:expected-outcome (if (= :invalid-outcome @mode)
+                                                        {} {:outcome :request/claimed})})
               :construct! (fn [_]
                             (swap! trace conj :construct)
                             {:spec {:purpose :gesso.live/refresh}
@@ -556,7 +560,11 @@
                                                             :wrong ["r2"]
                                                             :extra ["r1" "r2"]
                                                             ["r1"]))}
-                             :outcome {:outcome :request/claimed} :now "t0"})
+                             :outcome (case @mode
+                                        :wrong-outcome {:outcome :request/cancelled}
+                                        :extra-outcome {:outcome :request/claimed :extra true}
+                                        {:outcome :request/claimed})
+                             :now "t0"})
               :project! (fn [{:keys [ctx]} result]
                           (swap! trace conj :project)
                           (let [{:keys [basis rows]} (frontier/q-with-basis!
@@ -598,6 +606,11 @@
                              (dissoc opts :construction-contract :target-contract! :command-operation-contract! :predicate-contract!))))))
     (is (= :invalid-post-state-callback
            (:reason (error #(publication/build-executor (assoc opts :post-state-contract! nil))))))
+    (doseq [missing [:command-operation-contract! :post-state-contract!]]
+      (is (= :outcome-contract-requires-operation-and-post-state
+             (:reason (error #(publication/build-executor (dissoc opts missing)))))))
+    (is (= :invalid-outcome-callback
+           (:reason (error #(publication/build-executor (assoc opts :outcome-contract! nil))))))
     (with-operations {:request/claim (claim-operation executor)}
       (fn [assembly]
         (with-open [client (HttpClient/newHttpClient)]
@@ -612,18 +625,21 @@
                                                    (when (contains? ctx publication/preparation-key)
                                                      (swap! submissions inc))
                                                    (execute ctx ops options))]
-                (doseq [[scenario events] [[:wrong [:declare :declare-predicate :declare-operation :declare-post-state :construct]]
-                                           [:extra [:declare :declare-predicate :declare-operation :declare-post-state :construct]]
+                (doseq [[scenario events] [[:wrong [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
+                                           [:extra [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
                                            [:invalid [:declare]]
                                            [:invalid-operation [:declare :declare-predicate :declare-operation]]
-                                           [:wrong-operation [:declare :declare-predicate :declare-operation :declare-post-state :construct]]
+                                           [:wrong-operation [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
                                            [:invalid-predicate [:declare :declare-predicate]]
-                                           [:missing-predicate [:declare :declare-predicate :declare-operation :declare-post-state :construct]]
-                                           [:wrong-predicate [:declare :declare-predicate :declare-operation :declare-post-state :construct]]
+                                           [:missing-predicate [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
+                                           [:wrong-predicate [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
                                            [:invalid-post-state [:declare :declare-predicate :declare-operation :declare-post-state]]
-                                           [:wrong-post-state [:declare :declare-predicate :declare-operation :declare-post-state :construct]]
-                                           [:extra-post-state [:declare :declare-predicate :declare-operation :declare-post-state :construct]]
-                                           [:missing-post-state [:declare :declare-predicate :declare-operation :declare-post-state :construct]]]]
+                                           [:wrong-post-state [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
+                                           [:extra-post-state [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
+                                           [:missing-post-state [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
+                                           [:invalid-outcome [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome]]
+                                           [:wrong-outcome [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]
+                                           [:extra-outcome [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct]]]]
                   (reset! mode scenario)
                   (reset! trace [])
                   (let [failure (error #((:biff.ring/handler started)
@@ -644,6 +660,9 @@
                              :wrong-post-state :construction-post-state-mismatch
                              :extra-post-state :construction-post-state-mismatch
                              :missing-post-state :construction-post-state-mismatch
+                             :invalid-outcome :invalid-outcome-contract
+                             :wrong-outcome :construction-outcome-mismatch
+                             :extra-outcome :construction-outcome-mismatch
                              :construction-target-mismatch)
                            (:error/kind failure)))
                     (is (= events @trace))
@@ -653,17 +672,23 @@
                     (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))
                 (reset! mode :right)
                 (reset! trace [])
-                (is (= :confirmed (:resolution (settlement! (send-command! client started "right")))))
-                (is (= [:declare :declare-predicate :declare-operation :declare-post-state :construct :project] @trace))
+                (let [settlement (settlement! (send-command! client started "right"))]
+                  (is (= :confirmed (:resolution settlement)))
+                  (is (= :request/claimed (:outcome settlement))))
+                (is (= [:declare :declare-predicate :declare-operation :declare-post-state :declare-outcome :construct :project] @trace))
                 (is (= 1 @submissions))
                 (is (= [{:xt/id "r1" :status :claimed}]
                        (xt/q node ["SELECT _id, status FROM requests"])))
-                (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+                (is (= [{:gesso.command/outcome {:outcome :request/claimed}}]
+                       (mapv #(select-keys % [:gesso.command/outcome])
+                             (xt/q node ["SELECT * FROM gesso_commands"]))))
                 (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
                 ;; Replays neither redeclare targets nor construct a mutation.
                 (reset! mode :invalid)
                 (reset! trace [])
-                (is (= :already-incorporated (:resolution (settlement! (send-command! client started "replay")))))
+                (let [settlement (settlement! (send-command! client started "replay"))]
+                  (is (= :already-incorporated (:resolution settlement)))
+                  (is (= :request/claimed (:outcome settlement))))
                 (is (= [:project] @trace))
                 (is (= 1 @submissions)))
               (finally (host/stop! started)))))))))

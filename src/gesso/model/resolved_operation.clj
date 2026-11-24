@@ -908,7 +908,9 @@
                      :else false)))]
       (stable? value 0))))
 
-(defn- require-outcome-contract! [declared binding]
+(defn require-outcome-contract!
+  "Admit a deterministic portable outcome independently of construction."
+  [declared binding]
   ;; A deterministic outcome contract is meaningful only for operations whose
   ;; admitted result can be computed independently of their construction.
   ;; Do not leak the expected outcome (or its binding) in error diagnostics.
@@ -929,7 +931,9 @@
                {:declared-shape-valid? false})))
     declared))
 
-(defn- require-plan-outcome-coverage! [declared outcome]
+(defn require-plan-outcome-coverage!
+  "Require exact equality with the independently admitted durable outcome."
+  [declared outcome]
   (when (and declared
              (or (not (stable-outcome-data? outcome))
                  (not= (:expected-outcome declared) outcome)))
