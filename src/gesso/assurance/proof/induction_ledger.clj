@@ -45,7 +45,8 @@
      :proof-checker-and-extensionality-rule-soundness
      :proof-checker-and-literal-substitution-rule-soundness
      :initial-structural-inference-rule-soundness
-     :unified-preservation-dispatch-soundness}
+     :unified-preservation-dispatch-soundness
+     :guarded-literal-substitution-rule-soundness}
    :initialization
    #{:initial-state-existence
      :initial-state-coverage

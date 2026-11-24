@@ -6,7 +6,12 @@
    a whole postcondition branch after exact replacement and framing.
    Unsupported syntax, optional readers and over-budget expansion stay open.
    This is an unadmitted inference, not independent checker soundness."
-  (:require [gesso.assurance.proof.obligation :as obligation]))
+  (:require [gesso.assurance.proof.obligation :as obligation]
+            [gesso.assurance.subject :as subject]))
+
+(def guarded-preservation-version 1)
+(def report-type :gesso.assurance.proof.guarded-substitution/unadmitted-guarded-preservation)
+(def ^:private identity-id :gesso.assurance.proof/guarded-preservation-v1)
 
 (def ^:private branch-limit 128)
 
@@ -70,15 +75,38 @@
   [source]
   (let [ledger (obligation/derive-obligations! source)
         outcomes (mapv (fn [[id invariant]]
-                         (merge {:obligation-id [:preservation id] :invariant id}
-                                (infer (:construction source) invariant))) (:invariants ledger))]
-    {:obligation-fingerprint (:fingerprint ledger)
+                         (let [result (infer (:construction source) invariant)]
+                           (merge {:obligation-id [:preservation id] :invariant id
+                                   :readers (:readers invariant)
+                                   :inference (when (= :checked-conditional-inference (:status result))
+                                                :guarded-literal-substitution)}
+                                  result))) (:invariants ledger))
+        established (into #{} (comp (filter #(= :checked-conditional-inference (:status %)))
+                                    (map :obligation-id)) outcomes)
+        unsupported (into #{} (comp (filter #(= :open (:status %)))
+                                    (map :obligation-id)) outcomes)
+        identity (subject/describe-subject
+                  {:kind :rule :id identity-id
+                   :interface {:version guarded-preservation-version
+                               :obligation-fingerprint (:fingerprint ledger)
+                               :transition-fingerprint (:transition-fingerprint ledger)
+                               :outcomes outcomes}})]
+    {:type report-type :version guarded-preservation-version
+     :fingerprint (:fingerprint identity)
+     :obligation-fingerprint (:fingerprint ledger)
      :transition-fingerprint (:transition-fingerprint ledger)
+     :subject-fingerprint (:subject-fingerprint ledger)
+     :proof-rule :guarded-literal-substitution
+     :checking :original-source-and-guarded-literal-branches
+     :claim :all-pre-invariants-and-matching-transition-imply-post-invariant
      :preservation-outcomes outcomes
-     :conditionally-checked-preservation-ids
-     (into #{} (comp (filter #(= :checked-conditional-inference (:status %)))
-                     (map :obligation-id)) outcomes)
+     :conditionally-checked-preservation-ids established
+     :unsupported-preservation-ids unsupported
      :original-open-obligation-ids (:open-obligation-ids ledger)
      :scope :declared-abstract-state-projection-only
+     :proof-status :restricted-conditional-preservation-checked
      :checker-soundness :not-independently-proved
-     :certificate :not-issued :authority :none}))
+     :open-meta-obligations #{:guarded-literal-substitution-rule-soundness :certificate-admission}
+     :certificate :not-issued :admission :not-admitted
+     :runtime-enforcement :not-established :implementation-correspondence :not-established
+     :authority :none}))

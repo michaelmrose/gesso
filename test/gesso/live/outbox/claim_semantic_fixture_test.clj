@@ -5,6 +5,7 @@
             [gesso.live.outbox.claim-semantic-fixture :as claim]
             [gesso.assurance.proof.induction :as induction]
             [gesso.assurance.proof.guarded-substitution :as guarded]
+            [gesso.assurance.proof.unified-preservation :as unified]
             [gesso.assurance.proof.finite-model-oracle :as oracle]))
 
 (defn- eq [field value] [:= [:read field] [:literal value]])
@@ -149,3 +150,28 @@
     (is (no-proof? (guarded-report (assoc-in c [:invariants ownership-id]
                                             {:readers #{:request/revision}
                                              :expression (into [:or] (map #(eq :request/revision %) (range 129)))}) replay)))))
+
+(deftest unified-checker-selects-whole-guarded-claim-inferences
+  (let [c (catalog)
+        id :claim/ownership-and-journal
+        obligation-id [:preservation id]
+        source (fn [catalog operation-id]
+                 {:construction (:construction (first (filter #(= operation-id (:id %)) (:operations catalog))))
+                  :initial-condition (:initial-condition catalog) :invariants (:invariants catalog)})]
+    (doseq [op (:declared-operation-ids c)]
+      (let [s (source c op)
+            r (unified/check-unified-preservation! s)
+            outcome (first (filter #(= id (:invariant %)) (:preservation-outcomes r)))]
+        (is (contains? (:conditionally-checked-preservation-ids r) obligation-id))
+        (is (some #{:guarded} (:supporting-families outcome)))
+        (is (contains? (:open-meta-obligations r) :guarded-literal-substitution-rule-soundness))
+        (is (= :none (:authority r)))))
+    (let [accept (claim/alternative-id "helper-1" :accept)
+          mutant (alter-source c accept #(assoc-in % [:replacements :assignment/helper] [:literal "helper-2"]))
+          r (unified/check-unified-preservation! (source mutant accept))
+          induction (induction/check-induction! c)
+          row (first (filter #(= id (:invariant %)) (:induction-outcomes induction)))]
+      (is (contains? (:unsupported-preservation-ids r) obligation-id))
+      (is (= (:declared-operation-ids c) (:preserving-operation-ids row)))
+      (is (= :initial-consequence-open (:reason row)))
+      (is (= :not-issued (:certificate induction))))))

@@ -1,8 +1,8 @@
 (ns gesso.assurance.proof.unified-preservation
-  "Source-derived union of the four restricted invariant-preservation families
+  "Source-derived union of the five restricted invariant-preservation families
    (v1267): exact frame (v1259), literal postcondition (v1261), independently
    typed frame/literal conjunction (v1263), and same-origin copy equality
-   (v1265).
+   (v1265), and guarded literal substitution (v2493).
 
    One family must independently establish the WHOLE invariant. This module
    never assembles fragments from different families into a novel inference,
@@ -25,15 +25,16 @@
             [gesso.assurance.proof.assignment-preservation :as literal]
             [gesso.assurance.proof.copy-preservation :as copy]
             [gesso.assurance.proof.mixed-preservation :as mixed]
+            [gesso.assurance.proof.guarded-substitution :as guarded]
             [gesso.assurance.proof.obligation :as obligation]
             [gesso.assurance.proof.preservation :as frame]
             [gesso.assurance.subject :as subject]))
 
-(def unified-preservation-version 1)
+(def unified-preservation-version 2)
 (def report-type
   :gesso.assurance.proof.unified-preservation/unadmitted-unified-preservation)
 
-(def ^:private identity-id :gesso.assurance.proof/unified-preservation-v1)
+(def ^:private identity-id :gesso.assurance.proof/unified-preservation-v2)
 (def ^:private known-categories
   #{:initial-state :preservation :assumption :implementation})
 (def ^:private checked-status :checked-conditional-inference)
@@ -42,7 +43,7 @@
 ;; The order is a deterministic explanation preference, not a logical
 ;; priority: any ONE independently checked family may support a whole rule.
 (def ^:private families
-  [:frame :literal :mixed :copy])
+  [:frame :literal :mixed :copy :guarded])
 
 (defn- fail!
   [reason details]
@@ -70,7 +71,8 @@
   {:frame frame/check-frame-preservation!
    :literal literal/check-literal-assignment-preservation!
    :mixed mixed/check-mixed-preservation!
-   :copy copy/check-copy-preservation!})
+   :copy copy/check-copy-preservation!
+   :guarded guarded/check-guarded-preservation!})
 
 (defn- public-family-var
   [family]
@@ -79,6 +81,7 @@
     :literal #'literal/check-literal-assignment-preservation!
     :mixed #'mixed/check-mixed-preservation!
     :copy #'copy/check-copy-preservation!
+    :guarded #'guarded/check-guarded-preservation!
     (fail! :unknown-preservation-family {:family family})))
 
 (defn- verified-report-for!
@@ -129,7 +132,13 @@
            :checking :original-sources-independent-equality-substitution-and-frame
            :open-meta-obligations
            #{:proof-checker-substitution-and-frame-extensionality-soundness
-             :certificate-admission}}))
+             :certificate-admission}}
+    :guarded {:type guarded/report-type
+              :version guarded/guarded-preservation-version
+              :proof-rule :guarded-literal-substitution
+              :checking :original-source-and-guarded-literal-branches
+              :open-meta-obligations
+              #{:guarded-literal-substitution-rule-soundness :certificate-admission}}))
 
 (defn- validate-family-report!
   "Treat even a returned sibling report as an untrusted assertion about its
@@ -200,7 +209,7 @@
      :outcomes (into (sorted-map) (map (juxt :obligation-id identity)) outcomes)}))
 
 (defn check-unified-preservation!
-  "Recheck original obligation SOURCE through all four existing restricted
+  "Recheck original obligation SOURCE through all five existing restricted
    checkers; source-rederive whole sibling reports before accepting judgments.
 
    Successful candidate status is NOT a discharged v1241 proof obligation.
@@ -296,7 +305,7 @@
        :conditionally-checked-preservation-ids established
        :unsupported-preservation-ids open
        :original-open-obligation-ids (:open-obligation-ids obligations)
-       :checking :original-source-and-four-independent-restricted-checkers
+       :checking :original-source-and-five-independent-restricted-checkers
        :proof-status :restricted-conditional-preservation-checked
        :checker-soundness :not-independently-proved
        :open-meta-obligations meta-obligations

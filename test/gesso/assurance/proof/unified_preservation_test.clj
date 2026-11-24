@@ -1,7 +1,7 @@
 (ns gesso.assurance.proof.unified-preservation-test
   "v1268: source-derived tests for unified invariant preservation.
 
-   All four sibling checkers must derive their own evidence from original source.
+   All five sibling checkers must derive their own evidence from original source.
    An entire invariant must be checked by ONE sibling; apparent pieces of
    support supplied by different siblings cannot be combined into a theorem.
    Status :checked-conditional-inference is never a v1241 obligation discharge,
@@ -11,6 +11,7 @@
             [gesso.assurance.proof.assignment-preservation :as literal]
             [gesso.assurance.proof.copy-preservation :as copy]
             [gesso.assurance.proof.mixed-preservation :as mixed]
+            [gesso.assurance.proof.guarded-substitution :as guarded]
             [gesso.assurance.proof.obligation :as obligation]
             [gesso.assurance.proof.preservation :as frame]
             [gesso.assurance.proof.unified-preservation :as unified]
@@ -153,12 +154,12 @@
     (is (= (:subject-fingerprint ledger) (:subject-fingerprint report)))
     (is (= :source-derived-union-of-whole-invariant-inferences
            (:proof-rule report)))
-    (is (= :original-source-and-four-independent-restricted-checkers
+    (is (= :original-source-and-five-independent-restricted-checkers
            (:checking report)))
     (is (= :declared-abstract-state-projection-only (:scope report)))
     (is (= :all-pre-invariants-and-matching-transition-imply-post-invariant
            (:claim report)))
-    (is (= #{:frame :literal :mixed :copy}
+    (is (= #{:frame :literal :mixed :copy :guarded}
            (set (keys (:component-report-fingerprints report)))))
     (is (every? #(re-matches #"sha256:[0-9a-f]{64}" %)
                 (vals (:component-report-fingerprints report))))
@@ -448,7 +449,8 @@
   [#'frame/check-frame-preservation!
    #'literal/check-literal-assignment-preservation!
    #'mixed/check-mixed-preservation!
-   #'copy/check-copy-preservation!])
+   #'copy/check-copy-preservation!
+   #'guarded/check-guarded-preservation!])
 (defn- tampered-sibling [sibling mutate]
   (let [original (var-get sibling)]
     (with-redefs-fn
@@ -461,56 +463,56 @@
     (is (= :family-report-contract-changed (:reason d))
         (str sibling ": " (pr-str d)))))
 
-(deftest all-four-families-reject-forged-authority
+(deftest all-five-families-reject-forged-authority
   (doseq [s sibling-vars]
     (rejects-family! s #(assoc % :authority :transaction))))
 
-(deftest all-four-families-reject-forged-certification
+(deftest all-five-families-reject-forged-certification
   (doseq [s sibling-vars]
     (rejects-family! s #(assoc % :certificate :issued))
     (rejects-family! s #(assoc % :certified? true))))
 
-(deftest all-four-families-reject-pretend-physical-correspondence
+(deftest all-five-families-reject-pretend-physical-correspondence
   (doseq [s sibling-vars]
     (rejects-family! s #(assoc % :implementation-correspondence :proved))))
 
-(deftest all-four-families-reject-wrong-proof-rule
+(deftest all-five-families-reject-wrong-proof-rule
   (doseq [s sibling-vars]
     (rejects-family! s #(assoc % :proof-rule :anything-goes))))
 
-(deftest all-four-families-reject-missing-preservation-outcomes
+(deftest all-five-families-reject-missing-preservation-outcomes
   (doseq [s sibling-vars]
     (rejects-family! s #(update % :preservation-outcomes pop))))
 
-(deftest all-four-families-reject-duplicate-preservation-outcomes
+(deftest all-five-families-reject-duplicate-preservation-outcomes
   (doseq [s sibling-vars]
     (rejects-family! s #(update % :preservation-outcomes
                                 conj (first (:preservation-outcomes %))))))
 
-(deftest all-four-families-reject-forged-supported-id-set
+(deftest all-five-families-reject-forged-supported-id-set
   (let [id [:preservation :request/copy-and-literal-splice]]
     (doseq [s sibling-vars]
       (rejects-family! s #(update % :conditionally-checked-preservation-ids
                                   conj id)))))
 
-(deftest all-four-families-reject-forged-source-fingerprint
+(deftest all-five-families-reject-forged-source-fingerprint
   (doseq [s sibling-vars]
     (rejects-family! s #(assoc % :obligation-fingerprint
                                (str "sha256:" (apply str (repeat 64 "f")))))))
 
-(deftest all-four-families-reject-changed-scope
+(deftest all-five-families-reject-changed-scope
   (doseq [s sibling-vars]
     (rejects-family! s #(assoc % :scope :universal-xtdb-refinement))))
 
-(deftest all-four-families-reject-unproved-claimed-soundness
+(deftest all-five-families-reject-unproved-claimed-soundness
   (doseq [s sibling-vars]
     (rejects-family! s #(assoc % :checker-soundness :independently-proved))))
 
-(deftest all-four-families-reject-omitted-original-obligations
+(deftest all-five-families-reject-omitted-original-obligations
   (doseq [s sibling-vars]
     (rejects-family! s #(assoc % :original-open-obligation-ids #{}))))
 
-(deftest all-four-families-reject-mutated-outcome-reader-set
+(deftest all-five-families-reject-mutated-outcome-reader-set
   (doseq [s sibling-vars]
     (rejects-family!
      s
@@ -564,3 +566,7 @@
             :reason :family-report-contract-changed}
            (select-keys forged [:error/type :reason]))
         (str "v1267 accepted a fabricated frame proof: " (pr-str forged)))))
+
+(deftest guarded-family-rejects-self-consistent-forged-judgment
+  (rejects-family! #'guarded/check-guarded-preservation!
+                   #(forge-one-complete-family-judgment % [:preservation :request/copy-and-literal-splice])))
