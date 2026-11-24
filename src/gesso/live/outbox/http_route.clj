@@ -3,6 +3,7 @@
    general Ring router or URL coercion system."
   (:require [clojure.string :as str]
             [gesso.live.application-preflight.affordance :as affordance]
+            [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.progression.http :as progression-http]))
 
 (defn- segments [path]
@@ -55,15 +56,23 @@
 (defn selected-read-context
   "Prepare the same captured scope and minimum-read context for selected
    fragment GET and SSE authorization. Malformed captures or progression
-   carriers refuse admission before identity resolution. Request progression
-   is not proof of authority; authentication and policy remain separate."
+   carriers refuse admission before identity resolution. On a concrete
+   XTDB host bind its latest completed frontier before any application
+   callback, so browser progression cannot choose a historical authority
+   snapshot. Each SSE reauthorization obtains its own frontier. The existing
+   binder preserves empty-startup behavior without inventing a basis;
+   standalone handlers without a node retain their provider-neutral path.
+   Request progression is not proof of authority."
   [route request]
   (when-let [captures (captured-arguments route (:uri request))]
     (try
-      (progression-http/bind-request-progression
-       (-> request
-           (dissoc :params :query-params :form-params :route-params :path-params)
-           (assoc :path-params captures)))
+      (let [context (progression-http/bind-request-progression
+                     (-> request
+                         (dissoc :params :query-params :form-params :route-params :path-params)
+                         (assoc :path-params captures)))]
+        (if (xtdb/node-from context)
+          (xtdb/bind-request-frontier context)
+          context))
       (catch clojure.lang.ExceptionInfo e
         (if (= :gesso.live.progression.http/error (:error/type (ex-data e)))
           nil

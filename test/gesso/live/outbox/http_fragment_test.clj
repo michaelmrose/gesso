@@ -329,9 +329,7 @@
   (let [resolutions (atom [])
         authorizations (atom [])
         queries (atom [])
-        trusted (progression/requirement {:tx-id 31 :system-time "2026-08-29T06:00:00Z"})
-        browser (progression/requirement {:tx-id 32 :system-time "2026-08-29T06:00:01Z"})
-        combined (progression/compose trusted browser)
+        combined (atom nil)
         header progression-http/request-header-name
         observe (fn [ctx id]
                   {:id id :path-params (:path-params ctx)
@@ -344,7 +342,7 @@
     (with-redefs [fixture/allow? (fn [ctx id]
                                    (swap! authorizations conj (observe ctx id))
                                    (and (= "member" (:principal ctx)) (= "r1" id)
-                                        (= combined (live/progression ctx))))
+                                        (= @combined (live/progression ctx))))
                   fixture/generic-query (fn [ctx id]
                                           (swap! queries conj (observe ctx id))
                                           {:fragment/id id})]
@@ -359,6 +357,10 @@
                 status (get started host/sse-status-key)
                 fragment-path "/fragments/request-list/r1"
                 stream-path "/streams/request-list/r1"
+                node (:xtdb/connectable started)
+                trusted (:progression (xtdb/execute-tx! node [[:put-docs :requests {:xt/id "r1" :status :open}]]))
+                browser (:progression (xtdb/execute-tx! node [[:put-docs :requests {:xt/id "r1" :status :claimed}]]))
+                _ (reset! combined (progression/compose trusted browser))
                 request {:request-method :get :principal "member"
                          :gesso.live/progression trusted
                          :headers {header (progression-http/encode-request-progression browser)}
@@ -367,7 +369,7 @@
                          :route-params {:id "forged"} :xtdb/connectable :forged}
                 send! (fn [path req] (handler (assoc req :uri path)))
                 expected {:id "r1" :path-params {:id "r1"}
-                          :principal "member" :progression combined
+                          :principal "member" :progression @combined
                           :provider (:xtdb/connectable started) :untrusted-params {}}]
             (try
               (is (= 200 (:status (send! fragment-path request))))
@@ -401,6 +403,84 @@
               (is (= [expected] @queries))
               (is (zero? ((:occupied-count status))))
               (is (zero? (:subscription-count (source/stats (:source system)))))
+              (finally (host/stop! started)))))))))
+
+(deftest selected-authority-and-query-share-current-completed-xtdb-frontier
+  (let [observations (atom [])
+        queries (atom [])
+        intervene? (atom false)
+        resolve-id (fn [ctx _] (get-in ctx [:path-params :id]))
+        read-row (fn [ctx id]
+                   (first (live/q ctx ["SELECT allowed, status FROM requests WHERE _id = ?" id])))]
+    (with-redefs [fixture/allow? (fn [ctx id]
+                                   (let [row (read-row ctx id)]
+                                     (swap! observations conj [row (live/progression ctx)
+                                                               (:biff.xtdb/snapshot-token ctx)])
+                                     (when (compare-and-set! intervene? true false)
+                                       ;; Commit after the authorization read, before
+                                       ;; the fragment query receives the same context.
+                                       (xtdb/execute-tx! (:xtdb/connectable ctx)
+                                                        [[:put-docs :requests {:xt/id id :allowed false :status :revoked}]]))
+                                     (true? (:allowed row))))
+                  fixture/generic-query (fn [ctx id]
+                                          (let [row (read-row ctx id)]
+                                            (swap! queries conj [row (live/progression ctx)
+                                                                 (:biff.xtdb/snapshot-token ctx)])
+                                            {:fragment/id id :status (:status row)}))
+                  fixture/generic-render (fn [{:keys [fragment/id status]}]
+                                           [:section {:id id} (name status)])]
+      (with-assembly
+        (fn [assembly]
+          (let [started (host/start! assembly (constantly {:status 418})
+                                     (assoc (config)
+                                            :assembled-fragments {:resolve-id resolve-id}
+                                            :assembled-sse {:resolve-id resolve-id :max-connections 1
+                                                            :sse-options {:keepalive-ms nil}}))
+                node (:xtdb/connectable started)
+                handler (:biff.ring/handler started)
+                src (:source (:gesso.live/system started))
+                status (get started host/sse-status-key)
+                get! (fn [headers] (handler {:request-method :get :uri "/fragments/request-list/r1" :headers headers}))
+                subscribe! (fn [headers] (handler {:request-method :get :uri "/streams/request-list/r1" :headers headers}))
+                emit! #(source/emit! src {:topic :fixture/request-list :id "r1" :change/kind :updated})]
+            (try
+              (let [receipt (xtdb/execute-tx! node [[:put-docs :requests {:xt/id "r1" :allowed true :status :open}]])
+                    requirement (:progression receipt)
+                    headers {progression-http/request-header-name
+                             (progression-http/encode-request-progression requirement)}
+                    response (subscribe! headers)
+                    body (:body response)]
+                (is (= 200 (:status response)))
+                (try
+                  ;; Without a browser carrier, authorization and rendering
+                  ;; must still read one server-observed snapshot.
+                  (reset! intervene? true)
+                  (let [response (get! {})]
+                    (is (= 200 (:status response)))
+                    (is (str/includes? (:body response) ">open<")))
+                  (is (= [{:allowed false :status :revoked}]
+                         (xt/q node ["SELECT allowed, status FROM requests WHERE _id = ?" "r1"])))
+                  (is (= (peek @observations) (peek @queries)))
+                  (is (= requirement (second (peek @queries))))
+                  (is (string? (nth (peek @queries) 2)))
+                  ;; The same old browser carrier cannot choose the historical
+                  ;; authorized snapshot for a later read or frame.
+                  (is (= 403 (:status (get! headers))))
+                  (is (= 1 (count @queries)))
+                  (is (progression/covers? (second (peek @observations)) requirement))
+                  (let [pending (stream/take! body)]
+                    (emit!)
+                    (is (nil? (deref pending 3000 ::timeout))))
+                  (is (loop [remaining 250]
+                        (cond (and (zero? ((:occupied-count status)))
+                                   (zero? (:subscription-count (source/stats src)))) true
+                              (zero? remaining) false
+                              :else (do (Thread/sleep 20) (recur (dec remaining))))))
+                  (let [reconnect (subscribe! headers)]
+                    (try (is (= 403 (:status reconnect)))
+                         (finally (when (= 200 (:status reconnect)) (stream/close! (:body reconnect))))))
+                  (is (every? #(= false (get-in % [0 :allowed])) (drop 2 @observations)))
+                  (finally (stream/close! body))))
               (finally (host/stop! started)))))))))
 
 (deftest selected-read-and-subscription-require-affirmative-scope-decision
@@ -741,7 +821,8 @@
                               (let [response (send! path refresh-headers (HttpResponse$BodyHandlers/ofString))]
                                 (is (= 200 (.statusCode response)))
                                 (is (str/includes? (.body response) ">claimed<"))
-                                (is (= ["r1" requirement] (peek @queries))))))))
+                                (is (= "r1" (first (peek @queries))))
+                                (is (progression/covers? (second (peek @queries)) requirement)))))))
                       (finally (future-cancel a) (future-cancel b))))
                   (is (= [{:status :claimed :revision 1}]
                          (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"])))
