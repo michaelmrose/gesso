@@ -492,7 +492,9 @@
            {:expected expected-keys :received value}))
   value)
 
-(defn- require-construction-contract [contract]
+(defn require-construction-contract
+  "Validate an independently registered closed table-coverage contract."
+  [contract]
   ;; Only an operation registration made by trusted server code can opt in.
   ;; The sets describe tables, not document IDs or authorization policies.
   ;; An omitted set is never interpreted as an unconstrained wildcard.
@@ -641,6 +643,21 @@
                 :missing-write-target-count (count missing-writes)
                 :unexpected-write-target-count (count unexpected-writes)}))))
   incorporated)
+
+(defn admit-document-targets!
+  "Admit independently declared domain targets against a closed table contract.
+   Derive the command ledger target from the trusted binding, never the plan."
+  [table-contract declared binding]
+  (require-target-contract! declared
+                            (require-construction-contract table-contract)
+                            binding))
+
+(defn require-document-target-coverage!
+  "Check a normalized, incorporated domain and command-ledger plan against
+   admitted table and target contracts, before framework-added SQL assertions."
+  [table-contract target-contract incorporated]
+  (require-plan-table-coverage! table-contract incorporated)
+  (require-plan-target-coverage! target-contract incorporated))
 
 (defn- check-set? [checks]
   (and (set? checks)

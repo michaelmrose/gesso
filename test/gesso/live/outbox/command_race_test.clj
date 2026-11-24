@@ -493,3 +493,105 @@
                  (xt/q node ["SELECT revision, request$location_id AS subject FROM requests"])))
           (is (= [{:xt/id "move"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
           (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))))
+
+(deftest installed-executor-enforces-independent-document-targets
+  (let [mode (atom :wrong)
+        trace (atom [])
+        submissions (atom 0)
+        tables {:required-guard-tables #{} :allowed-guard-tables #{}
+                :required-write-tables #{:requests :gesso_commands}
+                :allowed-write-tables #{:requests :gesso_commands}}
+        doc (fn [id] {:xt/id id :status :claimed :revision 0
+                      :created-at "t0" :updated-at "t0"
+                      :request/location-id "r1"})
+        opts {:operation :request/claim
+              :submission-mode! (constantly :submit)
+              :may-disclose? (constantly true)
+              :construction-contract tables
+              :target-contract! (fn [_ binding]
+                                  (swap! trace conj :declare)
+                                  (let [target [:requests (get-in binding [:arguments :request-id])]]
+                                    {:required-guard-targets #{} :allowed-guard-targets #{}
+                                     :required-write-targets (if (= :invalid @mode) #{} #{target})
+                                     :allowed-write-targets #{target}}))
+              :construct! (fn [_]
+                            (swap! trace conj :construct)
+                            {:spec {:purpose :gesso.live/refresh}
+                             :model-plan {:commands (mapv #(model-command/create :requests (doc %) version)
+                                                          (case @mode
+                                                            :wrong ["r2"]
+                                                            :extra ["r1" "r2"]
+                                                            ["r1"]))}
+                             :outcome {:outcome :request/claimed} :now "t0"})
+              :project! (fn [{:keys [ctx]} result]
+                          (swap! trace conj :project)
+                          (let [{:keys [basis rows]} (frontier/q-with-basis!
+                                                    ctx ["SELECT status FROM requests WHERE _id = ?" "r1"])]
+                            {:resolution (if (= :incorporated (:status result)) :confirmed :already-incorporated)
+                             :outcome (get-in result [:outcome :outcome])
+                             :authoritative (protocol/authoritative
+                                             {:presence :present :basis basis
+                                              :projection {:request/id "r1" :request/status (:status (first rows))}})}))}
+        executor (publication/build-executor opts)
+        config {:xtdb-config {} :source-id "v2474-targets" :rules-context {}
+                :worker-options {:worker-id "v2474" :poll-ms 20}
+                :live-options {} :assembled-publication
+                (assoc mapping :model-entity-topics {:requests #{:request}}
+                               :require-derived-model? true
+                               :operation-model-entities {:request/claim #{:requests}})
+                :http-jdk {} :assembled-operations {:authorize-request? (constantly true)}}
+        error (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))]
+    (doseq [incomplete [(dissoc opts :construction-contract) (dissoc opts :target-contract!)]]
+      (is (= :incomplete-document-target-contract
+             (:reason (error #(publication/build-executor incomplete))))))
+    (is (= :invalid-document-target-callback
+           (:reason (error #(publication/build-executor (assoc opts :target-contract! nil))))))
+    (is (= :invalid-construction-contract
+           (:error/kind (error #(publication/build-executor (assoc opts :construction-contract {}))))))
+    (with-operations {:request/claim (claim-operation executor)}
+      (fn [assembly]
+        (with-open [client (HttpClient/newHttpClient)]
+          (let [started (host/start! assembly (fn [_] (g/html-response [:div "fallback"])) config)
+                node (:xtdb/connectable started)
+                execute xtdb/execute-tx-from!]
+            (try
+              (with-redefs [xtdb/execute-tx-from! (fn [ctx ops & [options]]
+                                                   ;; Count one call at the actual submission boundary,
+                                                   ;; not the delegating arity or outbox-worker writes.
+                                                   (when (contains? ctx publication/preparation-key)
+                                                     (swap! submissions inc))
+                                                   (execute ctx ops options))]
+                (doseq [[scenario events] [[:wrong [:declare :construct]]
+                                           [:extra [:declare :construct]]
+                                           [:invalid [:declare]]]]
+                  (reset! mode scenario)
+                  (reset! trace [])
+                  (let [failure (error #((:biff.ring/handler started)
+                                           {:uri "/operations/request/claim"
+                                            :request-method :post
+                                            :headers {"content-type" "application/x-www-form-urlencoded"}
+                                            :body (codec/form-encode
+                                                   {transport/command-parameter
+                                                    (pr-str (protocol/command->wire (command (name scenario))))})}))]
+                    (is (= (if (= :invalid scenario) :invalid-target-contract :construction-target-mismatch)
+                           (:error/kind failure)))
+                    (is (= events @trace))
+                    (is (zero? @submissions))
+                    (is (empty? (xt/q node ["SELECT _id FROM requests"])))
+                    (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+                    (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))
+                (reset! mode :right)
+                (reset! trace [])
+                (is (= :confirmed (:resolution (settlement! (send-command! client started "right")))))
+                (is (= [:declare :construct :project] @trace))
+                (is (= 1 @submissions))
+                (is (= [{:xt/id "r1"}] (xt/q node ["SELECT _id FROM requests"])))
+                (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+                (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+                ;; Replays neither redeclare targets nor construct a mutation.
+                (reset! mode :invalid)
+                (reset! trace [])
+                (is (= :already-incorporated (:resolution (settlement! (send-command! client started "replay")))))
+                (is (= [:project] @trace))
+                (is (= 1 @submissions)))
+              (finally (host/stop! started)))))))))

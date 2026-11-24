@@ -12,6 +12,7 @@
             [gesso.live.optimistic.server :as server]
             [gesso.live.optimistic.resolved-operation :as adapter]
             [gesso.model.command-resolution :as resolution]
+            [gesso.model.resolved-operation :as resolved]
             [gesso.model.tx :as model-tx]
             [gesso.model.command :as model-command])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
@@ -221,7 +222,10 @@
         (assoc :changes (vec (distinct (mapcat :changes contributions))))
         (update :assertions into (distinct (keep :assertion contributions))))))
 
-(defn- model-resolved-plan! [ctx spec model-plan outcome now]
+(defn- model-resolved-plan!
+  ([ctx spec model-plan outcome now]
+   (model-resolved-plan! ctx spec model-plan outcome now nil))
+  ([ctx spec model-plan outcome now contract]
   ;; This boundary owns publication, execution options and the command ledger.
   (when-not (and (map? model-plan)
                  (every? (conj model-tx/fragment-keys :emit) (keys model-plan))
@@ -249,22 +253,31 @@
                 (:commands fragment))
       (reject! :reserved-durable-model-table {}))
     (let [derive (::derive-model-fragment (meta (get ctx preparation-key)))
-          fragment (if (and derive (not journal-only?)) (derive fragment) fragment)
           record (resolution/command-record (command-binding! ctx) outcome now)
+          incorporated (model-tx/normalize-plan
+                        (-> fragment
+                            (assoc :emit false)
+                            (update :commands conj
+                                    (model-command/create resolution/command-entity-type
+                                                          record resolution/record-version))))
+          ;; Check independently admitted targets against the actual canonical
+          ;; domain and ledger plan. Generated subject assertions are added
+          ;; only afterwards, and cannot change its command or guard targets.
+          _ (when contract
+              (resolved/require-document-target-coverage!
+               (:tables contract) (:targets contract) {:plan incorporated}))
+          derived (if (and derive (not journal-only?)) (derive fragment) fragment)
           {:keys [plan tx-ops]}
-          (model-tx/prepare ctx
-                            (-> fragment
-                                (assoc :emit false)
-                                (update :commands conj
-                                        (model-command/create resolution/command-entity-type
-                                                              record resolution/record-version))))
+          (model-tx/prepare ctx (assoc incorporated
+                                      :changes (:changes derived)
+                                      :assertions (:assertions derived)))
           {:keys [intents guard-ops tx-op]}
           (if journal-only? {:intents [] :guard-ops []}
               (if-let [prepare-model (::prepare-model (meta (get ctx preparation-key)))]
                 (prepare-model spec (:changes plan))
                 (prepare! ctx spec (:changes plan))))]
       {:ops (cond-> (into guard-ops tx-ops) tx-op (conj tx-op))
-       :intents intents :record record})))
+       :intents intents :record record}))))
 
 (defn- execute-resolved-plan! [ctx {:keys [ops intents record]}]
   ;; A constructor may finish after its request has been cancelled. Check
@@ -359,7 +372,7 @@
       (after-abort! failure)
       :else (throw failure))))
 
-(defn- guarded-abort-outcome! [invocation may-disclose? construct! failure]
+(defn- guarded-abort-outcome! [invocation may-disclose? construct! failure contract]
   (let [ctx (:ctx invocation)
         {:keys [spec model-plan outcome now] :as construction} (construct! invocation)]
     (when (nil? construction) (throw failure))
@@ -371,11 +384,22 @@
     ;; The ordinary journal-only compiler excludes model commands, changes
     ;; and publication. A second abort may reconcile a winning record but
     ;; cannot invoke another constructor.
-    (let [plan (model-resolved-plan! ctx nil model-plan outcome now)]
+    (let [plan (model-resolved-plan! ctx nil model-plan outcome now contract)]
       (try {:status :incorporated :outcome outcome
             :transaction (execute-resolved-plan! ctx plan)}
            (catch Exception second-failure
              (recover-after-execute! ctx may-disclose? second-failure nil))))))
+
+(defn- require-target-options! [options]
+  (let [table? (contains? options :construction-contract)
+        target? (contains? options :target-contract!)]
+    (when-not (= table? target?)
+      (reject! :incomplete-document-target-contract {}))
+    (when table?
+      (resolved/require-construction-contract (:construction-contract options))
+      (when-not (fn? (:target-contract! options))
+        (reject! :invalid-document-target-callback {}))))
+  options)
 
 (defn execute-resolved!
   "Compose a trusted initial submission or read-only reconciliation with
@@ -400,30 +424,45 @@
    journal-only outcome. It never retries the domain mutation. A second
    failure receives reconciliation only. Mode and this policy are trusted
    server decisions, not browser retry flags.
-   Absence in :reconcile never authorizes a new mutation."
+   Absence in :reconcile never authorizes a new mutation.
+   Optional paired :construction-contract and :target-contract! (ctx binding)
+   use the existing resolved-operation contracts before construction. The
+   same admitted requirements constrain guarded abort outcomes. Raw SQL
+   construction cannot satisfy this selected contract. Replay does not
+   invoke the declaration or constructor. Callback policy is still trusted."
   [{:keys [ctx operation] :as invocation}
-   {:keys [mode construct! may-disclose? project! construct-after-abort!] :as options}]
+   {:keys [mode construct! may-disclose? project! construct-after-abort!
+           construction-contract target-contract!] :as options}]
   (when-not (and (map? options)
                  (#{#{:mode :construct! :may-disclose? :project!}
                     #{:mode :construct! :may-disclose? :project! :construct-after-abort!}}
-                  (set (keys options)))
+                  (disj (set (keys options)) :construction-contract :target-contract!))
                  (or (not (contains? options :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (#{:submit :reconcile} mode)
                  (every? fn? [construct! may-disclose? project!]))
     (reject! :invalid-resolved-execution-options {}))
+  (require-target-options! options)
   (when-not (= (command-binding! ctx) (adapter/require-context operation invocation))
     (reject! :mismatched-command-binding {}))
   (let [prior (reconcile-command! ctx may-disclose?)
         result
         (if (and (= :submit mode) (= :unresolved (:status prior)))
-          (let [{:keys [spec changes domain-ops model-plan outcome now] :as construction}
+          (let [contract (when target-contract!
+                           {:tables construction-contract
+                            :targets (resolved/admit-document-targets!
+                                      construction-contract
+                                      (target-contract! ctx (command-binding! ctx))
+                                      (command-binding! ctx))})
+                {:keys [spec changes domain-ops model-plan outcome now] :as construction}
                 (construct! invocation)
                 plan (case (when (map? construction) (set (keys construction)))
                        #{:spec :changes :domain-ops :outcome :now}
-                       (resolved-plan! ctx spec changes domain-ops outcome now)
+                       (if contract
+                         (reject! :document-target-contract-requires-model-plan {})
+                         (resolved-plan! ctx spec changes domain-ops outcome now))
                        #{:spec :model-plan :outcome :now}
-                       (model-resolved-plan! ctx spec model-plan outcome now)
+                       (model-resolved-plan! ctx spec model-plan outcome now contract)
                        (reject! :invalid-resolved-construction {}))]
             (try {:status :incorporated :outcome outcome
                   :transaction (execute-resolved-plan! ctx plan)}
@@ -431,7 +470,7 @@
                    (recover-after-execute! ctx may-disclose? failure
                                            (when construct-after-abort!
                                              #(guarded-abort-outcome! invocation may-disclose?
-                                                                      construct-after-abort! %))))))
+                                                                      construct-after-abort! % contract))))))
           prior)]
     (adapter/project-resolution! invocation result project!)))
 
@@ -450,16 +489,18 @@
    The invocation must match its installed binding before mode selection.
    Only the exact returned function is recognized by host admission. This
    is local wiring validation, not certification of business policy."
-  [{:keys [operation submission-mode! construct! may-disclose? project! construct-after-abort!] :as config}]
+  [{:keys [operation submission-mode! construct! may-disclose? project! construct-after-abort!
+           construction-contract target-contract!] :as config}]
   (when-not (and (map? config)
                  (#{#{:operation :submission-mode! :construct! :may-disclose? :project!}
                     #{:operation :submission-mode! :construct! :may-disclose? :project! :construct-after-abort!}}
-                  (set (keys config)))
+                  (disj (set (keys config)) :construction-contract :target-contract!))
                  (or (not (contains? config :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (qualified-keyword? operation)
                  (every? fn? [submission-mode! construct! may-disclose? project!]))
     (reject! :invalid-publication-executor-config {}))
+  (require-target-options! config)
   (let [executor (fn [invocation]
                    (when-not (= (command-binding! (:ctx invocation))
                                 (adapter/require-context operation invocation))
@@ -469,7 +510,10 @@
                                         :construct! construct! :may-disclose? may-disclose?
                                         :project! project!}
                                  construct-after-abort!
-                                 (assoc :construct-after-abort! construct-after-abort!))))]
+                                 (assoc :construct-after-abort! construct-after-abort!)
+                                 target-contract!
+                                 (assoc :construction-contract construction-contract
+                                        :target-contract! target-contract!))))]
     (locking registered-executors
       (.put registered-executors executor
             {:reference (WeakReference. executor) :operation operation}))
