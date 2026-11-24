@@ -2,6 +2,9 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [gesso.live.source :as live-source]
+            [gesso.live.core :as live]
+            [gesso.live.progression :as progression]
+            [gesso.live.progression.http :as progression-http]
             [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [gesso.live.consistency.xtdb :as xtdb]
@@ -829,6 +832,7 @@
         observed (atom [])
         projected (atom [])
         streams (atom [])
+        fragment-reads (atom [])
         credentials {"a" (issue! :fixture/helper-1) "b" (issue! :fixture/helper-2)
                      "reader" (issue! :fixture/reader)
                      "revoked" (issue! :fixture/reader)}
@@ -936,6 +940,7 @@
                                               :require-derived-model? true
                                               :operation-model-entities {:request/claim #{:requests :request_assignments}})
                 :http-jdk {} :assembled-operations {:authorize-request? (comp some? principal-fn)}
+                :assembled-fragments {:resolve-id (fn [ctx _] (get-in ctx [:headers "fragment-id"]))}
                 :assembled-sse {:resolve-id (fn [ctx _] (get-in ctx [:headers "fragment-id"]))
                                 :session-authorized? read-authorized?
                                 :sse-options {:keepalive-ms 50} :max-connections 4}}]
@@ -946,7 +951,19 @@
       (is (= :abort-contract-requires-guarded-journal-only
              (reason (assoc-in opts [:abort-contract :construction-contract :allowed-write-tables]
                                #{:requests :gesso_commands})))))
-    (with-redefs [fixture/allow? (fn [ctx id] (and (= "l1" id) (read-authorized? ctx)))]
+    (with-redefs [fixture/allow? (fn [ctx id] (and (= "l1" id) (read-authorized? ctx)))
+                  fixture/generic-query
+                  (fn [ctx id]
+                    (let [row (first (live/q ctx ["SELECT r.status, a.helper FROM requests r LEFT JOIN request_assignments a ON r._id = a.request_id WHERE r.request$location_id = ? AND r._id = ?" id "r1"]))]
+                      (swap! fragment-reads conj {:uri (:uri ctx) :id id
+                                                  :progression (live/progression ctx) :row row})
+                      {:fragment/id (str (last (str/split (:uri ctx) #"/")) "-" id)
+                       :row row}))
+                  fixture/generic-render
+                  (fn [{:keys [fragment/id row]}]
+                    [:section {:id id}
+                     [:span {:data-field "status"} (name (:status row))]
+                     [:span {:data-field "helper"} (or (:helper row) "unassigned")]])]
      (fixture/with-surfaced-application
      {:operations {:request/claim operation}
       :route-capabilities (fixture/route-capabilities {:request/claim operation})
@@ -959,6 +976,12 @@
        (with-open [client (HttpClient/newHttpClient)]
         (let [started (host/start! assembly (fn [_] (g/html-response [:div "fallback"])) config)
              node (:xtdb/connectable started)
+             fragment! (fn [path headers]
+                         (let [builder (HttpRequest/newBuilder
+                                        (URI/create (str (get-in started [host/listener-key :base-url]) path)))]
+                           (.timeout builder (Duration/ofSeconds 10))
+                           (doseq [[k v] headers] (.header builder k v))
+                           (.send client (.build builder) (HttpResponse$BodyHandlers/ofString))))
              stream! (fn [path headers]
                        (let [builder (HttpRequest/newBuilder
                                       (URI/create (str (get-in started [host/listener-key :base-url]) path)))]
@@ -1001,7 +1024,11 @@
                (is (= 403 (:status (request! headers "denied" "denied" true)))))
              (is (empty? @observed))
              (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
-             (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+             (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+             (let [response (fragment! "/fragments/request-list" (assoc (headers-for "reader") "fragment-id" "l1"))]
+               (is (= 200 (.statusCode response)))
+               (is (str/includes? (.body response) ">open<"))
+               (is (str/includes? (.body response) ">unassigned<"))))
            (let [stream-headers (fn [who] (assoc (headers-for who) "fragment-id" "l1"))
                  pending (when (= :valid recovery-mode)
                            (let [path "/streams/request-list"
@@ -1058,10 +1085,34 @@
                       (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$command_id AS command_id FROM gesso_live_outbox"]))))
                (is (= (cond-> #{[id :incorporated]} valid? (conj [loser-id :incorporated])) (set @projected)))
                (when valid?
-                 (doseq [[task topic] (map vector pending [:fixture/request-list :fixture/request-toolbar])]
+                 (doseq [[task topic who] (map vector pending [:fixture/request-list :fixture/request-toolbar] ["reader" "a"])]
                    (let [payload (deref task 10000 ::timeout)]
                      (is (= {:topic topic :id "l1"} (select-keys (:invalidation payload) [:topic :id])))
-                     (is (some? (:progression payload))))))
+                     (is (some? (:progression payload)))
+                     (when-let [wire (:progression payload)]
+                       (let [requirement (progression/wire->requirement wire)
+                             path (str "/fragments/" (name topic))
+                             headers (assoc (stream-headers who) progression-http/request-header-name
+                                            (progression-http/encode-request-progression requirement))
+                             before-reads @fragment-reads]
+                         ;; A delivered minimum-read token never confers read authority.
+                         (doseq [denied [(dissoc headers "cookie")
+                                         (assoc headers "fragment-id" "l2")
+                                         (merge headers (headers-for "revoked"))]]
+                           (is (= 403 (.statusCode (fragment! path denied)))))
+                         (is (= 400 (.statusCode (fragment! path (assoc headers progression-http/request-header-name "%ZZ")))))
+                         (is (= before-reads @fragment-reads))
+                         (let [response (fragment! path headers)
+                               read (peek @fragment-reads)]
+                           (is (= 200 (.statusCode response)))
+                           (is (= "no-store" (.orElse (.firstValue (.headers response) "cache-control") "")))
+                           (is (str/includes? (.body response) (str "id=\"" (name topic) "-l1\"")))
+                           (is (str/includes? (.body response) ">claimed<"))
+                           (is (str/includes? (.body response) (str ">" helper "<")))
+                           (is (= (inc (count before-reads)) (count @fragment-reads)))
+                           (is (= {:uri path :id "l1" :row {:status :claimed :helper helper}}
+                                  (select-keys read [:uri :id :row])))
+                           (is (progression/covers? (:progression read) requirement))))))))
                (let [replay (invoke session id "winner-replay")]
                  (is (= :already-incorporated (get-in replay [:settlement :resolution])))
                  (is (= {:status :claimed :helper helper} (get-in replay [:settlement :authoritative :projection])))
