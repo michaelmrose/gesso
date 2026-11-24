@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-proving
-  "v1494: A runnable, generic SINGLE-NODE reservation application built with
+  "v2344: A runnable, generic SINGLE-NODE reservation application built with
    Gesso's model transaction boundary and a real embedded XTDB2 node.
 
    The existing single-node-proving catalog owns abstract business intent:
@@ -24,6 +24,7 @@
 
 (def table :gesso_v1494_reservation_slots)
 (def operation-ids #{:slot/reserve :slot/release})
+(def outbox-source-id "gesso/proving-reservation")
 (def version-keys
   {:revision-key :revision
    :created-at-key :created-at
@@ -292,15 +293,20 @@
    inspect the returned :catalog, :biff-context, :biff-model-module, and
    :report. :guard-preflight! performs a read-only, source-derived check of
    the concrete plan that :execute! also validates before submitting once.
-   Its report is bounded and not a certificate. No live notification or HTTP
-   route is installed here.
+   Its report is bounded and not a certificate. The explicit :durable-outbox
+   selection records a pending publication intent atomically with each admitted
+   operation, without direct emission. No worker or HTTP route is installed here.
+   Intent IDs belong to one attempted operation, not an HTTP retry protocol.
 
    Do not retain the callbacks or node after the supplied function returns.
    This fixture is for a single test/application invocation, not production
    lifecycle management or authenticated writer issuance."
   ([f] (with-proving-application! (str "v1494-" (random-uuid)) f))
-  ([slot-id f]
+  ([slot-id f] (with-proving-application! slot-id :direct f))
+  ([slot-id publication-selection f]
    (require-slot-id! slot-id)
+   (when-not (contains? #{:direct :durable-outbox} publication-selection)
+     (reject! :invalid-publication-selection))
    (when-not (fn? f)
      (reject! :invalid-application-callback))
    (let [catalog (pilot/reservation-catalog)]
@@ -322,7 +328,24 @@
                               _ (checked-guard-plan! catalog ctx before op plan)]
                           ;; Check the SAME plan submitted exactly once. This
                           ;; does not authenticate the later physical commit.
-                          (tx/transact! ctx plan)))
+                          (if (= :durable-outbox publication-selection)
+                            ;; The domain plan remains the checked plan. Add
+                            ;; only source-owned publication metadata, never
+                            ;; request-provided scope or arbitrary tx ops.
+                            (let [published-plan
+                                  (assoc plan :changes
+                                         [{:topic :gesso-proving-reservation
+                                           :id slot-id :change/kind :updated}])]
+                              (when-not (= (:tx-ops (original-prepare ctx plan))
+                                           (:tx-ops (original-prepare ctx published-plan)))
+                                (reject! :publication-changed-domain-plan))
+                              (tx/transact-with-outbox!
+                               ctx published-plan
+                               {:intent-ids [(random-uuid)]
+                                :source-id outbox-source-id
+                                :operation op
+                                :purpose :gesso.live/refresh}))
+                            (tx/transact! ctx plan))))
              guard-preflight! (fn [op]
                                 (when-not (contains? operation-ids op)
                                   (reject! :unknown-operation))
@@ -334,7 +357,9 @@
                   :biff-context ctx
                   :biff-model-module (tx/module)
                   :catalog catalog
-                  :report (application-report slot-id)
+                  :publication-selection publication-selection
+                  :report (assoc (application-report slot-id)
+                                 :publication-selection publication-selection)
                   :read! read!
                   :abstract! abstract!
                   :guard-preflight! guard-preflight!

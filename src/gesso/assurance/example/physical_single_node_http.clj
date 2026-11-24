@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v2337: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2344: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -147,7 +147,13 @@
               (when-not (and (map? outcome)
                              (= :committed (:commit/status outcome)))
                 (reject! :nondefinitive-physical-outcome))
-              (render-after-reported-commit app))
+              (let [response (render-after-reported-commit app)]
+                ;; A recorded intent is NOT evidence of source acceptance.
+                ;; This header describes the selected transaction result only.
+                (if (= :durable-outbox (:publication-selection app))
+                  (assoc-in response [:headers "x-gesso-proving-live-publication"]
+                            "intent-recorded")
+                  response)))
             (unsupported 405))
 
           :else
@@ -339,6 +345,9 @@
   ([slot-id handler-extension! f]
    (with-http-proving-application! slot-id handler-extension! :no-listener f))
   ([slot-id handler-extension! listener-selection f]
+   (with-http-proving-application! slot-id handler-extension!
+                                   listener-selection :direct f))
+  ([slot-id handler-extension! listener-selection publication-selection f]
    (when-not (and (fn? handler-extension!) (fn? f))
      (reject! :invalid-test-callback))
    (when-not (contains? #{:no-listener :biff-loopback :biff-jetty-http1 :biff-aleph-http1}
@@ -354,7 +363,7 @@
    (when (= :biff-aleph-http1 listener-selection)
      (aleph-test-provider!))
    (physical/with-proving-application!
-    slot-id
+    slot-id publication-selection
     (fn [app]
       (checked-application! app)
       (let [original-handler (ring-handler! app)
