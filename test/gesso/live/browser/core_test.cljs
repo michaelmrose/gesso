@@ -171,15 +171,24 @@
                                              (let [[_ id] (re-matches #"<div id=\"([^\"]+)\"></div>" html)]
                                                (assert id "Unexpected mock response")
                                                [(.-testPrimaryTarget (make-root id))])))
-                                 ids (filter #(and (= 1 (.-nodeType %)) (.getAttribute % "id"))
-                                             (tree-seq #(= 1 (.-nodeType %))
-                                                       #(array-seq (.-children %))
-                                                       #js {:nodeType 1 :children (to-array nodes)
-                                                            :getAttribute (constantly nil)}))]
+                                 elements (filter #(= 1 (.-nodeType %))
+                                                  (rest (tree-seq #(= 1 (.-nodeType %))
+                                                                  #(array-seq (.-children %))
+                                                                  #js {:nodeType 1 :children (to-array nodes)})))]
                              (aset template "content"
                                    #js {:childNodes (to-array nodes)
-                                        :querySelectorAll (fn [_] (to-array ids))})))})
+                                        :querySelectorAll
+                                        (fn [selector]
+                                          (to-array
+                                           (filter (case selector
+                                                     "[id]" #(some? (.getAttribute % "id"))
+                                                     "[hx-preserve], [data-hx-preserve], [id='--htmx-preserve-pantry--']"
+                                                     #(or (some? (.getAttribute % "hx-preserve"))
+                                                          (some? (.getAttribute % "data-hx-preserve"))
+                                                          (= "--htmx-preserve-pantry--" (.getAttribute % "id"))))
+                                                   elements)))})))})
               template)))
+    (aset document "getElementById" (constantly nil))
     (aset document
           "querySelectorAll"
           (fn [selector]
@@ -1640,6 +1649,53 @@
         (core/on-before-swap! runtime (:event swap))
         (is (= (not allowed?) @(:prevented? swap)) (pr-str [local ancestor detail spec global-focus? response]))
         (is (= allowed? (aget (:detail swap) "shouldSwap")))
+        (is (= (if allowed? 1 0) @captures)))
+      (when allowed? (after-swap! runtime root xhr))
+      (after-request! runtime root xhr true)
+      (is (= (if allowed? #{} #{requirement})
+             (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+      (is (nil? (core/active-request runtime root))))))
+
+(deftest managed-replacement-refuses-global-preservation-effects-test
+  (doseq [mode ["innerHTML" "outerHTML"]
+          {:keys [attrs pantry? on-target? allowed?]}
+          [{:attrs {"id" "ordinary"} :allowed? true}
+           {:attrs {"hx-preserve" ""} :allowed? false}
+           {:attrs {"id" "foreign" "hx-preserve" "true"} :allowed? false}
+           {:attrs {"id" "foreign" "data-hx-preserve" "false"} :allowed? false}
+           {:attrs {"hx-preserve" "true"} :on-target? true :allowed? false}
+           {:attrs {"id" "--htmx-preserve-pantry--"} :allowed? false}
+           {:pantry? true :allowed? false}]]
+    (let [captures (atom 0)
+          {:keys [runtime root document-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          candidate (.-testPrimaryTarget (make-root "fragment-1"))
+          child (make-element {:attrs attrs})
+          old-attr (.-getAttribute root)
+          html "controlled preservation shape"
+          requirement (progression/requirement
+                       {:tx-id 808 :system-time "2026-08-26T08:10:08Z"})]
+      (if (= mode "outerHTML")
+        (if on-target?
+          (let [original (.-getAttribute candidate)]
+            (aset candidate "getAttribute" (fn [k] (get attrs k (original k)))))
+          (aset candidate "children" #js [child]))
+        nil)
+      (swap! (:parsed-responses document-fixture) assoc html
+             (if (= mode "outerHTML") [candidate] [child]))
+      (aset (:document document-fixture) "getElementById"
+            (fn [id] (when (and pantry? (= id "--htmx-preserve-pantry--")) child)))
+      (aset root "getAttribute" (fn [k] (if (= k "hx-swap") mode (old-attr k))))
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (let [fixture (make-event "htmx:beforeSwap"
+                                {:elt root :xhr xhr :should-swap true
+                                 :extra-detail {:serverResponse html}})]
+        (core/on-before-swap! runtime (:event fixture))
+        (is (= (not allowed?) @(:prevented? fixture)) (pr-str [mode attrs pantry? on-target?]))
+        (is (= allowed? (aget (:detail fixture) "shouldSwap")))
         (is (= (if allowed? 1 0) @captures)))
       (when allowed? (after-swap! runtime root xhr))
       (after-request! runtime root xhr true)

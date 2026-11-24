@@ -1569,6 +1569,16 @@
              (recur (.-parentElement element)))
            true))))
 
+(defn- passive-preservation?
+  "HTMX 2.0.7 resolves hx-preserve ids across the document and restores
+   the global preservation pantry after every HTML swap. Admit neither
+   preservation declarations nor the reserved pantry in this profile."
+  [runtime content]
+  (and (nil? (.getElementById (:document runtime) "--htmx-preserve-pantry--"))
+       (zero? (.-length (.querySelectorAll
+                        content
+                        "[hx-preserve], [data-hx-preserve], [id='--htmx-preserve-pantry--']")))))
+
 (defn- replacement-response-shape?
   "Inspect inert parsed partial HTML, never insert it into the live document.
    Outer replacement must leave one canonical direct-child target; inner
@@ -1593,14 +1603,15 @@
                                         (str/blank? (.-nodeValue %))) nodes)
               matching (filter #(= id (element-attr % "id"))
                                (array-seq (.querySelectorAll content "[id]")))]
-          (if outer?
-            (let [candidate (first significant)]
-              (and (= 1 (count significant))
-                   (node-element? candidate)
-                   (= (.-localName (primary-target root)) (.-localName candidate))
-                   (= 1 (count matching))
-                   (identical? candidate (first matching))))
-            (empty? matching)))))
+          (and (passive-preservation? runtime content)
+               (if outer?
+                 (let [candidate (first significant)]
+                   (and (= 1 (count significant))
+                        (node-element? candidate)
+                        (= (.-localName (primary-target root)) (.-localName candidate))
+                        (= 1 (count matching))
+                        (identical? candidate (first matching))))
+                 (empty? matching))))))
     (catch :default _ false)))
 
 (defn on-before-swap!
