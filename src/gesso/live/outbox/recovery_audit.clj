@@ -8,14 +8,15 @@
    caller's clock, but is not transaction-time reclaim authority.
 
    Pagination is bounded and ordered by the physical unsigned UUID keyset.
-   A page is one current read, NOT a snapshot of other pages or a claim that
+   Each page awaits a newly captured submitted log frontier on its selected
+   node. A page is one current read, NOT a snapshot of other pages or a claim that
    the outbox did not change during scanning. Start a NEW scan from nil after
    any continuation if completeness matters. This API neither acquires nor
    sends nor acknowledges, does not authorize an installed source or client,
    and never proves browser adoption or exactly-once delivery."
   (:require [clojure.string :as str]
             [gesso.live.outbox :as outbox]
-            [xtdb.api :as xt])
+            [gesso.live.outbox.read-frontier :as frontier])
   (:import [java.time ZonedDateTime]))
 
 (def ^:private allowed-keys #{:source-id :limit :after})
@@ -126,11 +127,7 @@
   [node opts]
   (validate! opts)
   (let [limit (get opts :limit default-page-size)
-        rows (try
-               (xt/q node (query opts))
-               (catch InterruptedException cause
-                 (.interrupt (Thread/currentThread))
-                 (throw cause)))]
+        rows (frontier/q-from! node (query opts))]
     (when-not (vector? rows)
       (reject! :invalid-physical-page {}))
     (when (> (count rows) (inc limit))
