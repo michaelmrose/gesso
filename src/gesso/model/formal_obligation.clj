@@ -17,7 +17,8 @@
    canonical guards declared by each admitted plan and checks their truth
    against the observed pre-write state."
   (:require [gesso.model.command :as command]
-            [gesso.model.formal-transition :as formal]))
+            [gesso.model.formal-transition :as formal]
+            [gesso.model.tx :as tx]))
 
 (def assurance-scope
   {:subject :gesso.model.formal-obligation/prepared-serial-safety-v1
@@ -131,30 +132,54 @@
                         (= (get document key) value)))
                  (:model/checks expected)))))
 
+(defn- field-count-check
+  "Recover the exact canonical ASSERT from the admitted plan, not from the
+   transition's reported checks. Share the SQL constructor only; independently
+   assess the top-level persisted field count against the recorded prestate."
+  [before assertion]
+  (let [expected-count (get-in assertion [:assert 1])
+        query (get-in assertion [:assert 2 :select 0 0 1 1])
+        table (:from query)
+        id (get-in query [:where 2 1])
+        entity (when (symbol? table) (keyword (namespace table) (name table)))]
+    (when-not (and entity (some? id)
+                   (= assertion (tx/assert-document-field-count entity id expected-count)))
+      (throw (ex-info "Unsupported assertion in admitted formal subject."
+                      {:error/type ::unsupported-assertion})))
+    (let [target [entity id]
+          document (get before target)]
+      {:kind :document-field-count
+       :target target
+       :expected-count expected-count
+       :satisfied? (and (map? document)
+                        (= expected-count (count (remove nil? (vals document)))))})))
+
 (defn- required-checks
   "Independently reconstruct the canonical precondition inventory and its
    truth values from the *admitted* plan and this observation's before-state.
 
    A dependency guard on a document already updated by the plan is redundant:
    normalize-plan admits it only when it agrees with that command's version.
+   Canonical field-count assertions precede all dependency and command checks.
    All other dependency guards precede the commands' own preconditions.
    No application-specific decision dependencies are inferred here."
-  [{:keys [commands guards]} before]
+  [{:keys [commands guards assertions]} before]
   (let [written-targets (set (map command/target commands))
         independent-guards
         (remove (fn [guard]
                   (contains? written-targets (command/guard-target guard)))
                 guards)]
     (into
-     (mapv (fn [guard]
-             (let [target (command/guard-target guard)
-                   expected (:model/expected guard)]
-               {:kind :dependency-version
-                :target target
-                :expected expected
-                :satisfied? (satisfies-expected-version?
-                             before target expected)}))
-           independent-guards)
+     (into (mapv (partial field-count-check before) assertions)
+           (map (fn [guard]
+                  (let [target (command/guard-target guard)
+                        expected (:model/expected guard)]
+                    {:kind :dependency-version
+                     :target target
+                     :expected expected
+                     :satisfied? (satisfies-expected-version?
+                                  before target expected)}))
+                independent-guards))
      (map (fn [model-command]
             (let [target (command/target model-command)]
               (if (command/create? model-command)

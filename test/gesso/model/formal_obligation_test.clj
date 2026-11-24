@@ -22,6 +22,7 @@
    [gesso.model.command :as command]
    [gesso.model.formal-obligation :as obligation]
    [gesso.model.formal-transition :as formal]
+   [gesso.model.tx :as tx]
    [gesso.model.tx-model :as reference]
    [recife.core :as recife]
    [recife.helpers :as helpers]))
@@ -67,6 +68,11 @@
    :guards [(command/guard :conditions right version)]
    :emit false})
 
+(defn- field-count-plan []
+  (assoc (guarded-update-plan) :assertions
+         [(tx/assert-document-field-count :conditions :right 5)
+          (tx/assert-document-field-count :items :left 5)]))
+
 (def ^:private cases
   {:competing-updates
    {:subject (formal/prepared-subject
@@ -93,6 +99,18 @@
               {left-target left dependency-target right}
               [(guarded-update-plan)])
     :statuses [:committed]}
+
+   :valid-field-count
+   {:subject (formal/prepared-subject
+              {left-target left dependency-target right}
+              [(field-count-plan)])
+    :statuses [:committed]}
+
+   :stale-field-count
+   {:subject (formal/prepared-subject
+              {left-target left dependency-target (assoc right :extra false)}
+              [(field-count-plan)])
+    :statuses [:rejected]}
 
    :stale-dependency
    {:subject (formal/prepared-subject
@@ -340,7 +358,11 @@
    [:valid-dependency :reorder-dependency-checks]
    [:valid-dependency :fabricate-expected-version]
    [:stale-dependency :forge-stale-commit-with-checks]
-   [:stale-dependency :forge-stale-commit-without-checks]])
+   [:stale-dependency :forge-stale-commit-without-checks]
+   [:valid-field-count :omit-dependency-check]
+   [:valid-field-count :reorder-dependency-checks]
+   [:stale-field-count :forge-stale-commit-with-checks]
+   [:stale-field-count :forge-stale-commit-without-checks]])
 
 (deftest guarded-precondition-reconstruction-positive-controls-test
   (testing "real committed dependency/command checks are accepted"
@@ -400,13 +422,57 @@
             (pr-str trace-info))))))
 
 (deftest tlc-accepts-valid-and-stale-dependency-controls-test
-  (doseq [case-id [:valid-dependency :stale-dependency]]
+  (doseq [case-id [:valid-dependency :stale-dependency
+                   :valid-field-count :stale-field-count]]
     (testing (name case-id)
       (let [{:keys [trace trace-info distinct-states] :as result}
             (check! case-id :correct)]
         (is (= :ok trace) (pr-str result))
         (is (nil? trace-info) (pr-str result))
         (is (= 2 distinct-states) (pr-str result))))))
+
+(deftest field-count-obligation-reconstructs-canonical-prestate-checks-test
+  (doseq [[label dependency expected-status]
+          [[:exact right :committed]
+           [:nil-field (assoc right :optional nil) :committed]
+           [:nested-value (assoc right :value {:nested nil}) :committed]
+           [:false-field (assoc right :extra false) :rejected]
+           [:missing-field (dissoc right :value) :rejected]
+           [:missing-document nil :rejected]]]
+    (testing (name label)
+      (let [target [:scope/conditions :right]
+            initial (cond-> {left-target left}
+                      dependency (assoc target dependency))
+            plan (assoc (update-plan left :next) :assertions
+                        [(tx/assert-document-field-count :scope/conditions :right 5)
+                         (tx/assert-document-field-count :items :left 5)])
+            subject (formal/prepared-subject initial [plan])
+            state (last (execution subject [0]))
+            observation (peek (::formal/observations state))]
+        (is (= expected-status (:status observation)))
+        (is (= [:document-field-count :document-field-count :command-version]
+               (mapv :kind (:checks observation))))
+        (is (= {:kind :document-field-count :target target
+                :expected-count 5 :satisfied? (= :committed expected-status)}
+               (first (:checks observation))))
+        (is (= (when (= :rejected expected-status) (first (:checks observation)))
+               (:failed-precondition observation)))
+        (is (empty? (obligation/violated-obligations subject state)))))))
+
+(deftest field-count-obligation-rechecks-after-competing-write-test
+  (let [plan (assoc (update-plan left :next) :assertions
+                    [(tx/assert-document-field-count :items :right 5)])
+        writer {:commands [(command/update-command
+                            :items :expand right
+                            (assoc (updated right :expanded) :extra false) version)]
+                :emit false}
+        subject (formal/prepared-subject {left-target left right-target right}
+                                         [plan writer])]
+    (doseq [[order statuses] [[[0 1] [:committed :committed]]
+                              [[1 0] [:committed :rejected]]]]
+      (let [states (execution subject order)]
+        (is (= statuses (mapv :status (::formal/observations (last states)))))
+        (is (every? #(empty? (obligation/violated-obligations subject %)) states))))))
 
 (deftest malformed-obligation-input-fails-closed-test
   (let [subject (get-in cases [:competing-updates :subject])
