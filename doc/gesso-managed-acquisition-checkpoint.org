@@ -1,0 +1,173 @@
+#+TITLE: Gesso v2464 — Managed Acquisition Assurance Checkpoint
+#+SUBTITLE: Restricted single-target acquisition, v2429–v2463; physical qualification remains open
+#+DATE: 2026-11-24
+#+OPTIONS: toc:2 num:t
+#+STARTUP: overview
+
+* Scope and decision
+
+Documentation-only checkpoint against v2463 on typed-clojure
+(=06ce39140296d3b1f2ddb8aa533b3f0e034f51ab=).
+No runtime, gate, certificate, requirement denominator or deployment
+policy is changed.
+
+*Decision: accept bounded implementation and focused regression evidence
+for the restricted managed acquisition profile. Do not qualify physical
+browser execution or close the original Stage 8 packets.*
+
+This contributes to R5.1 06.03 and 08.08, Stage 8 packets 22–24
+and the served-artifact correspondence work in packet 25. Gate L
+(recovery preserves scope and adoption permission) is the principal
+recovery concern. Gates D, E, G and K remain relevant: enforcement
+authority, artifact binding, physical integration and the distinction
+between incorporation, delivery and knowledge. None is discharged by
+this checkpoint. The existing 62-packet ledger is a planning
+decomposition, not the original requirement denominator. Profile O
+does not inherit an exemption from physical qualification.
+
+* Implemented boundaries and evidence
+
+| Work | First applicable boundary | Bounded evidence |
+|------+---------------------------+------------------|
+| v2429–v2432 | Adapter terminal handling and continuity ownership | Unadopted debt retained; abandoned capture released; height-lock ownership not inferred from equal CSS |
+| v2433–v2440 | Adapter, stable owner, browser request admission | Synchronous swap restriction; automatic versus explicit-refresh; trusted click, expiring grant, unsent cancellation, retired owner/XHR fence |
+| v2443–v2446 | Framework rendering and selected canonical GET serialization | Inline script removals; inspectable restricted Hiccup; reject incoming OOB |
+| v2447–v2453 | Browser beforeOnLoad and beforeSwap | Request selection, exact physical target, response-control headers, replacement mode and shape, document and preservation effects |
+| v2454–v2456 | Browser, descriptor and selected response | Pinned extension declarations, shared acquisition predicates, direct SSE-swap/trigger refusal and listener placement |
+| v2457–v2459 | Existing rendered-surface preflight | Owner ancestry, logical identity, canonical target/listener, request, policy, connection and Refresh correspondence |
+| v2461–v2462 | Parsed response admission; configRequest and beforeRequest | Independent incoming OOB refusal; exact coordinator grant for both managed policies |
+| v2441, v2460–v2463 | Real HTTP/SSE/HTMX/Chromium integration test definitions | Explicit-refresh cancellation/recovery, mutation refusal/recovery and automatic grant competition/replay scenarios; physical execution unqualified |
+
+v2442 is a separate formal-obligation correction, not acquisition evidence.
+The boundaries are complementary. Passing a later boundary does not
+retroactively authorize a prior effect or confer a trusted principal.
+
+** Required causal distinctions
+
+An invalidation or advisory is not a DOM mutation permission. Under
+automatic policy the coordinator can issue a read acquisition; under
+explicit-refresh policy a trusted Refresh click grants an idle acquisition.
+A busy click is not permission for a successor. Both policies require the
+actual pending grant at configuration and physical request binding, with
+the current owner and target. A configuration event is not evidence that
+the request was sent; a successful HTTP terminal event is not adoption.
+Only an admitted swap followed by the correlated adoption observation
+can discharge the applicable acquisition debt. A rejected or abandoned
+acquisition preserves its outstanding requirements subject to owner retirement.
+
+A grant identifies a cooperative browser lifecycle action, not an
+authenticated HTTP principal, an authorized subscription, a database read
+basis, or an independent receipt of physical execution. The server must
+still authorize the actual read and subscription at its own boundaries.
+
+** Source and test anchors
+
+All paths below are relative to the repository. Source names are anchors
+for review, not a new independent checklist or issuer.
+
+- =src/gesso/live/acquisition.cljc=: static replacement, extension, OOB
+  and SSE affordance vocabulary.
+- =src/gesso/live/ui.clj=: =validate-acquisition-config!= and descriptor
+  consumption; =test/gesso/live/ui_test.clj= and =fragment_test.clj=
+  (in the same test directory) exercise descriptor and model paths.
+- =src/gesso/live/outbox/managed_html.clj=: =html-response= checks
+  inspectable selected GET content before canonical serialization;
+  =test/gesso/live/outbox/managed_html_test.clj= covers forbidden markup,
+  secondary effects and retained normal rendering.
+- =src/gesso/live/application_preflight/rendered_surface.clj=:
+  =acquisition-errors=, =identity-errors= and
+  =acquisition-correspondence-errors=. The existing static and dynamic
+  entry points share the scanner. Tests in
+  =test/gesso/live/application_preflight/rendered_surface_test.clj=
+  and =rendered_response_test.clj= (same directory) check both entry points.
+- =src/gesso/live/browser/core.cljs=: =managed-request-authorized?=,
+  =on-config-request!=, =on-before-request!=, =on-before-on-load!=,
+  =on-before-swap!=; exact target, response and lifecycle admission.
+  =test/gesso/live/browser/core_test.cljs= covers grant competition,
+  retirement, request/response refusal and debt/continuity observations.
+
+* Focused results and their applicability
+
+Fresh combined focused execution against the available v2428 archive plus
+subsequent source overlay, with relevant local production/test blobs
+compared to the remote v2463 tree. All fourteen inspected source, test and
+ledger blobs matched. This is not a claim that every dependency, generated
+artifact or file in the checkout was independently authenticated.
+
+| Current execution | Tests | Assertions | Failures | Errors |
+|-------------------+-------+------------+----------+--------|
+| JVM: UI, fragment, managed HTML, rendered surface, rendered response, fixture server | 239 | 1220 | 0 | 0 |
+| Compiled CLJS Node browser core | 77 | 1270 | 0 | 0 |
+| Total of these distinct focused suites | 316 | 2490 | 0 | 0 |
+
+Historical negative controls provide additional, revision-relative evidence:
+v2458 against v2457 yielded 29 failing assertions; disabling v2461's
+incoming OOB guard yielded 24; v2462 against v2461 yielded 28.
+These are not additional passing assertions or a current mutation-coverage
+denominator. The fresh run is not a full Ygg, release, physical browser,
+Biff/XTDB or formal qualification run.
+
+** Physical scenarios and stopping condition
+
+In =test/gesso/live/browser/chromium_integration.clj=:
+
+- =explicit-refresh-preserves-debt-across-cancelled-physical-swap-test=:
+  cancelled physical acquisition, retained progression, later explicit adoption.
+- =managed-response-refusals-preserve-physical-footprint-and-debt-test=:
+  eleven prohibited acquisitions, unchanged target and foreign-node identity,
+  title, URL, event/continuity state, then valid recovery carrying both debts.
+- =automatic-acquisition-grant-survives-competing-real-htmx-requests-test=:
+  idle ungranted GET, competition in capture phase, exact physical progression,
+  successor acquisition and replay of consumed grant.
+
+Status: *implemented, unqualified*. The v2441 and v2460 physical attempts
+failed at fixture navigation with net::ERR_BLOCKED_BY_ADMINISTRATOR.
+The v2460 advanced runtime build succeeded, but is historical, not an
+exact-v2463 advanced-runtime qualification. The newer scenario definitions
+loaded; their physical assertions have not executed. Fixture-server tests,
+syntax checks and controlled parsed-node tests cannot substitute for them.
+
+On a supported host, run the current production advanced runtime build
+and =bb test:browser:integration= with a supported Chromium. Preserve
+the tested source, actual served artifact, HTMX/SSE versions, Chromium
+version and strict exit/result evidence. Do not treat a navigation refusal,
+skipped scenario, syntax check or mock DOM success as a physical pass.
+Require the actual positive and adversarial effects to execute, with
+the request counts, debt, target and continuity observations asserted.
+Also run the broader selected browser and release requirements before
+claiming any complete packet.
+
+* Remaining assumptions and nonclaims
+
+- HTMX 2.0.7, SSE extension 2.2.4, trusted bundled assets and cooperative
+  event delivery. Names alone do not authenticate extension implementations.
+  This is not arbitrary JavaScript isolation or a general HTML sanitizer.
+- Selected single-target GET replacement only. Native HTMX preservation,
+  unqualified extensions, selection and secondary mutations are not admitted.
+  Ordinary command/unmanaged paths retain their own contracts; they are not
+  certified by managed acquisition checks.
+- Template parsing and actual HTMX parsing/installation correspondence,
+  global runtime defaults, complete marker removal, external unmanaged
+  mutation sources, foreign DOM ID interactions, transport redirects and
+  executable effects outside the selected server boundary remain separate
+  qualification or mediation questions.
+- Surface-local supplied Hiccup evidence is not exhaustive reachable render
+  evidence, endpoint authority, actual served asset identity, or complete
+  deployed writer/reader inventory.
+- No claim of full optimistic settlement, all adapter traces, formal
+  browser refinement, installed HumanHelp Claim, multi-node operation,
+  Profile O/C/F release or Part XI milestone closure.
+
+* Next operational packet
+
+Keep the physical browser gate open; do not repeatedly add adjacent
+restriction wrappers merely to advance a revision number. Return to the
+existing ledger's priority of a selected original-source-to-installed
+Biff/XTDB/Live/browser path. First examine initial read and subscription
+authority and post-disconnect reacquisition (packets 25, 28–29, 31–32):
+identify the actual selected handler and authority scope, establish the
+first enforcing boundary, and test an authorized path and an adversarial
+scope or authority change. A valid coordinator grant or SSE notice must
+never supply a missing server authorization premise. Record bounded
+evidence and keep physical adoption distinct from delivery and storage.
+The browser qualification blocker remains pending in parallel.

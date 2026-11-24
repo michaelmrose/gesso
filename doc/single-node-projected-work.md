@@ -714,6 +714,12 @@ Existing evidence: Executable Choreo semantics, projection and JVM/Node parity t
 
 ### Stage 8 — Browser effects and continuity
 
+**v2464 evidence checkpoint (not a re-estimate):** See
+[managed acquisition assurance checkpoint](gesso-managed-acquisition-checkpoint.org)
+for the v2429–v2463 restricted acquisition implementation, fresh focused
+results, physical qualification blocker and next operational boundary.
+No original gate or packet is declared closed by that checkpoint.
+
 Existing evidence: Large adapter/CLJS/browser infrastructure and real Chromium convergence, extended through v2218–v2221 Biff recovery, late-interest and reconnect scenarios; general shell effects/served-generation correspondence remains partial.
 
 | # | Work package to close | Track | Estimated revisions | Status at v2319 |
