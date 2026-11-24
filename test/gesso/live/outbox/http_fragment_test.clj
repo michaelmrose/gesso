@@ -1156,6 +1156,40 @@
                        (or (:xtdb.error/code (ex-data e)) (:error/type (ex-data e)))))
                 (is (= (inc n) @calls))
                 (is (= (inc p) @policies))))
+            ;; Capture interruption before assertion reporting can consume it.
+            (let [n @calls p @policies
+                  observed (try
+                             (publication/execute-resolved!
+                              invocation (assoc options :construct!
+                                                (fn [_]
+                                                  (.interrupt (Thread/currentThread))
+                                                  construction)))
+                             nil
+                             (catch Exception e
+                               [(instance? InterruptedException e)
+                                (.isInterrupted (Thread/currentThread))])
+                             (finally (Thread/interrupted)))]
+              (is (= [true true] observed))
+              (is (= n @calls))
+              (is (= p @policies)))
+            ;; A real first abort permits policy evaluation, but cancellation
+            ;; during that callback must prevent the second submission.
+            (let [n @calls p @policies
+                  observed (try
+                             (publication/execute-resolved!
+                              invocation (assoc options :construct-after-abort!
+                                                (fn [_]
+                                                  (swap! policies inc)
+                                                  (.interrupt (Thread/currentThread))
+                                                  construction)))
+                             nil
+                             (catch Exception e
+                               [(instance? InterruptedException e)
+                                (.isInterrupted (Thread/currentThread))])
+                             (finally (Thread/interrupted)))]
+              (is (= [true true] observed))
+              (is (= (inc n) @calls))
+              (is (= (inc p) @policies)))
             ;; A second physical guard abort must not start a third attempt.
             (let [n @calls p @policies e (failure #(run! initial))]
               (is (= :xtdb/assert-failed (:xtdb.error/code (ex-data e))))

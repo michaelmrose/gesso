@@ -267,6 +267,11 @@
        :intents intents :record record})))
 
 (defn- execute-resolved-plan! [ctx {:keys [ops intents record]}]
+  ;; A constructor may finish after its request has been cancelled. Check
+  ;; at the last shared boundary before the physical submission, without
+  ;; consuming the interrupt flag. This is not atomic with provider entry.
+  (when (.isInterrupted (Thread/currentThread))
+    (throw (InterruptedException. "Durable model submission interrupted")))
   (assoc (xtdb/execute-tx-from! ctx ops)
          :outbox/intents intents :command/record record))
 
