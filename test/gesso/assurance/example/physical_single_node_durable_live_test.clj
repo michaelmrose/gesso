@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-durable-live-test
-  "v2349: Explicit atomic publication mode through the installed session handler."
+  "v2350: Explicit atomic publication mode through the installed session handler."
   (:require [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [gesso.assurance.example.physical-single-node-live :as fixture]
@@ -296,4 +296,65 @@
         (let [[{:keys [ring-admission-status outbox-worker-status live-system]} _] @app*]
           (is (= {:accepting? false :active 0} (ring-admission-status)))
           (is (= :stopped (:status (outbox-worker-status))))
+          (is (live/closed? live-system)))))))
+
+(deftest managed-sse-retirement-retries-after-close-hooks-before-provider-shutdown
+  (let [app* (promise)
+        session* (promise)
+        retry-entered (promise)
+        release-retry (promise)
+        attempts (atom 0)
+        real-cancel @#'live/cancel-sse!
+        real-start @#'live/start-sse!]
+    (with-redefs [live/start-sse! (fn [& args]
+                                  (let [started (apply real-start args)]
+                                    (deliver session* started)
+                                    started))
+                  live/cancel-sse! (fn [started]
+                                     (case (swap! attempts inc)
+                                       1 (do (real-cancel started)
+                                             (throw (ex-info "post-close cleanup failure" {})))
+                                       2 (do (deliver retry-entered true)
+                                             @release-retry
+                                             (real-cancel started))
+                                       (real-cancel started)))]
+      (let [scope (future
+                    (session/with-session-policy!
+                     policy
+                     (fn [{:keys [source issue!]}]
+                       (let [writer (issue! :actor/writer)]
+                         (fixture/with-managed-durable-granted-live-proving-application!
+                          "managed-sse-retirement" source :biff-jetty-http1
+                          {:worker-id "managed-sse-retirement-worker" :poll-ms 20}
+                          (fn [{:keys [handler] :as app}]
+                            (let [response (handler {:request-method :get
+                                                     :uri fixture/events-uri
+                                                     :headers (headers writer)})]
+                              (deliver app* [app writer (:status response)]))
+                            :callback-finished))))))]
+        (try
+          (is (= true (deref retry-entered 10000 ::timeout)))
+          (let [[{:keys [node live-system loopback-base-url outstanding-sse-count
+                         sse-retirement-status outbox-worker-status]} writer status]
+                (deref app* 5000 nil)
+                started (deref session* 5000 nil)]
+            (is (= 200 status))
+            (is (stream/closed? (:stream started)))
+            (is (true? ((:source-closed? started))))
+            ;; The close hooks have retired the open-session inventory, but
+            ;; the failed cancellation still owns its shutdown obligation.
+            (is (zero? (outstanding-sse-count)))
+            (is (= {:pending 1 :failed-attempts 1 :completed? false}
+                   (sse-retirement-status)))
+            (is (= :stopped (:status (outbox-worker-status))))
+            (is (empty? (rows node)))
+            (is (not (live/closed? live-system)))
+            (is (= 503 (:status (post! loopback-base-url release (headers writer)))))
+            (is (= ::blocked (deref scope 100 ::blocked))))
+          (finally (deliver release-retry true)))
+        (is (= :callback-finished (deref scope 10000 ::timeout)))
+        (let [[{:keys [live-system sse-retirement-status]} _ _] @app*]
+          (is (= 2 @attempts))
+          (is (= {:pending 0 :failed-attempts 1 :completed? true}
+                 (sse-retirement-status)))
           (is (live/closed? live-system)))))))

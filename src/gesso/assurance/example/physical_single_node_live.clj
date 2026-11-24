@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2349: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2350: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -284,6 +284,54 @@
         (live/cancel-sse! started)
         (reject! :live-session-registry-closed)))))
 
+(defn- retire-scoped-sessions! [registry]
+  ;; Ring admission has already drained. Keep an independent shutdown
+  ;; snapshot: a close hook may remove a session from :sessions BEFORE its
+  ;; cancellation returns or even if that cancellation subsequently throws.
+  ;; The lexical Biff/XTDB scope must not unwind on an incomplete release.
+  ;; Like scoped worker retirement, this can wait indefinitely on a broken
+  ;; provider. It is NOT evidence of downstream Netty writer completion.
+  (let [[before _] (swap-vals! registry
+                               (fn [state]
+                                 (if (:accepting? state)
+                                   (assoc state :accepting? false
+                                          :retirement {:pending (count (:sessions state))
+                                                       :failed-attempts 0
+                                                       :completed? false})
+                                   state)))]
+    (when (:accepting? before)
+      (let [interrupted? (volatile! (Thread/interrupted))
+            preserve-interrupt! (fn []
+                                  (when (Thread/interrupted)
+                                    (vreset! interrupted? true)))]
+        (try
+          (loop [remaining (vec (vals (:sessions before)))]
+            (if (empty? remaining)
+              (swap! registry assoc-in [:retirement :completed?] true)
+              (let [retry (reduce
+                           (fn [failed session]
+                             (try
+                               (live/cancel-sse! session)
+                               (when-not (and (stream/closed? (:stream session))
+                                              (true? ((:source-closed? session))))
+                                 (reject! :incomplete-scoped-sse-release))
+                               (swap! registry update-in [:retirement :pending] dec)
+                               failed
+                               (catch Exception error
+                                 (when (instance? InterruptedException error)
+                                   (vreset! interrupted? true))
+                                 (swap! registry update-in [:retirement :failed-attempts] inc)
+                                 (conj failed session))
+                               (finally (preserve-interrupt!))))
+                           [] remaining)]
+                (when (seq retry)
+                  (try (Thread/sleep 20)
+                       (catch InterruptedException _ (vreset! interrupted? true))))
+                (recur retry))))
+          (finally
+            (preserve-interrupt!)
+            (when @interrupted? (.interrupt (Thread/currentThread)))))))))
+
 (defn- build-handler [app live-system registered-streams assets principal-source]
   (let [original (:handler app)
         scope {:topic :gesso-proving-reservation :id (:slot-id app)}]
@@ -385,7 +433,9 @@
   (when principal-source
     (principal/checked-test-policy! principal-source))
   (let [live-system (live/create)
-        registered-streams (atom {:accepting? true :sessions {}})
+        registered-streams (atom {:accepting? true :sessions {}
+                                  :retirement {:pending 0 :failed-attempts 0
+                                               :completed? false}})
         guarded* (atom nil)
         admission (ring-admission)]
     (try
@@ -450,6 +500,7 @@
                          :live-handler installed
                          :live-system live-system
                          :outstanding-sse-count (fn [] (count (:sessions @registered-streams)))
+                         :sse-retirement-status (fn [] (:retirement @registered-streams))
                          :live-report
                          (cond-> (report app)
                            (= :durable-outbox publication-selection)
@@ -487,14 +538,19 @@
                   principal-source
                   (assoc :principal-handler guarded
                          :principal-source principal-source)))
-               (finally ((:close-and-await! admission))))))))
+               (finally
+                 ((:close-and-await! admission))
+                 ;; Retire the response producers before returning to the
+                 ;; enclosing Biff listener/XTDB owner. In managed mode the
+                 ;; callback has already drained and retired its worker.
+                 (retire-scoped-sessions! registered-streams)))))))
       (finally
-        (let [[before _] (swap-vals! registered-streams assoc :accepting? false)]
-          (try
-            (doseq [started (vals (:sessions before))]
-              (live/cancel-sse! started))
-            (finally
-              (live/close! live-system))))))))
+        ;; Startup failure fallback; ordinary callback exit has already
+        ;; retired sessions while the enclosing providers were available.
+        (try
+          ((:close-and-await! admission))
+          (retire-scoped-sessions! registered-streams)
+          (finally (live/close! live-system)))))))
 
 (defn with-live-proving-application!
   "Run the existing unguarded diagnostic Live/Biff/XTDB fixture. The exact
