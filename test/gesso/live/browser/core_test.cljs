@@ -187,6 +187,9 @@
                                                      "[hx-ext], [data-hx-ext]"
                                                      #(or (some? (.getAttribute % "hx-ext"))
                                                           (some? (.getAttribute % "data-hx-ext")))
+                                                     "[hx-swap-oob], [data-hx-swap-oob]"
+                                                     #(or (some? (.getAttribute % "hx-swap-oob"))
+                                                          (some? (.getAttribute % "data-hx-swap-oob")))
                                                      "[hx-preserve], [data-hx-preserve], [id='--htmx-preserve-pantry--']"
                                                      #(or (some? (.getAttribute % "hx-preserve"))
                                                           (some? (.getAttribute % "data-hx-preserve"))
@@ -1731,6 +1734,50 @@
       (after-request! runtime root xhr true)
       (is (= (if allowed? #{} #{requirement})
              (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements]))))))
+
+(deftest managed-replacement-refuses-incoming-oob-effects-test
+  (doseq [mode ["innerHTML" "outerHTML"]
+          {:keys [attrs nested? allowed?]}
+          [{:attrs {"data-description" "hx-swap-oob"} :allowed? true}
+           {:attrs {"hx-swap-oob" "true"} :allowed? false}
+           {:attrs {"data-hx-swap-oob" ""} :allowed? false}
+           {:attrs {"hx-swap-oob" "false"} :nested? true :allowed? false}
+           {:attrs {"data-hx-swap-oob" "innerHTML:#foreign"} :nested? true :allowed? false}]]
+    (let [captures (atom 0)
+          {:keys [runtime root document-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          candidate (.-testPrimaryTarget (make-root "fragment-1"))
+          child (make-element {:attrs (assoc attrs "id" "foreign")})
+          wrapper (make-element {})
+          html "controlled OOB shape"
+          old-attr (.-getAttribute root)
+          requirement (progression/requirement
+                       {:tx-id 810 :system-time "2026-08-26T08:10:10Z"})]
+      (aset wrapper "children" #js [child])
+      (when (= mode "outerHTML")
+        (if nested?
+          (aset candidate "children" #js [wrapper])
+          (let [original (.-getAttribute candidate)]
+            (aset candidate "getAttribute" (fn [k] (get attrs k (original k)))))))
+      (swap! (:parsed-responses document-fixture) assoc html
+             (if (= mode "outerHTML") [candidate] [(if nested? wrapper child)]))
+      (aset root "getAttribute" (fn [k] (if (= k "hx-swap") mode (old-attr k))))
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (let [fixture (make-event "htmx:beforeSwap"
+                                {:elt root :xhr xhr :should-swap true
+                                 :extra-detail {:serverResponse html}})]
+        (core/on-before-swap! runtime (:event fixture))
+        (is (= (not allowed?) @(:prevented? fixture)) (pr-str [mode attrs nested?]))
+        (is (= allowed? (aget (:detail fixture) "shouldSwap")))
+        (is (= (if allowed? 1 0) @captures)))
+      (when allowed? (after-swap! runtime root xhr))
+      (after-request! runtime root xhr true)
+      (is (= (if allowed? #{} #{requirement})
+             (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+      (is (nil? (core/active-request runtime root))))))
 
 (deftest managed-replacement-refuses-global-preservation-effects-test
   (doseq [mode ["innerHTML" "outerHTML"]

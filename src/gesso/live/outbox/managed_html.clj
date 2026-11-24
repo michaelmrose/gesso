@@ -45,7 +45,7 @@
       (cond
         ;; Selected fragment GETs have only a primary-target contract.
         ;; An OOB marker creates a separate mutation, even inside a template.
-        (#{"hx-swap-oob" "data-hx-swap-oob"} attribute)
+        (some #{attribute} acquisition/oob-swap-attributes)
         (reject! :undeclared-oob-effect path {:attribute attribute})
 
         (acquisition/unadmitted-sse-affordance? attribute v)

@@ -23,6 +23,9 @@
        (every? #{"" "sse" "ignore:sse"}
                (str/split (str/replace (or value "") " " "") #","))))
 
+(def oob-swap-attributes
+  ["hx-swap-oob" "data-hx-swap-oob"])
+
 (def sse-affordance-attributes
   ["sse-connect" "data-sse-connect" "sse-swap" "data-sse-swap"
    "sse-close" "data-sse-close" "data-gesso-live-invalidation"

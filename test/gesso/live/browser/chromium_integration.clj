@@ -4241,6 +4241,10 @@
                     :response (html-response (canonical "<span hx-ext='debug'>forbidden</span>"))}
                    {:label :sse
                     :response (html-response (canonical "<span sse-swap='live-update'>forbidden</span>"))}
+                   {:label :incoming-oob
+                    :response (html-response (canonical "<span id='fixture-foreign' hx-swap-oob='true'>forbidden</span>"))}
+                   {:label :incoming-data-oob
+                    :response (html-response (canonical "<section><span data-hx-swap-oob='innerHTML:#fixture-foreign'>forbidden</span></section>"))}
                    {:label :request-selection
                     :attribute ["hx-select-oob" "#fixture-foreign"]
                     :response (html-response (canonical "<span id='fixture-foreign'>forbidden</span>"))}

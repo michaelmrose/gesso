@@ -1618,6 +1618,15 @@
              (recur (.-parentElement element)))
            true))))
 
+(defn- passive-oob-content?
+  "HTMX extracts OOB elements before the primary swap, even if the primary
+   wrapper has the correct identity. Refuse every OOB attribute spelling
+   recognized by the shared canonical response contract."
+  [content]
+  (zero? (.-length (.querySelectorAll
+                    content
+                    (str/join ", " (map #(str "[" % "]") acquisition/oob-swap-attributes))))))
+
 (defn- passive-preservation?
   "HTMX 2.0.7 resolves hx-preserve ids across the document and restores
    the global preservation pantry after every HTML swap. Admit neither
@@ -1665,6 +1674,7 @@
                                (array-seq (.querySelectorAll content "[id]")))]
           (and (every? admitted-extension-declarations?
                        (array-seq (.querySelectorAll content "[hx-ext], [data-hx-ext]")))
+               (passive-oob-content? content)
                (passive-preservation? runtime content)
                (passive-sse-content? nodes)
                (if outer?
