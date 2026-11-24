@@ -836,6 +836,7 @@
         projected (atom [])
         streams (atom [])
         observer (atom nil)
+        page-basis (atom nil)
         fragment-reads (atom [])
         credentials {"a" (issue! :fixture/helper-1) "b" (issue! :fixture/helper-2)
                      "reader" (issue! :fixture/reader)
@@ -975,17 +976,24 @@
      {:operations {:request/claim operation}
       :route-capabilities (fixture/route-capabilities {:request/claim operation})
       :principal-fn principal-fn
-      :rendered-surfaces {:board [:main (fixture/rendered-operation-button
-                                       (fixture/render-context {:request/claim operation}) :request/claim
-                                       "/operations/request/claim")]}}
+      :rendered-surfaces {:board [:main (browser/claim-action (fixture/render-context {:request/claim operation})
+                                                 fixture/rendered-basis "fixture-csrf")]}}
      (fn [{:keys [assembly report]}]
        (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
        (with-open [client (HttpClient/newHttpClient)]
         (let [delegate (if (= :valid recovery-mode)
                          (browser/shell-handler
                           (get-in assembly [:operation-acquisition-assembly :acquisition-assembly :realizations :request-list :live-app])
+                          (get-in assembly [:operation-acquisition-assembly :execution-assembly :route-assembly :operation-assembly :operation-capabilities])
                           read-authorized?
-                          #(fixture/generic-render (fixture/generic-query (assoc % :uri "/fragments/request-list") "l1")))
+                          (fn [ctx] (let [who (:principal-id ((:acquire-principal! source) ctx))]
+                                      (when (contains? #{:fixture/helper-1 :fixture/helper-2} who)
+                                        ((:browser-csrf-token! source) ctx who))))
+                          (fn [ctx] (let [{:keys [basis rows]} (frontier/q-with-basis! ctx ["SELECT r.status, a.helper FROM requests r LEFT JOIN request_assignments a ON r._id = a.request_id WHERE r.request$location_id = ? AND r._id = ?" "l1" "r1"])
+                                          row (first rows)]
+                                      (reset! page-basis basis)
+                                      {:node (fixture/generic-render {:fragment/id "request-list-l1" :row row})
+                                       :basis basis :open? (= :open (:status row))})))
                          (fn [_] (g/html-response [:div "fallback"])))
               started (host/start! assembly delegate config)
              node (:xtdb/connectable started)
@@ -1042,6 +1050,7 @@
                (is (= 200 (.statusCode response)))
                (is (str/includes? (.body response) ">open<"))
                (is (str/includes? (.body response) ">unassigned<")))
+             (browser/verify-helper-pages! fragment! headers-for credentials page-basis)
              (let [page (fragment! "/claim-observer" (headers-for "reader"))
                    body (.body page)]
                (is (= 403 (.statusCode (fragment! "/claim-observer" {}))))
@@ -1115,6 +1124,7 @@
                (is (= #{{:topic :request :command-id id} {:topic :request-assignment :command-id id}}
                       (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$command_id AS command_id FROM gesso_live_outbox"]))))
                (is (= (cond-> #{[id :incorporated]} valid? (conj [loser-id :incorporated])) (set @projected)))
+               (when valid? (browser/verify-no-claim-action! fragment! (headers-for session)))
                (when-let [opened @observer]
                  (browser/verify! opened helper)
                  (is (some #(and (= "/fragments/request-list" (:uri %))

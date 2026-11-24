@@ -3,6 +3,10 @@
    Uses the production Live runtime and pinned HTMX/SSE assets; no synthetic
    invalidation, direct refresh trigger, or manual fragment fetch."
   (:require [clojure.java.io :as io]
+            [clojure.edn :as edn]
+            [clojure.data.json :as json]
+            [clojure.string :as str]
+            [clojure.xml :as xml]
             [clojure.test :refer [is]]
             [gesso.core :as g]
             [gesso.live.core :as live]
@@ -10,9 +14,21 @@
             [gesso.live.browser.chromium :as chromium])
   (:import [com.microsoft.playwright BrowserContext Page]
            [com.microsoft.playwright.options Cookie SameSiteAttribute]
-           [java.util.function BooleanSupplier]))
+           [java.util.function BooleanSupplier]
+           [java.io ByteArrayInputStream]
+           [java.nio.charset StandardCharsets]))
 
-(defn shell-handler [compiled authorized? initial-node]
+(defn claim-action [ctx basis csrf]
+  (ui/post-button ctx
+                  {:to "/operations/request/claim" :label "Claim"
+                   :swap "none" :choreo/op :request/claim
+                   :optimistic-binding {:arguments {:request-id "r1"}
+                                        :observed-basis basis
+                                        :target-id "request-list-l1"}
+                   :button-attrs {:id "claim-request"
+                                  :hx-headers (json/write-str {"x-gesso-proving-csrf" csrf})}}))
+
+(defn shell-handler [compiled capabilities authorized? csrf-for initial-state]
   (let [assets {"/claim-assets/htmx.js" (slurp (io/resource "META-INF/resources/webjars/htmx.org/2.0.7/dist/htmx.min.js"))
                 "/claim-assets/sse.js" (slurp (io/resource "META-INF/resources/webjars/htmx-ext-sse/2.2.4/dist/sse.js"))
                 "/claim-assets/runtime.js" (slurp (or (System/getProperty "gesso.claim.browser.runtime")
@@ -25,19 +41,57 @@
                                "cache-control" "no-store"} :body (get assets (:uri ctx))}
         (and (= :get (:request-method ctx)) (= "/claim-observer" (:uri ctx)))
         (if (authorized? ctx)
-          (let [panel (live/model-fragment-panel compiled :request-list "l1"
+          (let [{:keys [node basis open?]} (initial-state ctx)
+                csrf (when open? (csrf-for ctx))
+                node (cond-> node csrf
+                       (conj (claim-action (ui/with-optimistic-operation-capabilities ctx capabilities)
+                                           basis csrf)))
+                panel (live/model-fragment-panel compiled :request-list "l1"
                          {:fragment-url "/fragments/request-list?scope=l1"
                           :stream-url "/streams/request-list?scope=l1"
                           :event "live-update"})]
-            (g/html-response [:html [:head [:meta {:charset "utf-8"}]
+            (assoc-in (g/html-response [:html [:head [:meta {:charset "utf-8"}]
                                      [:title "Claim observer"] [:link {:rel "icon" :href "data:,"}]]
-                              [:body (assoc panel 3 (initial-node ctx))
+                              [:body (assoc panel 3 node)
                                [:script {:src "/claim-assets/htmx.js"}]
                                [:script {:src "/claim-assets/sse.js"}]
                                (ui/live-script {:src "/claim-assets/runtime.js"})
-                               [:script {:src "/claim-assets/bootstrap.js" :defer true}]]]))
+                               [:script {:src "/claim-assets/bootstrap.js" :defer true}]]])
+                      [:headers "cache-control"] "no-store"))
           {:status 403 :headers {"content-type" "text/plain"} :body "Denied"})
         :else {:status 404 :headers {"content-type" "text/plain"} :body "Not found"}))))
+
+(defn- rendered-action [body]
+  (when-let [button (re-find #"<button\b[^>]*id=\"claim-request\"[^>]*>.*?</button>" body)]
+    (:attrs (xml/parse (ByteArrayInputStream. (.getBytes ^String button StandardCharsets/UTF_8))))))
+
+(defn verify-helper-pages!
+  "Exercise the exact serialized page for each session; no browser claim here."
+  [fragment! headers-for credentials observed-basis]
+  (doseq [who ["a" "b"]]
+    (let [response (fragment! "/claim-observer" (headers-for who))
+          body (.body response)
+          attrs (rendered-action body)
+          action (some-> (:data-gesso-live-optimistic attrs) edn/read-string)]
+      (is (= 200 (.statusCode response)))
+      (is (= "no-store" (.orElse (.firstValue (.headers response) "cache-control") "")))
+      (is (= "/operations/request/claim" (:hx-post attrs)))
+      (is (= "none" (:hx-swap attrs)))
+      (is (= {"x-gesso-proving-csrf" (get-in credentials [who :csrf-token])}
+             (some-> (:hx-headers attrs) json/read-str)))
+      (is (= {:operation :request/claim :plan-key :request/claim
+              :arguments {:request-id "r1"} :target-id "request-list-l1"
+              :observed-basis @observed-basis} action))
+      (is (not (str/includes? body (get-in credentials [who :session-id]))))))
+  (let [reader (fragment! "/claim-observer" (headers-for "reader"))]
+    (is (= 200 (.statusCode reader)))
+    (is (nil? (rendered-action (.body reader))))
+    (is (not (str/includes? (.body reader) (get-in credentials ["reader" :csrf-token]))))))
+
+(defn verify-no-claim-action! [fragment! headers]
+  (let [response (fragment! "/claim-observer" headers)]
+    (is (= 200 (.statusCode response)))
+    (is (nil? (rendered-action (.body response))))))
 
 (defn open! [base issued subscribed?]
   (let [harness (chromium/start! {:args ["--no-sandbox" "--disable-dev-shm-usage"]})]
