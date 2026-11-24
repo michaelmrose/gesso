@@ -535,6 +535,17 @@
 ;; Fragment descriptors, query, render, response
 ;; -----------------------------------------------------------------------------
 
+(deftest private-scope-requires-affirmative-boolean-authorization
+  (doseq [decision [true false nil :denied {:allowed? false} {} [] 0 "false"]]
+    (let [calls (atom [])
+          compiled (model/compile-live-app
+                    (assoc-in base-app [:scopes :store-queue :authorized?]
+                              (fn [ctx id] (swap! calls conj [ctx id]) decision)))
+          ctx {:principal "user-1"}]
+      (is (= (true? decision)
+             (model/authorized-for-scope? compiled ctx :store-queue "store-42")))
+      (is (= [[ctx "store-42"]] @calls)))))
+
 (deftest fragment-descriptor-and-dom-id-work
   (let [compiled (compiled-app)]
     (is (= :store-queue

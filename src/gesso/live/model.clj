@@ -555,10 +555,13 @@
 ;; -----------------------------------------------------------------------------
 
 (defn authorized-for-scope?
+  "Private scope admission requires an affirmative boolean decision. A
+   truthy diagnostic, lookup result or error map is not authorization.
+   Explicitly public scopes remain independent of the private predicate."
   [compiled ctx scope-name id]
   (let [{:keys [public? authorized?]} (scope-descriptor compiled scope-name)]
-    (or public?
-        (boolean (call authorized? ctx id)))))
+    (or (true? public?)
+        (true? (call authorized? ctx id)))))
 
 (defn require-scope-authorized!
   [compiled ctx scope-name id]

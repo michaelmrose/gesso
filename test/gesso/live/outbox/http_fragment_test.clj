@@ -24,6 +24,7 @@
             [gesso.live.optimistic.protocol :as protocol]
             [gesso.live.progression :as progression]
             [ring.util.codec :as codec]
+            [manifold.stream :as stream]
             [gesso.live.source :as source]
             [xtdb.api :as xt]
             [xtdb.basis :as basis]
@@ -152,6 +153,61 @@
               (is (= 200 (.statusCode (send! "/other" {}))))
               (is (= 1 @fallback))
               (finally (host/stop! started) (.close client)))))))))
+
+(deftest selected-read-and-subscription-require-affirmative-scope-decision
+  (let [decision (atom true)
+        authorizations (atom [])
+        queries (atom [])
+        fallback (atom 0)
+        resolve-id (fn [ctx _] (get-in ctx [:path-params :id]))]
+    (with-redefs [fixture/allow? (fn [ctx id]
+                                   (swap! authorizations conj [(:uri ctx) id])
+                                   @decision)
+                  fixture/generic-query (fn [_ id]
+                                          (swap! queries conj id)
+                                          {:fragment/id id})]
+      (with-assembly
+        (fn [assembly]
+          (let [started (host/start! assembly
+                                     (fn [_] (swap! fallback inc) {:status 200})
+                                     (assoc (config)
+                                            :assembled-fragments {:resolve-id resolve-id}
+                                            :assembled-sse {:resolve-id resolve-id :max-connections 1}))
+                handler (:biff.ring/handler started)
+                status (get started host/sse-status-key)
+                system (:gesso.live/system started)
+                fragment-path "/fragments/request-list/r1"
+                stream-path "/streams/request-list/r1"
+                request! (fn [path] (handler {:request-method :get :uri path}))]
+            (try
+              (is (= 200 (:status (request! fragment-path))))
+              (let [response (request! stream-path)]
+                (is (= 200 (:status response)))
+                (is (= 1 ((:occupied-count status))))
+                (is (= 1 (:subscription-count (source/stats (:source system)))))
+                (stream/close! (:body response)))
+              (is (loop [remaining 250]
+                    (cond (and (zero? ((:occupied-count status)))
+                               (zero? (:subscription-count (source/stats (:source system))))) true
+                          (zero? remaining) false
+                          :else (do (Thread/sleep 20) (recur (dec remaining))))))
+              ;; Even a previously admitted scope must obtain a new affirmative
+              ;; decision for each read and reconnect. No denial reaches query
+              ;; execution or installs a source interest.
+              (doseq [value [false nil :denied {:allowed? false} {} [] 0 "false"]]
+                (reset! decision value)
+                (is (= 403 (:status (request! fragment-path))) (pr-str value))
+                (let [response (request! stream-path)]
+                  (try (is (= 403 (:status response)) (pr-str value))
+                       (finally (when (= 200 (:status response))
+                                  (stream/close! (:body response))))))
+                (is (= ["r1"] @queries))
+                (is (zero? ((:occupied-count status))))
+                (is (zero? (:subscription-count (source/stats (:source system))))))
+              (is (= (vec (repeat 9 [[fragment-path "r1"] [stream-path "r1"]]))
+                     (mapv vec (partition 2 @authorizations))))
+              (is (zero? @fallback))
+              (finally (host/stop! started)))))))))
 
 (deftest selected-fragment-response-rejects-inline-script-test
   (let [rendered (atom [:section "ordinary"])
