@@ -156,7 +156,7 @@
      (=
       (tx/assert-none
        :widget
-       [:= :xt/id :widget-2])
+       [:= :xt/id [:lift :widget-2]])
       (tx/assert-document-absent
        :widget
        :widget-2)))
@@ -165,7 +165,7 @@
      (=
       (tx/assert-one
        :widget
-       [:= :xt/id :widget-1])
+       [:= :xt/id [:lift :widget-1]])
       (tx/assert-document-exists
        :widget
        :widget-1))))
@@ -183,7 +183,7 @@
 
          :where
          [:and
-          [:= :xt/id :widget-1]
+          [:= :xt/id [:lift :widget-1]]
           [:= :widget/revision [:lift 3]]
           [:= :widget/updated-at [:lift :t1]]]}]}
       (tx/assert-document-current
@@ -1806,19 +1806,19 @@
                    :fixture/subject
                    (:model/expected guard))
         conditions (rest (get-in assertion [:assert 2 :where]))]
-    (is (some #{[:= :xt/id id]} conditions))
+    (is (some #{[:= :xt/id [:lift id]]} conditions))
     (is (some #{[:= :fixture/details [:lift nested]]} conditions))
     (is (some #{[:= :fixture/tags [:lift tags]]} conditions))
     (is (some #{[:= :fixture/classification [:lift :fixture/active]]}
               conditions))
     (is (some #{[:= :fixture/revision [:lift 0]]} conditions))
     (is (every? (fn [[op field expected]]
-                  (or (= field :xt/id)
-                      (and (= := op)
-                           (= :lift (first expected))
-                           (= 2 (count expected)))))
+                  (and (= := op)
+                       (keyword? field)
+                       (= :lift (first expected))
+                       (= 2 (count expected))))
                 conditions)
-        "All version values, but not the document target, are lifted data")))
+        "All version values and the document target are lifted data")))
 
 (defn- v994-physical-value-case! [label before after]
   (with-open [node (xtn/start-node {})]
@@ -1868,3 +1868,34 @@
    "string"
    "literal unchanged"
    "literal changed"))
+
+
+(deftest canonical-document-identity-is-literal-data-in-physical-assertions
+  (with-open [node (xtn/start-node {})]
+    (let [id :fixture/keyword-id
+          original (assoc widget-new :xt/id id)
+          updated (command/bump-version original version :t3)
+          creation (command/create :widget original version)
+          mutation (command/update-command :widget :rename original updated version)
+          outcome (assoc widget-new :xt/id :fixture/outcome)
+          plan (fn [commands & [extra]]
+                 (tx/prepare {} (merge {:commands commands :emit false} extra)))
+          commit! (fn [commands & [extra]]
+                    (xt/execute-tx node (:tx-ops (plan commands extra))))
+          conflict? (fn [f] (try (f) false (catch Exception e
+                                             (= :xtdb/assert-failed (:xtdb.error/code (ex-data e))))))]
+      (is (some #{id} (rest (first (:tx-ops (plan [creation]))))))
+      (commit! [creation])
+      (is (conflict? #(commit! [creation])))
+      (commit! [mutation])
+      (is (conflict? #(commit! [mutation])))
+      (let [check (tx/assert-document-field-count :widget id (count updated))
+            guard (command/guard :widget updated version)]
+        (commit! [(command/create :outcome outcome version)]
+                 {:guards [guard] :assertions [check (tx/assert-document-exists :widget id)]}))
+      (is (= [{:xt/id id :revision 1}]
+             (xt/q node ["SELECT _id, widget$revision AS revision FROM widget"])))
+      (is (= [{:xt/id :fixture/outcome}] (xt/q node ["SELECT _id FROM outcome"])))
+      (is (conflict? #(commit! [(command/create :outcome (assoc outcome :xt/id :fixture/missing) version)]
+                              {:assertions [(tx/assert-document-exists :widget :fixture/missing)]})))
+      (is (= 1 (count (xt/q node ["SELECT _id FROM outcome"])))))))

@@ -95,7 +95,10 @@
             document-query (nth nest-expr 1)
             table (:from document-query)
             where (:where document-query)
-            id (nth where 2)
+            operand (nth where 2)
+            id (when (and (vector? operand) (= 2 (count operand))
+                          (= :lift (first operand)))
+                 (second operand))
             entity-type (when (and (symbol? table)
                                    (seq (name table)))
                           (if-let [schema (namespace table)]

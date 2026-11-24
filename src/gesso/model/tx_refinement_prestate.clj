@@ -90,7 +90,7 @@
     (throw (ex-info "Invalid finite-model check target." {})))
   (let [[entity-type id] target
         table (reference-table entity-type)
-        id-predicate [:= :xt/id id]
+        id-predicate [:= :xt/id [:lift id]]
         row-count (fn [predicate]
                     {:select [[[:count '*]]]
                      :from table

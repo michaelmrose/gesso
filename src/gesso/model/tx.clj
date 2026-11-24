@@ -210,7 +210,7 @@
 
   (assert-none
    entity-type
-   [:= :xt/id id]))
+   [:= :xt/id [:lift id]]))
 
 (defn assert-document-exists
   "Requires exactly one current document for [entity-type id]."
@@ -222,7 +222,7 @@
 
   (assert-one
    entity-type
-   [:= :xt/id id]))
+   [:= :xt/id [:lift id]]))
 
 (defn assert-document-current
   "Requires a current document to match one canonical expected-version value.
@@ -248,7 +248,7 @@
      entity-type
      (into
       [:and
-       [:= :xt/id id]]
+       [:= :xt/id [:lift id]]]
       (map
        (fn [[key value]]
          ;; Expected-version values are document data, not HoneySQL syntax.
@@ -294,7 +294,7 @@
         [:nest_one
          {:select [:*]
           :from (table-symbol entity-type)
-          :where [:= :xt/id id]}]]]]}]})
+          :where [:= :xt/id [:lift id]]}]]]]}]})
 
 ;; =============================================================================
 ;; Canonical fragments
