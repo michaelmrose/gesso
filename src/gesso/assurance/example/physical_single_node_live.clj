@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2325: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2329: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -25,6 +25,7 @@
             [clojure.string :as str]
             [gesso.assurance.example.physical-single-node-http :as physical-http]
             [gesso.assurance.example.physical-single-node-proving :as physical]
+            [gesso.assurance.example.physical-single-node-principal :as principal]
             [gesso.http :as http]
             [gesso.live.core :as live]
             [gesso.live.ui :as live.ui]))
@@ -266,48 +267,96 @@
           :else
           (original request))))))
 
+(defn- with-live-application* [slot-id principal-source f]
+  (when-not (fn? f)
+    (reject! :invalid-application-callback))
+  ;; A source with invalid operation/grant coverage must fail BEFORE
+  ;; embedded XTDB and the original Biff lifecycle are constructed.
+  (when principal-source
+    (principal/checked-test-policy! principal-source))
+  (let [live-system (live/create)
+        registered-streams (atom [])
+        guarded* (atom nil)]
+    (try
+      (let [assets (browser-assets!)]
+        (physical-http/with-http-proving-application!
+         slot-id
+         (fn [app original-handler]
+           ;; Compose the checked grant boundary INSIDE Live and BEFORE the
+           ;; original Biff start. The Live source only publishes following a
+           ;; 200 response from that protected delegate. A 401/403 therefore
+           ;; cannot reach XTDB or trigger an advisory notification.
+           (let [delegated (if principal-source
+                             (principal/guarded-test-handler!
+                              principal-source app original-handler)
+                             original-handler)]
+             (reset! guarded* (when principal-source delegated))
+             (build-handler (assoc app :handler delegated)
+                            live-system registered-streams assets)))
+         (fn [app]
+           (let [installed (:biff.ring/handler (:system app))
+                 guarded @guarded*]
+             (when-not (and (fn? installed)
+                            (identical? installed (:handler app))
+                            (not (identical? installed (:delegate-handler app)))
+                            (or (nil? principal-source)
+                                (and (fn? guarded)
+                                     (not (identical? guarded installed))
+                                     (not (identical? guarded
+                                                      (:delegate-handler app)))
+                                     ;; Repeat owner-derived route/policy
+                                     ;; correspondence AFTER Biff start.
+                                     (do (principal/checked-test-policy!
+                                          principal-source)
+                                         (= (:http-routes app)
+                                            (get-in app [:http-report :routes]))))))
+               (reject! :composed-live-handler-not-adopted-by-original-biff))
+             (f (cond->
+                  (assoc app
+                         :live-handler installed
+                         :live-system live-system
+                         :live-report
+                         (cond-> (report app)
+                           principal-source
+                           (assoc :selected-mutation-grants
+                                  :checked-before-delegated-xtdb-write
+                                  :principal-acquisition
+                                  :trusted-not-authenticated
+                                  :grant-policy-id (:policy-id principal-source)
+                                  :grant-catalog-id (:catalog-id principal-source)
+                                  :live-subscription-authorization
+                                  :not-checked))
+                         :live-fragment (live-fragment))
+                  principal-source
+                  (assoc :principal-handler guarded
+                         :principal-source principal-source)))))))
+      (finally
+        (doseq [started @registered-streams]
+          (live/cancel-sse! started))
+        (live/close! live-system)))))
+
 (defn with-live-proving-application!
-  "Run f within one embedded XTDB and one ORIGINAL Biff start that adopts
-   the composed Live Ring handler BEFORE module init/start. The handler in
-   :system is object-identical to :live-handler and :handler, so an HTTP
-   bridge serving the selected Biff handler exercises real installed routing
-   rather than a late caller-composed wrapper.
-
-   This fixture remains UNCERTIFIED: Biff startup is not an independently
-   authenticated deployment, it opens no HTTP listener itself, the initial
-   v1494 writer lacks complete authorization and provenance, and Live publish
-   after reported HTTP success is not atomic with XTDB. Selected actual
-   listener, proof issuer, writer completeness and release remain open.
-
-   Streams, Live resources and the embedded node are scoped to f. No
-   automatic transaction retry is permitted."
+  "Run the existing unguarded diagnostic Live/Biff/XTDB fixture. The exact
+   Live handler is installed at original Biff startup, but this entrypoint
+   makes NO authorization claim. For a selected test-only request-grant
+   wrapper on the same Biff handler, use with-granted-live-proving-application!.
+   Neither entrypoint provides authenticated sessions, CSRF, authorized SSE
+   subscriber disclosure, durable outbox or a release credential."
   ([f] (with-live-proving-application! (str "v2323-" (random-uuid)) f))
   ([slot-id f]
-   (when-not (fn? f)
-     (reject! :invalid-application-callback))
-   (let [live-system (live/create)
-         registered-streams (atom [])]
-     (try
-       (let [assets (browser-assets!)]
-         (physical-http/with-http-proving-application!
-          slot-id
-          (fn [app original-handler]
-            ;; This factory runs before Biff's ORIGINAL init/start. The
-            ;; delegated physical operation remains the v1495 source path.
-            (build-handler (assoc app :handler original-handler)
-                           live-system registered-streams assets))
-          (fn [app]
-            (let [installed (:biff.ring/handler (:system app))]
-              (when-not (and (fn? installed)
-                             (identical? installed (:handler app))
-                             (not (identical? installed (:delegate-handler app))))
-                (reject! :composed-live-handler-not-adopted-by-original-biff))
-              (f (assoc app
-                        :live-handler installed
-                        :live-system live-system
-                        :live-report (report app)
-                        :live-fragment (live-fragment)))))))
-       (finally
-         (doseq [started @registered-streams]
-           (live/cancel-sse! started))
-         (live/close! live-system))))))
+   (with-live-application* slot-id nil f)))
+
+(defn with-granted-live-proving-application!
+  "Run one Biff-installed handler whose Live POSTs delegate through the
+   checked source-derived principal-grant wrapper BEFORE reaching XTDB.
+   The supplied :principal-handler is the installed Live handler's INNER
+   delegate, not an alternative serving handler. Source checking and grants
+   do not authenticate the trusted caller callback, authorize SSE readers,
+   or issue certified application/production guarantees. Test-only fixture."
+  ([principal-source f]
+   (with-granted-live-proving-application!
+    (str "v2329-" (random-uuid)) principal-source f))
+  ([slot-id principal-source f]
+   ;; nil/invalid source must not silently select the unguarded fixture.
+   (principal/checked-test-policy! principal-source)
+   (with-live-application* slot-id principal-source f)))

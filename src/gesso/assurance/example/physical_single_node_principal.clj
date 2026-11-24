@@ -143,6 +143,40 @@
              "cache-control" "no-store"}
    :body (if (= status 401) "Principal required" "Operation forbidden")})
 
+(defn checked-test-policy!
+  "Check a diagnostic request-grant source before a Biff/XTDB fixture starts.
+   This is source/shape validation, NOT principal authentication or a
+   certificate, and grants are not part of the physical XTDB guard."
+  [source]
+  (checked-static-source! source))
+
+(defn guarded-test-handler!
+  "Wrap the original operation handler with this source's selected request
+   grants BEFORE original Biff installation. Use the owner-derived :http-routes
+   inventory, not caller-maintained route strings. This only enforces grants
+   for known POST operations that reach this wrapper. It does not certify
+   the host's identity callback, SSE disclosure, CSRF or any alternate writer."
+  [source app original-handler]
+  (when-not (fn? original-handler)
+    (reject! :missing-original-physical-handler))
+  (let [operation-routes (admitted-policy! source app)
+        acquire! (:acquire-principal! source)
+        grants (:grants source)]
+    (fn [request]
+      (if (and (map? request)
+               (= :post (:request-method request))
+               (contains? operation-routes (:uri request))
+               (not (contains? request :path-params))
+               (not (contains? request :route-params)))
+        (let [principal (acquired-principal! acquire! request)
+              operation (get operation-routes (:uri request))]
+          (cond
+            (nil? principal) (denied-response 401)
+            (not (contains? (get grants principal #{}) operation))
+            (denied-response 403)
+            :else (original-handler request)))
+        (original-handler request)))))
+
 (defn with-principal-proving-application!
   "Run f with a real v1495 embedded-XTDB app and :principal-handler.
 
@@ -180,23 +214,7 @@
     ;; The supplied route inventory is derived by the original HTTP owner,
     ;; so this principal policy does not duplicate the protected routes.
     (fn [app original-handler]
-      (let [operation-routes (admitted-policy! source app)
-            acquire! (:acquire-principal! source)
-            grants (:grants source)]
-        (fn [request]
-          (if (and (map? request)
-                   (= :post (:request-method request))
-                   (contains? operation-routes (:uri request))
-                   (not (contains? request :path-params))
-                   (not (contains? request :route-params)))
-            (let [principal (acquired-principal! acquire! request)
-                  operation (get operation-routes (:uri request))]
-              (cond
-                (nil? principal) (denied-response 401)
-                (not (contains? (get grants principal #{}) operation))
-                (denied-response 403)
-                :else (original-handler request)))
-            (original-handler request)))))
+      (guarded-test-handler! source app original-handler))
     (fn [app]
       (let [operation-routes (admitted-policy! source app)
             handler (:handler app)

@@ -1,0 +1,197 @@
+(ns gesso.assurance.example.physical-single-node-granted-live-test
+  "v2329: One actual Biff-installed diagnostic handler combines source-derived
+   principal operation grants, authoritative XTDB writes and advisory Live.
+   No fixture in this namespace authenticates the principal callback, checks
+   SSE disclosure/CSRF, runs Biff's real Netty listener or issues certificates."
+  (:require [clojure.test :refer [deftest is]]
+            [gesso.assurance.example.physical-single-node-live :as fixture]
+            [gesso.assurance.example.physical-single-node-proving :as physical]
+            [gesso.live.core :as live]
+            [gesso.model.tx :as tx])
+  (:import (com.sun.net.httpserver HttpHandler HttpServer)
+           (java.net HttpURLConnection InetSocketAddress URL)
+           (java.nio.charset StandardCharsets)))
+
+(def ^:private reserve "/__gesso_proving/slot/reserve")
+(def ^:private release "/__gesso_proving/slot/release")
+(def ^:private panel fixture/panel-uri)
+
+(defn- policy [acquire!]
+  {:catalog-id :slot/reservation-lifecycle
+   :policy-id :proving/granted-live
+   :grants {:actor/reserver #{:slot/reserve}
+            :actor/releaser #{:slot/release}}
+   :acquire-principal! acquire!})
+
+(defn- authenticated [who]
+  {:status :authenticated :principal-id who})
+
+(defn- request [method uri]
+  {:request-method method :uri uri})
+
+(deftest original-biff-installed-live-handler-must-delegate-through-checked-grants
+  (let [principal (atom :anonymous)
+        acquisitions (atom 0)]
+    (fixture/with-granted-live-proving-application!
+     (policy (fn [_]
+               (swap! acquisitions inc)
+               (if (= :anonymous @principal)
+                 {:status :anonymous}
+                 (authenticated @principal))))
+     (fn [{:keys [system handler live-handler principal-handler
+                  delegate-handler read! live-report]}]
+       (let [installed (:biff.ring/handler system)
+             original-tx @#'tx/transact!
+             writes (atom 0)
+             emissions (atom 0)]
+         (is (identical? installed handler))
+         (is (identical? installed live-handler))
+         (is (fn? principal-handler))
+         (is (not (identical? installed principal-handler)))
+         (is (not (identical? principal-handler delegate-handler)))
+         (is (= :checked-before-delegated-xtdb-write
+                (:selected-mutation-grants live-report)))
+         (is (= :trusted-not-authenticated
+                (:principal-acquisition live-report)))
+         (is (= :proving/granted-live (:grant-policy-id live-report)))
+         (is (= :slot/reservation-lifecycle (:grant-catalog-id live-report)))
+         (is (= :not-checked
+                (:live-subscription-authorization live-report)))
+         (is (= :none (:authority live-report)))
+         (with-redefs [tx/transact! (fn [& args]
+                                      (swap! writes inc)
+                                      (apply original-tx args))
+                       live/emit! (fn [_ message]
+                                    (is (= :gesso-proving-reservation (:topic message)))
+                                    (swap! emissions inc)
+                                    {:status :emitted})]
+           (is (= 401 (:status (installed (request :post reserve)))))
+           (is (= 0 @writes))
+           (is (= 0 @emissions))
+           (reset! principal :actor/releaser)
+           (is (= 403 (:status (installed (request :post reserve)))))
+           (is (= 0 @writes))
+           (is (= 0 @emissions))
+           (reset! principal :actor/reserver)
+           (let [result (installed (request :post reserve))]
+             (is (= 200 (:status result)))
+             (is (= "source-accepted"
+                    (get-in result [:headers "x-gesso-proving-live-publication"]))))
+           (is (= 1 @writes))
+           (is (= 1 @emissions))
+           (is (= 1 (:revision (read!))))
+           (is (= 403 (:status (installed (request :post release)))))
+           (is (= 1 @writes))
+           (is (= 1 @emissions))
+           (reset! principal :actor/releaser)
+           (is (= 200 (:status (installed (request :post release)))))
+           (is (= 2 @writes))
+           (is (= 2 @emissions))
+           (is (= 2 (:revision (read!))))
+           (is (= 5 @acquisitions))
+         (let [fresh (installed (request :get panel))]
+           (is (= 200 (:status fresh)))
+           (is (.contains ^String (:body fresh) "data-slot-status=\"available\""))
+           (is (= 2 (:revision (read!)))))))))))
+
+(deftest postcommit-live-failure-still-preserves-protected-write
+  (fixture/with-granted-live-proving-application!
+   (policy (constantly (authenticated :actor/reserver)))
+   (fn [{:keys [handler read!]}]
+     (let [calls (atom 0)
+           result (with-redefs [live/emit! (fn [& _]
+                                            (swap! calls inc)
+                                            (throw (ex-info "notification failed" {})))]
+                    (handler (request :post reserve)))]
+       (is (= 200 (:status result)))
+       (is (= "unknown" (get-in result [:headers "x-gesso-proving-live-publication"])))
+       (is (= "true" (get-in result [:headers "HX-Refresh"])))
+       (is (= 1 @calls))
+       (is (= 1 (:revision (read!))))))))
+
+(deftest invalid-authorization-source-fails-before-xtdb-start
+  (let [starts (atom 0)
+        original @#'physical/with-proving-application!
+        source (assoc (policy (constantly (authenticated :actor/reserver)))
+                      :grants {:actor/reserver #{:slot/reserve}})
+        error (with-redefs [physical/with-proving-application!
+                            (fn [& args]
+                              (swap! starts inc)
+                              (apply original args))]
+                (try
+                  (fixture/with-granted-live-proving-application!
+                   source (fn [_] (is false "Must not enter callback")))
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    (ex-data e))))]
+    (is (= :policy-not-bound-to-catalog-and-http-operations (:reason error)))
+    (is (zero? @starts)))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (fixture/with-granted-live-proving-application!
+                nil (fn [_] nil)))
+      "nil must not silently select the unguarded Live fixture"))
+
+(defn- with-socket! [handler f]
+  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (try
+      (.createContext server "/"
+                      (reify HttpHandler
+                        (handle [_ exchange]
+                          (try
+                            (let [method (keyword (.toLowerCase
+                                                   (.getRequestMethod exchange)))
+                                  uri (.getPath (.getRequestURI exchange))
+                                  response (handler (request method uri))
+                                  bytes (.getBytes ^String (str (:body response))
+                                                   StandardCharsets/UTF_8)]
+                              (.sendResponseHeaders exchange
+                                                    (int (:status response))
+                                                    (long (alength bytes)))
+                              (with-open [out (.getResponseBody exchange)]
+                                (.write out bytes)))
+                            (finally (.close exchange))))))
+      (.start server)
+      (f (str "http://127.0.0.1:" (.getPort (.getAddress server))))
+      (finally (.stop server 0)))))
+
+(defn- socket-status [base method uri]
+  (let [^HttpURLConnection connection
+        (.openConnection (URL. (str base uri)))]
+    (try
+      (.setRequestMethod connection (.toUpperCase (name method)))
+      (.setConnectTimeout connection 3000)
+      (.setReadTimeout connection 3000)
+      (.getResponseCode connection)
+      (finally (.disconnect connection)))))
+
+(deftest real-socket-biff-selected-handler-enforces-grants-and-publishes
+  (let [principal (atom :actor/releaser)
+        acquired (atom 0)]
+    (fixture/with-granted-live-proving-application!
+     (policy (fn [_]
+               (swap! acquired inc)
+               (authenticated @principal)))
+     (fn [{:keys [system read! live-handler]}]
+       (let [installed (:biff.ring/handler system)
+             emissions (atom 0)]
+         (is (identical? installed live-handler))
+         (with-redefs [live/emit! (fn [_ _]
+                                    (swap! emissions inc)
+                                    {:status :emitted})]
+           (with-socket! installed
+             (fn [base]
+               (is (= 200 (socket-status base :get panel)))
+               (is (= 403 (socket-status base :post reserve)))
+               (is (zero? (:revision (read!))))
+               (is (zero? @emissions))
+               (reset! principal :actor/reserver)
+               (is (= 200 (socket-status base :post reserve)))
+               (is (= 1 (:revision (read!))))
+               (is (= 1 @emissions))
+               (is (= 403 (socket-status base :post release)))
+               (is (= 1 @emissions))
+               (reset! principal :actor/releaser)
+               (is (= 200 (socket-status base :post release)))
+               (is (= 2 (:revision (read!))))
+               (is (= 2 @emissions)))))
+         (is (= 4 @acquired)))))))
