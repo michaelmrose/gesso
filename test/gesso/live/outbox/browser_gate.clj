@@ -23,6 +23,7 @@
             [gesso.live.browser.chromium :as chromium]
             [gesso.live.outbox.browser-integration :as integration]
             [gesso.live.outbox.browser-restart-test :as restart]
+            [gesso.live.outbox.command-race-test :as claim]
             [gesso.live.outbox.frontier-recovery-test :as frontier]
             [gesso.live.outbox.http-fragment-test :as installed])
   (:import [com.sun.net.httpserver HttpHandler HttpServer]
@@ -149,7 +150,8 @@
 (defn run-readiness!
   "HTTP/XTDB tests only. This is explicitly NOT browser convergence."
   []
-  (test-selection!
+  (binding [claim/*claim-browser-observer?* false]
+   (test-selection!
    [#'integration/canonical-browser-page-and-authoritative-fragment-over-loopback-test
     #'integration/actual-http-fragment-read-honors-source-progression-test
     #'integration/physical-sse-frame-progresses-exact-authoritative-fragment-http-test
@@ -160,16 +162,19 @@
     #'session/actual-jetty-requests-require-server-issued-session-and-csrf
     #'durable/managed-worker-delivers-protected-http-writes-without-manual-processing
     #'durable/managed-worker-scope-retirement-precedes-provider-close-on-exception
-    #'durable/closed-application-reopens-persisted-reservation-and-recovers-pending-intent]))
+    #'durable/closed-application-reopens-persisted-reservation-and-recovers-pending-intent
+    #'claim/distinct-claim-commands-contend-for-one-primary-assignment])))
 
 (defn run-browser!
   "The STRICT real-browser scenario, not the HTTP-only readiness selection."
   []
-  (test-selection!
+  (binding [claim/*claim-browser-observer?* true]
+   (test-selection!
    [#'integration/concrete-host-eventsource-htmx-converges-to-authoritative-xtdb-test
     #'integration/recovered-biff-worker-redelivers-to-unchanged-chromium-fragment-test
     #'integration/late-independent-browser-interests-acquire-without-replayed-notice-test
-    #'restart/browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test]))
+    #'restart/browser-survives-physical-host-jvm-kill-and-reopens-persistent-xtdb-test
+    #'claim/distinct-claim-commands-contend-for-one-primary-assignment])))
 
 (defn execute!
   "Run a selected gate. The default browser gate requires preflight AND

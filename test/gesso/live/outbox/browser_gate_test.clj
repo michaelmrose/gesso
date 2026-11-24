@@ -3,7 +3,8 @@
 
    These are JVM unit tests and do NOT count as real Chromium convergence."
   (:require [clojure.test :as t :refer [deftest is]]
-            [gesso.live.outbox.browser-gate :as gate]))
+            [gesso.live.outbox.browser-gate :as gate]
+            [gesso.live.outbox.command-race-test :as claim]))
 
 (defn- reason [f]
   (try (f) nil
@@ -88,12 +89,12 @@
                                                                  (str (:name (meta %)))) vars))
                                (doseq [_ vars] (count-test!)))]
       (let [result (gate/run-readiness!)]
-        (is (= 11 (:test result)))
-        (is (= 11 (:pass result)))
+        (is (= 12 (:test result)))
+        (is (= 12 (:pass result)))
         (is (= @observed (mapv :case (:cases result))))
         (is (every? #(= {:test 1 :pass 1 :fail 0 :error 0}
                         (dissoc % :case)) (:cases result))))
-      (is (= 11 (count (distinct @observed))))
+      (is (= 12 (count (distinct @observed))))
       (is (every? (set @observed)
                   '[gesso.live.outbox.http-fragment-test/assembled-streams-share-capacity-and-use-original-model-policy
                     gesso.live.outbox.http-fragment-test/installed-model-command-recovers-submitted-transaction-without-replay-write
@@ -101,7 +102,8 @@
                     gesso.assurance.example.physical-single-node-session-test/actual-jetty-requests-require-server-issued-session-and-csrf
                     gesso.assurance.example.physical-single-node-durable-live-test/managed-worker-delivers-protected-http-writes-without-manual-processing
                     gesso.assurance.example.physical-single-node-durable-live-test/managed-worker-scope-retirement-precedes-provider-close-on-exception
-                    gesso.assurance.example.physical-single-node-durable-live-test/closed-application-reopens-persisted-reservation-and-recovers-pending-intent])))
+                    gesso.assurance.example.physical-single-node-durable-live-test/closed-application-reopens-persisted-reservation-and-recovers-pending-intent
+                    gesso.live.outbox.command-race-test/distinct-claim-commands-contend-for-one-primary-assignment])))
     ;; Positive but incomplete test counts used to satisfy the gate.
     (with-redefs [t/test-vars (fn [vars]
                                (doseq [_ (butlast vars)] (count-test!)))]
@@ -127,3 +129,30 @@
                 gate/run-browser! (constantly {:test 4 :pass 0 :fail 0 :error 0})]
     (is (= :assertion-failure (reason #(gate/execute! :readiness))))
     (is (= :assertion-failure (reason #(gate/execute! :browser))))))
+
+(deftest claim-selection-is-mode-bound-and-required-test
+  (let [modes (atom [])
+        claim-var #'claim/distinct-claim-commands-contend-for-one-primary-assignment
+        case-id 'gesso.live.outbox.command-race-test/distinct-claim-commands-contend-for-one-primary-assignment]
+    (with-redefs [t/test-vars (fn [vars]
+                               (doseq [v vars]
+                                 (when (= claim-var v)
+                                   (swap! modes conj claim/*claim-browser-observer?*))
+                                 (t/inc-report-counter :test)
+                                 (t/inc-report-counter :pass)))]
+      (let [http (binding [claim/*claim-browser-observer?* true] (gate/run-readiness!))
+            browser (binding [claim/*claim-browser-observer?* false] (gate/run-browser!))]
+        (is (= [false true] @modes))
+        (is (= 12 (:test http)))
+        (is (= 5 (:test browser)))
+        (is (= 1 (count (filter #(= case-id (:case %)) (:cases http)))))
+        (is (= 1 (count (filter #(= case-id (:case %)) (:cases browser)))))))
+    (with-redefs [t/test-vars (fn [vars]
+                               (doseq [v vars :when (not= claim-var v)]
+                                 (t/inc-report-counter :test)
+                                 (t/inc-report-counter :pass)))]
+      (doseq [run [gate/run-readiness! gate/run-browser!]]
+        (let [data (try (run) nil (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+          (is (= :assertion-failure (:reason data)))
+          (is (= case-id (:case data)))
+          (is (= {:test 0 :pass 0 :fail 0 :error 0} (:results data))))))))
