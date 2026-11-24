@@ -419,7 +419,7 @@
    route-specs))
 
 (defn- execution-assembly-with-routes
-  [operations route-capabilities']
+  [operations route-capabilities' principal-fn]
   (let [operation-assembly' (operation-assembly operations)
         route-assembly'
         (route-preflight/require-route-assembly!
@@ -428,7 +428,7 @@
           :route-capabilities route-capabilities'})
         prepared-server
         (server/server
-         {:principal-fn (fn [_] trusted-principal)
+         {:principal-fn principal-fn
           :operations operations})]
     (execution-preflight/require-execution-assembly!
      {:name :fixture/application-preflight-custom-execution
@@ -436,9 +436,9 @@
       :server prepared-server})))
 
 (defn- operation-acquisition-assembly-with-routes
-  [operations route-capabilities']
+  [operations route-capabilities' principal-fn]
   (let [live-app (compiled-live)
-        execution (execution-assembly-with-routes operations route-capabilities')
+        execution (execution-assembly-with-routes operations route-capabilities' principal-fn)
         acquisition' (acquisition-assembly live-app)]
     (operation-acquisition/require-operation-acquisition-assembly!
      {:name :fixture/application-operation-acquisition-custom-routes
@@ -447,8 +447,8 @@
 
 (defn with-surfaced-application
   [config-or-surfaces f]
-  (let [{:keys [operations route-capabilities rendered-surfaces custom-receipt?]
-         :or {custom-receipt? false}}
+  (let [{:keys [operations route-capabilities rendered-surfaces custom-receipt? principal-fn]
+         :or {custom-receipt? false principal-fn (constantly trusted-principal)}}
         (if (and (map? config-or-surfaces)
                  (contains? config-or-surfaces :rendered-surfaces))
           config-or-surfaces
@@ -460,7 +460,8 @@
        (let [operation-acquisition'
              (operation-acquisition-assembly-with-routes
               operations
-              route-capabilities)
+              route-capabilities
+              principal-fn)
              artifact-path (child-path dir "gesso-live.js")
              receipt-path (when custom-receipt?
                             (child-path dir "metadata/browser.edn"))]

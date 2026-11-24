@@ -805,3 +805,136 @@
                 (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
                 (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))
               (finally (host/stop! started)))))))))
+
+(deftest distinct-claim-commands-contend-for-one-primary-assignment
+  (let [ready (CountDownLatch. 2)
+        observed (atom [])
+        projected (atom [])
+        principal-fn (fn [ctx]
+                       (some-> (get {"a" "helper-1" "b" "helper-2"}
+                                    (get-in ctx [:headers "x-fixture-session"])) identity/principal))
+        actor (comp identity/raw-value :principal)
+        before {:xt/id "r1" :status :open :revision 0 :created-at "t0"
+                :updated-at "t0" :request/location-id "l1"}
+        member {:xt/id "m1" :active true :revision 0 :created-at "t0" :updated-at "t0"}
+        assignment {:xt/id "primary-r1" :request-id "r1" :helper "helper-1"
+                    :revision 0 :created-at "t1" :updated-at "t1" :request/location-id "l1"}
+        ;; Independent closed fixture policy, not extracted from the constructed plan.
+        tables #{:requests :request_assignments :gesso_commands}
+        targets #{[:requests "r1"] [:request_assignments "primary-r1"]}
+        operations #{[:requests "r1" :claim] [:request_assignments "primary-r1" :create]}
+        guards (fn [id] #{[:memberships id :active true] [:memberships id :revision 0]
+                          [:memberships id :updated-at "t0"]})
+        updates #{[:requests "r1" :status :open] [:requests "r1" :revision 0]
+                  [:requests "r1" :updated-at "t0"]}
+        values (fn [helper] (into #{} (mapcat (fn [[table id fields]]
+                                  (map (fn [[k v]] [table id k v]) fields)))
+                     [[:requests "r1" {:xt/id "r1" :status :claimed :revision 1 :created-at "t0"
+                                       :updated-at "t1" :request/location-id "l1"}]
+                      [:request_assignments "primary-r1" {:xt/id "primary-r1" :request-id "r1"
+                                                         :helper helper :revision 0 :created-at "t1"
+                                                         :updated-at "t1" :request/location-id "l1"}]]))
+        executor (publication/build-executor
+                  {:operation :request/claim :submission-mode! (constantly :submit)
+                   :may-disclose? (fn [binding record] (= binding (:gesso.command/binding record)))
+                   :construction-contract {:required-guard-tables #{:memberships} :allowed-guard-tables #{:memberships}
+                                           :required-write-tables tables :allowed-write-tables tables}
+                   :target-contract! (fn [_ binding]
+                                       (when-not (= "r1" (get-in binding [:arguments :request-id]))
+                                         (throw (ex-info "Outside fixture request" {})))
+                                       {:required-guard-targets #{[:memberships (actor binding)]} :allowed-guard-targets #{[:memberships (actor binding)]}
+                                        :required-write-targets targets :allowed-write-targets targets})
+                   :predicate-contract! (fn [_ binding] {:required-guard-checks (guards (actor binding)) :allowed-guard-checks (guards (actor binding))
+                                                   :required-update-checks updates :allowed-update-checks updates})
+                   :command-operation-contract! (fn [_ _] {:required-command-operations operations :allowed-command-operations operations})
+                   :post-state-contract! (fn [_ binding] {:required-post-state-values (values (actor binding)) :allowed-post-state-values (values (actor binding))})
+                   :outcome-contract! (fn [_ binding] {:expected-outcome {:outcome :request/claimed :helper (actor binding)}})
+                   :construct! (fn [{:keys [ctx command-id] :as invocation}]
+                                 (let [helper (actor invocation)
+                                       row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))
+                                       membership (first (frontier/q-from! ctx ["SELECT * FROM memberships WHERE _id = ?" helper]))]
+                                   (swap! observed conj [(identity/raw-value command-id) helper row])
+                                   (.countDown ready)
+                                   (when-not (.await ready 15 TimeUnit/SECONDS)
+                                     (throw (ex-info "Claim construction barrier timed out" {})))
+                                   {:spec {:purpose :gesso.live/refresh}
+                                    :model-plan {:guards [(model-command/guard :memberships membership
+                                                                               (assoc version :compare-keys [:revision :updated-at :active]))]
+                                                 :commands [(model-command/update-command
+                                                             :requests :claim row
+                                                             (assoc row :status :claimed :revision 1 :updated-at "t1")
+                                                             (assoc version :compare-keys [:revision :updated-at :status]))
+                                                            (model-command/create :request_assignments (assoc assignment :helper helper) version)]}
+                                    :outcome {:outcome :request/claimed :helper helper} :now "t1"}))
+                   :project! (fn [{:keys [ctx command-id]} result]
+                               (let [{:keys [basis rows]} (frontier/q-with-basis!
+                                                           ctx ["SELECT r.status, a.helper FROM requests r JOIN request_assignments a ON r._id = a.request_id WHERE r._id = ? AND a._id = ?" "r1" "primary-r1"])]
+                                 (swap! projected conj [(identity/raw-value command-id) (:status result)])
+                                 {:resolution (if (= :incorporated (:status result)) :confirmed :already-incorporated)
+                                  :outcome (get-in result [:outcome :outcome])
+                                  :authoritative (protocol/authoritative {:presence :present :basis basis :projection (first rows)})}))})
+        operation (fixture/trusted-operation :request/claim {:published-change-topics #{:request :request-assignment} :execute! executor})
+        config {:xtdb-config {} :source-id "v2480-claim" :rules-context {}
+                :worker-options {:worker-id "v2480" :poll-ms 20} :live-options {}
+                :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
+                                              :require-derived-model? true
+                                              :operation-model-entities {:request/claim #{:requests :request_assignments}})
+                :http-jdk {} :assembled-operations {:authorize-request? (comp some? principal-fn)}}]
+    (fixture/with-surfaced-application
+     {:operations {:request/claim operation}
+      :route-capabilities (fixture/route-capabilities {:request/claim operation})
+      :principal-fn principal-fn
+      :rendered-surfaces {:board [:main (fixture/rendered-operation-button
+                                       (fixture/render-context {:request/claim operation}) :request/claim
+                                       "/operations/request/claim")]}}
+     (fn [{:keys [assembly report]}]
+       (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
+       (let [started (host/start! assembly (fn [_] (g/html-response [:div "fallback"])) config)
+             node (:xtdb/connectable started)
+             invoke (fn [session id execution]
+                      (try
+                        (let [cmd (assoc (command execution) :command-id (identity/command-id id))
+                              response ((:biff.ring/handler started)
+                                        {:uri "/operations/request/claim" :request-method :post
+                                         :headers {"content-type" "application/x-www-form-urlencoded" "x-fixture-session" session}
+                                         :body (codec/form-encode {transport/command-parameter (pr-str (protocol/command->wire cmd))})})]
+                          {:status (:status response)
+                           :settlement (when (= 200 (:status response))
+                                         (let [marker (xml/parse (ByteArrayInputStream. (.getBytes ^String (:body response) StandardCharsets/UTF_8)))]
+                                           (protocol/wire->settlement (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))))})
+                        (catch Exception e {:failure (ex-data e)})))]
+         (try
+           (xt/execute-tx node [[:put-docs :requests before]
+                                [:put-docs :memberships (assoc member :xt/id "helper-1") (assoc member :xt/id "helper-2")]])
+           (let [a (future (invoke "a" "claim-a" "attempt-a"))
+                 b (future (invoke "b" "claim-b" "attempt-b"))
+                 results [(deref a 40000 ::timeout) (deref b 40000 ::timeout)]]
+             (when (some #{::timeout} results)
+               (future-cancel a) (future-cancel b)
+               (throw (ex-info "Claim race timed out" {})))
+             (let [winner-index (if (= 200 (:status (first results))) 0 1)
+                   winner (nth results winner-index) loser (nth results (- 1 winner-index))
+                   [session id helper] (nth [["a" "claim-a" "helper-1"] ["b" "claim-b" "helper-2"]] winner-index)]
+               (is (= #{["claim-a" "helper-1" before] ["claim-b" "helper-2" before]} (set @observed)))
+               (is (= 2 (count @observed)))
+               (is (= 1 (count (filter #(= 200 (:status %)) results))))
+               (is (= :confirmed (get-in winner [:settlement :resolution])))
+               (is (= :request/claimed (get-in winner [:settlement :outcome])))
+               (is (= {:status :claimed :helper helper} (get-in winner [:settlement :authoritative :projection])))
+               (is (= :xtdb/assert-failed (get-in loser [:failure :xtdb.error/code])))
+               (is (= [{:status :claimed :revision 1}] (xt/q node ["SELECT status, revision FROM requests"])))
+               (is (= [{:xt/id "primary-r1" :request-id "r1" :helper helper}] (xt/q node ["SELECT _id, request_id, helper FROM request_assignments"])))
+               (let [records (xt/q node ["SELECT * FROM gesso_commands"])]
+                 (is (= [id] (mapv :xt/id records)))
+                 (is (= (identity/principal helper) (get-in (first records) [:gesso.command/binding :principal])))
+                 (is (= {:outcome :request/claimed :helper helper} (:gesso.command/outcome (first records)))))
+               (is (= #{{:topic :request :command-id id} {:topic :request-assignment :command-id id}}
+                      (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$command_id AS command_id FROM gesso_live_outbox"]))))
+               (is (= [[id :incorporated]] @projected))
+               (let [replay (invoke session id "winner-replay")]
+                 (is (= :already-incorporated (get-in replay [:settlement :resolution])))
+                 (is (= {:status :claimed :helper helper} (get-in replay [:settlement :authoritative :projection])))
+                 (is (= 2 (count @observed)))
+                 (is (= [[id :incorporated] [id :replay]] @projected))
+                 (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))
+           (finally (host/stop! started))))))))
