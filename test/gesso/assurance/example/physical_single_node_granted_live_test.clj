@@ -1,15 +1,16 @@
 (ns gesso.assurance.example.physical-single-node-granted-live-test
-  "v2331: One actual Biff-installed diagnostic handler combines source-derived
+  "v2332: One actual Biff-installed diagnostic handler combines source-derived
    principal operation grants, authoritative XTDB writes and advisory Live.
-   This fixture now also checks granted-principal membership at initial GET
-   view/fragment/SSE acquisition, but does not authenticate its callback,
-   revoke an established SSE stream, provide general read policy, enforce
-   CSRF, run Biff's Netty listener or issue certificates."
+   The fixture also rechecks the original reader identity before each outgoing
+   advisory SSE event and closes the stream if the recheck fails. It does not
+   authenticate the callback, provide periodic idle revocation or an in-flight
+   delivery fence, enforce CSRF, run Biff's Netty listener or issue certificates."
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.example.physical-single-node-live :as fixture]
             [gesso.assurance.example.physical-single-node-proving :as physical]
             [gesso.live.core :as live]
-            [gesso.model.tx :as tx])
+            [gesso.model.tx :as tx]
+            [manifold.stream :as stream])
   (:import (com.sun.net.httpserver HttpHandler HttpServer)
            (java.net HttpURLConnection InetSocketAddress URL)
            (java.nio.charset StandardCharsets)))
@@ -65,8 +66,10 @@
          (is (= :independent-declared-read-principals
                 (:live-read-policy live-report)))
          (is (= 2 (:live-declared-read-principal-count live-report)))
-         (is (= :not-established
+         (is (= :event-triggered-only-not-idle-or-in-flight
                 (:ongoing-sse-authorization-and-revocation live-report)))
+         (is (= :same-reader-check-before-each-encoded-event
+                (:sse-advisory-event-revalidation live-report)))
          (is (= :none (:authority live-report)))
          (with-redefs [tx/transact! (fn [& args]
                                       (swap! writes inc)
@@ -148,7 +151,7 @@
              (is (= 1 @stream-starts)
                  "One real SSE stream starts after principal acceptance"))
            (is (= 12 @acquisitions))
-           (is (= :not-established
+           (is (= :event-triggered-only-not-idle-or-in-flight
                   (:ongoing-sse-authorization-and-revocation live-report)))))))))
 
 (deftest independent-read-grants-admit-read-only-and-deny-writers-without-read-access
@@ -272,6 +275,89 @@
                (fixture/with-granted-live-proving-application!
                 nil (fn [_] nil)))
       "nil must not silently select the unguarded Live fixture"))
+
+(defn- eventually
+  "Poll a bounded physical stream predicate; never mistake timeout for pass."
+  [pred]
+  (loop [attempt 0]
+    (cond
+      (pred) true
+      (>= attempt 150) false
+      :else (do (Thread/sleep 20) (recur (inc attempt))))))
+
+(deftest revoked-sse-reader-closes-original-biff-stream-before-an-event-frame
+  ;; The actual connected Biff handler starts the real Live source-backed SSE
+  ;; transport. A host callback now reporting anonymous must prevent a later
+  ;; source invalidation from being encoded onto that existing stream.
+  ;; This is event-triggered revalidation, NOT immediate idle revocation.
+  (let [who (atom :actor/reader)
+        calls (atom 0)
+        source (assoc (policy (fn [_]
+                                (swap! calls inc)
+                                (if (= @who :anonymous)
+                                  {:status :anonymous}
+                                  (authenticated @who))))
+                      :read-principals #{:actor/reader})]
+    (fixture/with-granted-live-proving-application!
+     source
+     (fn [{:keys [system handler live-system slot-id live-report]}]
+       (let [installed (:biff.ring/handler system)
+             response (installed (request :get fixture/events-uri))
+             body (:body response)]
+         (is (identical? installed handler))
+         (is (= 200 (:status response)))
+         (is (some? body))
+         (is (= :event-triggered-only-not-idle-or-in-flight
+                (:ongoing-sse-authorization-and-revocation live-report)))
+         (is (= 1 @calls) "Initial SSE GET checks the host callback once")
+         ;; An unchanged identity may receive an advisory event. Use a real
+         ;; source and Manifold response, not a fabricated encoder-only call.
+         (is (contains? #{:emitted :queued}
+                        (:status (live/emit! live-system
+                                             {:topic :gesso-proving-reservation
+                                              :id slot-id
+                                              :change/kind :updated}))))
+         (let [first-frame (deref (stream/take! body) 3000 ::timeout)]
+           (is (string? first-frame))
+           (is (re-find #"event: " (str first-frame))))
+         (is (= 2 @calls)
+             "The actual SSE formatter rechecks before encoding an event")
+         (reset! who :anonymous)
+         (is (contains? #{:emitted :queued}
+                        (:status (live/emit! live-system
+                                             {:topic :gesso-proving-reservation
+                                              :id slot-id
+                                              :change/kind :updated}))))
+         (is (= ::closed (deref (stream/take! body ::closed) 3000 ::timeout))
+             "Revoked reader must not receive a new SSE frame")
+         (is (eventually #(stream/closed? body))
+             "A failed event-time reader check must close the transport")
+         (is (= 3 @calls))
+         (is (= 401 (:status (installed (request :get fixture/events-uri))))
+             "Reconnect must be denied by the original Biff-installed guard"))))))
+
+(deftest changed-reader-identity-closes-instead-of-inheriting-open-stream
+  ;; A new authorized principal on the same request does not inherit an
+  ;; EventSource acquired by a different principal. This is a fixed original
+  ;; connection subject, not simply a recheck that some reader is authorized.
+  (let [who (atom :actor/reader)
+        source (assoc (policy (fn [_] (authenticated @who)))
+                      :read-principals #{:actor/reader :actor/releaser})]
+    (fixture/with-granted-live-proving-application!
+     source
+     (fn [{:keys [handler live-system slot-id]}]
+       (let [response (handler (request :get fixture/events-uri))
+             body (:body response)]
+         (is (= 200 (:status response)))
+         (reset! who :actor/releaser)
+         (is (contains? #{:emitted :queued}
+                        (:status (live/emit! live-system
+                                             {:topic :gesso-proving-reservation
+                                              :id slot-id
+                                              :change/kind :updated}))))
+         (is (= ::closed (deref (stream/take! body ::closed) 3000 ::timeout))
+             "An initially different reader must never receive the frame")
+         (is (eventually #(stream/closed? body))))))))
 
 (defn- with-socket! [handler f]
   (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]

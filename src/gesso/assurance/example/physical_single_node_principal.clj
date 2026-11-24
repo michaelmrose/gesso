@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-principal
-  "v2331: Original-Biff-installed source-checked principal admission for v1495
+  "v2332: Original-Biff-installed source-checked principal admission for v1495
    single-node Biff/Ring -> XTDB proving fixture.
 
    An application-supplied declaration names the original reservation catalog,
@@ -25,7 +25,12 @@
    never imply read rights, and read-only principals need not hold mutation
    rights. This remains a narrow TEST-ONLY read policy, not role-dependent
    fine-grained disclosure or trusted principal authentication. Continuous
-   SSE authorization after connection/revocation is NOT established. No proof certificate, admission,
+   SSE authorization is rechecked when each advisory event is about to be
+   encoded, with the originally acquired subject identity retained; this
+   terminates the source stream on a failed recheck. This does NOT establish
+   instantaneous revocation during idle intervals, recheck of keepalive bytes,
+   trusted callback thread-safety, or exclusion of in-flight frames. No proof
+   certificate, admission,
    authorization theorem, or physical refinement is issued."
   (:require [clojure.set :as set]
             [gesso.assurance.example.physical-single-node-http :as http]
@@ -217,6 +222,36 @@
                       (conceal-write-only-result response)))))
         (original-handler request)))))
 
+(def ^:private authorized-reader-key
+  ::initial-authorized-reader)
+
+(defn guarded-test-event-encoder!
+  "Build a test-only SSE encoder bound to the ORIGINAL checked GET reader.
+   The outer read guard sets ::initial-authorized-reader AFTER requesting the
+   principal from the host. On every advisory event the encoder independently
+   reacquires the current principal from that same host callback and permits
+   frames only while the exact initial reader remains authorized. A rejected
+   recheck throws before payload encoding, so the SSE transport closes its
+   Manifold output and releases its source interest. Keepalives, in-flight
+   writes and revocations without an event are not continuously monitored.
+   Rechecks run on a Live worker thread, so the trusted host callback must be
+   safe to invoke there; this is NOT a production session authenticator."
+  [source request]
+  (checked-static-source! source)
+  (let [initial (get request authorized-reader-key)
+        readers (:read-principals source)
+        acquire! (:acquire-principal! source)]
+    (when-not (and (map? request)
+                   (= :get (:request-method request))
+                   (contains? readers initial))
+      (reject! :missing-initial-sse-reader))
+    (fn [payload]
+      (let [current (acquired-principal! acquire! request)]
+        (when-not (and (= initial current)
+                       (contains? readers current))
+          (reject! :sse-reader-no-longer-authorized))
+        (pr-str payload)))))
+
 (defn guarded-test-read-handler!
   "Guard a closed, selected set of GET routes in the combined Live fixture.
    A principal in the explicitly declared :read-principals may READ the
@@ -224,7 +259,9 @@
    handler read or SSE stream allocation. The original HTTP owner supplies
    its read-only route; the Live owner supplies its panel/fragment/SSE routes.
    This is a narrow test policy: it cannot infer fine-grained read rights,
-   validate host authentication, or revoke an already-open SSE stream."
+   validate host authentication, or revoke an already-open SSE stream
+   BEFORE its next advisory event. The event encoder receives the exact
+   originally checked identity in a wrapper-owned request entry."
   [source app read-uris handler]
   (when-not (and (fn? handler)
                  (set? read-uris)
@@ -246,7 +283,7 @@
           (cond
             (nil? who) (denied-response 401)
             (not (contains? readers who)) (denied-response 403)
-            :else (handler request)))
+            :else (handler (assoc request authorized-reader-key who))))
         ;; Forged route parameters still reach the original handler, which
         ;; independently rejects them with 400 before physical access.
         (handler request)))))

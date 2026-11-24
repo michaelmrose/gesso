@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2331: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2332: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -58,7 +58,7 @@
     :http-listener-and-client-connection-not-observed
     :host-principal-authenticity-and-csrf-not-established
     :fine-grained-read-policy-and-subject-disclosure-not-established
-    :existing-sse-stream-revocation-not-established
+    :idle-sse-revocation-and-in-flight-event-fence-not-established
     :postcommit-publication-not-atomic-with-xtdb
     :authoritative-progression-basis-not-attached-to-invalidation
     :browser-adapter-execution-not-observed
@@ -225,7 +225,7 @@
         ;; *requested* recovery, not tested browser adoption or durable fanout.
         (not accepted?) (assoc-in [:headers "HX-Refresh"] "true")))))
 
-(defn- build-handler [app live-system registered-streams assets]
+(defn- build-handler [app live-system registered-streams assets principal-source]
   (let [original (:handler app)
         scope {:topic :gesso-proving-reservation :id (:slot-id app)}]
     (fn [request]
@@ -255,7 +255,12 @@
           (if (= :get method)
             (let [started (live/start-sse!
                            live-system scope
-                           {:flow-options {:event event-name}})]
+                           (cond-> {:flow-options {:event event-name}}
+                             principal-source
+                             (assoc :sse-options
+                                    {:encoder
+                                     (principal/guarded-test-event-encoder!
+                                      principal-source request)})))]
               (swap! registered-streams conj started)
               (:response started))
             (unsupported 405))
@@ -294,7 +299,8 @@
                               principal-source app original-handler)
                              original-handler)
                  live-handler (build-handler (assoc app :handler delegated)
-                                             live-system registered-streams assets)
+                                             live-system registered-streams assets
+                                             principal-source)
                  ;; Original physical read route comes from the original
                  ;; HTTP owner; Live GET routes come from this Live owner.
                  ;; In the granted fixture, original-source declared read
@@ -352,8 +358,10 @@
                                   :independent-declared-read-principals
                                   :live-declared-read-principal-count
                                   (count (:read-principals principal-source))
+                                  :sse-advisory-event-revalidation
+                                  :same-reader-check-before-each-encoded-event
                                   :ongoing-sse-authorization-and-revocation
-                                  :not-established))
+                                  :event-triggered-only-not-idle-or-in-flight))
                          :live-fragment (live-fragment))
                   principal-source
                   (assoc :principal-handler guarded
@@ -382,9 +390,11 @@
    GET guard admits the physical view, Live panel/fragment and SSE stream
    only to principals in the independent :read-principals declaration.
    Read permission does NOT follow from mutation permission, and a principal
-   can hold read-only permission. Source checking and grants do not
-   authenticate the trusted callback, revoke existing SSE streams, provide
-   general read-right declarations, or certify production. Test-only fixture."
+   can hold read-only permission. Each outgoing advisory SSE event checks that
+   the trusted host callback still resolves the same originally admitted
+   reader, closing the stream on failed recheck. No periodic idle revocation,
+   in-flight delivery exclusion, authenticated callback, general read policy,
+   CSRF protection or production certification is established. Test-only."
   ([principal-source f]
    (with-granted-live-proving-application!
     (str "v2329-" (random-uuid)) principal-source f))
