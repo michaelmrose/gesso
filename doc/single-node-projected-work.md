@@ -782,6 +782,18 @@ Existing evidence: Selected four-phase source-release diagnostics, catalog omiss
 
 ### Stage 13 — Source-derived certification
 
+**v2489 evidence checkpoint (not a re-estimate):** See
+[Claim obligation reconciliation](claim-proof-obligation-ledger.org#v2489-reconciliation--selected-installed-multi-record-witness)
+for the v2474–v2488 installed correspondence, multi-record contention,
+guarded rejection, authenticated Live acquisition and qualification results.
+The selected HTTP readiness gate passed 12 cases / 619 assertions; strict
+Chromium remains blocked. This advances packets 14–15, 26, 28, 31–32,
+42–43 and 45, without retiring any package. The selected witness is not
+the same issued proof subject or actual HumanHelp Claim. The guarded loser
+record needs an explicit abstract transition or a narrower abstraction;
+next bind original semantics to the installed path rather than inflate
+report verdicts or add more unrelated proving fixtures.
+
 Existing evidence: Many conditional proof and source-derived reports; application assurance report explicitly marks full certification and physical writer/HTMX correspondence unestablished.
 
 | # | Work package to close | Track | Estimated revisions | Status at v2319 |

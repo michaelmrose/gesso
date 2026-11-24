@@ -329,3 +329,71 @@ keep the formal/prod bridge honest about HTMX and DOM shell behavior.
 
 This is planning/provenance evidence only.  It does not discharge CLM-S1..S5,
 CLM-R1/R2, CLM-B1, CLM-G1 or CLM-L1.
+
+* v2489 reconciliation — selected installed multi-record witness
+
+This dated checkpoint supplements, not rewrites, the v894 pilot. Evidence
+baseline: =typed-clojure= at v2488, =65cc027d0ee0f6cfcf4d1259c9ad976f58f895c8=.
+The subject is the Gesso-owned closed fixture, NOT HumanHelp production Claim
+or the issued certified-plan/inductive executor of earlier proof pilots.
+The operation keyword alone does not establish same-subject identity.
+
+** Measured executable evidence and its first enforcing boundary
+
+All Claim test vars below are in =test/gesso/live/outbox/command_race_test.clj=.
+Counts are historical runs at the indicated revisions, not additive coverage
+or fresh results at v2489.
+
+| Revision | Boundary and evidence | Remaining limit |
+|----------+-----------------------+-----------------|
+| v2474–v2478 | =installed-executor-enforces-independent-document-targets=: independent targets, operations, predicates, post-state and outcome checked in the durable executor before submit; v2478 116 assertions | Opt-in trusted declarations, not derived policy |
+| v2479 | =installed-multi-record-claim-correspondence=: 30 assertions, real request/assignment atomic commit and identity-conflict abort | Closed fixture, not arbitrary relations |
+| v2480–v2481 | =distinct-claim-commands-contend-for-one-primary-assignment=: two independent stale preparations, one winner; guarded journal-only loser, invalid recovery refused, both replay | No membership-revocation or Organization-policy race in this subject |
+| v2482–v2484 | Same var: issued cookie/CSRF, authorized streams, revocation closure, progression-covered joined acquisition | Fixture session policy; no physical DOM adoption |
+| v2485–v2487 | Same var and =claim_browser_fixture.clj=: actual managed panel/action HTML and three-context Chromium harness | HTTP passes; Chromium navigation blocked, race not observed |
+| v2488 | =browser_gate.clj=: Claim required in both mode-bound gates; HTTP readiness 12 tests / 619 assertions, Claim 1 / 181; orchestration 8 / 46, all passing | =:browser-convergence-verified? false=; strict browser and whole-suite qualification outstanding |
+
+** Original obligation reconciliation (not theorem discharge)
+
+| Obligation | New evidence for this fixture | Still required |
+|------------+-------------------------------+----------------|
+| CLM-S1 | Trusted session principal, active membership and request predicates, exact assignment helper | Associated Membership/Organization policy inventory and interference, truthful policy and complete writers |
+| CLM-S2 | Forced competing stale preparations; only one success and primary assignment persist | Universal preservation across admitted histories, epochs and all writers |
+| CLM-S3 | Both durable outcomes and bindings replay unchanged in selected trace | Ledger writer closure and invariant for all outcomes |
+| CLM-S4 | Winner and loser replay without additional mutation; session refusal | Full compatible/incompatible binding and disclosure refinement for same subject |
+| CLM-S5 | Physical abort and journal-only refusal; invalid recovery cannot mutate or publish | Abstract rejection transition and unresolved/denied histories |
+| CLM-R1 | Canonical plan matches independently declared closed fixture contracts | Same-subject abstract lowering and checked simulation |
+| CLM-R2 | Actual embedded XTDB commit/abort and joined readback | Universal physical refinement or explicitly qualified trusted premise; actual production writers |
+| CLM-B1 | Managed action HTML and browser test specification | Actual optimistic settlement and DOM evidence; adapter refinement |
+| CLM-G1 | Connected HTTP, SSE, and progression-pinned fragment trace | Same-subject browser/global trace refinement |
+| CLM-L1 | Observed delivery and replay in selected finite run | Fairness, availability, retry and temporal liveness argument |
+
+The v894 abstract failed-attempt step leaves the ledger unchanged. The v2481
+physical loser instead adds a durable rejection record guarded by the claimed
+Request. If =alpha= includes the full ledger, this is NOT stuttering. Either
+extend the abstract machine with a guarded journal-only rejection step (and
+prove preservation and immutable replay for it), or explicitly project only
+accepted records for the narrower initial-epoch ownership theorem. The latter
+projection cannot prove rejection replay or disclosure properties. Do not
+silently identify all incorporated records with accepted Claims: this trace
+has two command records but only one accepted business effect.
+
+** Existing report boundary and next enforcement step
+
+=src/gesso/assurance/report.clj= requires an issued checked-plan operation,
+original proof/obligation source and optional rechecked application binding.
+Its =:classification :tested= is caller-reported-only, unauthenticated;
+=:full-success?= remains false. =inductive_report.clj= similarly does not
+establish physical operation coverage. This fixture invokes
+=publication/build-executor=, not those issued proof-bound handles. Do not
+attach its observations to a different Claim proof simply because the name
+matches; do not manufacture a certificate or change report verdicts.
+
+Next: bind the fixture's declared operation to an original independent
+semantic subject and the existing source-bound checker. Start with the
+success and guarded refusal alternatives and distinguish acceptance history
+from journal incorporation. Derive/check the supported transaction mapping
+and add adversarial same-subject controls before claiming a report-level
+correspondence. Keep production writer inventory, HumanHelp, browser gate,
+formal soundness and liveness separate. No original CLM obligation or full
+work package is retired by this documentation checkpoint.
