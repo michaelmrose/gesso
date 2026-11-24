@@ -374,3 +374,27 @@
         (stream/close! producer)
         ((:stop! adapter) 2000)
         (.close client)))))
+
+(deftest physical-jdk-bodyless-responses-retire-quiet-producers-test
+  (doseq [[method status] [["HEAD" 200] ["GET" 204] ["GET" 205] ["GET" 304]]]
+    (let [producer (stream/stream 1)
+          adapter (jdk/start! (fn [_] {:status status :headers {} :body producer}) {})
+          client (HttpClient/newHttpClient)
+          request (-> (HttpRequest/newBuilder (URI/create (str (:base-url adapter) "/bodyless")))
+                      (.method method (java.net.http.HttpRequest$BodyPublishers/noBody))
+                      (.timeout (java.time.Duration/ofSeconds 4))
+                      (.build))]
+      (try
+        (let [response (.send client request (HttpResponse$BodyHandlers/ofInputStream))]
+          (with-open [input (.body response)]
+            (is (= status (.statusCode response)) [method status])
+            ;; Observe retirement before stopping the listener or closing the
+            ;; producer. There must be no take waiting for a forbidden body.
+            (is (eventual #(zero? ((:active-count adapter)))) [method status])
+            (is (stream/closed? producer) [method status])
+            (when (stream/closed? producer)
+              (is (= -1 (.read input)) [method status]))))
+        (finally
+          (stream/close! producer)
+          ((:stop! adapter) 2000)
+          (.close client))))))

@@ -95,7 +95,14 @@
         (doseq [[k v] (:headers response)]
           (.set headers (name k) (str v))))
       (cond
-        (nil? body) (.sendResponseHeaders exchange status -1)
+        ;; HEAD and these final response statuses cannot carry a payload.
+        ;; Do not begin taking frames (or writing finite bodies) that the
+        ;; protocol forbids. The ownership guard still closes a stream.
+        (or (= "HEAD" (.getRequestMethod exchange))
+            (contains? #{204 205 304} status)
+            (nil? body))
+        (.sendResponseHeaders exchange status -1)
+
         streaming?
         (do
           (.sendResponseHeaders exchange status 0)
