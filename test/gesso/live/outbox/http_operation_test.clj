@@ -131,7 +131,9 @@
                          (let [builder (-> (HttpRequest/newBuilder (URI/create (str (:base-url listener) path)))
                                            (.timeout (Duration/ofSeconds 10))
                                            (.header "content-type" "application/x-www-form-urlencoded")
-                                           (.POST (HttpRequest$BodyPublishers/ofString body)))]
+                                           (.POST (if (bytes? body)
+                                                    (HttpRequest$BodyPublishers/ofByteArray body)
+                                                    (HttpRequest$BodyPublishers/ofString body))))]
                            (doseq [[k v] extra-headers] (.header builder k v))
                            (.send client (.build builder) (HttpResponse$BodyHandlers/ofString))))
               path "/operations/request/r1/claim"
@@ -144,7 +146,34 @@
               (is (= 400 (.statusCode (send-at! path valid [["Content-Type" "text/plain"]]))))
               (is (= 400 (.statusCode (send-at! path valid [["Authorization" "one"]
                                                            ["authorization" "two"]])))))
+            ;; Exercise the hardened parser through the *installed* listener
+            ;; and host, not just a synthetic Ring request. These requests
+            ;; must neither reach the application gate nor write anything.
+            (let [valid (form :request/claim "valid")
+                  wire (pr-str (protocol/command->wire (command :request/claim)))
+                  malformed-wire (codec/form-encode
+                                  {transport/command-parameter
+                                   (str wire " :gesso.live.outbox.http-operation/eof nil")
+                                   "csrf" "valid"})
+                  invalid-bytes (byte-array (concat (.getBytes (str valid "&extra=")
+                                                               StandardCharsets/UTF_8)
+                                                    [(unchecked-byte 0xff)]))]
+              (doseq [body [(str valid "&extra=%FF")
+                            invalid-bytes
+                            (str valid "&%63srf=valid")
+                            malformed-wire]]
+                (is (= 400 (.statusCode (send! body)))))
+              (is (= 400 (.statusCode (send-at! path valid [["Content-Encoding" "gzip"]]))))
+              (let [bad-method (-> (HttpRequest/newBuilder (URI/create (str (:base-url listener) path)))
+                                   (.timeout (Duration/ofSeconds 10))
+                                   (.header "content-type" "application/x-www-form-urlencoded")
+                                   (.method "post" (HttpRequest$BodyPublishers/ofString valid))
+                                   (.build))]
+                (is (= 400 (.statusCode (.send client bad-method (HttpResponse$BodyHandlers/ofString)))))))
             (is (zero? @gates))
+            (is (empty? @calls))
+            (is (empty? (xt/q node ["SELECT _id FROM requests"])))
+            (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
             (is (= 403 (.statusCode (send! (form :request/claim "wrong")))))
             (is (= 400 (.statusCode (send! (form :request/reassign "valid")))))
             (is (empty? @calls))
