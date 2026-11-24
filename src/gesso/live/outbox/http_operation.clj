@@ -6,7 +6,7 @@
             [clojure.string :as str]
             [gesso.http :as http]
             [gesso.live.application-preflight :as application]
-            [gesso.live.application-preflight.affordance :as affordance]
+            [gesso.live.outbox.http-route :as route]
             [gesso.live.optimistic.choreo :as choreo]
             [gesso.live.optimistic.server :as server]
             [gesso.live.ui :as ui]
@@ -22,36 +22,6 @@
                   (assoc data :error/type :gesso.live.outbox/invalid-http-operation
                          :reason reason))))
 
-(defn- segments [path]
-  (str/split path #"/" -1))
-
-(defn- parameter-segment? [segment]
-  (and (str/starts-with? segment ":") (> (count segment) 1)))
-
-(defn- concrete-segment? [segment]
-  (and (re-matches #"[A-Za-z0-9._~-]+" segment)
-       (not (#{"." ".."} segment))))
-
-(defn- route-segments [path]
-  (when (and (string? path) (str/starts-with? path "/"))
-    (let [parts (subvec (vec (segments path)) 1)
-          parameters (filter parameter-segment? parts)]
-      (when (and (every? #(or (concrete-segment? %)
-                             (re-matches #":[A-Za-z][A-Za-z0-9_-]*" %)) parts)
-                 (= (count parameters) (count (distinct parameters))))
-        parts))))
-
-(defn- templates-overlap? [left right]
-  ;; Same simple full-segment vocabulary as application preflight. A shared
-  ;; literal or a placeholder on either side admits a common concrete path.
-  (let [a (segments (first (str/split left #"[?#]" 2)))
-        b (segments (first (str/split right #"[?#]" 2)))]
-    (and (= (count a) (count b))
-         (every? true? (map (fn [x y]
-                              (or (= x y)
-                                  (and (parameter-segment? x) (not (str/blank? y)))
-                                  (and (parameter-segment? y) (not (str/blank? x))))) a b)))))
-
 (defn- selected-routes! [assembly prepared routes]
   (let [realizations (get-in assembly [:operation-acquisition-assembly
                                       :acquisition-assembly :realizations])
@@ -59,34 +29,17 @@
                               (keep #(get-in realization [% :path])
                                     [:fragment-route :stream-route])) realizations)]
     (reduce (fn [selected {:keys [path method operation required-transport] :as route}]
-              (let [parts (route-segments path)]
+              (let [parts (route/route-segments path)]
                 (when-not (and parts (= :post method)
                                (= :htmx required-transport)
                                (contains? #{nil 200} (get-in prepared [:operations operation
                                                                      :response-status-contract :status])))
                   (reject! :unsupported-command-route {:route-id (:route-id route)}))
-                (when (some #(templates-overlap? path %)
+                (when (some #(route/templates-overlap? path %)
                             (concat (map :path selected) other-paths))
                   (reject! :ambiguous-command-route {:path path}))
                 (conj selected (assoc route :transport-segments parts))))
             [] (sort-by (comp pr-str :route-id) (vals routes)))))
-
-(defn- matching-route [routes uri]
-  (when (string? uri)
-    (some #(when (affordance/route-template-matches? (:path %) uri) %) routes)))
-
-(defn- captured-arguments [route uri]
-  ;; Match ownership first using preflight's broader matcher. Once a route
-  ;; owns the request, malformed concrete values may not fall through to
-  ;; trusted fallback. Only exact, uncoerced string argument bindings qualify.
-  (let [parts (subvec (vec (segments uri)) 1)
-        template (:transport-segments route)]
-    (when (and (= (count parts) (count template))
-               (every? concrete-segment? parts))
-      (into {} (keep (fn [[segment value]]
-                       (when (parameter-segment? segment)
-                         [(keyword (subs segment 1)) value])))
-            (map vector template parts)))))
 
 (defn- response [status]
   {:status status :headers {"cache-control" "no-store"
@@ -147,14 +100,14 @@
         routes (selected-routes! assembly prepared (get-in execution [:route-assembly :routes]))
         authorize? (:authorize-request? options)]
     (fn [request]
-      (if-let [route (matching-route routes (:uri request))]
+      (if-let [route (route/matching-route routes (:uri request))]
         (cond
           (not= :post (:request-method request)) (response 405)
           (not (application/application-assembly? assembly))
           (reject! :stale-command-assembly {})
           :else
           (if-let [{:keys [form command]} (try (read-form request) (catch Exception _ nil))]
-            (let [captured (captured-arguments route (:uri request))]
+            (let [captured (route/captured-arguments route (:uri request))]
               (if-not (and (some? captured)
                            (every? (fn [[k v]] (= v (get (:arguments command) k))) captured)
                            (try (choreo/require-operation (:operation route) command)

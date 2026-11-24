@@ -24,6 +24,7 @@
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http :as http]
             [gesso.live.outbox.http-jdk :as jdk]
+            [gesso.live.outbox.http-fragment :as fragment-http]
             [gesso.live.outbox.http-operation :as operation-http]
             [gesso.live.outbox.http-recovery :as recovery]
             [gesso.live.outbox.lifecycle :as lifecycle]
@@ -50,7 +51,7 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations})
+    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
 
@@ -219,7 +220,7 @@
                (reject! :invalid-ring-request {}))
              ;; The request cannot select a different XTDB provider through
              ;; any recognized alias. Do not expose the worker/stop handle.
-             (handler (merge (dissoc request :xtdb/conn :xtdb/node
+             (handler (merge (dissoc request :xtdb/read-connectable :xtdb/conn :xtdb/node
                                      :biff.xtdb/connection-pool)
                              (:context before)))
              (finally (signal! (swap! state update :active dec))))
@@ -301,6 +302,8 @@
    :sse-recovery optionally supplies its numeric pacing and batch options.
    Optional :assembled-operations selects the admitted literal or simple parameterized HTMX POST
    operation transport with an explicit trusted :authorize-request? callback.
+   Optional :assembled-fragments mounts the compiled model fragment GETs
+   using a trusted :resolve-id callback and mandatory model authorization.
    Other routes retain their existing trusted delegate.
    No SSE route means no scheduler. On shutdown, drain Ring requests, stop and
    drain recovery, retire route-owned SSE sessions, then run native stop
@@ -315,7 +318,10 @@
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
   (require-unshadowed-sse-path! assembly config)
-  (let [handler (if (contains? config :assembled-operations)
+  (let [handler (if (contains? config :assembled-fragments)
+                  (fragment-http/wrap-handler assembly handler (:assembled-fragments config))
+                  handler)
+        handler (if (contains? config :assembled-operations)
                   (operation-http/wrap-handler assembly handler (:assembled-operations config))
                   handler)
         route* (atom nil)
