@@ -186,11 +186,11 @@
         form (fn [command]
                (codec/form-encode {operation-http/command-parameter
                                    (pr-str (protocol/command->wire command))}))
-        execute! (fn [invocation]
-                   (swap! invocations conj invocation)
-                   (publication/execute-resolved!
-                    invocation
-                    {:mode :submit
+        execute! (publication/build-executor
+                    {:operation :request/claim
+                     :submission-mode! (fn [invocation]
+                                         (swap! invocations conj invocation)
+                                         :submit)
                      :may-disclose? (fn [binding record]
                                       (= (:principal binding) (get-in record [:gesso.command/binding :principal])))
                      :construct! (fn [{:keys [arguments]}]
@@ -213,7 +213,7 @@
                                     :outcome (get-in result [:outcome :outcome])
                                     :authoritative (protocol/authoritative
                                                     {:presence :present :basis basis
-                                                     :projection {:request/id id :request/status (:status row)}})}))}))
+                                                     :projection {:request/id id :request/status (:status row)}})}))})
         resolve-id (fn [ctx _]
                      (or (get-in ctx [:path-params :id]) (get-in ctx [:headers "fragment-id"])))]
     (with-redefs [fixture/allow? (fn [ctx id]
@@ -763,3 +763,51 @@
           (is (= [{:xt/id "r1"}] (xt/q node ["SELECT _id FROM requests"])))
           (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
           (is (= [{:xt/id "command-2375"}] (xt/q node ["SELECT _id FROM gesso_commands"]))))))))
+
+(deftest registered-publication-executor-requires-compatible-host-wiring
+  (let [called (atom 0)
+        build-options {:operation :request/claim
+                       :submission-mode! (fn [_] (swap! called inc) :submit)
+                       :construct! (fn [_] (throw (ex-info "unexpected construction" {})))
+                       :may-disclose? (constantly false)
+                       :project! (fn [& _] (throw (ex-info "unexpected projection" {})))}
+        executor (publication/build-executor build-options)
+        selected (assoc (config) :live-options {}
+                        :assembled-publication subject-mapping
+                        :assembled-operations {:authorize-request? (constantly true)})]
+    (doseq [options [(dissoc build-options :submission-mode!)
+                     (assoc build-options :operation :claim)
+                     (assoc build-options :project! nil)
+                     (assoc build-options :extra true)]]
+      (is (= :invalid-publication-executor-config
+             (reason #(publication/build-executor options)))))
+    (is (= :missing-command-preparation (reason #(executor {:ctx {}}))))
+    (with-assembly "/fragments/request-list/:id" "/streams/request-list/:id" executor
+      (fn [assembly]
+        (let [starts (atom 0)]
+          (with-redefs [managed/start-biff-application! (fn [& _] (swap! starts inc))]
+            (doseq [[cfg expected]
+                    [[(config) :missing-publication-executor-profile]
+                     [(dissoc selected :assembled-operations) :missing-publication-executor-profile]
+                     [(-> selected (dissoc :assembled-publication) (assoc :live-options {:rules []}))
+                      :missing-publication-executor-profile]
+                     [(update-in selected [:assembled-publication :subject-keys] dissoc :request)
+                      :unsupported-publication-executor-topics]]]
+              (is (= expected (reason #(host/start! assembly identity cfg)))))
+            (is (zero? @starts))))
+        (let [command (protocol/command {:command-id (identity/command-id "v2376-command")
+                                         :execution-id (identity/execution-id "v2376-execution")
+                                         :operation :request/claim :arguments {:request-id "r1"}
+                                         :observed-basis fixture/rendered-basis})
+              bind (:bind-command (publication/profile! assembly subject-mapping))
+              invocation (assoc (select-keys command [:operation :command-id :execution-id :arguments])
+                                :command command :principal fixture/trusted-principal
+                                :ctx {publication/preparation-key
+                                      (bind "owned-source" (assoc command :principal (identity/principal "other")))})]
+          (is (= :mismatched-command-binding (reason #(executor invocation)))))))
+    (with-assembly "/fragments/request-list/:id" "/streams/request-list/:id"
+      (publication/build-executor (assoc build-options :operation :request/cancel))
+      (fn [assembly]
+        (is (= :publication-executor-operation-mismatch
+               (reason #(host/start! assembly identity selected))))))
+    (is (zero? @called))))

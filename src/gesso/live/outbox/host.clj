@@ -318,7 +318,9 @@
    :live-options :rules (which must be absent). Only unconditional graphs
    reconstructible from one durable subject per topic are admitted. When
    assembled operations are also selected, their trusted executors receive
-   a command-bound publication preparer using that same subject mapping. All
+   a command-bound publication preparer using that same subject mapping.
+   Recognized publication/build-executor callbacks require both profiles
+   and compatible declared topics before provider startup. All
    streams share one connection budget and recovery controller. Do not
    combine :assembled-sse with the legacy :authorized-sse profile.
    Other routes retain their existing trusted delegate.
@@ -335,6 +337,7 @@
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
   (require-unshadowed-sse-path! assembly config)
+  (publication/require-host-wiring! assembly config)
   (let [profile (when (contains? config :assembled-publication)
                   (publication/profile! assembly (:assembled-publication config)))
         config (if profile

@@ -13,7 +13,8 @@
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.nio ByteBuffer]
            [java.security MessageDigest]
-           [java.util UUID]))
+           [java.util UUID WeakHashMap]
+           [java.lang.ref WeakReference]))
 
 (defn- reject! [reason data]
   (throw (ex-info "Durable model publication not admitted."
@@ -267,6 +268,61 @@
                    (recover-after-execute! ctx may-disclose? failure))))
           prior)]
     (adapter/project-resolution! invocation result project!)))
+
+(def ^:private ^WeakHashMap registered-executors (WeakHashMap.))
+
+(defn- executor-operation [executor]
+  (locking registered-executors
+    (let [{:keys [reference operation]} (.get registered-executors executor)]
+      (when (and reference (identical? executor (.get ^WeakReference reference)))
+        operation))))
+
+(defn build-executor
+  "Construct the ordinary optimistic operation :execute! callback for the
+   selected publication profile. Mode selection uses trusted server evidence;
+   construction and projection retain their existing trusted contracts.
+   The invocation must match its installed binding before mode selection.
+   Only the exact returned function is recognized by host admission. This
+   is local wiring validation, not certification of business policy."
+  [{:keys [operation submission-mode! construct! may-disclose? project!] :as config}]
+  (when-not (and (map? config)
+                 (= #{:operation :submission-mode! :construct! :may-disclose? :project!}
+                    (set (keys config)))
+                 (qualified-keyword? operation)
+                 (every? fn? [submission-mode! construct! may-disclose? project!]))
+    (reject! :invalid-publication-executor-config {}))
+  (let [executor (fn [invocation]
+                   (when-not (= (command-binding! (:ctx invocation))
+                                (adapter/require-context operation invocation))
+                     (reject! :mismatched-command-binding {}))
+                   (execute-resolved!
+                    invocation {:mode (submission-mode! invocation)
+                                :construct! construct! :may-disclose? may-disclose?
+                                :project! project!}))]
+    (locking registered-executors
+      (.put registered-executors executor
+            {:reference (WeakReference. executor) :operation operation}))
+    executor))
+
+(defn require-host-wiring!
+  "Check the exact selected executor objects against their registered
+   operation and the host's selected publication and operation profiles.
+   Unrecognized arbitrary callbacks are not classified or certified."
+  [assembly config]
+  (let [operations (get-in assembly [:operation-acquisition-assembly
+                                     :execution-assembly :server :operations])]
+    (doseq [[operation entry] operations
+            :let [built-for (executor-operation (:execute! entry))]
+            :when built-for]
+      (when-not (= operation built-for)
+        (reject! :publication-executor-operation-mismatch {:operation operation :built-for built-for}))
+      (when-not (and (contains? config :assembled-publication)
+                     (contains? config :assembled-operations))
+        (reject! :missing-publication-executor-profile {:operation operation}))
+      (let [topics (server/operation-published-change-topics entry)
+            subjects (get-in config [:assembled-publication :subject-keys])]
+        (when-not (and (map? subjects) (seq topics) (every? #(contains? subjects %) topics))
+          (reject! :unsupported-publication-executor-topics {:operation operation :topics topics}))))))
 
 (defn profile!
   "Compile an explicit topic -> subject field declaration against the exact
