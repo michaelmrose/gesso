@@ -1459,6 +1459,24 @@
                          (str/lower-case headers)))))
     (catch :default _ false)))
 
+(defn- passive-document-request?
+  "History is calculated before beforeSwap. Refuse history-producing root
+   configuration and boosted/anchor requests before response processing.
+   Explicit false history declarations are harmless; do not resolve mutable
+   inheritance to justify other declarations."
+  [root event]
+  (and (not (detail-field event "boosted"))
+       (not (some-> (detail-field event "requestConfig") (aget "boosted")))
+       (let [anchor (some-> (detail-field event "pathInfo") (aget "anchor"))]
+         (or (nil? anchor) (= "" anchor)))
+       (loop [element root]
+         (if (node-element? element)
+           (and (every? #(contains? #{nil "false"} (element-attr element %))
+                        ["hx-push-url" "data-hx-push-url"
+                         "hx-replace-url" "data-hx-replace-url"])
+                (recur (.-parentElement element)))
+           true))))
+
 (defn on-before-on-load!
   "Refuse ungranted response-header effects before HTMX handles them.
    Cancellation leaves terminal request handling responsible for debt."
@@ -1471,6 +1489,7 @@
         (when-let [{:keys [root record]} (active-request-from-event runtime event)]
           (when (or @(:response-refused? record)
                     (not (current-acquisition-owner? runtime root))
+                    (not (passive-document-request? root event))
                     (not (passive-response-headers? xhr)))
             (reset! (:response-refused? record) true)
             (prevent-event! event))))))
@@ -1483,6 +1502,18 @@
       override
       (or (not-empty (element-attr root "hx-swap"))
           (element-attr root "data-hx-swap")))))
+
+(defn- passive-swap-modifiers?
+  "Only timing, title suppression and explicit no-scroll focus are admitted.
+   HTMX scroll/show modifiers can select arbitrary document nodes; unknown
+   modifiers are outside the pinned replacement contract."
+  [tokens config]
+  (and (every? #(or (contains? #{"swap:0" "swap:0ms" "swap:0s" "swap:0m"
+                                 "transition:false" "ignoreTitle:true" "focus-scroll:false"} %)
+                    (re-matches #"settle:[0-9]+(?:\.[0-9]+)?(?:ms|s|m)?" %))
+               (rest tokens))
+       (or (some #{"focus-scroll:false"} (rest tokens))
+           (not (some-> config (aget "defaultFocusScroll"))))))
 
 (defn- synchronous-managed-swap?
   "The managed fragment lifecycle currently requires installation before
@@ -1504,6 +1535,7 @@
             delay (last (filter #(str/starts-with? % "swap:") tokens))
             transition (last (filter #(str/starts-with? % "transition:") tokens))]
         (and (contains? #{"innerHTML" "outerHTML"} (first tokens))
+             (passive-swap-modifiers? tokens config)
              (if delay
                (contains? #{"swap:0" "swap:0ms" "swap:0s" "swap:0m"} delay)
                (zero? (js/Number (or (some-> config (aget "defaultSwapDelay")) 0))))
@@ -1541,7 +1573,7 @@
   "Inspect inert parsed partial HTML, never insert it into the live document.
    Outer replacement must leave one canonical direct-child target; inner
    replacement must not introduce a duplicate of the surviving target id.
-   Full documents and template delimiters are outside this restricted profile
+   Full documents, title elements and template delimiters are outside this restricted profile
    because HTMX's wrapper parser can interpret them differently. Selection
    and extension transformations are not part of this shape contract."
   [runtime root event]
@@ -1551,7 +1583,7 @@
           outer? (= "outerHTML" (first (str/split (str/trim (managed-swap-spec root event)) #"\s+")))]
       (when (and (string? response) id
                  (replacement-selection? root event)
-                 (not (re-find #"<\s*(?:/?\s*(?:html|head|body|template)(?:\s|/|>)|!doctype)"
+                 (not (re-find #"<\s*(?:/?\s*(?:html|head|body|template|title)(?:\s|/|>)|!doctype)"
                                (str/lower-case response))))
         (let [template (.createElement (:document runtime) "template")
               _ (set! (.-innerHTML template) response)
@@ -1599,6 +1631,9 @@
               (cancel-swap-event! event)
               (.warn js/console
                      "Gesso managed fragment swap refused: primary target identity changed."))
+
+            (not (passive-document-request? root event))
+            (cancel-swap-event! event)
 
             (not (single-target-selection? root))
             (do

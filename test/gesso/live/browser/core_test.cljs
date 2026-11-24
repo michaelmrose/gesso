@@ -1587,6 +1587,66 @@
         (is (nil? (core/active-request runtime root)))
         (is (empty? (:continuity (core/state runtime))))))))
 
+(deftest managed-document-effects-refused-before-adoption-test
+  (doseq [{:keys [local ancestor detail spec global-focus? response allowed?]}
+          [{:allowed? true}
+           {:local {"hx-push-url" "false"} :allowed? true}
+           {:ancestor {"data-hx-replace-url" "false"} :allowed? true}
+           {:local {"hx-push-url" "true"} :allowed? false}
+           {:local {"data-hx-push-url" "/other"} :allowed? false}
+           {:ancestor {"hx-replace-url" "/other"} :allowed? false}
+           {:ancestor {"data-hx-replace-url" "true"} :allowed? false}
+           {:local {"hx-push-url" "false"} :ancestor {"hx-push-url" "true"} :allowed? false}
+           {:detail {:boosted true} :allowed? false}
+           {:detail {:requestConfig #js {:boosted true}} :allowed? false}
+           {:detail {:pathInfo #js {:anchor "foreign"}} :allowed? false}
+           {:spec "outerHTML scroll:#foreign:bottom" :allowed? false}
+           {:spec "outerHTML show:window:top" :allowed? false}
+           {:spec "outerHTML show:none" :allowed? false}
+           {:spec "outerHTML focus-scroll:true" :allowed? false}
+           {:global-focus? true :allowed? false}
+           {:global-focus? true :spec "outerHTML focus-scroll:false" :allowed? true}
+           {:spec "outerHTML ignoreTitle:true settle:20ms" :allowed? true}
+           {:spec "outerHTML ignoreTitle:false" :allowed? false}
+           {:spec "outerHTML unknown:modifier" :allowed? false}
+           {:response "<title>Foreign</title>" :allowed? false}]]
+    (let [captures (atom 0)
+          {:keys [runtime root htmx-fixture document-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          old-attr (.-getAttribute root)
+          requirement (progression/requirement
+                       {:tx-id 807 :system-time "2026-08-26T08:10:07Z"})
+          early-refusal? (or (some #(not= "false" %) (vals local))
+                             (some #(not= "false" %) (vals ancestor))
+                             (seq detail))]
+      (aset xhr "getAllResponseHeaders" (constantly "Content-Type: text/html"))
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (aset root "getAttribute" (fn [k] (if (= k "hx-swap") (or spec "outerHTML")
+                                          (get local k (old-attr k)))))
+      (aset root "parentElement" (make-element {:attrs ancestor}))
+      (aset (:htmx htmx-fixture) "config" #js {:defaultFocusScroll (boolean global-focus?)})
+      (when response
+        (swap! (:parsed-responses document-fixture) assoc response
+               [(.-testPrimaryTarget (make-root "fragment-1"))]))
+      (let [load (make-event "htmx:beforeOnLoad" {:elt root :xhr xhr :extra-detail detail})
+            swap (make-event "htmx:beforeSwap"
+                             {:elt root :xhr xhr :should-swap true
+                              :extra-detail (cond-> detail response (assoc :serverResponse response))})]
+        (core/on-before-on-load! runtime (:event load))
+        (is (= (boolean early-refusal?) @(:prevented? load)) (pr-str [local ancestor detail]))
+        (core/on-before-swap! runtime (:event swap))
+        (is (= (not allowed?) @(:prevented? swap)) (pr-str [local ancestor detail spec global-focus? response]))
+        (is (= allowed? (aget (:detail swap) "shouldSwap")))
+        (is (= (if allowed? 1 0) @captures)))
+      (when allowed? (after-swap! runtime root xhr))
+      (after-request! runtime root xhr true)
+      (is (= (if allowed? #{} #{requirement})
+             (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+      (is (nil? (core/active-request runtime root))))))
+
 (deftest managed-replacement-response-shape-test
   (doseq [{:keys [mode shape selection override response allowed?]}
           [{:shape :canonical :allowed? true}
