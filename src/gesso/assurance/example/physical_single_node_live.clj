@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2333: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2334: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -415,3 +415,17 @@
   ([slot-id source f]
    (principal/checked-test-policy! source)
    (with-live-application* slot-id source :biff-loopback f)))
+
+(defn with-biff-jetty-granted-live-proving-application!
+  "Use a REAL Ring Jetty HTTP/1 server attached to the original Biff-started
+   and Biff-stopped checked principal->XTDB->Live handler. This is an opt-in
+   test-only transport using the :test adapter dependency and loopback port 0.
+   The Jetty adapter's handling of Manifold SSE bodies, original principal
+   authentication, CSRF, public ingress and production release are NOT
+   certified by a successful short-response test."
+  ([source f]
+   (with-biff-jetty-granted-live-proving-application!
+    (str "v2334-" (random-uuid)) source f))
+  ([slot-id source f]
+   (principal/checked-test-policy! source)
+   (with-live-application* slot-id source :biff-jetty-http1 f)))

@@ -91,7 +91,12 @@
   {:extra-paths ["test"]
 
    :extra-deps
-   {com.microsoft.playwright/playwright
+   {;; Pin the REAL test HTTP adapter, rather than relying on whatever
+    ;; transitive Jetty version happens to appear via another provider.
+    info.sunng/ring-jetty9-adapter
+    {:mvn/version "0.39.2"}
+
+    com.microsoft.playwright/playwright
     {:mvn/version "1.61.0"}
 
     org.webjars.npm/htmx.org

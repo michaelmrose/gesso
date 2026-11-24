@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v2333: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2334: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -14,8 +14,9 @@
 
    By default no HTTP listener is opened. An opt-in, JDK-only loopback
    listener is installed AS A SEPARATE Biff module and managed by the same
-   original start/stop lifecycle. It always binds 127.0.0.1 on an ephemeral
-   port; this is NOT the deployed Biff/Jetty/Aleph listener. Callbacks remain
+   original start/stop lifecycle. An additional opt-in REAL Jetty HTTP/1
+   adapter is now available; both bind 127.0.0.1 on an ephemeral port. These
+   are test-only transport selections, NOT the production Biff/Aleph release. Callbacks remain
    valid only during the managed application lifetime. There is no intrinsic
    principal or CSRF verification: NEVER expose the unguarded diagnostic
    handler on a public network. This namespace
@@ -227,15 +228,58 @@
        (.stop ^HttpServer server 0)
        (reset! state nil)))})
 
+(def ^:private jetty-module-id
+  :gesso.assurance.example.physical-single-node-http/jetty-http1)
+
+(defn- biff-jetty-module! [handler state]
+  ;; Test the real Ring Jetty server adapter via the same Biff module lifecycle
+  ;; as the selected handler. Biff 2.0.2 owns modules and :biff.ring/handler;
+  ;; it does not itself ship a production HTTP listener. Jetty is bound to
+  ;; loopback only and is not an Aleph/Netty or streaming-SSE qualification.
+  {:biff.core/id jetty-module-id
+   :biff.core/start
+   (fn [system]
+     (when-not (identical? handler (:biff.ring/handler system))
+       (reject! :jetty-not-serving-original-biff-handler))
+     ;; This dependency is an explicit :test extra-dep, NOT required for the
+     ;; ordinary Gesso application classpath or :no-listener fixture.
+     (let [start! (try (requiring-resolve 'ring.adapter.jetty9/run-jetty)
+                       (catch Exception _ (reject! :jetty-test-adapter-unavailable)))
+           server (start! handler {:host "127.0.0.1"
+                                   :port 0
+                                   :join? false})]
+       (try
+         (let [;; Reflection deliberately stays inside this opt-in branch:
+               ;; the ordinary Gesso classpath must not need Jetty classes.
+               connectors (vec (.getConnectors server))
+               connector (first connectors)
+               port (when connector (.getLocalPort connector))]
+           (when-not (and (= 1 (count connectors))
+                          (integer? port) (pos? port))
+             (reject! :jetty-loopback-port-unavailable))
+           (reset! state {:server server :port port :handler handler})
+           system)
+         (catch Throwable t
+           (.stop server)
+           (throw t)))))
+   :biff.core/stop
+   (fn [_]
+     (when-let [server (:server @state)]
+       (try
+         (.stop server)
+         (finally
+           (reset! state nil)))))})
+
 (defn with-http-proving-application!
   "Execute a local embedded-XTDB proving application under one Biff start.
    The default three-arg form installs NO listener. The test-only four-arg
-   form opts in with literal :biff-loopback (not a caller-provided server):
-   a JDK HttpServer is then started/stopped by a SECOND Biff module, always
-   bound to 127.0.0.1, port 0. This demonstrates lifecycle ownership and the
-   identity of the adopted handler over a socket, NOT Biff's real production
-   listener, SSE transport, authenticated principal, CSRF, source-completeness
-   or release eligibility. The system is stopped on normal/exceptional exit."
+   form opts in with literal :biff-loopback or :biff-jetty-http1 (not
+   caller-supplied server functions). Each starts and stops an explicit test
+   HTTP module on 127.0.0.1, port 0. The latter uses a REAL Ring Jetty
+   server to verify actual adapter/HTTP behavior. Neither selection proves
+   production deployment, Aleph streaming SSE, authenticated principal,
+   CSRF protection, source-completeness or release eligibility. The system
+   is stopped on both normal and exceptional callback exit."
   ([f] (with-http-proving-application! (str "v1495-" (random-uuid)) f))
   ([slot-id f]
    (with-http-proving-application!
@@ -245,8 +289,16 @@
   ([slot-id handler-extension! listener-selection f]
    (when-not (and (fn? handler-extension!) (fn? f))
      (reject! :invalid-test-callback))
-   (when-not (contains? #{:no-listener :biff-loopback} listener-selection)
+   (when-not (contains? #{:no-listener :biff-loopback :biff-jetty-http1}
+                        listener-selection)
      (reject! :invalid-test-listener-selection))
+   ;; Fail before opening embedded XTDB or starting Biff if the explicitly
+   ;; selected adapter is absent. The normal no-listener route never loads it.
+   (when (= :biff-jetty-http1 listener-selection)
+     (try
+       (requiring-resolve 'ring.adapter.jetty9/run-jetty)
+       (catch Exception _
+         (reject! :jetty-test-adapter-unavailable))))
    (physical/with-proving-application!
     slot-id
     (fn [app]
@@ -260,10 +312,15 @@
           (reject! :invalid-prestart-handler-extension))
         (let [module (install-module! handler)
               listener-state (atom nil)
-              listener-module (when (= :biff-loopback listener-selection)
-                                (biff-loopback-module! handler listener-state))
+              listener-module (case listener-selection
+                                :no-listener nil
+                                :biff-loopback
+                                (biff-loopback-module! handler listener-state)
+                                :biff-jetty-http1
+                                (biff-jetty-module! handler listener-state))
               modules (cond-> [module] listener-module (conj listener-module))
-              order (cond-> [module-id] listener-module (conj loopback-module-id))
+              order (cond-> [module-id]
+                      listener-module (conj (:biff.core/id listener-module)))
               ;; Listener startup happens AFTER Biff installs its immutable
               ;; chosen Ring function, and Biff stop owns socket teardown.
               system (binding [*biff-modules* modules]
@@ -285,9 +342,11 @@
                    :physical-transactions :delegated-to-v1494-once-per-post
                    :postcommit-rendering :independent-physical-readback-may-be-unknown
                    :postcommit-render-failure :preserve-reported-commit-and-request-refresh
-                   :biff-owned-loopback-listener (if listener-module
-                                                   :jdk-short-http-only
-                                                   :not-selected)
+                   :biff-owned-loopback-listener
+                   (case listener-selection
+                     :no-listener :not-selected
+                     :biff-loopback :jdk-short-http-only
+                     :biff-jetty-http1 :ring-jetty-http1-test-adapter)
                    :issued-certified-plan-executors :not-established
                    :certified-plan-compatibility
                    {:persisted-fields :unqualified-v1494-fields

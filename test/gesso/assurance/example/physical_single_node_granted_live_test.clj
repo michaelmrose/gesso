@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-granted-live-test
-  "v2333: One actual Biff-installed diagnostic handler combines source-derived
+  "v2334: One actual Biff-installed diagnostic handler combines source-derived
    principal operation grants, authoritative XTDB writes and advisory Live.
    The fixture also rechecks the original reader identity before each outgoing
    advisory SSE event and closes the stream if the recheck fails. It does not
@@ -446,6 +446,85 @@
              (is (= 200 (socket-status base :get panel)))
              (is (= 200 (socket-status base :post release)))
              (is (= 2 (:revision (read!)))))))))))
+
+(deftest original-biff-lifecycle-serves-actual-jetty-http1-protected-operations
+  ;; Unlike the JDK test adapter, this is the real Ring Jetty HTTP adapter
+  ;; started by Biff AFTER it chooses the same protected Ring function. The
+  ;; observed scope is short HTTP/1 operations and request-time denials only;
+  ;; this does not certify Manifold SSE streaming or a deployed Aleph service.
+  (let [who (atom :anonymous)
+        source (assoc (policy (fn [_]
+                                (if (= :anonymous @who)
+                                  {:status :anonymous}
+                                  (authenticated @who))))
+                      :read-principals #{:actor/reader :actor/releaser})
+        captured (atom nil)
+        server* (atom nil)]
+    (fixture/with-biff-jetty-granted-live-proving-application!
+     source
+     (fn [{:keys [handler system loopback-base-url loopback-listener-state
+                  read! http-report live-report]}]
+       (reset! captured loopback-listener-state)
+       (reset! server* (:server @loopback-listener-state))
+       (is (identical? handler (:biff.ring/handler system)))
+       (is (identical? handler (:handler @loopback-listener-state)))
+       (is (= :ring-jetty-http1-test-adapter
+              (:biff-owned-loopback-listener http-report)))
+       (is (= :not-established (:biff-network-consumption live-report))
+           "The diagnostic Jetty listener isn't deployed production evidence")
+       (is (instance? org.eclipse.jetty.server.Server @server*))
+       (is (.isStarted ^org.eclipse.jetty.server.Server @server*))
+       (is (re-matches #"http://127\.0\.0\.1:[1-9][0-9]*"
+                       loopback-base-url))
+       (is (= 401 (socket-status loopback-base-url :get panel)))
+       (is (= 401 (socket-status loopback-base-url :post reserve)))
+       (is (= 0 (:revision (read!))))
+       (reset! who :actor/reader)
+       (let [view (socket-response loopback-base-url :get panel)]
+         (is (= 200 (:status view)))
+         (is (re-find #"data-slot-status=\"available\"" (:body view))))
+       (is (= 403 (socket-status loopback-base-url :post reserve)))
+       (is (= 0 (:revision (read!))))
+       (reset! who :actor/reserver)
+       (is (= 403 (socket-status loopback-base-url :get panel)))
+       (is (= 403 (socket-status loopback-base-url :get fixture/events-uri)))
+       (with-redefs [live/emit! (fn [_ _] {:status :emitted})]
+         (let [result (socket-response loopback-base-url :post reserve)]
+           (is (= 200 (:status result)))
+           (is (= "write-only" (:visibility result)))
+           (is (nil? (:readback result)))
+           (is (not (re-find #"data-slot-status|data-slot-revision|reserved"
+                             (:body result)))))
+         (is (= 1 (:revision (read!))))
+         (reset! who :actor/releaser)
+         (let [view (socket-response loopback-base-url :get panel)]
+           (is (= 200 (:status view)))
+           (is (re-find #"data-slot-status=\"reserved\"" (:body view))))
+         (is (= 200 (socket-status loopback-base-url :post release)))
+         (is (= 2 (:revision (read!)))))))
+    (is (instance? clojure.lang.IAtom @captured))
+    (is (nil? @@captured) "Biff must clear the Jetty listener state on stop")
+    (is (.isStopped ^org.eclipse.jetty.server.Server @server*)
+        "The actual Jetty server must be stopped by Biff")))
+
+(deftest biff-owned-jetty-is-stopped-on-exceptional-callback-exit
+  (let [state* (atom nil)
+        server* (atom nil)
+        expected (ex-info "Synthetic pilot callback failure" {:reason :test-end})
+        observed (try
+                   (fixture/with-biff-jetty-granted-live-proving-application!
+                    (policy (constantly (authenticated :actor/releaser)))
+                    (fn [{:keys [loopback-listener-state loopback-base-url]}]
+                      (reset! state* loopback-listener-state)
+                      (reset! server* (:server @loopback-listener-state))
+                      (is (= 200 (socket-status loopback-base-url :get panel)))
+                      (throw expected)))
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+    (is (identical? expected observed))
+    (is (instance? clojure.lang.IAtom @state*))
+    (is (nil? @@state*))
+    (is (.isStopped ^org.eclipse.jetty.server.Server @server*))))
 
 (deftest original-biff-lifecycle-starts-and-stops-a-real-protected-loopback-listener
   ;; Unlike the separately managed JDK bridge used by earlier tests, this
