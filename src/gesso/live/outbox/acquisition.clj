@@ -1,7 +1,8 @@
 (ns gesso.live.outbox.acquisition
   "Single-node, opt-in physical acquisition of a pending Live outbox intent.
 
-   A claim reads one CURRENT XTDB row, checks that it is a version-1 pending
+   A claim reads one CURRENT XTDB row after awaiting the selected node's
+   freshly captured submitted frontier, checks that it is a version-1 pending
    intent, and submits one transaction containing a provider-system-time
    compare-and-swap ASSERT followed by a replacement document with a lease.
    A stale claimant cannot overwrite an already leased or otherwise changed
@@ -28,7 +29,7 @@
   (:require [clojure.string :as str]
             [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox :as outbox]
-            [xtdb.api :as xt])
+            [gesso.live.outbox.read-frontier :as frontier])
   (:import [java.time Duration Instant ZonedDateTime]))
 
 (def ^:private max-lease-millis 300000)
@@ -92,16 +93,7 @@
 
 (defn- current-intent!
   [node intent-id]
-  (let [rows (try
-               (xt/q node [read-current-sql intent-id])
-               (catch InterruptedException cause
-                 ;; The current read is a physical XTDB boundary shared by
-                 ;; acquisition, reclaim and active-lease fencing. A failed
-                 ;; interruptible read is not evidence that an intent or its
-                 ;; lease is missing. Preserve both the exact exception and
-                 ;; the calling thread's cancellation signal.
-                 (restore-interrupt! cause)
-                 (throw cause)))]
+  (let [rows (frontier/q-from! node [read-current-sql intent-id])]
     ;; XTDB q returns a vector (including [] for an observed missing row).
     ;; Nil, maps, sequences, and non-map entries do not establish that the
     ;; intent is absent. Never turn a malformed physical read into a safe

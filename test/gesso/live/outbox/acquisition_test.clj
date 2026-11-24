@@ -4,7 +4,9 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox.acquisition :as acquisition]
+            [gesso.live.outbox.read-frontier :as frontier]
             [xtdb.api :as xt]
+            [xtdb.basis :as basis]
             [xtdb.node :as xtn])
   (:import [java.time Instant]))
 
@@ -225,7 +227,7 @@
             request (claim id "next-worker")]
         (try
           (Thread/interrupted)
-          (let [caught (with-redefs [xt/q (fn [& _]
+          (let [caught (with-redefs [live.xtdb/q-from (fn [& _]
                                             (swap! queries inc)
                                             (throw cause))]
                          (try
@@ -264,7 +266,7 @@
             physical-claims (atom 0)
             reads (atom 0)
             request (claim id "worker-a")
-            rejected (with-redefs [xt/q (fn [& _]
+            rejected (with-redefs [live.xtdb/q-from (fn [& _]
                                           (swap! reads inc)
                                           response)
                                    live.xtdb/execute-tx!
@@ -312,3 +314,53 @@
                      node (select-keys request [:intent-id :lease-id :worker-id]))
                     (catch clojure.lang.ExceptionInfo e e))]
         (is (= :missing-lease (:reason (ex-data error))))))))
+
+(deftest lease-observations-await-selected-node-frontiers-test
+  (let [node :selected-node
+        id (random-uuid)
+        request (claim id "worker-a")
+        fence (select-keys request [:intent-id :lease-id :worker-id])
+        calls (atom [])
+        frontier-id (atom 40)
+        read-lease (fn [phase]
+                     (case phase
+                       :acquire (acquisition/acquire-pending! node request)
+                       :reclaim (acquisition/reclaim-expired! node request)
+                       :fence (acquisition/active-lease-guard-ops node fence)))
+        error-data (fn [f]
+                     (try (f) nil
+                          (catch clojure.lang.ExceptionInfo e (ex-data e))))]
+    (with-redefs [xt/status (fn [n]
+                             (swap! calls conj [:status n])
+                             {:latest-submitted-msg-ids {"xtdb" [(swap! frontier-id inc)]}})
+                  live.xtdb/q-from (fn [n q opts]
+                                     (swap! calls conj [:query n q opts])
+                                     [])
+                  live.xtdb/execute-tx! (fn [& _] (throw (AssertionError. "Unexpected write")))]
+      (is (= :missing (:reason (read-lease :acquire))))
+      (is (= :missing (:reason (read-lease :reclaim))))
+      (is (= :missing-lease (:reason (error-data #(read-lease :fence)))))
+      (is (= (vec (mapcat (fn [n]
+                           [[:status node]
+                            [:query node ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" id]
+                             {:await-token (basis/->tx-basis-str {"xtdb" [n]})}]])
+                         [41 42 43]))
+             @calls))
+      (reset! calls [])
+      (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {}})]
+        (doseq [phase [:acquire :reclaim :fence]]
+          (is (= ::frontier/invalid-frontier
+                 (:error/type (error-data #(read-lease phase))))))
+        (is (empty? @calls))))))
+
+(deftest acquisition-observes-submitted-intent-without-client-await-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          request (claim id "worker-a")
+          plan (outbox/prepare!
+                {:intent-ids [id] :source-id "example/source"
+                 :operation :request/claim :purpose :gesso.live/refresh}
+                [{:topic :request :id "submitted-request"}])]
+      (xt/submit-tx node (conj (vec (:guard-ops plan)) (:tx-op plan)))
+      (is (= :acquired (:status (acquisition/acquire-pending! node request))))
+      (is (= (:lease-id request) (:gesso.live.outbox/lease-id (read-intent node id)))))))
