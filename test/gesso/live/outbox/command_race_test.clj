@@ -885,6 +885,7 @@
                          [:requests "r1" :revision 1]
                          [:requests "r1" :updated-at "t1"]}
         opts {:operation :request/claim :submission-mode! (constantly :submit)
+                   :single-command-per-principal? true
                    :may-disclose? (fn [binding record] (= binding (:gesso.command/binding record)))
                    :construction-contract {:required-guard-tables #{:memberships} :allowed-guard-tables #{:memberships}
                                            :required-write-tables tables :allowed-write-tables tables}

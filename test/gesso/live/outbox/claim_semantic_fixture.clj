@@ -140,8 +140,8 @@
 (defn- require-source-lowering!
   "Check the selected source's projected literal writes and exact pre-write
    assertions. The physical mapping and extra version/subject predicates are
-   fixture declarations. A journal slot is represented by THIS command ID,
-   not a proof of uniqueness across arbitrary IDs for the same helper."
+   fixture declarations. Require both command-ID absence and principal/
+   operation slot absence, so distinct IDs cannot fill the same slot."
   [helper alternative id ops writes]
   (let [declaration (source helper alternative)
         conditions (literal-conditions! declaration)
@@ -164,7 +164,9 @@
                                              [[:revision (:request/revision conditions)]
                                               [:updated-at (if accept? "t0" "t1")]
                                               [:status (:request/status conditions)]])
-                           (absence-assertion :gesso_commands id)]
+                           (absence-assertion :gesso_commands id)
+                           ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE (gesso$command$binding).principal.gesso$choreo$identity$value = ? AND (gesso$command$binding).operation = ?)"
+                            helper :request/claim]]
                    accept? (into [(current-assertion :memberships helper
                                                      [[:revision 0] [:updated-at "t0"] [:active (get conditions membership)]])
                                   (absence-assertion :request_assignments "primary-r1")

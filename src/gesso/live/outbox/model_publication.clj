@@ -283,7 +283,11 @@
               (if-let [prepare-model (::prepare-model (meta (get ctx preparation-key)))]
                 (prepare-model spec (:changes plan))
                 (prepare! ctx spec (:changes plan))))]
-      {:ops (cond-> (into guard-ops tx-ops) tx-op (conj tx-op))
+      {:ops (cond-> (into (cond-> guard-ops
+                            (:single-command-per-principal? contract)
+                            (conj (resolution/principal-operation-slot-assertion (command-binding! ctx))))
+                          tx-ops)
+              tx-op (conj tx-op))
        :intents intents :record record}))))
 
 (defn- execute-resolved-plan! [ctx {:keys [ops intents record]}]
@@ -404,6 +408,9 @@
         predicate? (contains? options :predicate-contract!)
         post-state? (contains? options :post-state-contract!)
         outcome? (contains? options :outcome-contract!)]
+    (when (and (contains? options :single-command-per-principal?)
+               (not (and (true? (:single-command-per-principal? options)) target?)))
+      (reject! :invalid-principal-slot-contract {}))
     (when-not (= table? target?)
       (reject! :incomplete-document-target-contract {}))
     (when table?
@@ -453,12 +460,13 @@
 
 (defn- admit-contract! [ctx {:keys [construction-contract target-contract!
                                     predicate-contract! command-operation-contract!
-                                    post-state-contract! outcome-contract!]}]
+                                    post-state-contract! outcome-contract! single-command-per-principal?]}]
   (when target-contract!
     (let [binding (command-binding! ctx)
           targets (resolved/admit-document-targets!
                    construction-contract (target-contract! ctx binding) binding)]
       {:tables construction-contract
+       :single-command-per-principal? single-command-per-principal?
        :targets targets
        :predicates (when predicate-contract!
                      (resolved/require-predicate-contract!
@@ -514,17 +522,23 @@
    must contain the full six contract options, require guarded journal-only
    writes, and is admitted only after the physical abort and unresolved
    recovery, before the abort constructor. It cannot authorize domain writes.
+   Optional :single-command-per-principal? true requires document-target
+   contracts and adds a binding-derived ledger absence assertion to both
+   canonical acceptance and abort-refusal transactions. It scopes one
+   durable command to a string principal and operation, not command ID or
+   arguments, for the lifetime of its current ledger record. Replay is
+   unchanged. Other writers must obey the same restriction.
    Neither contract verifies projection. Raw SQL
    construction cannot satisfy this selected contract. Replay does not
    invoke the declaration or constructor. Callback policy is still trusted."
   [{:keys [ctx operation] :as invocation}
    {:keys [mode construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract] :as options}]
+           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract single-command-per-principal?] :as options}]
   (when-not (and (map? options)
                  (#{#{:mode :construct! :may-disclose? :project!}
                     #{:mode :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys options)) :construction-contract :target-contract!
-                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract))
+                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract :single-command-per-principal?))
                  (or (not (contains? options :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (#{:submit :reconcile} mode)
@@ -556,7 +570,7 @@
                                              #(guarded-abort-outcome! invocation may-disclose?
                                                                       construct-after-abort! %
                                                                       (if abort-contract
-                                                                        (admit-contract! ctx abort-contract)
+                                                                        (admit-contract! ctx (assoc abort-contract :single-command-per-principal? single-command-per-principal?))
                                                                         contract)))))))
           prior)]
     (adapter/project-resolution! invocation result project!)))
@@ -577,12 +591,12 @@
    Only the exact returned function is recognized by host admission. This
    is local wiring validation, not certification of business policy."
   [{:keys [operation submission-mode! construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract] :as config}]
+           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract single-command-per-principal?] :as config}]
   (when-not (and (map? config)
                  (#{#{:operation :submission-mode! :construct! :may-disclose? :project!}
                     #{:operation :submission-mode! :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys config)) :construction-contract :target-contract!
-                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract))
+                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract :single-command-per-principal?))
                  (or (not (contains? config :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (qualified-keyword? operation)
@@ -611,6 +625,8 @@
                                  (assoc :post-state-contract! post-state-contract!)
                                  outcome-contract!
                                  (assoc :outcome-contract! outcome-contract!)
+                                 single-command-per-principal?
+                                 (assoc :single-command-per-principal? true)
                                  abort-contract
                                  (assoc :abort-contract abort-contract))))]
     (locking registered-executors

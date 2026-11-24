@@ -132,6 +132,19 @@
   [binding]
   (identity/raw-value (:command-id (require-binding binding))))
 
+(defn principal-operation-slot-assertion
+  "Require an empty durable journal slot for this principal and operation,
+   regardless of command ID or arguments. Intended only for explicitly
+   single-command operations; this is not the default retry policy.
+   The slot lasts as long as the current ledger record is retained."
+  [binding]
+  (require-binding binding)
+  (let [principal (identity/raw-value (:principal binding))]
+    (when-not (string? principal)
+      (fail! :unsupported-principal-slot "Principal slots require string identities." {}))
+    ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE (gesso$command$binding).principal.gesso$choreo$identity$value = ? AND (gesso$command$binding).operation = ?)"
+     principal (:operation binding)]))
+
 (defn command-record
   "Construct a version-zero persisted *incorporation* record. The supplied
    outcome is application-owned but must be a portable non-empty map; `now`
