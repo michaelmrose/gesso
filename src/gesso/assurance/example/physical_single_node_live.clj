@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2339: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2341: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -38,6 +38,11 @@
 (def htmx-asset-uri "/__gesso_proving/live/assets/htmx.js")
 (def sse-asset-uri "/__gesso_proving/live/assets/sse.js")
 (def runtime-asset-uri "/gesso/gesso-live.js")
+(def bootstrap-asset-uri "/__gesso_proving/live/assets/bootstrap.js")
+(def ^:private bootstrap-js
+  ;; ADVANCED compilation exports init! but deliberately never auto-starts.
+  ;; This fixed, non-session-specific script runs after the deferred runtime.
+  "gesso.live.browser.runtime.init_BANG_();\n")
 (def ^:private htmx-candidates
   ["META-INF/resources/webjars/htmx.org/2.0.7/dist/htmx.min.js"
    "META-INF/resources/webjars/htmx.org/2.0.7/dist/htmx.js"])
@@ -47,7 +52,7 @@
    "META-INF/resources/webjars/htmx-ext-sse/2.2.4/sse.min.js"
    "META-INF/resources/webjars/htmx-ext-sse/2.2.4/sse.js"])
 (def ^:private asset-uris
-  #{htmx-asset-uri sse-asset-uri runtime-asset-uri})
+  #{htmx-asset-uri sse-asset-uri runtime-asset-uri bootstrap-asset-uri})
 (def ^:private event-name "live-update")
 (def ^:private operation-uris
   {"/__gesso_proving/slot/reserve" :slot/reserve
@@ -88,7 +93,8 @@
         (reject! :empty-built-browser-runtime))
       {htmx-asset-uri (read-resource! htmx-candidates)
        sse-asset-uri (read-resource! sse-candidates)
-       runtime-asset-uri runtime-text})))
+       runtime-asset-uri runtime-text
+       bootstrap-asset-uri bootstrap-js})))
 
 (defn- asset-response [content]
   {:status 200
@@ -156,12 +162,22 @@
         node (assoc panel 3 (fragment-node app presentation))]
     (assoc-in
      (http/html-response
-      [:main {:data-gesso-proving-live-panel true}
-       [:h2 "Single-node Live reservation proving fixture"]
-       node
-       [:script {:src htmx-asset-uri}]
-       [:script {:src sse-asset-uri}]
-       (live.ui/live-script {:src runtime-asset-uri})])
+      [:html {:lang "en"}
+       [:head
+        [:meta {:charset "utf-8"}]
+        [:title "Single-node Live reservation proving fixture"]
+        ;; Avoid an unrelated browser-generated 404 for a nonexistent icon.
+        [:link {:rel "icon" :href "data:,"}]]
+       [:body
+        [:main {:data-gesso-proving-live-panel true}
+         [:h2 "Single-node Live reservation proving fixture"]
+         node]
+        [:script {:src htmx-asset-uri}]
+        [:script {:src sse-asset-uri}]
+        (live.ui/live-script {:src runtime-asset-uri})
+        ;; Both deferred classic scripts execute in document order. Do not
+        ;; invoke init! inline ahead of the deferred runtime export.
+        [:script {:src bootstrap-asset-uri :defer true}]]])
      [:headers "cache-control"] "no-store")))
 
 (defn- unsupported [status]

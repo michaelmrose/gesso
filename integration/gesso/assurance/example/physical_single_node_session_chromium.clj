@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-session-chromium
-  "v2340: Strict real Chromium/Aleph/session/CSRF/XTDB/Live gate.
+  "v2341: Strict real Chromium/Aleph/session/CSRF/XTDB/Live gate.
    Credentials are provisioned out of band, not via a production login."
   (:require [clojure.test :as t :refer [deftest is]]
             [gesso.assurance.example.physical-single-node-session :as session]
@@ -28,8 +28,11 @@
                     (.setSameSite SameSiteAttribute/STRICT))])
     (let [page (chromium/new-page! ctx)]
       (chromium/navigate! page (str base fixture/panel-uri))
-      (chromium/wait-for-js!
-       page "() => !!window.htmx && !!window.gessoLive && !!document.querySelector('[data-gesso-proving-live-target]')")
+      ;; Distinguish missing assets, missing runtime initialization, and
+      ;; absent managed markup instead of timing out on a composite predicate.
+      (chromium/wait-for-js! page "() => !!window.htmx")
+      (chromium/wait-for-js! page "() => !!window.gessoLive")
+      (chromium/wait-for-js! page "() => !!document.querySelector('[data-gesso-proving-live-target]')")
       page)))
 
 (defn- wait-state! [page status revision]
@@ -91,11 +94,9 @@
         (doseq [page [pa pb pr]] (wait-state! page "available" 2))
         (is (= 2 (:revision (read!))))
         (doseq [ctx @contexts]
-          ;; The fixture has no favicon route; do not mask other errors.
-          (is (empty? (remove #(and (= :console-error (:kind %))
-                                  (= (str base "/favicon.ico")
-                                     (get-in % [:location "url"])))
-                              (chromium/browser-errors ctx))))))
+          ;; The document declares an icon. No unexpected console errors,
+          ;; including resource failures, are suppressed by this gate.
+          (is (true? (chromium/assert-clean! ctx)))))
       (finally
         (try
           (doseq [ctx (reverse @contexts)] (chromium/close-context! ctx))

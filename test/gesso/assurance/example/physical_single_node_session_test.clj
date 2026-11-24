@@ -160,3 +160,33 @@
               (is (= 401 (:status (call "POST" release
                                        {"cookie" (:cookie both)
                                         "x-gesso-proving-csrf" token}))))))))))))
+
+(deftest session-document-explicitly-starts-runtime-after-loading-it
+  ;; Production ADVANCED runtime exports init! without auto-start. Serve
+  ;; the real ordered classic scripts and a fixed bootstrap over HTTP.
+  (session/with-session-policy!
+   policy
+   (fn [{:keys [source issue!]}]
+     (let [reader (issue! :actor/releaser)]
+       (fixture/with-biff-jetty-granted-live-proving-application!
+        source
+        (fn [{:keys [loopback-base-url read!]}]
+          (let [call (partial socket! loopback-base-url)
+                headers {"cookie" (:cookie reader)}
+                panel (call "GET" fixture/panel-uri headers)
+                tags (vec (re-seq #"<script\b[^>]*>" (:body panel)))
+                urls (mapv #(second (re-find #"src=\"([^\"]+)\"" %)) tags)
+                bootstrap (call "GET" fixture/bootstrap-asset-uri {})]
+            (is (= 200 (:status panel)))
+            (is (= [fixture/htmx-asset-uri fixture/sse-asset-uri
+                    fixture/runtime-asset-uri fixture/bootstrap-asset-uri] urls))
+            (is (every? #(re-find #"\bdefer(?:=|\s|>)" %) (drop 2 tags)))
+            (is (re-find #"<link[^>]*href=\"data:,\"" (:body panel)))
+            (is (= 200 (:status bootstrap)))
+            (is (= "gesso.live.browser.runtime.init_BANG_();\n" (:body bootstrap)))
+            (is (= (:body bootstrap)
+                   (:body (call "GET" fixture/bootstrap-asset-uri headers))))
+            (is (= 405 (:status (call "POST" fixture/bootstrap-asset-uri {}))))
+            (is (= 401 (:status (call "GET" fixture/panel-uri {}))))
+            (is (not (re-find #"<script\b" (:body (call "GET" fixture/fragment-uri headers)))))
+            (is (zero? (:revision (read!)))))))))))
