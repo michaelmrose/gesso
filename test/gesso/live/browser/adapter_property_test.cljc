@@ -914,6 +914,14 @@
    :fragment-id fragment-id
    :requirement requirement})
 
+(defn- adopt-fragment
+  [state fragment-id generation request-id]
+  (let [event {:fragment-id fragment-id
+               :request-generation generation
+               :request-id request-id}
+        [admitted _] (adapter/step state (assoc event :event :htmx/before-swap))]
+    (first (adapter/step admitted (assoc event :event :htmx/after-swap)))))
+
 (deftest generated-invalidation-bursts-remain-singleflight-and-bounded-test
   (testing "one active refresh absorbs an arbitrary burst into one queued requirement set"
     (check-property!
@@ -964,7 +972,7 @@
                 :request-id request-id})
               [state-c finish-effects]
               (adapter/step
-               state-b
+               (adopt-fragment state-b fragment-id generation request-id)
                {:event :htmx/after-request
                 :fragment-id fragment-id
                 :request-generation generation
@@ -1057,7 +1065,7 @@
               fragment (get-in state [:fragments fragment-id])
               [finished finish-effects]
               (adapter/step
-               state
+               (adopt-fragment state fragment-id generation request-id)
                {:event :htmx/after-request
                 :fragment-id fragment-id
                 :request-generation generation
@@ -1107,15 +1115,16 @@
 
 
 (deftest generated-success-and-failure-preserve-exact-unsatisfied-requirements-test
-  (testing "successful completion discharges active authority while failure preserves it into any already-required successor"
+  (testing "adopted completion discharges active authority while unadopted completion preserves it"
     (check-property!
      property-test-count
      (prop/for-all*
       [small-natural-gen
        (gen/vector small-natural-gen 0 40)
        gen/boolean
+       gen/boolean
        gen/boolean]
-      (fn [active-index observed-indexes advisory? fail?]
+      (fn [active-index observed-indexes advisory? fail? swap?]
         (let [fragment-id :fragment/generated-success-failure
               active-requirement (basis-id active-index)
               observed-requirements (mapv basis-id observed-indexes)
@@ -1168,6 +1177,7 @@
                     requirement))))
                state-b
                observed-requirements)
+              adopted? swap?
               terminal-event
               (if fail?
                 {:event :http/failed
@@ -1181,14 +1191,16 @@
                  :request-id request-id})
               [finished terminal-effects]
               (adapter/step
-               state-c
+               (if adopted?
+                 (adopt-fragment state-c fragment-id generation request-id)
+                 state-c)
                terminal-event)
               successor
               (effect-data :fragment/refresh terminal-effects)
               expected-requirements
-              (if fail?
-                expected-failure-requirements
-                expected-success-requirements)]
+              (if adopted?
+                expected-success-requirements
+                expected-failure-requirements)]
           (and
            (= #{active-requirement}
               (:requirements first-refresh))
@@ -1217,14 +1229,8 @@
               successor
               (= expected-requirements
                  (:requirements successor))
-              (if fail?
-                (contains?
-                 (:requirements successor)
-                 active-requirement)
-                (not
-                 (contains?
-                  (:requirements successor)
-                  active-requirement)))
+              (= (not adopted?)
+                 (contains? (:requirements successor) active-requirement))
               (not= generation
                     (:request-generation successor))
               (= (:request-generation successor)
@@ -1246,7 +1252,7 @@
               (= false
                  (get-in finished
                          [:fragments fragment-id :queued-refresh?]))
-              (= (if fail? #{active-requirement} #{})
+              (= (if adopted? #{} #{active-requirement})
                  (get-in finished
                          [:fragments fragment-id
                           :queued-requirements]))))

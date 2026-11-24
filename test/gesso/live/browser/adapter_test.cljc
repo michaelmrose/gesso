@@ -271,6 +271,16 @@
       authoritative
       (assoc :authoritative authoritative)))))
 
+(defn- adopt-fragment
+  [state fragment-id generation request-id]
+  (let [[admitted _] (before-swap state fragment-id generation request-id)]
+    (first
+     (adapter/step admitted
+                   {:event :htmx/after-swap
+                    :fragment-id fragment-id
+                    :request-generation generation
+                    :request-id request-id}))))
+
 ;; =============================================================================
 ;; State and event boundary
 ;; =============================================================================
@@ -1891,7 +1901,7 @@
         (adapter/step state-c (invalidation :panel :basis-2))
         [state-e completion-effects]
         (adapter/step
-         state-d
+         (adopt-fragment state-d :panel gen-1 :xhr-1)
          {:event :htmx/after-request
           :fragment-id :panel
           :request-generation gen-1
@@ -1928,7 +1938,7 @@
         (adapter/step state-c (invalidation :panel :basis-1))
         [state-e completion-effects]
         (adapter/step
-         state-d
+         (adopt-fragment state-d :panel gen-1 :xhr-1)
          {:event :htmx/after-request
           :fragment-id :panel
           :request-generation gen-1
@@ -2043,6 +2053,29 @@
     (is (= #{}
            (get-in state-d [:fragments :panel :queued-requirements])))))
 
+(deftest transport-completion-requires-admitted-swap-to-discharge-debt-test
+  (doseq [mode [:no-swap :cancelled-swap :unmatched-after-swap :installed]]
+    (let [{state-a :state gen-1 :generation}
+          (begin-fragment (adapter/initial-state) :panel :basis-1)
+          [bound _] (bind-request state-a :panel gen-1 :xhr-1)
+          event {:fragment-id :panel
+                 :request-generation gen-1
+                 :request-id :xhr-1}
+          prepared
+          (case mode
+            :no-swap bound
+            :cancelled-swap (first (before-swap bound :panel gen-1 :xhr-1))
+            :unmatched-after-swap
+            (first (adapter/step bound (assoc event :event :htmx/after-swap)))
+            :installed (adopt-fragment bound :panel gen-1 :xhr-1))
+          [finished effects]
+          (adapter/step prepared (assoc event :event :htmx/after-request))]
+      (is (= (if (= :installed mode) #{} #{:basis-1})
+             (get-in finished [:fragments :panel :queued-requirements]))
+          (str mode))
+      (is (nil? (get-in finished [:fragments :panel :inflight])))
+      (is (empty? (effects-of :fragment/refresh effects))))))
+
 (deftest queued-requirements-start-next-generation-after-current-request-finishes-test
   (let [{state-a :state gen-1 :generation}
         (begin-fragment (adapter/initial-state) :panel :basis-1)
@@ -2050,7 +2083,7 @@
         [state-c _] (adapter/step state-b (invalidation :panel :basis-2))
         [state-d effects-d]
         (adapter/step
-         state-c
+         (adopt-fragment state-c :panel gen-1 :xhr-1)
          {:event :htmx/after-request
           :fragment-id :panel
           :request-generation gen-1

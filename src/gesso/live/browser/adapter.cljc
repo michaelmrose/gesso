@@ -385,6 +385,7 @@
        (map? inflight)
        (positive-integer? (:generation inflight))
        (set? (:requirements inflight))
+       (boolean? (:adopted? inflight))
        (or (nil? (:request-id inflight))
            (some? (:request-id inflight)))
        (or (nil? (:authoritative inflight))
@@ -1599,7 +1600,8 @@
         {:generation request-generation
          :request-id nil
          :requirements (set requirements)
-         :authoritative nil}
+         :authoritative nil
+         :adopted? false}
         state''
         (assoc-in
          state'
@@ -1899,8 +1901,9 @@
          "Fragment request generation"
          (:request-generation event))
         request-id (require-non-nil! "HTMX request id" (:request-id event))]
-    (if-not (current-fragment-request?
-             state fragment-id request-generation request-id)
+    (cond
+      (not (current-fragment-request?
+            state fragment-id request-generation request-id))
       [state
        [(ignored-effect
          event
@@ -1908,6 +1911,17 @@
          {:fragment-id fragment-id
           :request-generation request-generation
           :request-id request-id})]]
+
+      (not (get-in state [:continuity [fragment-id request-generation]]))
+      [state
+       [(ignored-effect
+         event
+         :swap-not-admitted
+         {:fragment-id fragment-id
+          :request-generation request-generation
+          :request-id request-id})]]
+
+      :else
       (let [candidate
             (get-in state
                     [:fragments fragment-id :inflight :authoritative])
@@ -1947,48 +1961,41 @@
                  :fragment-id fragment-id
                  :request-generation request-generation
                  :request-id request-id})))]
-        [state-b effects]))))
+        [(assoc-in state-b [:fragments fragment-id :inflight :adopted?] true)
+         effects]))))
 
 (defn- finish-fragment-request
-  ([state fragment-id request-generation request-id]
-   (finish-fragment-request
-    state fragment-id request-generation request-id #{}))
-  ([state
-    fragment-id
-    request-generation
-    request-id
-    carry-forward-requirements]
-   (if-not (current-fragment-request?
-            state fragment-id request-generation request-id)
-     [state []]
-     (let [queued-refresh?
-           (true?
-            (get-in state
-                    [:fragments fragment-id :queued-refresh?]))
-           queued
-           (get-in state [:fragments fragment-id :queued-requirements])
-           ;; A successful generation has satisfied its own minimum-read
-           ;; requirements, so the ordinary completion path carries forward
-           ;; nothing. A failed generation has not satisfied them. If queued
-           ;; work already warrants a successor, that successor must therefore
-           ;; retain the failed generation's opaque requirements as well as the
-           ;; independently queued ones.
-           successor-requirements
-           (into queued carry-forward-requirements)
-           state'
-           (assoc-in state
-                     [:fragments fragment-id]
-                     {:inflight nil
-                      :queued-refresh? false
-                      ;; Preserve uncovered requirements even when there is
-                      ;; no permission to start a successor yet.
-                      :queued-requirements successor-requirements})]
-       (if queued-refresh?
-         (begin-fragment-request
+  [state fragment-id request-generation request-id]
+  (if-not (current-fragment-request?
+           state fragment-id request-generation request-id)
+    [state []]
+    (let [queued-refresh?
+          (true?
+           (get-in state
+                   [:fragments fragment-id :queued-refresh?]))
+          queued
+          (get-in state [:fragments fragment-id :queued-requirements])
+          inflight (get-in state [:fragments fragment-id :inflight])
+          ;; Transport completion alone is not adoption. Only a correlated
+          ;; admitted swap can discharge this generation's read requirements.
+          successor-requirements
+          (if (:adopted? inflight)
+            queued
+            (into queued (:requirements inflight)))
           state'
-          fragment-id
-          successor-requirements)
-         [state' []])))))
+          (assoc-in state
+                    [:fragments fragment-id]
+                    {:inflight nil
+                     :queued-refresh? false
+                     ;; Preserve uncovered requirements even when there is
+                     ;; no permission to start a successor yet.
+                     :queued-requirements successor-requirements})]
+      (if queued-refresh?
+        (begin-fragment-request
+         state'
+         fragment-id
+         successor-requirements)
+        [state' []]))))
 
 (defn- after-request
   [state event]
@@ -2027,20 +2034,9 @@
          {:fragment-id fragment-id
           :request-generation request-generation
           :request-id request-id})]]
-      (let [;; Failure cannot prove that the active generation satisfied its
-            ;; minimum-read frontier. Preserve those opaque requirements in any
-            ;; successor that queued work already requires; do not manufacture
-            ;; an unconditional retry when no successor is queued.
-            inflight-requirements
-            (get-in state
-                    [:fragments fragment-id :inflight :requirements])
-            [state' next-effects]
+      (let [[state' next-effects]
             (finish-fragment-request
-             state
-             fragment-id
-             request-generation
-             request-id
-             inflight-requirements)]
+             state fragment-id request-generation request-id)]
         [state'
          (into
           [(effect
@@ -2432,6 +2428,7 @@
                     [:generation
                      :request-id
                      :requirements
+                     :adopted?
                      :authoritative]))
            :queued-refresh?
            (:queued-refresh? fragment)
