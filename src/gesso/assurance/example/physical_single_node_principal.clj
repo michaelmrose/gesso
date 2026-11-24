@@ -78,7 +78,9 @@
                  (identical? original-catalog
                              (var-get #'pilot/reservation-catalog)))
     (reject! :substituted-source-or-http-constructor))
-  (when-not (closed-map? source source-keys)
+  (when-not (or (closed-map? source source-keys)
+                (and (closed-map? source (conj source-keys :browser-csrf-token!))
+                     (fn? (:browser-csrf-token! source))))
     (reject! :invalid-policy-source-shape))
   (let [{:keys [catalog-id policy-id grants read-principals acquire-principal!]} source
         catalog (original-catalog)
@@ -224,6 +226,25 @@
 
 (def ^:private authorized-reader-key
   ::initial-authorized-reader)
+
+(defn session-command-presentation!
+  "Return session-specific permitted operations and a static HTMX header for
+   the selected, already authorized GET reader. No credential is derived from
+   client parameters or rendered for a read-only principal. This optional
+   trusted presentation callback is not itself an authentication certificate."
+  [source request]
+  (when-let [token! (:browser-csrf-token! source)]
+    (let [who (get request authorized-reader-key)
+          operations (get (:grants source) who #{})]
+      (when-not (contains? (:read-principals source) who)
+        (reject! :missing-initial-view-reader))
+      (if (seq operations)
+        (let [token (token! request who)]
+          (when-not (and (string? token) (re-matches #"[0-9a-f]{64}" token))
+            (reject! :session-presentation-token-unavailable))
+          {:operations operations
+           :headers (str "{\"x-gesso-proving-csrf\":\"" token "\"}")})
+        {:operations #{}}))))
 
 (defn guarded-test-event-encoder!
   "Build a test-only SSE encoder bound to the ORIGINAL checked GET reader.

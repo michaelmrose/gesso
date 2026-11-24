@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2337: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2339: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -103,7 +103,7 @@
                     :event event-name
                     :swap "outerHTML"}))
 
-(defn- fragment-node [app]
+(defn- fragment-node [app presentation]
   (let [row ((:read! app))
         ;; Use ONE physical read for all displayed fields. A second query
         ;; could observe a different revision during concurrent activity.
@@ -125,20 +125,26 @@
      [:p "Revision: " (str revision)]
      ;; These POSTs intentionally never swap the response over the managed
      ;; target. The SSE wakeup enters the browser adapter, which owns GET.
-     [:button {:type "button"
-               :hx-post "/__gesso_proving/slot/reserve"
-               :hx-swap "none"
-               :disabled (= status :reserved)} "Reserve"]
-     [:button {:type "button"
-               :hx-post "/__gesso_proving/slot/release"
-               :hx-swap "none"
-               :disabled (= status :available)} "Release"]]))
+     (when (or (nil? presentation)
+               (contains? (:operations presentation) :slot/reserve))
+       [:button (cond-> {:type "button"
+                         :hx-post "/__gesso_proving/slot/reserve"
+                         :hx-swap "none"
+                         :disabled (= status :reserved)}
+                  presentation (assoc :hx-headers (:headers presentation))) "Reserve"])
+     (when (or (nil? presentation)
+               (contains? (:operations presentation) :slot/release))
+       [:button (cond-> {:type "button"
+                         :hx-post "/__gesso_proving/slot/release"
+                         :hx-swap "none"
+                         :disabled (= status :available)}
+                  presentation (assoc :hx-headers (:headers presentation))) "Release"])]))
 
-(defn- fragment-response [app]
-  (assoc-in (http/html-response (fragment-node app))
+(defn- fragment-response [app presentation]
+  (assoc-in (http/html-response (fragment-node app presentation))
             [:headers "cache-control"] "no-store"))
 
-(defn- panel-response [app]
+(defn- panel-response [app presentation]
   (let [panel (live/fragment-panel (live-fragment))
         target (nth panel 3 nil)
         _ (when-not (and (= 4 (count panel))
@@ -147,7 +153,7 @@
             (reject! :changed-managed-fragment-contract))
         ;; Retain the exact generated root/listener. Replace only the initially
         ;; empty inner target with the authoritative readback's fragment node.
-        node (assoc panel 3 (fragment-node app))]
+        node (assoc panel 3 (fragment-node app presentation))]
     (assoc-in
      (http/html-response
       [:main {:data-gesso-proving-live-panel true}
@@ -281,10 +287,14 @@
           (if (= :get method) (asset-response (get assets uri)) (unsupported 405))
 
           (= uri panel-uri)
-          (if (= :get method) (panel-response app) (unsupported 405))
+          (if (= :get method)
+            (panel-response app (principal/session-command-presentation! principal-source request))
+            (unsupported 405))
 
           (= uri fragment-uri)
-          (if (= :get method) (fragment-response app) (unsupported 405))
+          (if (= :get method)
+            (fragment-response app (principal/session-command-presentation! principal-source request))
+            (unsupported 405))
 
           (= uri events-uri)
           (if (= :get method)

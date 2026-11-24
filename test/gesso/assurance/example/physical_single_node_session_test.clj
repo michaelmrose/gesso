@@ -108,3 +108,55 @@
     (let [[{:keys [source issue!]} req] @captured]
       (is (= {:status :anonymous} ((:acquire-principal! source) req)))
       (is (thrown? clojure.lang.ExceptionInfo (issue! :actor/reader))))))
+
+(deftest session-rendered-htmx-commands-use-the-current-session-token
+  (session/with-session-policy!
+   policy
+   (fn [{:keys [source issue! revoke!]}]
+     (let [reader (issue! :actor/reader)
+           writer (issue! :actor/reserver)
+           both (issue! :actor/releaser)
+           another (issue! :actor/releaser)]
+       (fixture/with-biff-jetty-granted-live-proving-application!
+        source
+        (fn [{:keys [loopback-base-url read!]}]
+          (let [call (partial socket! loopback-base-url)
+                get-view (fn [uri issued]
+                           (call "GET" uri {"cookie" (:cookie issued)}))
+                ;; Rum escapes JSON quotes in HTML attributes. The browser
+                ;; decodes these entities before HTMX reads hx-headers.
+                rendered-token (fn [body]
+                                 (second (re-find #"hx-headers=\"\{&quot;x-gesso-proving-csrf&quot;:&quot;([0-9a-f]{64})&quot;\}\"" body)))]
+            (doseq [uri [fixture/panel-uri fixture/fragment-uri]]
+              (let [ro (get-view uri reader)
+                    rw (get-view uri both)
+                    other (get-view uri another)]
+                (is (= 200 (:status ro)))
+                (is (not (re-find #"hx-post=|hx-headers=" (:body ro))))
+                (is (= 403 (:status (get-view uri writer))))
+                (is (= 200 (:status rw)))
+                (is (= (:csrf-token both) (rendered-token (:body rw))))
+                (is (= (:csrf-token another) (rendered-token (:body other))))
+                (is (not (.contains ^String (:body rw) (:csrf-token another))))
+                (is (not (.contains ^String (:body rw) (:session-id both))))
+                (is (re-find #"hx-post=\"/__gesso_proving/slot/release\"" (:body rw)))
+                (is (not (re-find #"hx-post=\"/__gesso_proving/slot/reserve\"" (:body rw))))))
+            (is (= 200 (:status (call "POST" reserve (credentials writer)))))
+            (let [fresh (get-view fixture/fragment-uri both)
+                  token (rendered-token (:body fresh))]
+              (is (= 200 (:status fresh)))
+              (is (re-find #"data-slot-status=\"reserved\"" (:body fresh)))
+              (is (= (:csrf-token both) token))
+              (is (= 401 (:status (call "POST" release
+                                       {"cookie" (:cookie another)
+                                        "x-gesso-proving-csrf" token}))))
+              (is (= 1 (:revision (read!))))
+              (is (= 200 (:status (call "POST" release
+                                       {"cookie" (:cookie both)
+                                        "x-gesso-proving-csrf" token}))))
+              (is (= 2 (:revision (read!))))
+              (revoke! (:session-id both))
+              (is (= 401 (:status (get-view fixture/fragment-uri both))))
+              (is (= 401 (:status (call "POST" release
+                                       {"cookie" (:cookie both)
+                                        "x-gesso-proving-csrf" token}))))))))))))

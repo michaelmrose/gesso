@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-session
-  "v2338: Scoped server-issued credentials for the reservation proving fixture.
+  "v2339: Scoped server-issued credentials for the reservation proving fixture.
    This is NOT a login system, public cookie deployment or production session
    store. The trusted test host provisions principals; network clients must
    present an opaque server-issued cookie, and POSTs additionally require a
@@ -50,6 +50,7 @@
    (401 at the selected handler), with no mutation delegation."
   [policy f]
   (when-not (and (map? policy) (not (contains? policy :acquire-principal!))
+                 (not (contains? policy :browser-csrf-token!))
                  (fn? f))
     (reject! :invalid-session-policy-input))
   (let [random (SecureRandom.)
@@ -63,8 +64,15 @@
                                                (get-in request [:headers csrf-header]))))
                        {:status :authenticated :principal-id (:principal-id session)}
                        {:status :anonymous})))
+        token! (fn [request who]
+                 ;; Match the exact session and reader accepted by the outer
+                 ;; guard; a revoked or changed credential cannot render a token.
+                 (let [session (get-in @state [:sessions (cookie-id request)])]
+                   (when (= who (:principal-id session))
+                     (:csrf-token session))))
         source (principal/checked-test-policy!
-                (assoc policy :acquire-principal! acquire!))
+                (assoc policy :acquire-principal! acquire!
+                              :browser-csrf-token! token!))
         known (into (:read-principals source) (keys (:grants source)))
         issue! (fn [who]
                  (when-not (contains? known who)
