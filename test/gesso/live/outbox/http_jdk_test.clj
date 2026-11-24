@@ -318,3 +318,26 @@
         (is (= 200 (.statusCode (send! method))) method))
       (is (= [:post :get :put :patch] @seen))
       (finally ((:stop! adapter) 2000) (.close client)))))
+
+(deftest physical-jdk-releases-stream-on-response-setup-failure
+  (doseq [[status headers] [[999 {}]
+                            [200 nil]
+                            [200 {"bad\nheader" "value"}]]]
+    (let [producer (stream/stream 1)
+          entered (promise)
+          adapter (jdk/start! (fn [_]
+                               (deliver entered true)
+                               {:status status :headers headers :body producer}) {})]
+      (try
+        (with-open [socket (java.net.Socket. "127.0.0.1" (:port adapter))]
+          (let [out (.getOutputStream socket)]
+            (.write out (.getBytes "GET /events HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                                   StandardCharsets/US_ASCII))
+            (.flush out))
+          (is (= true (deref entered 3000 ::timeout)))
+          (is (eventual #(zero? ((:active-count adapter)))))
+          (is (stream/closed? producer) [status headers])
+          (is (= {:outcome :drained} ((:stop! adapter) 1000))))
+        (finally
+          (stream/close! producer)
+          ((:stop! adapter) 2000))))))

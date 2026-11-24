@@ -74,18 +74,20 @@
                 (recur (stream/take! body)))))))
 
 (defn- write-response! [^HttpExchange exchange response]
-  (when-not (and (map? response)
-                 (integer? (:status response))
-                 (<= 100 (:status response) 599)
-                 (map? (:headers response)))
-    (reject! :invalid-ring-response))
   (let [body (:body response)
         streaming? (stream/stream? body)
-        headers (.getResponseHeaders exchange)
         status (:status response)]
-    (doseq [[k v] (:headers response)]
-      (.set headers (name k) (str v)))
+    ;; Ownership begins with the returned body, not the first socket write.
+    ;; Even invalid response metadata must release an owned stream.
     (try
+      (when-not (and (map? response)
+                     (integer? status)
+                     (<= 100 status 599)
+                     (map? (:headers response)))
+        (reject! :invalid-ring-response))
+      (let [headers (.getResponseHeaders exchange)]
+        (doseq [[k v] (:headers response)]
+          (.set headers (name k) (str v))))
       (cond
         (nil? body) (.sendResponseHeaders exchange status -1)
         streaming?
