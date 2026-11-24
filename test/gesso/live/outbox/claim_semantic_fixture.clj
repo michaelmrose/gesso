@@ -3,6 +3,10 @@
    One initial epoch and one command per helper; no production writer closure.
    Observations are diagnostic, not certificates or transaction authority."
   (:require [clojure.set :as set]
+            [clojure.walk :as walk]
+            [honey.sql :as hsql]
+            [xtdb.util :as xt-util]
+            [gesso.model.tx :as model-tx]
             [gesso.assurance.transition :as construction]
             [gesso.assurance.proof.transition :as abstract]
             [gesso.assurance.proof.independent-transition-semantics :as independent]
@@ -114,6 +118,69 @@
               :current-time (Instant/now)}]
     {:basis basis :state (snapshot! #(xtdb/q-from node % opts))}))
 
+(defn- literal-conditions! [declaration]
+  (construction/build-guarded-replacement! declaration)
+  (let [expression (get-in declaration [:guard :expression])
+        terms (if (= :and (first expression)) (rest expression) [expression])]
+    (into {} (map (fn [[_ [_ field] [_ value] :as term]]
+                    (require! (= term [:= [:read field] [:literal value]]))
+                    [field value])) terms)))
+
+(defn- format-assertion [assertion]
+  (hsql/format (walk/postwalk (fn [x] (if (qualified-keyword? x)
+                                       (xt-util/kw->normal-form-kw x) x)) assertion)))
+
+(defn- current-assertion [table id checks]
+  (format-assertion (model-tx/assert-document-current
+                     table {:model/id id :model/checks checks})))
+
+(defn- absence-assertion [table id]
+  (format-assertion (model-tx/assert-document-absent table id)))
+
+(defn- require-source-lowering!
+  "Check the selected source's projected literal writes and exact pre-write
+   assertions. The physical mapping and extra version/subject predicates are
+   fixture declarations. A journal slot is represented by THIS command ID,
+   not a proof of uniqueness across arbitrary IDs for the same helper."
+  [helper alternative id ops writes]
+  (let [declaration (source helper alternative)
+        conditions (literal-conditions! declaration)
+        [slot membership] (helpers helper)
+        accept? (= :accept alternative)
+        mapped (if accept? #{:request/status :request/revision :assignment/helper slot membership}
+                   #{:request/status :request/revision slot})
+        replacement-fields (if accept? #{:request/status :request/revision :assignment/helper slot} #{slot})
+        _ (require! (and (= mapped (set (keys conditions)))
+                         (= replacement-fields (:writes declaration))
+                         (= replacement-fields (set (keys (:replacements declaration))))
+                         (every? #(= :literal (first %)) (vals (:replacements declaration)))
+                         (nil? (get conditions slot))
+                         (or (not accept?) (nil? (:assignment/helper conditions)))))
+        after (into {} (map (fn [[k expression]] [k (second expression)])) (:replacements declaration))
+        request (second (first (get writes :requests)))
+        assignment (second (first (get writes :request_assignments)))
+        intents (map second (get writes :gesso_live_outbox))
+        expected (cond-> [(current-assertion :requests "r1"
+                                             [[:revision (:request/revision conditions)]
+                                              [:updated-at (if accept? "t0" "t1")]
+                                              [:status (:request/status conditions)]])
+                           (absence-assertion :gesso_commands id)]
+                   accept? (into [(current-assertion :memberships helper
+                                                     [[:revision 0] [:updated-at "t0"] [:active (get conditions membership)]])
+                                  (absence-assertion :request_assignments "primary-r1")
+                                  (format-assertion (model-tx/assert-one :requests
+                                                                      [:and [:= :xt/id [:lift "r1"]]
+                                                                       [:= :request/location-id [:lift "l1"]]]))])
+                   accept? (into (map (fn [intent] ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)" (:xt/id intent)]) intents)))
+        [assertions puts] (split-with #(string? (first %)) ops)]
+    (require! (and (seq puts) (every? #(= :put-docs (first %)) puts)
+                   (= (frequencies expected) (frequencies assertions))
+                   (= (if accept? :accepted :rejected) (get after slot))
+                   (or (not accept?)
+                       (= (select-keys after [:request/status :request/revision :assignment/helper])
+                          {:request/status (:status request) :request/revision (:revision request)
+                           :assignment/helper (:helper assignment)}))))))
+
 (defn submitted-alternative!
   "Classify the selected actual synchronous submission, not a claimed plan.
    Only the fixture's canonical ASSERT/put-docs forms are recognized.
@@ -150,16 +217,16 @@
       :accept (require! (and (= #{:requests :request_assignments :gesso_commands :gesso_live_outbox}
                                (set (keys by-table)))
                             (= 1 (count requests) (count assignments))
-                            (= {:xt/id "r1" :status :claimed :revision 1}
-                               (select-keys (first requests) [:xt/id :status :revision]))
-                            (= {:xt/id "primary-r1" :request-id "r1" :helper helper}
-                               (select-keys (first assignments) [:xt/id :request-id :helper]))
+                            (= "r1" (:xt/id (first requests)))
+                            (= {:xt/id "primary-r1" :request-id "r1"}
+                               (select-keys (first assignments) [:xt/id :request-id]))
                             (= 2 (count intents) (count (set (map :xt/id intents))))
                             (= #{:request :request-assignment} (set (map :gesso.live.outbox/topic intents)))
                             (every? #(and (= id (:gesso.live.outbox/command-id %))
                                           (= "l1" (:gesso.live.outbox/subject-id %))) intents)))
       :refuse (require! (= #{:gesso_commands} (set (keys by-table))))
       (require! false))
+    (require-source-lowering! helper alternative id ops by-table)
     {:alternative (alternative-id helper alternative) :command-id id}))
 
 (defn writer-kind!

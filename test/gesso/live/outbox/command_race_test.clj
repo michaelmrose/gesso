@@ -1304,6 +1304,19 @@
                      (is (= :submission-policy-refused (denied #(xtdb/submit-tx! node seed))))
                      (is (= :submission-policy-refused
                             (denied #(execute-adapter node [[:put-docs :requests (assoc (get-in seed [0 2]) :status :claimed)]] nil))))
+                     (let [accepted (:ops (first (filter #(and (= :claim (:kind %)) (= :committed (:result %))
+                                                                  (= id (:command-id %))) entries)))
+                           guards (filterv #(string? (first %)) accepted)
+                           puts (filterv #(= :put-docs (first %)) accepted)]
+                       ;; A well-shaped write is not enough without every source-derived predicate.
+                       (doseq [guard guards]
+                         (is (= :submission-policy-refused
+                                (denied #(execute-adapter node (filterv (partial not= guard) accepted) nil)))))
+                       (is (= :submission-policy-refused
+                              (denied #(execute-adapter node (into puts guards) nil))))
+                       (is (= :submission-policy-refused
+                              (denied #(execute-adapter node (mapv (fn [op] (if (= :requests (second op))
+                                                                            (assoc-in op [2 :status] :open) op)) accepted) nil)))))
                      (is (= before (semantics/snapshot-at-frontier! node)))))
                  (when valid?
                    (revoke! (get-in credentials [session :session-id]))
