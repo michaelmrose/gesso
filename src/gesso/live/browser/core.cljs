@@ -604,6 +604,36 @@
         matches (filterv #(= id (fragment-id-from-root %)) (fragment-roots runtime))]
     (and (= 1 (count matches)) (identical? root (first matches)))))
 
+(defn- acquisition-policy
+  [root]
+  (case (element-attr root acquisition-policy-attribute)
+    (nil "automatic") :automatic
+    "explicit-refresh" :explicit-refresh
+    nil))
+
+(defn- current-acquisition-owner?
+  [runtime root]
+  (let [owner (get @(:acquisition-owners runtime) (fragment-id-from-root root))]
+    (and owner
+         (identical? root (:root owner))
+         (= (:policy owner) (acquisition-policy root))
+         (unique-current-root? runtime root))))
+
+(defn- admit-acquisition-owner!
+  "Policy is immutable for an admitted physical owner lifetime. Replacement
+   requires retiring the old root, then admitting a fresh root. No grant or
+   debt is transferred across potentially different disclosure scopes."
+  [runtime root]
+  (let [id (fragment-id-from-root root)
+        policy (acquisition-policy root)
+        owner (get @(:acquisition-owners runtime) id)]
+    (when (and policy (unique-current-root? runtime root)
+               (not (.has (:retired-acquisition-roots runtime) root)))
+      (if owner
+        (current-acquisition-owner? runtime root)
+        (do (swap! (:acquisition-owners runtime) assoc id {:root root :policy policy})
+            true)))))
+
 (defn- weak-get
   [^js weak-map key]
   (when (and weak-map key)
@@ -714,6 +744,7 @@
      (fn [{:keys [effect physical]}]
        (let [fragment-id (:fragment-id effect)
              root (or (fragment-root-by-id runtime fragment-id)
+                      (:root (get @(:acquisition-owners runtime) fragment-id))
                       (throw
                        (core-error
                         :missing-fragment-root
@@ -722,38 +753,40 @@
                          :effect effect})))
              explicit? (explicit-refresh-root? root)
              grant (when explicit? (js-obj))
-             _ (when (and explicit?
-                          (not (and (identical? root (physical-root physical))
-                                    (unique-current-root? runtime root))))
-                 (throw (core-error :missing-refresh-owner
-                                    "Explicit refresh requires its admitted physical owner."
-                                    {:fragment-id fragment-id})))
              pending (cond-> {:fragment-id fragment-id
                               :request-generation (:request-generation effect)
                               :requirements (set (:requirements effect))}
                        grant (assoc :grant grant))
              detail (clj->js {:fragmentId fragment-id
                               :requestGeneration (:request-generation effect)})]
-         (when grant (aset detail "gessoRefreshGrant" grant))
-         (weak-set! (:pending-refreshes runtime) root pending)
-         (try
-           (htmx-trigger!
-            runtime
-            root
-            refresh-event-name
-            detail)
-           ;; Both policies require immediate managed trigger binding.
-           ;; Cancellation or a missing listener must not strand a generation.
-           (.then (js/Promise.resolve nil)
-                  (fn [_] (abandon-pending-refresh! runtime @shell-ref root pending)))
-           :triggered
-           (catch :default error
-             (if (identical? pending (weak-get (:pending-refreshes runtime) root))
-               (do (abandon-pending-refresh! runtime @shell-ref root pending)
-                   (.warn js/console "Gesso managed refresh trigger failed." error)
-                   :failed)
-               (do (delete-if-same! (:pending-refreshes runtime) root pending)
-                   (throw error)))))))
+         (if-not (and (current-acquisition-owner? runtime root)
+                      (or (not explicit?) (identical? root (physical-root physical))))
+           (do (shell/dispatch! @shell-ref
+                                {:event :fragment/refresh-unbound
+                                 :fragment-id fragment-id
+                                 :request-generation (:request-generation effect)})
+               :owner-not-current)
+           (do
+             (when grant (aset detail "gessoRefreshGrant" grant))
+             (weak-set! (:pending-refreshes runtime) root pending)
+             (try
+               (htmx-trigger!
+                runtime
+                root
+                refresh-event-name
+                detail)
+               ;; Both policies require immediate managed trigger binding.
+               ;; Cancellation or a missing listener must not strand a generation.
+               (.then (js/Promise.resolve nil)
+                      (fn [_] (abandon-pending-refresh! runtime @shell-ref root pending)))
+               :triggered
+               (catch :default error
+                 (if (identical? pending (weak-get (:pending-refreshes runtime) root))
+                   (do (abandon-pending-refresh! runtime @shell-ref root pending)
+                       (.warn js/console "Gesso managed refresh trigger failed." error)
+                       :failed)
+                   (do (delete-if-same! (:pending-refreshes runtime) root pending)
+                       (throw error)))))))))
 
      :htmx/allow-request
      (fn [{:keys [physical]}]
@@ -854,6 +887,9 @@
           :request-id-fn request-id-fn
           :authoritative-from-event authoritative-from-event
           :continuity continuity-runtime
+          :acquisition-owners (atom {})
+          :retired-acquisition-roots (js/WeakSet.)
+          :retired-acquisition-xhrs (js/WeakSet.)
           :pending-refreshes (js/WeakMap.)
           :consumed-refresh-clicks (js/WeakSet.)
           :active-requests (js/WeakMap.)
@@ -1055,8 +1091,15 @@
          requirement
          (when requirement-present?
            (require-refresh-requirement! requirement))
+         kind (invalidation-event-kind runtime fragment-id)
+         root (fragment-root-by-id runtime fragment-id)
+         _ (when (and (or root (get @(:acquisition-owners runtime) fragment-id))
+                      (not (and root (admit-acquisition-owner! runtime root))))
+             (throw (core-error :acquisition-owner-replacement
+                                "Retire the admitted fragment owner before replacing its root or acquisition policy."
+                                {:fragment-id fragment-id})))
          event
-         (cond-> {:event (invalidation-event-kind runtime fragment-id)
+         (cond-> {:event kind
                   :fragment-id fragment-id}
            requirement-present?
            (assoc :requirement requirement))]
@@ -1081,7 +1124,7 @@
         (.add (:consumed-refresh-clicks runtime) event)
         (when (and (explicit-refresh-root? root)
                    (= id (element-attr control refresh-control-attribute))
-                   (unique-current-root? runtime root))
+                   (admit-acquisition-owner! runtime root))
           (shell/dispatch! (:shell runtime)
                            {:event :fragment/refresh-requested :fragment-id id}
                            {:event event :fragment-root root})))))
@@ -1151,11 +1194,13 @@
             {:listener-fragment-id listener-id
              :root-fragment-id fragment-id
              :managed-root? (managed-fragment-root? root)})))
-        (let [{:keys [present? requirement]}
-              (payload-progression (read-managed-sse-payload event))]
-          (if present?
-            (notify-fragment! runtime fragment-id requirement)
-            (notify-fragment! runtime fragment-id))))))
+        (when (and (unique-current-root? runtime root)
+                   (not (.has (:retired-acquisition-roots runtime) root)))
+          (let [{:keys [present? requirement]}
+                (payload-progression (read-managed-sse-payload event))]
+            (if present?
+              (notify-fragment! runtime fragment-id requirement)
+              (notify-fragment! runtime fragment-id)))))))
   true)
 
 (defn on-sse-open!
@@ -1164,7 +1209,9 @@
   [runtime event]
   (when-let [root (some-> (detail-field event "elt")
                           fragment-root-from-element)]
-    (when (managed-fragment-root? root)
+    (when (and (managed-fragment-root? root)
+               (unique-current-root? runtime root)
+               (not (.has (:retired-acquisition-roots runtime) root)))
       (when-let [fragment-id (fragment-id-from-root root)]
         (notify-fragment! runtime fragment-id))))
   true)
@@ -1249,6 +1296,11 @@
         pending (and root
                      (weak-get (:pending-refreshes runtime) root))]
     (cond
+      (and root (root-issued-request? root event)
+           (get @(:acquisition-owners runtime) (fragment-id-from-root root))
+           (not (current-acquisition-owner? runtime root)))
+      (prevent-event! event)
+
       (and (explicit-boundary? root pending)
            (not (root-issued-request? root event)))
       nil
@@ -1302,6 +1354,11 @@
         pending (and root
                      (weak-get (:pending-refreshes runtime) root))]
     (cond
+      (and root (root-issued-request? root event)
+           (get @(:acquisition-owners runtime) (fragment-id-from-root root))
+           (not (current-acquisition-owner? runtime root)))
+      (prevent-event! event)
+
       (and (explicit-boundary? root pending)
            (not (root-issued-request? root event)))
       nil
@@ -1388,12 +1445,18 @@
   [runtime event]
   (let [runtime (require-core! runtime)
         {:keys [root record]} (active-request-from-event runtime event)]
+    (when (and (xhr-from-event event)
+               (.has (:retired-acquisition-xhrs runtime) (xhr-from-event event)))
+      (cancel-swap-event! event))
     (when record
       (let [disposition (atom :undecided)
             physical
             (physical-context runtime event root record disposition)]
         (try
           (cond
+            (not (current-acquisition-owner? runtime root))
+            (cancel-swap-event! event)
+
             (false? (detail-field event "shouldSwap"))
             nil
 
@@ -1423,7 +1486,7 @@
   [runtime event]
   (let [runtime (require-core! runtime)
         {:keys [root record]} (active-request-from-event runtime event)]
-    (when record
+    (when (and record (current-acquisition-owner? runtime root))
       (shell/dispatch!
        (:shell runtime)
        (normalized-request-event :htmx/after-swap record)
@@ -1475,8 +1538,13 @@
                     (when event (.-target event)))]
     (doseq [root (nested-fragment-roots element)
             :let [fragment-id (fragment-id-from-root root)
-                  record (weak-get (:active-requests runtime) root)]
-            :when fragment-id]
+                  record (weak-get (:active-requests runtime) root)
+                  owner (get @(:acquisition-owners runtime) fragment-id)]
+            :when (and fragment-id owner (identical? root (:root owner)))]
+      (.add (:retired-acquisition-roots runtime) root)
+      (when-let [xhr (:xhr record)]
+        (.add (:retired-acquisition-xhrs runtime) xhr))
+      (swap! (:acquisition-owners runtime) dissoc fragment-id)
       (shell/dispatch!
        (:shell runtime)
        {:event :fragment/retire
@@ -1631,6 +1699,7 @@
       (remove-installed-listeners! runtime)
       (reset! (:started? runtime) false))
     (shell/shutdown! (:shell runtime))
+    (reset! (:acquisition-owners runtime) {})
     :stopped))
 
 ;; =============================================================================

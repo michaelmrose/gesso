@@ -869,6 +869,60 @@
            (finally (done))))
        0))))
 
+(deftest acquisition-policy-replacement-requires-owner-retirement-test
+  (let [policy (atom "automatic")
+        old (make-managed-root "panel")
+        new (make-element {:fragment-id "panel"
+                           :attrs {"hx-trigger" core/refresh-event-name
+                                   core/acquisition-policy-attribute "explicit-refresh"}})
+        original-attr (.-getAttribute old)
+        _ (aset old "getAttribute" (fn [k] (if (= k core/acquisition-policy-attribute)
+                                              @policy (original-attr k))))
+        doc (make-document [old])
+        htmx (make-htmx)
+        runtime (core/create {:document (:document doc) :htmx (:htmx htmx)})
+        requirement (progression/requirement {:tx-id 42 :system-time "2026-08-25T20:00:42Z"})
+        {xhr :xhr} (make-xhr 200)
+        cleanup (fn [root] (core/on-before-cleanup!
+                            runtime (:event (make-event "htmx:beforeCleanupElement" {:elt root}))))]
+    (core/notify-fragment! runtime "panel" requirement)
+    (bind-request! runtime old xhr)
+    (core/notify-fragment! runtime "panel")
+    (reset! policy "explicit-refresh")
+    (is (= :acquisition-owner-replacement
+           (error-kind #(core/notify-fragment! runtime "panel"))))
+    (is @(-> (before-swap! runtime old xhr) :prevented?))
+    (after-request! runtime old xhr true)
+    (is (= 1 (count @(:calls htmx))))
+    (is (= #{requirement} (get-in (core/state runtime) [:fragments "panel" :queued-requirements])))
+    (is (nil? (get-in (core/state runtime) [:fragments "panel" :inflight])))
+    ;; A different root with the same logical id cannot inherit this debt.
+    (reset! (:roots doc) [new])
+    (is (= :acquisition-owner-replacement
+           (error-kind #(core/notify-fragment! runtime "panel"))))
+    (cleanup old)
+    (core/notify-fragment! runtime "panel")
+    (is (true? (get-in (core/state runtime) [:fragments "panel" :queued-advisory?])))
+    (is (= #{} (get-in (core/state runtime) [:fragments "panel" :queued-requirements])))
+    (let [before (core/state runtime)]
+      (cleanup old)
+      (core/on-sse-open! runtime (:event (make-event core/sse-open-event-name {:elt old})))
+      (is (= before (core/state runtime))))
+    (is (= 1 (count @(:calls htmx))))))
+
+(deftest retired-owner-xhr-cannot-install-into-replacement-test
+  (let [{:keys [runtime root document-fixture]} (runtime-fixture "panel")
+        {xhr :xhr aborted? :aborted?} (make-xhr 200)
+        replacement (make-managed-root "panel")]
+    (begin-refresh! runtime "panel")
+    (bind-request! runtime root xhr)
+    (core/on-before-cleanup! runtime (:event (make-event "htmx:beforeCleanupElement" {:elt root})))
+    (is @aborted?)
+    (reset! (:roots document-fixture) [replacement])
+    (begin-refresh! runtime "panel")
+    (is @(-> (before-swap! runtime replacement xhr) :prevented?))
+    (is (some? (core/pending-refresh runtime replacement)))))
+
 (deftest unknown-acquisition-policy-fails-before-admission-test
   (let [root (make-element {:fragment-id "bad"
                             :attrs {"hx-trigger" core/refresh-event-name
