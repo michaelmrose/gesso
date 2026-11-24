@@ -1,4 +1,4 @@
-# Gesso R5.1 single-node closure estimate — v2319
+# Gesso R5.1 completion profiles and single-node closure ledger — v2319
 
 Re-estimated November 23, 2026, against the accepted Gessoplan R5.1
 Stage 1–17 roadmap and Part XI completion scopes, the prior v2257 ledger,
@@ -6,11 +6,14 @@ and the clean Gesso `typed-clojure` source at `4996190cecaefc79ef28693cbd4f7c5f2
 The uploaded archive and GitHub branch match. Published as the
 documentation-only revision v2320.
 
-**Scope:** Framework-owned single-node construction, authoritative
-operations, Live, browser, compositional certification, independent
-formal soundness/selected S0–S4 transfer, and release. HumanHelp Stage
-12 and multi-node Stage 18 are **excluded, not completed**. A Gesso-owned
-proving example cannot substitute for HumanHelp-specific acceptance.
+**Scope of the existing 62-package cost ledger:** Framework-owned
+single-node construction, authoritative operations, Live, browser,
+compositional certification, independent formal soundness/selected
+S0–S4 transfer, and release. HumanHelp Stage 12 and multi-node
+Stage 18 were **excluded from those cost estimates, not completed**.
+The three release profiles below separately account for these
+missing original R5.1 subjects wherever mandatory. A Gesso-owned
+proving example is not a substitute for HumanHelp acceptance.
 
 **Interpretation:** The packages below represent *remaining acceptance
 work*, not absent modules or earned progress points. A closed package
@@ -18,12 +21,13 @@ requires its original requirement, an enforcing physical boundary,
 positive/adversarial evidence, a current applicability statement and a
 qualified completion decision. Additional tests alone do not close it.
 
-**Current working forecast:** approximately **380 additional numbered
-revisions from v2319**, assuming an unproven **15% improvement in
-qualified work per revision** under the revised, larger-objective
-workflow. The arithmetic is 452 × 0.85 ≈ **384**; the provisional
-planning range remains **300–550**, with independent formal proof
-capable of exceeding it.
+**Unvalidated forecasting scenario (not a completion measurement):**
+approximately **380 further numbered revisions from v2319** if
+the larger-objective workflow actually yields **15% more qualified
+work per revision** (452 × 0.85 ≈ 384). The historical scenario
+range is **300–550**, with independent formal proof potentially
+exceeding it. No measured package-closure throughput validates
+this scenario; it is not used in the progress measures below.
 
 **Undiscounted remaining work:** **452 old-workflow-equivalent
 revision units** across **62 still-open acceptance packages**,
@@ -32,6 +36,228 @@ incorrectly presented 452 as the directly comparable central
 numbered-revision forecast. Without demonstrated acceptance
 throughput improvements, the more conservative planning center
 moves toward 452. Neither number is a proven delivery bound.
+
+## Three explicit release profiles and measured nearness — v2321 review (v2322)
+
+**Authority and date.** This is a human-readable planning view
+over the original R5.1 requirements, not an issuer, a release
+admission decision or the authoritative requirement denominator.
+The Gesso source baseline remains **v2319** at
+`4996190cecaefc79ef28693cbd4f7c5f26113e6a`. Revisions
+v2320 and v2321 changed **only this documentation**; the
+`typed-clojure` head examined for this review is v2321 at
+`577d583c145079e1c8e060be7e35d49d14ffa7a6`. Canonical scope and evidence policy:
+Gessoplan R5.1 on `main`, especially Part XI
+`11.12`–`11.17` and Part XII `12.10`–`12.11`.
+The profile names below are new *release intents*, not
+renamings or purported completion of stronger Part XI milestones.
+
+### Profile O — Operational Gesso and usable assurance CLI
+
+**User value:** A documented, genuinely usable **single-node
+Gesso framework** for supported typed rules, admitted operations,
+Biff/XTDB authority, Choreo, server-rendered browser effects
+and Live, with a **Ygg-mediated CLI** capable of selecting its
+original source-derived checks, executing them and reporting
+the exact checked scope, failures, missing coverage and trusted
+premises. Include a genuinely installed representative
+Gesso-owned application, portable positive and adversarial
+examples, reproducible toolchain and selected host/release
+qualification. A green run is not a substitute for actual
+application behavior or mandatory current enforcement.
+
+**Boundaries:** This is a newly named *narrower Gesso-framework
+release intent*, **not** the original Part XI
+`milestone-operational-application`, which specifically requires
+the complete independent HumanHelp Part VIII product capability
+inventory. Independent S0–S4 theorem transfer, the full HumanHelp
+product and multi-node Stage 18 are not requested for O.
+No guarantee required for the O profile may be silently
+downgraded; dynamically enforce the actual selected contracts.
+
+**Bookkeeping subset:** Tracks O and Q, nominally packages
+**22 + 10 = 32** (202 undiscounted old-workflow-equivalent
+units). Any original mandatory cross-track prerequisite must
+still be included when the real profile is derived; 32 is not
+a complete original-requirement denominator.
+
+### Profile C — Compositional single-node certification
+
+**User value:** O plus reusable, source-complete, non-vacuous
+typed-rule/proof/issuer and assembly certification at the
+supported original-source scope, current dependency/evidence
+rechecking, truthful opaque premises, actual writer and
+initializer coverage, paired negative/positive checks and a
+**genuine multi-record HumanHelp Claim pilot using its public
+production models**, as required by R5.1 Part XI 11.14.
+A simplified Gesso-owned Claim-like example (#42) may prepare
+the infrastructure but **does not satisfy the HumanHelp pilot**.
+The genuine Claim pilot is an **additional, unestimated
+subject outside the present 62-package ledger**; it is not
+to be silently included as a fictitious passed package.
+
+**Boundaries:** This aims at the selected Part XI *compositional
+certification* milestone, not the separate complete HumanHelp
+*operational-application* milestone. Independent S0–S4
+meta-theorems and all production transfer remain separately
+open unless the selected claim itself requires them. The
+certification result must name any accepted trusted premises;
+an unavailable mandatory proof is never a passing certificate.
+
+**Bookkeeping subset:** Tracks O, Q and C, nominally
+**22 + 10 + 21 = 53** single-node packages (348 undiscounted
+units), **plus the separately unmeasured actual HumanHelp
+Claim-pilot requirements** and any mandatory cross-track edges.
+
+### Profile F — Full Gessoplan R5.1 completion
+
+**User value:** Every applicable original R5.1 requirement
+within the expressly selected completion envelopes, including
+**all four independent Part XI milestone judgments**:
+(1) full real **HumanHelp operational application** against
+Part VIII's independent capabilities; (2) genuine
+**compositional certification** with actual Claim; (3) exact
+independently checked **external S0–S4 formal/production
+correspondence frontier** from Parts IX–X and Stage 16–17,
+with warranted trust assumptions; and (4) **multi-node
+production** Stage 18 on real independent processes/hosts,
+router failure/recovery, authorization, durable Live,
+mixed-release compatibility and measured fault/scale envelopes.
+A full profile composes four separately justified decisions;
+it does **not** turn them into a single theorem that proves
+arbitrary Clojure, browsers or all possible network schedules.
+
+**Boundaries:** All original chosen mandatory gates, real
+positive capabilities and adversarial paths must be
+qualified, not inferred from a generated partial catalog.
+No narrower O/C result counts as F. Full R5.1 explicitly
+includes HumanHelp and multi-node, which the earlier
+single-node forecast excluded. The accepted environment,
+premises, topology and theorem scope remain explicit, never
+universalized.
+
+**Bookkeeping subset:** All **62** framework single-node
+packages (452 undiscounted units), **plus** the separately
+required complete HumanHelp Stage 12/Part VIII acceptance
+inventory and the multi-node Stage 18 production acceptance
+inventory. These outside inventories have **not** been
+enumerated or estimated in this 62-package report. Therefore
+**452 is not a full-R5.1 remaining-work forecast**.
+
+### How close are we, based on current evidence?
+
+The following counts are **exactly reproducible from the
+62 current work-package rows below**, not from a claimed
+percentage of R5.1 completeness. A "substantial base",
+"advanced partial", or "partial" means an *implementation
+footprint reported in the ledger*, not an established gate.
+"Early", "open" and "research" are also not formal gate
+results. Every package currently remains **unqualified for
+full package closure**. A package can contain many original
+mandatory assertions and tests; one package is never
+one original obligation.
+
+| Profile | Ledger subset | Described implementation footprint | Early / open / research | Qualified packet closures | Extra original-profile subjects |
+|---|---:|---:|---|---:|---|
+| **O** | **32** (O+Q) | **29/32** (substantial 5, advanced 5, other partial 19) | early 3, open 0, research 0 | **0/32** | Ygg assurance-profile admission, completeness and CLI execution/reporting not yet qualified |
+| **C** | **53** (O+Q+C) | **45/53** (substantial 6, advanced 5, other partial 34) | early 4, open 4, research 0 | **0/53** | Actual multi-record HumanHelp Claim acceptance not measured in this ledger |
+| **F** | **62** (O+Q+C+F) | **46/62** (substantial 6, advanced 5, other partial 35) | early 4, open 4, research 8 | **0/62** | Original HumanHelp whole-product and real multi-node denominators unassessed, not zero |
+
+The footprint counts describe **how widespread current partial
+implementation work is**, not how near completion is as a
+percentage, and they do not earn any Part XI gate `:passed`
+status. The **0 qualified packet closures** comes from the
+existing ledger's deliberately strict package-complete
+criterion, not from a new execution of every underlying
+test. The two selected exact-v2319 CI workflows (Typed
+Clojure assurance and Ansatz regressions) passed; that
+is useful local evidence, **not** source-complete operational,
+compositional, formal or multi-node admission.
+
+**Currently knowable distance:** O needs qualification of
+all 32 selected framework packets and the CLI/evidence
+interface; C needs the 53 selected packets **plus**
+real HumanHelp Claim and issuer/source completeness; F
+needs all 62 **plus** the independently required
+HumanHelp operational and multi-node inventories.
+Because the external F denominators and exact executable
+profile gates are **not yet frozen**, the percentage
+distance to C and F is **unknown**, not 0%, 50% or
+`46/62`. A 0/32 or 0/53 packet-closure ratio is
+**not** a claim that zero useful work is complete.
+
+**Most consequential unsatisfied joins:**
+
+| Profile | Principal currently unqualified acceptance links | Existing ledger pointers |
+|---|---|---|
+| O | Complete original feature and source inventory; one real admitted Biff→guarded XTDB→durable Live→authorized browser positive/rejection/recovery path; real four-phase release decision and full current test/adoption/CLI output | #01, #10–12, #15, #23–24, #29–31, #34–39, #59–62 |
+| C | Independently complete physical writer/initializer and original operation inventory; source-complete issuer and effect/consequence checking; true multi-record positive/adversarial Claim pilot in production HumanHelp models | #16, #18, #25, #32–33, #40–49 and separate HumanHelp Claim |
+| F | Genuine independent theorem and checker/issuer/typed atom/physical transfer with S0–S4 honesty; all required HumanHelp capabilities; actual qualified two-host/router/Live/rolling-release/failure histories | #50–58 plus Part VIII/Stage 12 and Stage 18 |
+
+### Proposed Ygg measurement contract — not implemented
+
+Make **Ygg** the generic CLI and Shard its execution engine;
+Gesso retains all semantic/checker/release authority. The
+following commands describe the *desired* UX, not
+currently supported Ygg commands:
+
+#+begin_src sh
+ygg check --profile operational -n 8
+ygg check --profile compositional -n 8
+ygg check --profile full-r5.1 -n 8
+ygg report --profiles
+ygg explain --profile full-r5.1
+#+end_src
+
+Before executing a selected profile, Gesso must freeze the
+**original** requirement IDs and their independent owner/
+scope, explicit exclusions, required positive and negative
+histories, checker or physical-observer identity, actual
+source/installation/served asset version, environmental
+premises, complete selected job and proof inventory, and
+release intent. Shard then executes the *predeclared
+inventory* with durable attributable receipts. Gesso
+checks actual results, provenance and dependency
+applicability. Ygg may render and compare them; it
+cannot invent missing passes or issue its own semantic
+certificate.
+
+The root progress view should preserve separate totals
+for independently required product capabilities, source/
+assembly closure, physical execution, typed judgments,
+S0–S4 proof and transfer, mutation rejection, recovery,
+compatibility and all mandatory test coverage. Every
+original gate receives the exact Part XI classification
+`:passed`, `:failed`, `:incomplete`, `:unavailable`,
+`:unsupported`, `:skipped`, `:stale` or `:missing`;
+trusted premises and conditionality stay attached.
+Report `qualified_passed / all_mandatory_original`
+**only after independently validating that denominator**.
+If that validation itself is incomplete, print
+`denominator: unverified` and `completion: not established`,
+not a conveniently smaller percentage. A passing checker
+job is evidence for only its checked proposition, not
+automatic completion of a higher profile.
+
+To measure actual convergence from run to run, report
+each newly qualified original gate, reopened/stale gate,
+newly discovered original requirement, supported
+unexamined boundary, explicitly approved profile
+change, and the **first required missing boundary**
+for each profile. The report must separately show
+*runner success*, *assurance claim disposition*,
+*release admission* and the four independent Part XI
+milestone results. Persist the immutable source/profile
+identity for comparisons. Do not let a successful weaker
+profile or a copied EDN receipt upgrade a stronger one.
+
+**Next evidentiary objective:** Freeze O's complete
+original-source denominator and deliver one fully
+qualified original admitted operation through actual
+Biff/XTDB/Live/browser/release boundaries, then a
+materially distinct second operation using the same
+assurance machinery. This is a proposed priority,
+not a claimed new gate or source implementation.
 
 ## Maintenance and re-estimation policy
 
@@ -80,6 +306,13 @@ v2320's report: it keeps the 452-unit package budget but restores
 the *conditional* roughly 380-revision working forecast consistent
 with the 375-revision v2290 discussion. This documentation-only
 correction does not close an acceptance obligation.
+
+**Three-profile measurement:** v2322 records provisional O/C/F
+completion intents and baseline evidence-footprint versus qualified
+closure counts. It expressly adds unmeasured HumanHelp and
+multi-node R5.1 responsibilities to F, without counting those
+as closed, editing the original specification or modifying
+the framework source. The CLI commands are proposals only.
 
 ## Re-estimation ledger — v2229 source baseline (published v2230)
 
