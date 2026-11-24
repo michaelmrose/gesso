@@ -5,7 +5,7 @@
             [gesso.live.core :as live]
             [gesso.live.progression :as progression]
             [gesso.live.progression.http :as progression-http]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :as t :refer [deftest is]]
             [clojure.java.io :as io]
             [gesso.live.consistency.xtdb :as xtdb]
             [clojure.xml :as xml]
@@ -15,6 +15,7 @@
             [gesso.live.application-preflight.fixture :as fixture]
             [gesso.live.optimistic.protocol :as protocol]
             [gesso.live.outbox.host :as host]
+            [gesso.live.outbox.claim-browser-fixture :as browser]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
@@ -822,6 +823,8 @@
               (edn/read-string (subs data 6))))
           (recur))))))
 
+(def ^:dynamic *claim-browser-observer?* false)
+
 (deftest distinct-claim-commands-contend-for-one-primary-assignment
   (doseq [recovery-mode [:valid :wrong-outcome :missing-guard :domain-write]]
    (session/with-session-authority!
@@ -832,6 +835,7 @@
         observed (atom [])
         projected (atom [])
         streams (atom [])
+        observer (atom nil)
         fragment-reads (atom [])
         credentials {"a" (issue! :fixture/helper-1) "b" (issue! :fixture/helper-2)
                      "reader" (issue! :fixture/reader)
@@ -934,14 +938,16 @@
                                   :authoritative (protocol/authoritative {:presence :present :basis basis :projection (first rows)})}))}
         executor (publication/build-executor opts)
         operation (fixture/trusted-operation :request/claim {:published-change-topics #{:request :request-assignment} :execute! executor})
+        resolve-id (fn [ctx _] (or (get-in ctx [:headers "fragment-id"])
+                                  (when (= "scope=l1" (:query-string ctx)) "l1")))
         config {:xtdb-config {} :source-id "v2480-claim" :rules-context {}
                 :worker-options {:worker-id "v2480" :poll-ms 20} :live-options {}
                 :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                               :require-derived-model? true
                                               :operation-model-entities {:request/claim #{:requests :request_assignments}})
                 :http-jdk {} :assembled-operations {:authorize-request? (comp some? principal-fn)}
-                :assembled-fragments {:resolve-id (fn [ctx _] (get-in ctx [:headers "fragment-id"]))}
-                :assembled-sse {:resolve-id (fn [ctx _] (get-in ctx [:headers "fragment-id"]))
+                :assembled-fragments {:resolve-id resolve-id}
+                :assembled-sse {:resolve-id resolve-id
                                 :session-authorized? read-authorized?
                                 :sse-options {:keepalive-ms 50} :max-connections 4}}]
     (let [reason (fn [config] (try (publication/build-executor config) nil
@@ -956,7 +962,8 @@
                   (fn [ctx id]
                     (let [row (first (live/q ctx ["SELECT r.status, a.helper FROM requests r LEFT JOIN request_assignments a ON r._id = a.request_id WHERE r.request$location_id = ? AND r._id = ?" id "r1"]))]
                       (swap! fragment-reads conj {:uri (:uri ctx) :id id
-                                                  :progression (live/progression ctx) :row row})
+                                                  :progression (live/progression ctx) :row row
+                                                  :wire (get-in ctx [:headers progression-http/request-header-name])})
                       {:fragment/id (str (last (str/split (:uri ctx) #"/")) "-" id)
                        :row row}))
                   fixture/generic-render
@@ -974,7 +981,13 @@
      (fn [{:keys [assembly report]}]
        (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
        (with-open [client (HttpClient/newHttpClient)]
-        (let [started (host/start! assembly (fn [_] (g/html-response [:div "fallback"])) config)
+        (let [delegate (if (= :valid recovery-mode)
+                         (browser/shell-handler
+                          (get-in assembly [:operation-acquisition-assembly :acquisition-assembly :realizations :request-list :live-app])
+                          read-authorized?
+                          #(fixture/generic-render (fixture/generic-query (assoc % :uri "/fragments/request-list") "l1")))
+                         (fn [_] (g/html-response [:div "fallback"])))
+              started (host/start! assembly delegate config)
              node (:xtdb/connectable started)
              fragment! (fn [path headers]
                          (let [builder (HttpRequest/newBuilder
@@ -1028,13 +1041,27 @@
              (let [response (fragment! "/fragments/request-list" (assoc (headers-for "reader") "fragment-id" "l1"))]
                (is (= 200 (.statusCode response)))
                (is (str/includes? (.body response) ">open<"))
-               (is (str/includes? (.body response) ">unassigned<"))))
+               (is (str/includes? (.body response) ">unassigned<")))
+             (let [page (fragment! "/claim-observer" (headers-for "reader"))
+                   body (.body page)]
+               (is (= 403 (.statusCode (fragment! "/claim-observer" {}))))
+               (is (= 200 (.statusCode page)))
+               (is (str/includes? body "data-gesso-live-fragment=\"request-list-l1\""))
+               (is (str/includes? body "sse-connect=\"/streams/request-list?scope=l1\""))
+               (is (str/includes? body "hx-get=\"/fragments/request-list?scope=l1\""))
+               (is (str/includes? body ">open<"))
+               (is (str/includes? body ">unassigned<"))
+               (doseq [path ["/claim-assets/htmx.js" "/claim-assets/sse.js"
+                             "/claim-assets/runtime.js" "/claim-assets/bootstrap.js"]]
+                 (let [asset (fragment! path {})]
+                   (is (= 200 (.statusCode asset)))
+                   (is (not (str/blank? (.body asset))))))))
            (let [stream-headers (fn [who] (assoc (headers-for who) "fragment-id" "l1"))
                  pending (when (= :valid recovery-mode)
                            (let [path "/streams/request-list"
                                  denied (stream! path {"fragment-id" "l1"})
                                  wrong-scope (stream! path (assoc (stream-headers "reader") "fragment-id" "l2"))
-                                 list-response (stream! path (stream-headers "reader"))
+                                 list-response (stream! (str path "?scope=l1") (headers-for "reader"))
                                  toolbar-response (stream! "/streams/request-toolbar" (stream-headers "a"))
                                  revoked-response (stream! path (stream-headers "revoked"))]
                              (is (= [403 403 200 200 200]
@@ -1045,6 +1072,10 @@
                                (is (= nil (deref revoked 10000 ::timeout))))
                              [(future (read-claim-invalidation (.body list-response)))
                               (future (read-claim-invalidation (.body toolbar-response)))]))
+                 _ (when (and *claim-browser-observer?* (= :valid recovery-mode))
+                     (reset! observer (browser/open! (get-in started [host/listener-key :base-url])
+                                                    (get credentials "reader")
+                                                    #(= 3 (:subscription-count (live-source/stats (get-in started [:gesso.live/system :source])))))))
                  a (future (invoke "a" "claim-a" "attempt-a"))
                  b (future (invoke "b" "claim-b" "attempt-b"))
                  results [(deref a 40000 ::timeout) (deref b 40000 ::timeout)]]
@@ -1084,6 +1115,14 @@
                (is (= #{{:topic :request :command-id id} {:topic :request-assignment :command-id id}}
                       (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$command_id AS command_id FROM gesso_live_outbox"]))))
                (is (= (cond-> #{[id :incorporated]} valid? (conj [loser-id :incorporated])) (set @projected)))
+               (when-let [opened @observer]
+                 (browser/verify! opened helper)
+                 (is (some #(and (= "/fragments/request-list" (:uri %))
+                                 (= {:status :claimed :helper helper} (:row %))
+                                 (some? (:progression %))
+                                 (string? (:wire %))) @fragment-reads))
+                 (browser/close! opened)
+                 (reset! observer nil))
                (when valid?
                  (doseq [[task topic who] (map vector pending [:fixture/request-list :fixture/request-toolbar] ["reader" "a"])]
                    (let [payload (deref task 10000 ::timeout)]
@@ -1102,7 +1141,9 @@
                            (is (= 403 (.statusCode (fragment! path denied)))))
                          (is (= 400 (.statusCode (fragment! path (assoc headers progression-http/request-header-name "%ZZ")))))
                          (is (= before-reads @fragment-reads))
-                         (let [response (fragment! path headers)
+                         (let [response (if (= topic :fixture/request-list)
+                                          (fragment! (str path "?scope=l1") (dissoc headers "fragment-id"))
+                                          (fragment! path headers))
                                read (peek @fragment-reads)]
                            (is (= 200 (.statusCode response)))
                            (is (= "no-store" (.orElse (.firstValue (.headers response) "cache-control") "")))
@@ -1132,5 +1173,16 @@
                    (is (= 403 (:status (request! (headers-for session) id "revoked-replay" true))))
                    (is (= 2 (count @observed)))))))
            (finally
+             (when-let [opened @observer] (browser/close! opened))
              (doseq [input @streams] (.close input))
              (host/stop! started)))))))))))))
+
+(defn -main [& args]
+  (when (seq args) (throw (ex-info "Unexpected Claim browser gate arguments" {})))
+  (let [result (binding [*claim-browser-observer?* true
+                         t/*report-counters* (ref t/*initial-report-counters*)]
+                 (t/test-vars [#'distinct-claim-commands-contend-for-one-primary-assignment])
+                 @t/*report-counters*)]
+    (println "GESSO CLAIM CHROMIUM OBSERVER GATE" (pr-str result))
+    (shutdown-agents)
+    (System/exit (if (and (= 1 (:test result)) (zero? (:fail result)) (zero? (:error result))) 0 1))))
