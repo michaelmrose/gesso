@@ -2,10 +2,10 @@
   "Selected canonical authoritative fragment GET transport. The admitted
    assembly supplies the route, fragment, query, renderer and scope policy."
   (:require [clojure.string :as str]
-            [gesso.http :as http]
             [gesso.live.application-preflight :as application]
             [gesso.live.core :as live]
             [gesso.live.outbox.http-route :as route]
+            [gesso.live.outbox.managed-html :as managed-html]
             [gesso.live.progression.http :as progression-http]))
 
 (defn- reject! [reason data]
@@ -87,7 +87,7 @@
                     (try
                       (update (live/render-fragment-response
                                (:live-app selected) context (:fragment selected) id
-                               {:response http/html-response})
+                               {:response managed-html/html-response})
                               :headers assoc "cache-control" "no-store")
                       (catch clojure.lang.ExceptionInfo e
                         (if (= :gesso.live/not-authorized (:error/type (ex-data e)))

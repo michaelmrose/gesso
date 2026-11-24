@@ -153,6 +153,23 @@
               (is (= 1 @fallback))
               (finally (host/stop! started) (.close client)))))))))
 
+(deftest selected-fragment-response-rejects-inline-script-test
+  (let [rendered (atom [:section "ordinary"])
+        fallback (atom 0)]
+    (with-redefs [fixture/generic-render (fn [_] @rendered)]
+      (with-assembly
+        (fn [assembly]
+          (let [handler (fragment/wrap-handler assembly
+                                               (fn [_] (swap! fallback inc) {:status 200})
+                                               {:resolve-id (constantly "r1")})
+                request {:request-method :get :uri "/fragments/request-list/r1"}]
+            (is (= "<section>ordinary</section>" (:body (handler request))))
+            (reset! rendered [:section [:script "unexpected()"]])
+            (is (= :gesso.live.outbox.managed-html/invalid-content
+                   (try (handler request) nil
+                        (catch clojure.lang.ExceptionInfo e (:error/type (ex-data e))))))
+            (is (zero? @fallback))))))))
+
 (deftest canonical-fragment-route-rejects-overlapping-or-unsupported-templates
   (doseq [[path expected] [["/fragments/:id" :ambiguous-fragment-route]
                            ["/streams/:id" :ambiguous-fragment-route]
