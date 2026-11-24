@@ -405,6 +405,48 @@
               (is (zero? (:subscription-count (source/stats (:source system)))))
               (finally (host/stop! started)))))))))
 
+(deftest selected-read-clock-is-fixed-across-authority-and-query-even-at-empty-startup
+  (let [observations (atom [])
+        queries (atom [])
+        resolve-id (fn [ctx _] (get-in ctx [:path-params :id]))
+        observe (fn [ctx]
+                  (let [clock (:current-time (live/consistency ctx))
+                        sql "SELECT CURRENT_TIMESTAMP AS clock"
+                        override (java.time.Instant/parse "2000-01-01T00:00:00Z")]
+                    {:clock clock
+                     :sql (live/q ctx sql)
+                     :plan (into [] (xtdb/plan-q-consistent-from ctx sql))
+                     :override (reason #(live/q ctx sql {:current-time override}))
+                     :plan-override (reason #(into [] (xtdb/plan-q-consistent-from ctx sql {:current-time override})))
+                     :progression (live/progression ctx)}))]
+    (with-redefs [fixture/allow? (fn [ctx _] (swap! observations conj (observe ctx)) true)
+                  fixture/generic-query (fn [ctx id]
+                                          (Thread/sleep 20)
+                                          (swap! queries conj (observe ctx))
+                                          {:fragment/id id})]
+      (with-assembly
+        (fn [assembly]
+          (let [started (host/start! assembly (constantly {:status 418})
+                                     (assoc (config) :assembled-fragments {:resolve-id resolve-id}))
+                node (:xtdb/connectable started)
+                handler (:biff.ring/handler started)
+                request {:request-method :get :uri "/fragments/request-list/r1"}]
+            (try
+              (is (nil? (xtdb/latest-completed-basis node)))
+              (is (= 200 (:status (handler request))))
+              (is (nil? (:progression (peek @observations))))
+              (xtdb/execute-tx! node [[:put-docs :requests {:xt/id "r1" :allowed true}]])
+              (is (= 200 (:status (handler request))))
+              (is (some? (:progression (peek @observations))))
+              (is (= 2 (count @observations) (count @queries)))
+              (is (= @observations @queries))
+              (doseq [{:keys [clock sql plan override plan-override]} @observations]
+                (is (instance? java.time.Instant clock))
+                (is (= sql plan))
+                (is (= :conflicting-selected-read-clock override plan-override)))
+              (is (not= (:clock (first @observations)) (:clock (second @observations))))
+              (finally (host/stop! started)))))))))
+
 (deftest selected-authority-and-query-share-current-completed-xtdb-frontier
   (let [observations (atom [])
         queries (atom [])

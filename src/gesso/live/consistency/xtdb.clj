@@ -2305,6 +2305,35 @@
         query
         (consistent-query-opts consistency opts))))
 
+(defn bind-selected-read-clock
+  "Fix one valid-time clock for a selected read authorization and query phase.
+   Preserve an explicitly admitted trusted consistency clock; otherwise sample
+   the server clock once. This is not an empty-database snapshot or evidence
+   of a completed transaction. The HTTP progression carrier has no clock field."
+  [ctx]
+  (let [consistency (consistency-from ctx)
+        clock (or (:current-time consistency) (Instant/now))]
+    (when-not (or (instance? Instant clock) (instance? ZonedDateTime clock))
+      (throw (ex "Invalid selected read clock." {:reason :invalid-selected-read-clock})))
+    (assoc ctx :gesso.live/selected-read-clock clock
+               :gesso.live/consistency (assoc consistency :current-time clock))))
+
+(defn- context-read-query-opts
+  [ctx opts]
+  (let [consistency (consistency-from ctx)
+        clock (:gesso.live/selected-read-clock ctx)
+        caller (query-opts opts)]
+    ;; Unlike an ordinary convenience option, the selected read clock cannot
+    ;; change between policy and query, including before the first transaction
+    ;; when authoritative progression is absent.
+    (when (and clock
+               (or (not= clock (:current-time consistency))
+                   (and (contains? caller :current-time)
+                        (not= clock (:current-time caller)))))
+      (throw (ex "Selected read cannot change its admitted valid-time clock."
+                 {:reason :conflicting-selected-read-clock})))
+    (read-query-opts consistency (progression-from ctx) caller)))
+
 (defn q-consistent-from
   "Run a request-scoped consistency/progression-aware XTDB2 query.
 
@@ -2317,10 +2346,7 @@
   ([ctx-or-connectable query opts]
    (*q* (require-connectable! (read-connectable-from ctx-or-connectable))
         query
-        (read-query-opts
-         (consistency-from ctx-or-connectable)
-         (progression-from ctx-or-connectable)
-         opts))))
+        (context-read-query-opts ctx-or-connectable opts))))
 
 (defn q-task
   "Return a Missionary task that runs plain q on m/blk."
@@ -2384,10 +2410,7 @@
   ([ctx-or-connectable query opts]
    (*plan-q* (require-connectable! (read-connectable-from ctx-or-connectable))
              query
-             (read-query-opts
-              (consistency-from ctx-or-connectable)
-              (progression-from ctx-or-connectable)
-              opts))))
+             (context-read-query-opts ctx-or-connectable opts))))
 
 ;; -----------------------------------------------------------------------------
 ;; Transaction result normalization

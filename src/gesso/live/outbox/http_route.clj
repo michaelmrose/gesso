@@ -60,8 +60,10 @@
    XTDB host bind its latest completed frontier before any application
    callback, so browser progression cannot choose a historical authority
    snapshot. Each SSE reauthorization obtains its own frontier. The existing
-   binder preserves empty-startup behavior without inventing a basis;
-   standalone handlers without a node retain their provider-neutral path.
+   binder preserves empty-startup behavior without inventing a basis.
+   Pin the valid-time clock even during empty startup, which is not itself
+   an empty system-time snapshot. Standalone handlers without a node retain
+   their provider-neutral path.
    Request progression is not proof of authority."
   [route request]
   (when-let [captures (captured-arguments route (:uri request))]
@@ -71,7 +73,7 @@
                          (dissoc :params :query-params :form-params :route-params :path-params)
                          (assoc :path-params captures)))]
         (if (xtdb/node-from context)
-          (xtdb/bind-request-frontier context)
+          (xtdb/bind-selected-read-clock (xtdb/bind-request-frontier context))
           context))
       (catch clojure.lang.ExceptionInfo e
         (if (= :gesso.live.progression.http/error (:error/type (ex-data e)))
