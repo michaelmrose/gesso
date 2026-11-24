@@ -139,8 +139,8 @@
          (is (= :claimed (:status (first (xt/q node ["SELECT * FROM requests WHERE _id = ?" "real-request"])))))
          (is (eventually
               #(= :dispatch-accepted
-                  (:gesso.live.outbox/status
-                   (first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id]))))))
+                  (:outbox-status
+                   (first (xt/q node ["SELECT gesso$live$outbox$status AS outbox_status FROM gesso_live_outbox WHERE _id = ?" id]))))))
          (is (eventually #(= 1 (:total-dispatch-accepted
                                (lifecycle/status work)))))
          (let [event (deref (stream/take! sub) 1500 ::timeout)]

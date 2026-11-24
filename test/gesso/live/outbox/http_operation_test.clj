@@ -92,7 +92,7 @@
           (is (= 1 @fallback)))))))
 
 (deftest assembled-operation-over-owned-http-commits-and-returns-correlated-settlement
-  (let [intent-id (random-uuid) calls (atom [])
+  (let [intent-id (random-uuid) calls (atom []) gates (atom 0)
         result* (atom nil)]
     (with-routes
       (fn [{:keys [ctx arguments principal] :as invocation}]
@@ -121,18 +121,30 @@
                                     :live-options {:rules [{:when-topic :request
                                                            :expand (fn [_ change] [(select-keys change [:topic :id])])}]}
                                     :http-jdk {} :assembled-operations
-                                    {:authorize-request? #(= "valid" (get-in % [:form-params "csrf"]))}})
+                                    {:authorize-request? (fn [ctx]
+                                                           (swap! gates inc)
+                                                           (= "valid" (get-in ctx [:form-params "csrf"])))}})
               listener (get started host/listener-key)
               node (:xtdb/connectable started)
               client (HttpClient/newHttpClient)
-              send! (fn [body]
-                      (.send client
-                             (-> (HttpRequest/newBuilder (URI/create (str (:base-url listener) "/operations/request/r1/claim")))
-                                 (.timeout (Duration/ofSeconds 10))
-                                 (.header "content-type" "application/x-www-form-urlencoded")
-                                 (.POST (HttpRequest$BodyPublishers/ofString body)) .build)
-                             (HttpResponse$BodyHandlers/ofString)))]
+              send-at! (fn [path body extra-headers]
+                         (let [builder (-> (HttpRequest/newBuilder (URI/create (str (:base-url listener) path)))
+                                           (.timeout (Duration/ofSeconds 10))
+                                           (.header "content-type" "application/x-www-form-urlencoded")
+                                           (.POST (HttpRequest$BodyPublishers/ofString body)))]
+                           (doseq [[k v] extra-headers] (.header builder k v))
+                           (.send client (.build builder) (HttpResponse$BodyHandlers/ofString))))
+              path "/operations/request/r1/claim"
+              send! #(send-at! path % [])]
           (try
+            (let [valid (form :request/claim "valid")]
+              (doseq [bad-path ["/operations/request/%721/claim"
+                                "/operations%2Frequest/r1/claim"]]
+                (is (= 400 (.statusCode (send-at! bad-path valid [])))))
+              (is (= 400 (.statusCode (send-at! path valid [["Content-Type" "text/plain"]]))))
+              (is (= 400 (.statusCode (send-at! path valid [["Authorization" "one"]
+                                                           ["authorization" "two"]])))))
+            (is (zero? @gates))
             (is (= 403 (.statusCode (send! (form :request/claim "wrong")))))
             (is (= 400 (.statusCode (send! (form :request/reassign "valid")))))
             (is (empty? @calls))
@@ -150,6 +162,7 @@
             (is (= [{:status :claimed}] (xt/q node ["SELECT status FROM requests WHERE _id = ?" "r1"])))
             (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id])))
             (is (= 1 (count @calls)))
+            (is (= 2 @gates))
             (is (identical? node (get-in (first @calls) [:ctx :xtdb/connectable])))
             (is (= fixture/trusted-principal (:principal (first @calls))))
             (is (= {:request-id "r1"} (get-in (first @calls) [:ctx :path-params])))

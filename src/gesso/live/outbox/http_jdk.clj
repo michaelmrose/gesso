@@ -24,18 +24,32 @@
                    :reason reason})))
 
 (defn- request-map [^HttpExchange exchange]
-  (let [uri (.getRequestURI exchange)]
-    {:uri (.getPath uri)
-     :query-string (.getRawQuery uri)
-     :request-method (keyword (str/lower-case (.getRequestMethod exchange)))
-     :headers (into {}
-                    (map (fn [[name values]]
-                           [(str/lower-case name) (first values)]))
-                    (.entrySet (.getRequestHeaders exchange)))
-     :body (.getRequestBody exchange)
-     :scheme :http
-     :server-port (.getPort (.getLocalAddress exchange))
-     :remote-addr (some-> exchange .getRemoteAddress .getAddress .getHostAddress)}))
+  (let [uri (.getRequestURI exchange)
+        path (.getRawPath uri)
+        fields (.entrySet (.getRequestHeaders exchange))]
+    ;; This selected reference transport does not admit alternative path
+    ;; spellings or multi-valued header fields. Never discard information
+    ;; before route selection, authorization or progression validation.
+    (when (and (string? path) (str/starts-with? path "/")
+               (not (.isAbsolute uri)) (nil? (.getRawAuthority uri))
+               (nil? (.getRawFragment uri))
+               (= path (.getPath uri) (.getRawPath (.normalize uri)))
+               (every? (fn [[_ values]] (= 1 (count values))) fields))
+      {:uri path
+       :query-string (.getRawQuery uri)
+       :request-method (keyword (str/lower-case (.getRequestMethod exchange)))
+       :headers (into {}
+                      (map (fn [[name values]]
+                             [(str/lower-case name) (first values)])) fields)
+       :body (.getRequestBody exchange)
+       :scheme :http
+       :server-port (.getPort (.getLocalAddress exchange))
+       :remote-addr (some-> exchange .getRemoteAddress .getAddress .getHostAddress)})))
+
+(def ^:private ambiguous-request-response
+  {:status 400 :headers {"content-type" "text/plain; charset=utf-8"
+                         "cache-control" "no-store"}
+   :body "Unsupported or ambiguous HTTP request."})
 
 (defn- write-stream! [body out]
   ;; Keep the original take! during timeout polling; starting another take!
@@ -96,6 +110,12 @@
 
    Options: :host (default 127.0.0.1), :port (0..65535, default 0),
    :threads (1..64, default 8), :drain-timeout-ms (0..120000, default 5000).
+   Requests must use an unescaped, normalized origin-form path and one
+   value per physical header name (comma-separated field values remain
+   intact). Invalid requests get 400 before Ring dispatch. Raw query
+   strings are unchanged. This is a deliberately narrow reference profile,
+   not a general-purpose URI normalization or header combination policy.
+
    All callbacks are synchronous from the caller's perspective. Return
    :base-url, :port, :stop! (optional timeout), :stop-listener! (zero-arg
    shutdown-plan callback), :drained?, :active-count, :status. No Biff or
@@ -128,7 +148,10 @@
           owner (listener/prepare!
                  {:dispatch! (fn [^HttpExchange exchange]
                                (try
-                                 (write-response! exchange (ring-handler (request-map exchange)))
+                                 (write-response! exchange
+                                                  (if-let [request (request-map exchange)]
+                                                    (ring-handler request)
+                                                    ambiguous-request-response))
                                  (finally (.close exchange))))
                   :on-rejected! (fn [^HttpExchange exchange]
                                   ;; This response is handled without host

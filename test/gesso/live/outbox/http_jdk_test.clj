@@ -256,3 +256,44 @@
       (finally
         (stream/close! producer)
         ((:stop! adapter) 1000)))))
+
+(deftest physical-jdk-refuses-lossy-request-normalization-before-dispatch
+  (let [seen (atom [])
+        adapter (jdk/start! (fn [req]
+                              (swap! seen conj req)
+                              {:status 200 :headers {} :body "ok"}) {})
+        client (HttpClient/newHttpClient)
+        send! (fn [path headers]
+                (let [builder (HttpRequest/newBuilder (URI/create (str (:base-url adapter) path)))]
+                  (doseq [[k v] headers] (.header builder k v))
+                  (.send client (.build builder) (HttpResponse$BodyHandlers/ofString))))]
+    (try
+      (doseq [path ["/operations/%72equest/claim"
+                    "/operations%2Frequest/claim"
+                    "/operations/request/%252e%252e/claim"
+                    "/operations/request/../claim"
+                    "/operations//request/claim"]]
+        (is (= 400 (.statusCode (send! path []))) path))
+      ;; HttpClient combines repeated Cookie fields before transmission.
+      ;; Write actual distinct fields to the loopback socket instead.
+      (doseq [header ["authorization" "cookie" "content-type"
+                      "gesso-live-progression"]]
+        (with-open [socket (java.net.Socket. "127.0.0.1" (:port adapter))]
+          (.setSoTimeout socket 5000)
+          (let [wire (str "GET /normal HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+                          header ": one\r\n" (.toUpperCase header java.util.Locale/ROOT)
+                          ": two\r\n\r\n")
+                output (.getOutputStream socket)]
+            (.write output (.getBytes wire StandardCharsets/US_ASCII))
+            (.flush output)
+            (with-open [reader (java.io.BufferedReader.
+                                (java.io.InputStreamReader. (.getInputStream socket)
+                                                            StandardCharsets/US_ASCII))]
+              (is (re-find #"^HTTP/1\.1 400(?: |$)" (.readLine reader)) header)))))
+      (is (empty? @seen))
+      (is (= 200 (.statusCode (send! "/normal?q=a%2Fb" [["accept" "text/html, text/plain"]]))))
+      (is (= 1 (count @seen)))
+      (is (= "/normal" (:uri (first @seen))))
+      (is (= "q=a%2Fb" (:query-string (first @seen))))
+      (is (= "text/html, text/plain" (get-in (first @seen) [:headers "accept"])))
+      (finally ((:stop! adapter) 2000) (.close client)))))
