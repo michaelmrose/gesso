@@ -6,7 +6,8 @@
    [gesso.validation.htmx :as vhtmx]
    [gesso.validation.malli :as vmalli]
    [gesso.validation.scripts :as vscripts]
-   [malli.core :as m]))
+   [malli.core :as m]
+   [rum.core :as rum]))
 
 (def ^:private user-schema
   [:map
@@ -49,12 +50,6 @@
                      (= node-id (:id x)))
             x))
         (hiccup-seq hiccup)))
-
-(defn- script-node-js
-  [node]
-  (when (and (vector? node)
-             (= :script (first node)))
-    (get-in (second node) [:dangerouslySetInnerHTML :__html] "")))
 
 (deftest extract-string-field-constraints-test
   (testing "string fields map min/max/pattern/required into HTML5 attrs"
@@ -238,24 +233,26 @@
       (is (= :<> (first hiccup)))
       (is (= "innerHTML" (:hx-swap-oob (attrs-with-id "email-error" hiccup))))
       (is (= "innerHTML" (:hx-swap-oob (attrs-with-id "age-error" hiccup))))
-      (is (some (fn [node]
-                  (when-let [js (script-node-js node)]
-                    (str/includes? js "aria-invalid")))
-                (hiccup-seq hiccup))))))
+      (is (= 2 (count (filter :data-validation-error-message
+                              (filter map? (hiccup-seq hiccup))))))
+      (is (not-any? #(and (vector? %) (= :script (first %)))
+                    (hiccup-seq hiccup))))))
 
-#_(deftest render-oob-errors-test
-  (testing "Malli explain-data renders HTMX OOB updates"
-    (let [schema [:map
-                  [:email [:string {:min 5}]]
-                  [:age [:int {:min 18}]]]
-          explain-data (m/explain schema {:email "x"
-                                          :age 12})
-          hiccup (vhtmx/render-oob-errors explain-data)]
-      (is (= :<> (first hiccup)))
-      (is (= "innerHTML" (:hx-swap-oob (attrs-with-id "email-error" hiccup))))
-      (is (= "innerHTML" (:hx-swap-oob (attrs-with-id "age-error" hiccup))))
-      (is (some #(str/includes? (script-node-js %) "aria-invalid")
-                (hiccup-seq hiccup))))))
+(deftest friendly-error-response-is-inert-and-escaped-test
+  (let [path [:user "email<quoted>"]
+        message "</script><img src=x onerror=alert(1)>"
+        node (vhtmx/render-oob-error-map {path [message "ignored"]})
+        html (rum/render-static-markup node)]
+    (is (= [:<> [:div {:id "user-email<quoted>-error" :hx-swap-oob "innerHTML"}
+                 [:span {:data-validation-error-message true
+                         :style {:color "var(--destructive)"}} message]]]
+           node))
+    (is (str/includes? html "user-email&lt;quoted&gt;-error"))
+    (is (str/includes? html "&lt;/script&gt;&lt;img"))
+    (is (not (str/includes? html "<script")))
+    (is (not (str/includes? html "<img")))
+    (is (not (str/includes? html "ignored")))
+    (is (nil? (vhtmx/render-oob-error-map {:email nil :age []})))))
 
 (deftest render-oob-errors-empty-test
   (testing "nil explain-data returns nil"

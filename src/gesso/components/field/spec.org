@@ -721,13 +721,17 @@ Example:
 
 #+begin_src html
 <div id="email-error" hx-swap-oob="innerHTML">
-  <span>Email is already taken.</span>
-  <script>...</script>
+  <span data-validation-error-message="true">Email is already taken.</span>
 </div>
 #+end_src
 
 The field component must render a matching error container when validation is
-enabled, so OOB swaps have a stable target.
+enabled, so OOB swaps have a stable target. The target owns the fixed
+Hyperscript reveal handler and the =data-field-error-for= association.
+On =htmx:load= of the installed direct-child marker it reveals the error,
+sets the server-error recovery flag and marks the associated control invalid.
+The response contains no inline script. Custom error targets must implement
+this same contract.
 
 * Interaction with forms
 

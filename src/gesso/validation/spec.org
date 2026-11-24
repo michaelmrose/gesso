@@ -683,8 +683,7 @@ Returns Hiccup:
         :hx-swap-oob "innerHTML"}
   [:span {:data-validation-error-message true
           :style {:color "var(--destructive)"}}
-   "Email is invalid."]
-  [:script "..."]]]
+   "Email is invalid."]]]
 #+end_src
 
 ** Error path to ID conversion
@@ -739,11 +738,14 @@ Each error update should:
 - remove hidden state from the error container
 - mark the related field control invalid when the control can be found by id
 
-The first version may use a small inline script to remove hidden state and mark
-the control invalid.
-
-A later version may prefer data attributes or a dedicated Hyperscript event
-instead of inline scripts.
+The response contains only text and an inert =data-validation-error-message=
+marker, not executable scripts. The existing field error slot owns a fixed
+Hyperscript handler for =htmx:load= on its installed direct-child marker.
+It reveals the slot, marks server-error recovery state and marks the control
+invalid when the slot's =data-field-error-for= and the control's
+=aria-errormessage= agree. A cancelled or unrelated swap does not load the
+marker into that slot. Custom error containers must provide equivalent stable
+reveal behavior; matching the id alone is insufficient.
 
 ** Non-goals
 

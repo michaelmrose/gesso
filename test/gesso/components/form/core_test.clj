@@ -56,12 +56,6 @@
    [:name
     [:string {:re #"(?i)^[a-z]+$"}]]])
 
-(defn- script-node-js
-  [node]
-  (when (and (vector? node)
-             (= :script (first node)))
-    (get-in (second node) [:dangerouslySetInnerHTML :__html] "")))
-
 ;; -----------------------------------------------------------------------------
 ;; Validation extraction and facade tests
 ;; -----------------------------------------------------------------------------
@@ -216,6 +210,26 @@
       (is (= "alert" (:role error-attrs)))
       (is (= "polite" (:aria-live error-attrs)))
       (is (h/has-class? error-attrs "hidden")))))
+
+(deftest field-error-slot-owns-server-reveal-test
+  (let [field (fn [id] (g/field {:for id :schema signup-schema :field-key :notes
+                                 :control [:input {:type "text"}]}))
+        slot (fn [id] (h/element-attrs (h/by-id (str id "-error") (field id))))
+        ordinary (slot "notes")
+        unusual (slot "notes.with'punctuation")
+        script (:_ ordinary)]
+    (is (= "notes" (:data-field-error-for ordinary)))
+    (is (= "notes.with'punctuation" (:data-field-error-for unusual)))
+    (is (= script (:_ unusual)))
+    (is (h/script-includes? ordinary "on htmx:load"))
+    (is (h/script-includes? ordinary ":scope > [data-validation-error-message]"))
+    (is (h/script-includes? ordinary "if marker and event.target is marker"))
+    (is (h/script-includes? ordinary "remove .hidden from me"))
+    (is (h/script-includes? ordinary "set my.dataset.serverError to 'true'"))
+    (is (h/script-includes? ordinary "document.getElementById(my.getAttribute('data-field-error-for'))"))
+    (is (h/script-includes? ordinary "field.getAttribute('aria-errormessage') is my.id"))
+    (is (h/script-includes? ordinary "field.setAttribute('aria-invalid', 'true')"))
+    (is (h/has-class? ordinary "hidden"))))
 
 (deftest field-schema-backed-error-target-test
   (testing "schema-backed optional field with no local attrs still renders an OOB error target"
@@ -562,8 +576,7 @@
           username-error (h/by-id "username-error" node)
           email-error (h/by-id "email-error" node)
           age-error (h/by-id "age-error" node)
-          scripts (h/elements-by-tag :script node)
-          script-texts (keep script-node-js scripts)]
+          scripts (h/elements-by-tag :script node)]
       (is (= :<> (first node)))
       (is username-error)
       (is (= "innerHTML" (:hx-swap-oob (h/element-attrs username-error))))
@@ -571,10 +584,11 @@
       (is (= "innerHTML" (:hx-swap-oob (h/element-attrs email-error))))
       (is age-error)
       (is (= "innerHTML" (:hx-swap-oob (h/element-attrs age-error))))
-      (is (some #(str/includes? % "dataset.serverError='true'")
-                script-texts))
-      (is (some #(str/includes? % "aria-invalid")
-                script-texts)))))
+      (is (empty? scripts))
+      (doseq [slot [username-error email-error age-error]]
+        (let [message (first (h/elements-by-tag :span slot))]
+          (is (true? (:data-validation-error-message (h/element-attrs message))))
+          (is (not (contains? (h/element-attrs message) :_))))))))
 
 (deftest validation-path-id-facade-test
   (testing "path id helpers are exposed through gesso.core"

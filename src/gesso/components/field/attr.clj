@@ -5,6 +5,7 @@
    user-provided Hiccup controls."
   (:require
    [clojure.string :as str]
+   [gesso.components.field.scripts :as field-scripts]
    [gesso.util :refer [class-names hiccup-element? merge-attrs]]))
 
 (defn- ->id-part
@@ -186,7 +187,7 @@
      {:id desc-id})))
 
 (defn error-attrs
-  [class {:keys [err-id hidden?]}]
+  [class {:keys [id err-id hidden?]}]
   (merge-attrs
    {:class (class-names (when hidden? "hidden") class)
     :data-field-error true
@@ -194,4 +195,7 @@
     :aria-live "polite"
     :style {:color "var(--destructive)"}}
    (when err-id
-     {:id err-id})))
+     {:id err-id})
+   (when (and id err-id)
+     {:data-field-error-for id
+      :_ (field-scripts/server-error-reveal-script)})))

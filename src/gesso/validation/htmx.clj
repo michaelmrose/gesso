@@ -79,50 +79,23 @@
   (flatten-humanized* [] humanized))
 
 ;; -----------------------------------------------------------------------------
-;; Client reveal script
-;; -----------------------------------------------------------------------------
-
-(defn- js-string
-  [s]
-  (pr-str (str s)))
-
-(defn- reveal-error-script
-  [field-id err-id]
-  (str
-   "(function(){"
-   "var err=document.getElementById(" (js-string err-id) ");"
-   "if(err){"
-   "err.classList.remove('hidden');"
-   "err.dataset.serverError='true';"
-   "}"
-   "var field=document.getElementById(" (js-string field-id) ");"
-   "if(field){field.setAttribute('aria-invalid','true');}"
-   "})();"))
-
-(defn- script-node
-  [js]
-  [:script {:dangerouslySetInnerHTML
-            {:__html js}}])
-
-;; -----------------------------------------------------------------------------
 ;; OOB field-error rendering
 ;; -----------------------------------------------------------------------------
 
 (defn- render-oob-error
   [{:keys [path messages]}]
-  (let [field-id (path->field-id path)
-        err-id   (path->err-id path)
+  (let [err-id   (path->err-id path)
         message  (first messages)]
     [:div {:id err-id
            :hx-swap-oob "innerHTML"}
      [:span {:data-validation-error-message true
              :style {:color "var(--destructive)"}}
-      message]
-     (script-node (reveal-error-script field-id err-id))]))
+      message]]))
 
 (defn render-oob-errors
   "Render Malli explain-data as HTMX out-of-band updates for field error
-   containers.
+   containers. Responses contain only error text and an inert marker. The
+   stable field error container owns reveal behavior (see gesso.components.field.attr/error-attrs).
 
    The generated ids follow the same convention as the field component:
 
