@@ -39,20 +39,15 @@
 (defn- reject! [reason]
   (throw (ex-info "Invalid proving session authority." {:reason reason})))
 
-(defn with-session-policy!
-  "Supply a checked grant policy WITHOUT :acquire-principal!. During f, the
-   trusted host may issue credentials for declared principals and revoke them.
-   :source can be passed to the existing granted Live fixture. :issue! returns
-   :session-id, :cookie (Cookie request header value), and :csrf-token (value
-   for X-Gesso-Proving-Csrf). This intentionally provisions credentials out of
-   band; it does not serve login or Set-Cookie endpoints. Scope exit invalidates
-   all credentials. Invalid/missing credentials or CSRF proof resolve anonymous
-   (401 at the selected handler), with no mutation delegation."
-  [policy f]
-  (when-not (and (map? policy) (not (contains? policy :acquire-principal!))
-                 (not (contains? policy :browser-csrf-token!))
-                 (fn? f))
-    (reject! :invalid-session-policy-input))
+(defn with-session-authority!
+  "Fixture-only scoped cookie/CSRF authority shared by the reservation and
+   assembled Claim hosts. The caller supplies a closed set of known principals
+   and applies its own independent read/write grants. No login or production
+   session certification is provided."
+  [known f]
+  (when-not (and (set? known) (seq known)
+                 (every? #(and (keyword? %) (namespace %)) known) (fn? f))
+    (reject! :invalid-session-authority-input))
   (let [random (SecureRandom.)
         state (atom {:open? true :sessions {}})
         acquire! (fn [request]
@@ -70,10 +65,7 @@
                  (let [session (get-in @state [:sessions (cookie-id request)])]
                    (when (= who (:principal-id session))
                      (:csrf-token session))))
-        source (principal/checked-test-policy!
-                (assoc policy :acquire-principal! acquire!
-                              :browser-csrf-token! token!))
-        known (into (:read-principals source) (keys (:grants source)))
+        source {:acquire-principal! acquire! :browser-csrf-token! token!}
         issue! (fn [who]
                  (when-not (contains? known who)
                    (reject! :unknown-session-principal))
@@ -94,3 +86,25 @@
       (f {:source source :issue! issue! :revoke! revoke!})
       (finally
         (reset! state {:open? false :sessions {}})))))
+
+(defn with-session-policy!
+  "Supply a checked grant policy WITHOUT :acquire-principal!. During f, the
+   trusted host may issue credentials for declared principals and revoke them.
+   :source can be passed to the existing granted Live fixture. :issue! returns
+   :session-id, :cookie (Cookie request header value), and :csrf-token (value
+   for X-Gesso-Proving-Csrf). This intentionally provisions credentials out of
+   band; it does not serve login or Set-Cookie endpoints. Scope exit invalidates
+   all credentials. Invalid/missing credentials or CSRF proof resolve anonymous
+   (401 at the selected handler), with no mutation delegation."
+  [policy f]
+  (when-not (and (map? policy) (not (contains? policy :acquire-principal!))
+                 (not (contains? policy :browser-csrf-token!))
+                 (fn? f))
+    (reject! :invalid-session-policy-input))
+  (let [checked (principal/checked-test-policy!
+                 (assoc policy :acquire-principal! (constantly {:status :anonymous})))]
+    (with-session-authority!
+      (into (:read-principals checked) (keys (:grants checked)))
+      (fn [authority]
+        (f (update authority :source
+                   #(principal/checked-test-policy! (merge checked %))))))))

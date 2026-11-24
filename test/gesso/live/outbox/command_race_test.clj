@@ -6,6 +6,7 @@
             [clojure.xml :as xml]
             [gesso.choreo.identity :as identity]
             [gesso.core :as g]
+            [gesso.assurance.example.physical-single-node-session :as session]
             [gesso.live.application-preflight.fixture :as fixture]
             [gesso.live.optimistic.protocol :as protocol]
             [gesso.live.outbox.host :as host]
@@ -808,13 +809,21 @@
 
 (deftest distinct-claim-commands-contend-for-one-primary-assignment
   (doseq [recovery-mode [:valid :wrong-outcome :missing-guard :domain-write]]
-   (let [ready (CountDownLatch. 2)
+   (session/with-session-authority!
+    #{:fixture/helper-1 :fixture/helper-2 :fixture/reader}
+    (fn [{:keys [source issue! revoke!]}]
+     (let [ready (CountDownLatch. 2)
         recovery-trace (atom [])
         observed (atom [])
         projected (atom [])
+        credentials {"a" (issue! :fixture/helper-1) "b" (issue! :fixture/helper-2)
+                     "reader" (issue! :fixture/reader)}
+        headers-for (fn [who] (let [{:keys [cookie csrf-token]} (get credentials who)]
+                               {"cookie" cookie "x-gesso-proving-csrf" csrf-token}))
         principal-fn (fn [ctx]
-                       (some-> (get {"a" "helper-1" "b" "helper-2"}
-                                    (get-in ctx [:headers "x-fixture-session"])) identity/principal))
+                       (let [who (:principal-id ((:acquire-principal! source) ctx))]
+                         (when (contains? #{:fixture/helper-1 :fixture/helper-2} who)
+                           (identity/principal (name who)))))
         actor (comp identity/raw-value :principal)
         before {:xt/id "r1" :status :open :revision 0 :created-at "t0"
                 :updated-at "t0" :request/location-id "l1"}
@@ -928,15 +937,26 @@
                                        "/operations/request/claim")]}}
      (fn [{:keys [assembly report]}]
        (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
-       (let [started (host/start! assembly (fn [_] (g/html-response [:div "fallback"])) config)
+       (with-open [client (HttpClient/newHttpClient)]
+        (let [started (host/start! assembly (fn [_] (g/html-response [:div "fallback"])) config)
              node (:xtdb/connectable started)
+             request! (fn [headers id execution network?]
+                        (let [cmd (assoc (command execution) :command-id (identity/command-id id))
+                              headers (assoc headers "content-type" "application/x-www-form-urlencoded")
+                              body (codec/form-encode {transport/command-parameter (pr-str (protocol/command->wire cmd))})]
+                          (if network?
+                            (let [builder (HttpRequest/newBuilder
+                                           (URI/create (str (get-in started [host/listener-key :base-url]) "/operations/request/claim")))]
+                              (doseq [[k v] headers] (.header builder k v))
+                              (let [response (.send client (-> builder (.timeout (Duration/ofSeconds 35))
+                                                               (.POST (HttpRequest$BodyPublishers/ofString body)) .build)
+                                                    (HttpResponse$BodyHandlers/ofString))]
+                                {:status (.statusCode response) :body (.body response)}))
+                            ((:biff.ring/handler started) {:uri "/operations/request/claim" :request-method :post
+                                                          :headers headers :body body}))))
              invoke (fn [session id execution]
                       (try
-                        (let [cmd (assoc (command execution) :command-id (identity/command-id id))
-                              response ((:biff.ring/handler started)
-                                        {:uri "/operations/request/claim" :request-method :post
-                                         :headers {"content-type" "application/x-www-form-urlencoded" "x-fixture-session" session}
-                                         :body (codec/form-encode {transport/command-parameter (pr-str (protocol/command->wire cmd))})})]
+                        (let [response (request! (headers-for session) id execution (= :valid recovery-mode))]
                           {:status (:status response)
                            :settlement (when (= 200 (:status response))
                                          (let [marker (xml/parse (ByteArrayInputStream. (.getBytes ^String (:body response) StandardCharsets/UTF_8)))]
@@ -945,6 +965,16 @@
          (try
            (xt/execute-tx node [[:put-docs :requests before]
                                 [:put-docs :memberships (assoc member :xt/id "helper-1") (assoc member :xt/id "helper-2")]])
+           (when (= :valid recovery-mode)
+             ;; Actual network refusals must not reach either constructor.
+             (doseq [headers [{"x-fixture-session" "a"}
+                              (dissoc (headers-for "a") "x-gesso-proving-csrf")
+                              (assoc (headers-for "a") "x-gesso-proving-csrf" (get-in credentials ["b" :csrf-token]))
+                              (headers-for "reader")]]
+               (is (= 403 (:status (request! headers "denied" "denied" true)))))
+             (is (empty? @observed))
+             (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+             (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
            (let [a (future (invoke "a" "claim-a" "attempt-a"))
                  b (future (invoke "b" "claim-b" "attempt-b"))
                  results [(deref a 40000 ::timeout) (deref b 40000 ::timeout)]]
@@ -997,5 +1027,9 @@
                      (is (= [loser-id :replay] (last @projected)))
                      (is (= 2 (count @recovery-trace)))
                      (is (= 2 (count @observed)))))
-                 (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))
-           (finally (host/stop! started)))))))))
+                 (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+                 (when valid?
+                   (revoke! (get-in credentials [session :session-id]))
+                   (is (= 403 (:status (request! (headers-for session) id "revoked-replay" true))))
+                   (is (= 2 (count @observed)))))))
+           (finally (host/stop! started))))))))))))
