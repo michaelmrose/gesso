@@ -37,7 +37,7 @@
    (str/starts-with? segment ":")
    (> (count segment) 1)))
 
-(defn- route-template-matches?
+(defn route-template-matches?
   "Match one concrete rendered affordance path against the small physical route
    template vocabulary already used by current Biff/Reitit applications.
 

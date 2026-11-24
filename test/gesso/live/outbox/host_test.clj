@@ -1,14 +1,16 @@
 (ns gesso.live.outbox.host-test
   "v2106: concrete canonical Biff host inventory and physically owned XTDB,
    Live, outbox worker, handler and explicitly selected JDK listener."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [com.biffweb.core :as biff]
             [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.core :as g]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.fixture
              :refer [with-surfaced-application standard-operations render-context
-                     rendered-operation-button]]
+                     rendered-operation-button custom-route-capabilities]]
             [gesso.live.core :as live]
             [gesso.live.flow :as flow]
             [gesso.live.outbox :as outbox]
@@ -16,13 +18,16 @@
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http-jdk :as jdk]
             [gesso.live.outbox.lifecycle :as lifecycle]
+            [gesso.live.progression :as progression]
             [gesso.live.source :as source]
             [manifold.stream :as stream]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
-  (:import [java.net URI]
-           [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
-           [java.time Duration]))
+  (:import [java.io BufferedReader InputStreamReader]
+           [java.net URI]
+           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
+           [java.time Duration]
+           [java.nio.charset StandardCharsets]))
 
 (defn- setup [f]
   (let [ops (standard-operations)
@@ -633,3 +638,121 @@
        (is ((:drained? (get @system* host/listener-key))))
        (is (live/closed? (:gesso.live/system @system*)))
        (is (thrown? Exception (xt/q (:xtdb/connectable @system*) ["SELECT 1 AS x"])))))))
+
+(deftest canonical-sse-path-cannot-shadow-original-operation-or-fragment
+  (let [ops (standard-operations)
+        ctx (render-context ops)
+        starts (atom 0)]
+    (with-surfaced-application
+      {:operations ops
+       :route-capabilities
+       (custom-route-capabilities
+        {:request/claim {:operation :request/claim :path "/operations/request/:id/claim"}
+         :request/cancel {:operation :request/cancel :path "/operations/request/cancel"}
+         :request/reassign {:operation :request/reassign :path "/operations/request/reassign"}})
+       :rendered-surfaces {:board [:main (rendered-operation-button
+                                        ctx :request/claim "/operations/request/r1/claim")]}}
+      (fn [{:keys [assembly]}]
+        (is (some? assembly))
+        (with-redefs [managed/start-biff-application!
+                      (fn [& _] (swap! starts inc) (throw (ex-info "unexpected startup" {})))]
+          (doseq [[path kind] [["/operations/request/r1/claim" :operation]
+                               ["/operations/request/cancel" :operation]
+                               ["/fragments/request-toolbar" :fragment]]]
+            (let [failure (problem #(host/start! assembly identity
+                                                (assoc (config) :authorized-sse
+                                                       {:path path :authorize-subscription (constantly nil)})))]
+              (is (= :sse-path-shadows-application-route (:reason failure)))
+              (is (= path (:path failure)))
+              (is (= [kind] (mapv :kind (:conflicts failure)))))))
+        (is (zero? @starts))))))
+
+(deftest canonical-owned-http-mutation-outbox-and-sse-convergence
+  ;; A selected trusted Ring callback, not an independently certified executor.
+  ;; The actual HTTP write, database commit, worker, SSE delivery and refetch
+  ;; must all cross the reusable host-owned boundary, not external adapters.
+  (setup
+   (fn [assembly render]
+     (let [id "v2361-owned-request"
+           intent-id (random-uuid)
+           operation-path "/operations/request/claim"
+           fragment-path "/fragments/request-toolbar"
+           stream-path "/streams/request-toolbar"
+           scope {:topic :request :id id}
+           read-state (fn [node]
+                        (:status (first (xt/q node ["SELECT status FROM requests WHERE _id = ?" id]))))
+           handler (fn [{:keys [uri request-method headers] :as request}]
+                     (let [node (:xtdb/connectable request)]
+                       (cond
+                         (and (= operation-path uri) (= :post request-method))
+                         (if-not (= "allowed" (get headers "authorization"))
+                           {:status 403 :headers {} :body "Denied"}
+                           (let [plan (outbox/prepare!
+                                       {:intent-ids [intent-id]
+                                        :source-id (get request managed/source-id-key)
+                                        :operation :request/claim :purpose :gesso.live/refresh}
+                                       [(assoc scope :change/kind :updated)])]
+                             (try
+                               (xt/execute-tx node
+                                              (into (vec (:guard-ops plan))
+                                                    [[:put-docs :requests {:xt/id id :status :claimed}]
+                                                     (:tx-op plan)]))
+                               {:status 200 :headers {} :body "Mutation"}
+                               (catch Exception e
+                                 (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                                   {:status 409 :headers {} :body "Rejected"}
+                                   (throw e))))))
+                         (= fragment-path uri)
+                         (g/html-response [:div {:id "request-status"} (name (or (read-state node) :open))])
+                         :else (render request))))
+           started (host/start! assembly handler
+                                (assoc (config) :http-jdk {}
+                                       :authorized-sse {:path stream-path
+                                                        :authorize-subscription
+                                                        #(when (= "allowed" (get-in % [:headers "authorization"])) scope)
+                                                        :sse-options {:keepalive-ms 50}}))
+           listener (get started host/listener-key)
+           node (:xtdb/connectable started)
+           worker (get started managed/handle-key)
+           client (HttpClient/newHttpClient)
+           req (fn [path method allowed?]
+                 (let [builder (HttpRequest/newBuilder (URI/create (str (:base-url listener) path)))]
+                   (.timeout builder (Duration/ofSeconds 5))
+                   (when allowed? (.header builder "authorization" "allowed"))
+                   (when (= method :post) (.POST builder (HttpRequest$BodyPublishers/noBody)))
+                   (.build builder)))
+           send! (fn [path method allowed?]
+                   (.send client (req path method allowed?) (HttpResponse$BodyHandlers/ofString)))]
+       (try
+         (is (= 403 (.statusCode (send! stream-path :get false))))
+         (is (= 403 (.statusCode (send! operation-path :post false))))
+         (is (nil? (read-state node)))
+         (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id])))
+         (is (str/includes? (.body (send! fragment-path :get true)) ">open<"))
+         (let [response (.send client (req stream-path :get true) (HttpResponse$BodyHandlers/ofInputStream))]
+           (with-open [body (.body response)
+                       reader (BufferedReader. (InputStreamReader. body StandardCharsets/UTF_8))]
+             (is (= 200 (.statusCode response)))
+             (is (= 200 (.statusCode (send! operation-path :post true))))
+             (is (= :claimed (read-state node)))
+             (is (eventually #(= 1 (:total-dispatch-accepted (lifecycle/status worker)))))
+             (let [pending (future (loop []
+                                     (when-let [line (.readLine reader)]
+                                       (if (= "event: live-update" line)
+                                         (.readLine reader)
+                                         (recur)))))
+                   line (deref pending 5000 nil)]
+               (try
+                 (is (and (string? line) (str/starts-with? line "data: ")))
+                 (when (and line (str/starts-with? line "data: "))
+                   (let [payload (edn/read-string (subs line 6))]
+                     (is (= scope (select-keys (:invalidation payload) [:topic :id])))
+                     (is (some? (progression/wire->requirement (:progression payload))))))
+                 (finally (future-cancel pending))))
+             (is (str/includes? (.body (send! fragment-path :get true)) ">claimed<"))
+             (is (= 409 (.statusCode (send! operation-path :post true))))
+             (is (= :claimed (read-state node)))
+             (is (= 1 (:total-dispatch-accepted (lifecycle/status worker))))
+             (host/stop! started)
+             (is ((:drained? listener)))))
+         (finally (host/stop! started) (.close client)))))))

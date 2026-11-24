@@ -19,6 +19,7 @@
   (:require [clojure.string :as str]
             [com.biffweb.core :as biff]
             [gesso.live.application-preflight :as application]
+            [gesso.live.application-preflight.affordance :as affordance]
             [gesso.live.core :as live]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http :as http]
@@ -101,6 +102,34 @@
       (when-not (and (integer? timeout) (<= 0 timeout 120000))
         (reject! :invalid-stop-timeout {}))))
   config)
+
+(defn- require-unshadowed-sse-path! [assembly config]
+  ;; The SSE adapter owns ALL methods at its literal path (including 405
+  ;; responses), not just GET. Compare against the admitted route products,
+  ;; never against a caller-provided list of supposedly installed routes.
+  ;; Stream routes are intentionally not excluded: this adapter may realize
+  ;; one. This is a collision check in the existing simple template language,
+  ;; not proof of arbitrary router semantics or complete stream adoption.
+  (when-let [path (get-in config [:authorized-sse :path])]
+    (when (string? path)
+      (let [acquisition (:operation-acquisition-assembly assembly)
+            operations (get-in acquisition [:execution-assembly :route-assembly :routes])
+            fragments (get-in acquisition [:acquisition-assembly :realizations])
+            protected (concat
+                       (for [[id route] operations]
+                         {:kind :operation :id id :path (:path route)
+                          :method (:method route)})
+                       (for [[id realization] fragments
+                             :let [route (:fragment-route realization)]]
+                         {:kind :fragment :id id :path (:path route)
+                          :method (:method route)}))
+            conflicts (->> protected
+                           (filter #(affordance/route-template-matches? (:path %) path))
+                           (sort-by (juxt :kind (comp pr-str :id)))
+                           vec)]
+        (when (seq conflicts)
+          (reject! :sse-path-shadows-application-route
+                   {:path path :conflicts conflicts}))))))
 
 (defn- start-xtdb! [system]
   (let [node (managed/acquire-startup-resource!
@@ -281,6 +310,7 @@
     (reject! :invalid-handler {}))
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
+  (require-unshadowed-sse-path! assembly config)
   (let [route* (atom nil)
         recovery* (atom nil)
         timeout-ms (get config :stop-timeout-ms 10000)
