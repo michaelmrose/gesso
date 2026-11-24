@@ -115,8 +115,14 @@
   (let [node (xtdb/connectable-from ctx)
         {:keys [basis]} (frontier/q-with-basis! node ["SELECT 1 AS ready"])
         opts {:snapshot-token (xtdb/basis-snapshot-token basis)
-              :current-time (Instant/now)}]
-    {:basis basis :state (snapshot! #(xtdb/q-from node % opts))}))
+              :current-time (Instant/now)}
+        records (atom nil)
+        state (snapshot! (fn [query]
+                           (let [rows (xtdb/q-from node query opts)]
+                             (when (= query ["SELECT * FROM gesso_commands"])
+                               (reset! records (into {} (map (juxt :xt/id clojure.core/identity)) rows)))
+                             rows)))]
+    {:basis basis :state state :records @records}))
 
 (defn- literal-conditions! [declaration]
   (construction/build-guarded-replacement! declaration)
@@ -313,3 +319,49 @@
      :invariants {:claim/ownership-and-journal ownership :claim/nonnegative-revision revision}
      :operations operations}))
 
+
+(defn correlate-history!
+  "Reconcile the selected fixture's pinned state/ledger windows and actual
+   adapter submission results. A committed alternative must have exactly one
+   window containing its returned basis and its exact new journal record.
+   Replay must refer to that record and submit nothing during its call.
+   Supplied history is diagnostic, not authenticated physical provenance."
+  [steps submissions]
+  (let [committed (filterv #(= :committed (:result %)) submissions)
+        ids (mapv #(get-in % [:identity :command-id]) committed)
+        by-id (zipmap ids committed)
+        incorporated (filterv #(#{:accept :refuse} (:alternative %)) steps)]
+    (require! (and (= (count ids) (count (distinct ids)))
+                   (= (frequencies ids) (frequencies (map :command-id incorporated)))
+                   (every? #(= (:identity %) (submitted-alternative! (:ops %))) submissions)
+                   (every? #(or (= :committed (:result %))
+                                (and (= :xtdb/assert-failed (:result %)) (nil? (:commit-basis %)))) submissions)))
+    (mapv
+     (fn [{:keys [helper alternative command-id before after replay-counts]}]
+       (let [replay? (#{:replay-accepted :replay-rejected} alternative)
+             original (case alternative :accept :accept :refuse :refuse
+                            :replay-accepted :accept :replay-rejected :refuse)
+             {:keys [identity ops commit-basis]} (get by-id command-id)
+             record (first (mapcat #(drop 2 %) (filter #(and (= :put-docs (first %)) (= :gesso_commands (second %))) ops)))
+             before-basis (:basis before)
+             after-basis (:basis after)]
+         (require! (and (= identity {:alternative (alternative-id helper original) :command-id command-id})
+                        (some? record) (some? commit-basis)
+                        (not (pos? (xtdb/compare-bases before-basis after-basis)))
+                        (= record (get (:records after) command-id))))
+         (if replay?
+           (require! (and (vector? replay-counts) (= 2 (count replay-counts))
+                          (every? nat-int? replay-counts) (apply = replay-counts)
+                          (<= (first replay-counts) (count submissions))
+                          (not (pos? (xtdb/compare-bases commit-basis before-basis)))
+                          (= (:records before) (:records after))))
+           (require! (and (nil? replay-counts)
+                          (xtdb/basis-advances? before-basis commit-basis)
+                          (not (pos? (xtdb/compare-bases commit-basis after-basis)))
+                          (not (contains? (:records before) command-id))
+                          (= (assoc (:records before) command-id record) (:records after)))))
+         {:command-id command-id :operation-id (alternative-id helper alternative)
+          :commit-basis commit-basis :before-basis before-basis :after-basis after-basis
+          :submission (if replay? :no-new-submission :committed-in-window)
+          :observation {:construction (source helper alternative)
+                        :before (:state before) :inputs {} :after (:state after)}})) steps)))

@@ -54,9 +54,9 @@
         initial-state (atom nil)
         recovery-state (atom nil)
         comparisons (atom [])
-        record-step! (fn [helper alternative before after]
-                       (swap! comparisons conj {:construction (semantics/source helper alternative)
-                                                :before before :inputs {} :after after}))
+        record-step! (fn [helper alternative command-id before after replay-counts]
+                       (swap! comparisons conj {:helper helper :alternative alternative :command-id command-id
+                                                :before before :after after :replay-counts replay-counts}))
         submissions (atom [])
         writers (atom [])
         seed-admitted? (atom false)
@@ -221,7 +221,8 @@
                       (let [entry {:ops ops :identity (semantics/submitted-alternative! ops)}]
                         (try
                           (let [result (execute ctx ops options)]
-                            (swap! submissions conj (assoc entry :result :committed))
+                            (swap! submissions conj (assoc entry :result :committed
+                                                           :commit-basis (xtdb/tx-result-basis (:tx-result result))))
                             result)
                           (catch Exception e
                             (swap! submissions conj (assoc entry :result (:xtdb.error/code (ex-data e))))
@@ -397,8 +398,8 @@
                      final (:state final-state)
                      accepted (semantics/observe! helper :accept initial recovered)
                      refused (semantics/observe! loser-helper :refuse recovered final)]
-                 (record-step! helper :accept initial recovered)
-                 (when valid? (record-step! loser-helper :refuse recovered final))
+                 (record-step! helper :accept id @initial-state @recovery-state nil)
+                 (when valid? (record-step! loser-helper :refuse loser-id @recovery-state final-state nil))
                  (is (:matches? accepted))
                  (is (neg? (xtdb/compare-bases (:basis @initial-state) (:basis @recovery-state))))
                  (is (if valid? (neg? (xtdb/compare-bases (:basis @recovery-state) (:basis final-state)))
@@ -449,10 +450,13 @@
                            (is (= {:uri path :id "l1" :row {:status :claimed :helper helper}}
                                   (select-keys read [:uri :id :row])))
                            (is (progression/covers? (:progression read) requirement))))))))
-               (let [before (:state (semantics/snapshot-at-frontier! node))
+               (let [before-snapshot (semantics/snapshot-at-frontier! node)
+                     before-count (count @submissions)
                      replay (invoke session id "winner-replay")
-                     after (:state (semantics/snapshot-at-frontier! node))]
-                 (record-step! helper :replay-accepted before after)
+                     after-count (count @submissions)
+                     after-snapshot (semantics/snapshot-at-frontier! node)
+                     before (:state before-snapshot) after (:state after-snapshot)]
+                 (record-step! helper :replay-accepted id before-snapshot after-snapshot [before-count after-count])
                  (is (:matches? (semantics/observe! helper :replay-accepted before after)))
                  (is (not (:matches? (semantics/observe! helper :replay-rejected before after))))
                  (is (not (:matches? (semantics/observe! helper :replay-accepted before (assoc after :request/revision 2)))))
@@ -461,9 +465,12 @@
                  (is (= 2 (count @observed)))
                  (is (= [id :replay] (last @projected)))
                  (when valid?
-                   (let [replay (invoke loser-session loser-id "loser-replay")
-                         refused-after (:state (semantics/snapshot-at-frontier! node))]
-                     (record-step! loser-helper :replay-rejected after refused-after)
+                   (let [before-count (count @submissions)
+                         replay (invoke loser-session loser-id "loser-replay")
+                         after-count (count @submissions)
+                         refused-snapshot (semantics/snapshot-at-frontier! node)
+                         refused-after (:state refused-snapshot)]
+                     (record-step! loser-helper :replay-rejected loser-id after-snapshot refused-snapshot [before-count after-count])
                      (is (:matches? (semantics/observe! loser-helper :replay-rejected after refused-after)))
                      (is (not (:matches? (semantics/observe! loser-helper :replay-accepted after refused-after))))
                      (is (= :rejected (get-in replay [:settlement :resolution])))
@@ -485,7 +492,7 @@
                        refused? (fn [ops] (try (semantics/submitted-alternative! ops) false
                                                (catch clojure.lang.ExceptionInfo _ true)))]
                    (is (= (count expected) (count @submissions)))
-                   (is (= expected (set (map #(dissoc % :ops) @submissions))))
+                   (is (= expected (set (map #(dissoc % :ops :commit-basis) @submissions))))
                    (is (refused? (conj accepted [:put-docs :memberships {:xt/id helper :active false}])))
                    (is (refused? (conj accepted ["DELETE FROM requests"])))
                    (is (refused? (filterv #(not= :request_assignments (second %)) accepted)))
@@ -546,12 +553,25 @@
                                                                             (assoc-in op [2 :status] :open) op)) accepted) nil)))))
                      (is (= before (semantics/snapshot-at-frontier! node)))))
                  (when valid?
-                   (let [report (correspondence/check-declared-observations!
-                                 {:catalog (semantics/catalog) :observations @comparisons})
+                   (let [correlated (semantics/correlate-history! @comparisons @submissions)
+                         report (correspondence/check-declared-observations!
+                                 {:catalog (semantics/catalog) :observations (mapv :observation correlated)})
+                         rejected? (fn [steps attempts]
+                                     (try (semantics/correlate-history! steps attempts) false
+                                          (catch clojure.lang.ExceptionInfo _ true)))
                          committed (set (map (comp :alternative :identity)
                                              (filter #(= :committed (:result %)) @submissions)))
                          replay-ids #{(semantics/alternative-id helper :replay-accepted)
                                       (semantics/alternative-id loser-helper :replay-rejected)}]
+                     (is (= [id loser-id id loser-id] (mapv :command-id correlated)))
+                     (is (= [:committed-in-window :committed-in-window :no-new-submission :no-new-submission]
+                            (mapv :submission correlated)))
+                     (is (= (mapv :commit-basis (take 2 correlated)) (mapv :commit-basis (drop 2 correlated))))
+                     (is (rejected? (assoc-in @comparisons [0 :command-id] loser-id) @submissions))
+                     (is (rejected? (assoc-in @comparisons [0 :after :basis] (get-in @comparisons [0 :before :basis])) @submissions))
+                     (is (rejected? (assoc-in @comparisons [2 :replay-counts] [0 1]) @submissions))
+                     (is (rejected? (update-in @comparisons [2 :after :records] dissoc id) @submissions))
+                     (is (rejected? @comparisons (pop @submissions)))
                      (is (:all-supplied-observations-match? report))
                      (is (empty? (:divergent-operation-ids report)))
                      (is (= (into committed replay-ids) (:observed-operation-ids report)))
