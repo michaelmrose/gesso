@@ -181,9 +181,12 @@
         snapshot
         (do (Thread/sleep 20) (recur (dec remaining)))))))
 
-(deftest assembled-streams-share-capacity-and-use-original-model-policy
+(defn- exercise-installed-claim! [lose-reply?]
   (let [seen (atom []) queries (atom []) invocations (atom []) fallback (atom 0)
         prepared-intents (atom nil)
+        submitted (atom 0)
+        execute xtdb/execute-tx-from!
+        lost (ex-info "submitted command reply lost" {:test/lost-reply true})
         constructions (atom 0)
         projections (atom [])
         version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at}
@@ -307,12 +310,27 @@
                   (let [a (future (read-invalidation list-body))
                         b (future (read-invalidation toolbar-body))]
                     (try
-                      (let [response (post! headers)]
+                      (let [response (if lose-reply?
+                                       (with-redefs [xtdb/execute-tx-from!
+                                                     (fn [ctx ops & options]
+                                                       (if (some #(and (vector? %)
+                                                                       (= [:put-docs :gesso_commands]
+                                                                          (subvec % 0 (min 2 (count %))))) ops)
+                                                         (do (swap! submitted inc)
+                                                             (xt/submit-tx (:xtdb/connectable ctx) ops)
+                                                             (throw lost))
+                                                         (apply execute ctx ops options)))]
+                                         (post! headers))
+                                       (post! headers))]
+                        (is (= (if lose-reply? 1 0) @submitted))
                         (is (= 200 (.statusCode response)))
                         (let [marker (xml/parse (ByteArrayInputStream. (.getBytes ^String (.body response) StandardCharsets/UTF_8)))
                               settlement (protocol/wire->settlement
                                           (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))]
-                          (is (= :confirmed (:resolution settlement)))
+                          (is (= (if lose-reply? :already-incorporated :confirmed)
+                                 (:resolution settlement)))
+                          (is (= :request/claimed (:outcome settlement)))
+                          (is (= :claimed (get-in settlement [:authoritative :projection :request/status])))
                           (is (= (select-keys command [:command-id :execution-id])
                                  (select-keys settlement [:command-id :execution-id])))))
                       (is (= 1 (count @invocations)))
@@ -338,6 +356,11 @@
                       (finally (future-cancel a) (future-cancel b))))
                   (is (= [{:status :claimed :revision 1}]
                          (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"])))
+                  ;; Recovery cannot expose an execution receipt that was lost.
+                  ;; Observe the durable intent independently for that branch.
+                  (when lose-reply?
+                    (is (nil? @prepared-intents))
+                    (reset! prepared-intents (xt/q node ["SELECT * FROM gesso_live_outbox"])))
                   (let [intent-id (:xt/id (first @prepared-intents))]
                     (is (uuid? intent-id))
                     (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id]))))
@@ -386,7 +409,8 @@
                     (is (= :request/claimed (:outcome settlement)))
                     (is (= :done (get-in settlement [:authoritative :projection :request/status])))
                     (is (= 2 (count @invocations)))
-                    (is (= [:incorporated :replay] @projections))
+                    (is (= [(if lose-reply? :replay :incorporated) :replay] @projections))
+                    (is (= (if lose-reply? 1 0) @submitted))
                     (is (= 1 @constructions))
                     (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
                     (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
@@ -397,6 +421,12 @@
                   (is ((:drained? listener)))
                   (is ((:drained? (get started host/recovery-status-key))))))
               (finally (host/stop! started) (.close client)))))))))
+
+(deftest assembled-streams-share-capacity-and-use-original-model-policy
+  (exercise-installed-claim! false))
+
+(deftest installed-model-command-recovers-submitted-transaction-without-replay-write
+  (exercise-installed-claim! true))
 
 (deftest assembled-stream-route-rejects-overlap-and-incompatible-profile
   (doseq [[path expected] [["/streams/:id" :ambiguous-stream-route]
