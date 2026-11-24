@@ -1929,3 +1929,30 @@
                                                        (create :other/widget_items widget-new)] []))))
       (is (= #{:widget-2 :other} (set (map :xt/id (xt/q node ["SELECT _id FROM widget_items"])))))
       (is (= [{:xt/id :widget-2}] (xt/q node ["SELECT _id FROM other.widget_items"]))))))
+
+(deftest canonical-field-identity-admission-before-compilation
+  (let [plan (fn [commands guards] {:commands commands :guards guards :emit false})
+        create (fn [doc] (command/create :widget doc version))
+        update (fn [b a] (command/update-command :widget :rename b a version))
+        alias-error ::tx/aliased-document-fields
+        guard (assoc (command/guard :widget widget-before version) :model/expected
+                     {:model/id :widget-1 :model/checks [[:_id :widget-1]]})
+        duplicate-version {:model/id :widget-1
+                           :model/checks [[:widget/updated-at :t1] [:widget/updated_at :t1]]}]
+    (doseq [[field value] [[:_id :other] [:widget$revision 99] [:widget/updated_at :other]]]
+      (let [bad (create (assoc widget-new field value))]
+        (is (= alias-error (error-type #(tx/prepare {} (plan [bad] [])))))
+        (is (= alias-error (error-type #(tx/command->tx-op bad))))))
+    (is (= ::tx/unsupported-document-field
+           (error-type #(tx/normalize-plan (plan [(create (assoc widget-new "name" "other"))] [])))))
+    (is (= alias-error (error-type #(tx/prepare {} (plan [(update (assoc widget-before :_id :other) widget-after)] [])))))
+    (is (= alias-error (error-type #(tx/normalize-guards [guard]))))
+    (is (= alias-error (error-type #(tx/assert-document-current :widget duplicate-version))))
+    (is (= alias-error (error-type #(tx/normalize-plan
+                                     (plan [(update widget-before (-> widget-after
+                                                                      (dissoc :widget/name)
+                                                                      (assoc :widget$name "After")))] [])))))
+    (with-open [node (xtn/start-node {})]
+      (let [good (create (assoc widget-new :payload {:x-y 1 :z 2}))]
+        (xt/execute-tx node (:tx-ops (tx/prepare {} (plan [good] []))))
+        (is (= [{:xt/id :widget-2}] (xt/q node ["SELECT _id FROM widget"])))))))

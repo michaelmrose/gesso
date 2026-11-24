@@ -68,7 +68,8 @@
                    (= (second target) (:xt/id document)))
       (fail! ::invalid-state
              "Reference state contains an invalid target or inconsistent document identity."
-             {:target target :document document})))
+             {:target target :document document}))
+    (tx/require-document-fields! (first target) :state document))
   (tx/require-distinct-entity-identities! (map first (keys state)))
   state)
 

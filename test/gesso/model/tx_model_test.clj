@@ -357,3 +357,14 @@
     (is (= error (error-type #(model/explore-orders {} [(plan [aliased]) unguarded-claim]))))
     (is (= :committed (:status (model/step (assoc initial-state [:other/request :request-1] request)
                                            (plan [other])))))))
+
+(deftest reference-rejects-ambiguous-field-identities
+  (let [bad-state (assoc initial-state [:request :request-1] (assoc request :_id :different))
+        bad-command (update-command :request :claim request {:updated_at :t2})
+        bad-guard (assoc-in membership-guard [:model/expected :model/checks]
+                            [[:updated-at :t0] [:updated_at :t0]])]
+    (is (= ::tx/aliased-document-fields (error-type #(model/require-state bad-state))))
+    (is (= ::tx/aliased-document-fields (error-type #(model/step initial-state (plan [bad-command])))))
+    (is (= ::tx/aliased-document-fields
+           (error-type #(model/step initial-state (plan [claim-a] :guards [bad-guard])))))
+    (is (= :committed (:status (model/step initial-state unguarded-claim))))))

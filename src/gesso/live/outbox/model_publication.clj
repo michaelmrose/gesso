@@ -12,8 +12,7 @@
             [gesso.live.optimistic.resolved-operation :as adapter]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.tx :as model-tx]
-            [gesso.model.command :as model-command]
-            [xtdb.util :as xt-util])
+            [gesso.model.command :as model-command])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.nio ByteBuffer]
            [java.security MessageDigest]
@@ -194,30 +193,9 @@
                 tx-op (conj tx-op))]
       {:ops ops :intents intents :record record})))
 
-(defn- require-unambiguous-document-fields! [entity phase document]
-  ;; Use the same provider normalizer as model.tx for document field identity.
-  ;; Checking only the declared subject would miss aliased IDs/version fields.
-  ;; Nested payloads are opaque to this selected top-level boundary.
-  (reduce (fn [seen field]
-            (when-not (keyword? field)
-              (reject! :unsupported-model-document-field
-                       {:entity-type entity :phase phase :field field}))
-            (let [physical (xt-util/kw->normal-form-kw field)]
-              (when-let [previous (get seen physical)]
-                (reject! :aliased-model-document-fields
-                         {:entity-type entity :phase phase
-                          :fields #{previous field} :physical-field physical}))
-              (assoc seen physical field)))
-          {} (keys document))
-  nil)
-
 (defn- derive-model-fragment [fragment subjects entity-topics]
   (when (seq (:changes fragment))
     (reject! :explicit-changes-with-derived-model {}))
-  (doseq [{:model/keys [entity-type before after]} (:commands fragment)]
-    (when before
-      (require-unambiguous-document-fields! entity-type :before before))
-    (require-unambiguous-document-fields! entity-type :after after))
   (let [contributions
         (for [{:model/keys [entity-type id before after]} (:commands fragment)
               :let [topics (get entity-topics entity-type)]

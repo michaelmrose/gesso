@@ -134,6 +134,53 @@
      {:id id}))
   id)
 
+(defn require-distinct-field-identities!
+  "Require keyword fields with distinct normalized XTDB column identities.
+   Repeated references to the same logical field are allowed. Nested payloads
+   are opaque; this is not a general document schema validator."
+  [fields details]
+  (reduce (fn [seen field]
+            (when-not (keyword? field)
+              (fail! ::unsupported-document-field
+                     "Canonical model fields must be keywords."
+                     (assoc details :field field)))
+            (let [physical (xt.util/kw->normal-form-kw field)]
+              (when-let [prior (get seen physical)]
+                (when-not (= prior field)
+                  (fail! ::aliased-document-fields
+                         "Distinct logical fields address the same physical column."
+                         (assoc details :fields #{prior field} :physical-field physical))))
+              (assoc seen physical field)))
+          {} fields)
+  nil)
+
+(defn require-document-fields!
+  "Validate top-level field identities for a canonical document or reference state."
+  [entity phase document]
+  (require-distinct-field-identities! (keys document)
+                                      {:entity-type entity :phase phase}))
+
+(defn- require-expected-fields! [entity expected]
+  (require-distinct-field-identities! (cons :xt/id (map first (:model/checks expected)))
+                                      {:entity-type entity :phase :expected}))
+
+(defn- require-command-fields! [value]
+  (let [{:model/keys [entity-type before after expected]} (command/require-command value)]
+    (when before (require-document-fields! entity-type :before before))
+    (require-document-fields! entity-type :after after)
+    (when expected (require-expected-fields! entity-type expected))
+    ;; A canonical transition cannot rename a logical field to an alias of
+    ;; itself: the reference machine would see a different field than XTDB.
+    (require-distinct-field-identities!
+     (concat (keys before) (keys after) (map first (:model/checks expected)))
+     {:entity-type entity-type :phase :transition}))
+  value)
+
+(defn- require-guard-fields! [value]
+  (let [{:model/keys [entity-type expected]} (command/require-guard value)]
+    (require-expected-fields! entity-type expected))
+  value)
+
 (defn- assertion-form?
   [value]
   (and
@@ -244,6 +291,7 @@
           checks]}
         (command/require-expected-version
          expected)]
+    (require-expected-fields! entity-type expected)
     (assert-one
      entity-type
      (into
@@ -349,11 +397,11 @@
          (:changes value))]
 
     (run!
-     command/require-command
+     require-command-fields!
      commands)
 
     (run!
-     command/require-guard
+     require-guard-fields!
      guards)
 
     (when-not
@@ -537,7 +585,7 @@
        {:guards guards}))
 
     (require-distinct-entity-identities!
-     (map (comp :model/entity-type command/require-guard) guards))
+     (map (comp :model/entity-type require-guard-fields!) guards))
     (let [{:keys
            [order
             by-target]}
@@ -694,7 +742,7 @@
          [entity-type
           id
           expected]}
-        (command/require-command
+        (require-command-fields!
          model-command)]
 
     (if
@@ -729,7 +777,7 @@
   [model-command]
   (let [{:model/keys
          [entity-type]}
-        (command/require-command
+        (require-command-fields!
          model-command)]
     [:put-docs
      entity-type

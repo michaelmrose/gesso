@@ -472,15 +472,15 @@
             (let [b (cond-> before (= phase :before) (assoc alias value))
                   a (cond-> after (= phase :after) (assoc alias value))
                   failure (error #(run! "alias" (model-command/update-command :requests :move b a version)))]
-              (is (= :aliased-model-document-fields (:reason failure)))
-              (is (= phase (:phase failure)))
-              (is (= #{field alias} (:fields failure)))
-              (is (= physical (:physical-field failure)))))
-          (is (= :unsupported-model-document-field
-                 (:reason (error #(run! "string-key" (model-command/create
+              (is (= :gesso.model.tx/aliased-document-fields (:error/type failure)))
+              (is (= phase (get-in failure [:error/details :phase])))
+              (is (= #{field alias} (get-in failure [:error/details :fields])))
+              (is (= physical (get-in failure [:error/details :physical-field])))))
+          (is (= :gesso.model.tx/unsupported-document-field
+                 (:error/type (error #(run! "string-key" (model-command/create
                                                        :requests (assoc before "location" "wrong") version))))))
-          (is (= :aliased-model-document-fields
-                 (:reason (error #(run! "create-alias" (model-command/create
+          (is (= :gesso.model.tx/aliased-document-fields
+                 (:error/type (error #(run! "create-alias" (model-command/create
                                                          :requests (assoc before :_id "wrong") version))))))
           (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
           (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
