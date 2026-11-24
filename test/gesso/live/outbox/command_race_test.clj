@@ -1,5 +1,7 @@
 (ns gesso.live.outbox.command-race-test
   (:require [clojure.edn :as edn]
+            [clojure.string :as str]
+            [gesso.live.source :as live-source]
             [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [gesso.live.consistency.xtdb :as xtdb]
@@ -18,7 +20,7 @@
             [xtdb.node :as xtn]
             [ring.util.codec :as codec]
             [xtdb.api :as xt])
-  (:import [java.io ByteArrayInputStream]
+  (:import [java.io ByteArrayInputStream BufferedReader InputStreamReader]
            [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
            [java.nio.charset StandardCharsets]
@@ -807,6 +809,16 @@
                 (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))
               (finally (host/stop! started)))))))))
 
+(defn- read-claim-invalidation [input]
+  (let [reader (BufferedReader. (InputStreamReader. input StandardCharsets/UTF_8))]
+    (loop []
+      (when-let [line (.readLine reader)]
+        (if (= "event: live-update" line)
+          (let [data (.readLine reader)]
+            (when (and data (str/starts-with? data "data: "))
+              (edn/read-string (subs data 6))))
+          (recur))))))
+
 (deftest distinct-claim-commands-contend-for-one-primary-assignment
   (doseq [recovery-mode [:valid :wrong-outcome :missing-guard :domain-write]]
    (session/with-session-authority!
@@ -816,10 +828,13 @@
         recovery-trace (atom [])
         observed (atom [])
         projected (atom [])
+        streams (atom [])
         credentials {"a" (issue! :fixture/helper-1) "b" (issue! :fixture/helper-2)
-                     "reader" (issue! :fixture/reader)}
+                     "reader" (issue! :fixture/reader)
+                     "revoked" (issue! :fixture/reader)}
         headers-for (fn [who] (let [{:keys [cookie csrf-token]} (get credentials who)]
                                {"cookie" cookie "x-gesso-proving-csrf" csrf-token}))
+        read-authorized? (fn [ctx] (= :authenticated (:status ((:acquire-principal! source) ctx))))
         principal-fn (fn [ctx]
                        (let [who (:principal-id ((:acquire-principal! source) ctx))]
                          (when (contains? #{:fixture/helper-1 :fixture/helper-2} who)
@@ -920,7 +935,10 @@
                 :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                               :require-derived-model? true
                                               :operation-model-entities {:request/claim #{:requests :request_assignments}})
-                :http-jdk {} :assembled-operations {:authorize-request? (comp some? principal-fn)}}]
+                :http-jdk {} :assembled-operations {:authorize-request? (comp some? principal-fn)}
+                :assembled-sse {:resolve-id (fn [ctx _] (get-in ctx [:headers "fragment-id"]))
+                                :session-authorized? read-authorized?
+                                :sse-options {:keepalive-ms 50} :max-connections 4}}]
     (let [reason (fn [config] (try (publication/build-executor config) nil
                                    (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
       (is (= :invalid-abort-contract (reason (dissoc opts :construct-after-abort!))))
@@ -928,7 +946,8 @@
       (is (= :abort-contract-requires-guarded-journal-only
              (reason (assoc-in opts [:abort-contract :construction-contract :allowed-write-tables]
                                #{:requests :gesso_commands})))))
-    (fixture/with-surfaced-application
+    (with-redefs [fixture/allow? (fn [ctx id] (and (= "l1" id) (read-authorized? ctx)))]
+     (fixture/with-surfaced-application
      {:operations {:request/claim operation}
       :route-capabilities (fixture/route-capabilities {:request/claim operation})
       :principal-fn principal-fn
@@ -940,6 +959,14 @@
        (with-open [client (HttpClient/newHttpClient)]
         (let [started (host/start! assembly (fn [_] (g/html-response [:div "fallback"])) config)
              node (:xtdb/connectable started)
+             stream! (fn [path headers]
+                       (let [builder (HttpRequest/newBuilder
+                                      (URI/create (str (get-in started [host/listener-key :base-url]) path)))]
+                         (.timeout builder (Duration/ofSeconds 10))
+                         (doseq [[k v] headers] (.header builder k v))
+                         (let [response (.send client (.build builder) (HttpResponse$BodyHandlers/ofInputStream))]
+                           (swap! streams conj (.body response))
+                           response)))
              request! (fn [headers id execution network?]
                         (let [cmd (assoc (command execution) :command-id (identity/command-id id))
                               headers (assoc headers "content-type" "application/x-www-form-urlencoded")
@@ -975,7 +1002,23 @@
              (is (empty? @observed))
              (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
              (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
-           (let [a (future (invoke "a" "claim-a" "attempt-a"))
+           (let [stream-headers (fn [who] (assoc (headers-for who) "fragment-id" "l1"))
+                 pending (when (= :valid recovery-mode)
+                           (let [path "/streams/request-list"
+                                 denied (stream! path {"fragment-id" "l1"})
+                                 wrong-scope (stream! path (assoc (stream-headers "reader") "fragment-id" "l2"))
+                                 list-response (stream! path (stream-headers "reader"))
+                                 toolbar-response (stream! "/streams/request-toolbar" (stream-headers "a"))
+                                 revoked-response (stream! path (stream-headers "revoked"))]
+                             (is (= [403 403 200 200 200]
+                                    (mapv #(.statusCode %) [denied wrong-scope list-response toolbar-response revoked-response])))
+                             (is (= 3 (:subscription-count (live-source/stats (get-in started [:gesso.live/system :source])))))
+                             (let [revoked (future (read-claim-invalidation (.body revoked-response)))]
+                               (revoke! (get-in credentials ["revoked" :session-id]))
+                               (is (= nil (deref revoked 10000 ::timeout))))
+                             [(future (read-claim-invalidation (.body list-response)))
+                              (future (read-claim-invalidation (.body toolbar-response)))]))
+                 a (future (invoke "a" "claim-a" "attempt-a"))
                  b (future (invoke "b" "claim-b" "attempt-b"))
                  results [(deref a 40000 ::timeout) (deref b 40000 ::timeout)]]
              (when (some #{::timeout} results)
@@ -1014,6 +1057,11 @@
                (is (= #{{:topic :request :command-id id} {:topic :request-assignment :command-id id}}
                       (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$command_id AS command_id FROM gesso_live_outbox"]))))
                (is (= (cond-> #{[id :incorporated]} valid? (conj [loser-id :incorporated])) (set @projected)))
+               (when valid?
+                 (doseq [[task topic] (map vector pending [:fixture/request-list :fixture/request-toolbar])]
+                   (let [payload (deref task 10000 ::timeout)]
+                     (is (= {:topic topic :id "l1"} (select-keys (:invalidation payload) [:topic :id])))
+                     (is (some? (:progression payload))))))
                (let [replay (invoke session id "winner-replay")]
                  (is (= :already-incorporated (get-in replay [:settlement :resolution])))
                  (is (= {:status :claimed :helper helper} (get-in replay [:settlement :authoritative :projection])))
@@ -1032,4 +1080,6 @@
                    (revoke! (get-in credentials [session :session-id]))
                    (is (= 403 (:status (request! (headers-for session) id "revoked-replay" true))))
                    (is (= 2 (count @observed)))))))
-           (finally (host/stop! started))))))))))))
+           (finally
+             (doseq [input @streams] (.close input))
+             (host/stop! started)))))))))))))
