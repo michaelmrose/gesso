@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2355: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2356: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -57,9 +57,18 @@
 (def ^:private asset-uris
   #{htmx-asset-uri sse-asset-uri runtime-asset-uri bootstrap-asset-uri})
 (def ^:private event-name "live-update")
-(def ^:private operation-uris
-  {"/__gesso_proving/slot/reserve" :slot/reserve
-   "/__gesso_proving/slot/release" :slot/release})
+(defn- declared-route-inventory []
+  ;; Required surface, independent of the physical HTTP owner and loaded assets.
+  {"/__gesso_proving/slot" [:get :physical-view]
+   "/__gesso_proving/slot/reserve" [:post :mutation :slot/reserve]
+   "/__gesso_proving/slot/release" [:post :mutation :slot/release]
+   panel-uri [:get :panel]
+   fragment-uri [:get :fragment]
+   events-uri [:get :subscription]
+   htmx-asset-uri [:get :asset]
+   sse-asset-uri [:get :asset]
+   runtime-asset-uri [:get :asset]
+   bootstrap-asset-uri [:get :asset]})
 
 (def ^:private obligations
   #{:v1495-delegated-http-outcome-not-authenticated
@@ -77,6 +86,33 @@
 (defn- reject! [reason]
   (throw (ex-info "Invalid single-node Live proving fixture."
                   {:physical-single-node-live/rejection true :reason reason})))
+
+(defn- checked-route-inventory! [app assets]
+  (let [routes (declared-route-inventory)
+        physical-routes (into {} (keep (fn [[uri [method capability operation]]]
+                                        (case capability
+                                          :physical-view (when (= [:get :physical-view] (get routes uri)) [uri :read-only])
+                                          :mutation (when (= [:post :mutation operation] (get routes uri)) [uri operation])
+                                          nil))) routes)
+        operations (into {} (keep (fn [[uri [_ capability operation]]]
+                                    (when (= :mutation capability) [operation uri]))) routes)
+        asset-paths (into #{} (keep (fn [[uri route]]
+                                     (when (= [:get :asset] route) uri))) routes)
+        reads (into #{} (keep (fn [[uri [method capability]]]
+                                (when (and (= :get method)
+                                           (#{:physical-view :panel :fragment :subscription} capability)) uri))) routes)]
+    (when-not (and (= 10 (count routes))
+                   (= physical-routes (:http-routes app))
+                   (= (set (keys operations)) physical/operation-ids
+                      (get-in app [:catalog :declared-operation-ids]))
+                   (= 3 (count physical-routes))
+                   (= asset-paths asset-uris (set (keys assets)))
+                   (= 4 (count reads))
+                   (= [:get :panel] (get routes panel-uri))
+                   (= [:get :fragment] (get routes fragment-uri))
+                   (= [:get :subscription] (get routes events-uri)))
+      (reject! :selected-route-inventory-mismatch))
+    {:routes routes :operations operations :read-uris reads}))
 
 (defn- read-resource! [candidates]
   (let [resource (some io/resource candidates)]
@@ -137,14 +173,14 @@
      (when (or (nil? presentation)
                (contains? (:operations presentation) :slot/reserve))
        [:button (cond-> {:type "button"
-                         :hx-post "/__gesso_proving/slot/reserve"
+                         :hx-post (get-in app [:selected-route-inventory :operations :slot/reserve])
                          :hx-swap "none"
                          :disabled (= status :reserved)}
                   presentation (assoc :hx-headers (:headers presentation))) "Reserve"])
      (when (or (nil? presentation)
                (contains? (:operations presentation) :slot/release))
        [:button (cond-> {:type "button"
-                         :hx-post "/__gesso_proving/slot/release"
+                         :hx-post (get-in app [:selected-route-inventory :operations :slot/release])
                          :hx-swap "none"
                          :disabled (= status :available)}
                   presentation (assoc :hx-headers (:headers presentation))) "Release"])]))
@@ -335,36 +371,27 @@
 
 (defn- build-handler [app live-system registered-streams assets principal-source]
   (let [original (:handler app)
+        routes (get-in app [:selected-route-inventory :routes])
         scope {:topic :gesso-proving-reservation :id (:slot-id app)}]
     (fn [request]
       (when-not (map? request)
         (reject! :invalid-ring-request))
       (let [method (:request-method request)
-            uri (:uri request)]
+            uri (:uri request)
+            [required-method capability :as route] (get routes uri)]
         (cond
-          (not (and (keyword? method) (string? uri)))
-          (unsupported 400)
-
-          (and (contains? (into asset-uris [panel-uri fragment-uri events-uri]) uri)
-               (or (contains? request :path-params)
-                   (contains? request :route-params)))
-          (unsupported 400)
-
-          (contains? asset-uris uri)
-          (if (= :get method) (asset-response (get assets uri)) (unsupported 405))
-
-          (= uri panel-uri)
-          (if (= :get method)
-            (panel-response app (principal/session-command-presentation! principal-source request))
-            (unsupported 405))
-
-          (= uri fragment-uri)
-          (if (= :get method)
-            (fragment-response app (principal/session-command-presentation! principal-source request))
-            (unsupported 405))
-
-          (= uri events-uri)
-          (if (= :get method)
+          (not (and (keyword? method) (string? uri))) (unsupported 400)
+          (or (contains? request :path-params)
+              (contains? request :route-params)) (unsupported 400)
+          (nil? route) (unsupported 404)
+          (not= method required-method) (unsupported 405)
+          :else
+          (case capability
+            :asset (asset-response (get assets uri))
+            :physical-view (original request)
+            :panel (panel-response app (principal/session-command-presentation! principal-source request))
+            :fragment (fragment-response app (principal/session-command-presentation! principal-source request))
+            :subscription
             (let [started (live/start-sse!
                            live-system scope
                            (cond-> {:flow-options {:event event-name}}
@@ -374,21 +401,13 @@
                                      (principal/guarded-test-event-encoder!
                                       principal-source request)})))]
               (:response (register-sse! registered-streams started)))
-            (unsupported 405))
-
-          (and (= :post method) (contains? operation-uris uri))
-          (let [response (original request)]
-            ;; The delegated write remains authoritative for this fixture.
-            ;; A later source failure cannot transform committed HTTP success
-            ;; into a misleading failed command or cause a second write.
-            (if (= :durable-outbox (:publication-selection app))
-              ;; The mutation has already recorded its intent atomically.
-              ;; Do not emit a second, untracked postcommit wakeup here.
-              response
-              (publish-after-committed-response live-system scope response)))
-
-          :else
-          (original request))))))
+            :mutation
+            (let [response (original request)]
+              ;; Durable mutation already recorded its intent atomically.
+              ;; Direct mode must not reclassify a committed write on failure.
+              (if (= :durable-outbox (:publication-selection app))
+                response
+                (publish-after-committed-response live-system scope response)))))))))
 
 (defn- ring-admission []
   ;; This owns synchronous Ring invocations ONLY. A returned SSE body or
@@ -448,6 +467,7 @@
                                   :retirement {:pending 0 :failed-attempts 0
                                                :completed? false}})
         guarded* (atom nil)
+        inventory* (atom nil)
         admission (ring-admission)]
     (try
       (let [assets (browser-assets!)]
@@ -458,26 +478,17 @@
            ;; original Biff start. The Live source only publishes following a
            ;; 200 response from that protected delegate. A 401/403 therefore
            ;; cannot reach XTDB or trigger an advisory notification.
-           (let [delegated (if principal-source
+           (let [inventory (checked-route-inventory! app assets)
+                 delegated (if principal-source
                              (principal/guarded-test-handler!
                               principal-source app original-handler)
                              original-handler)
-                 live-handler (build-handler (assoc app :handler delegated)
+                 live-handler (build-handler (assoc app :handler delegated
+                                                    :selected-route-inventory inventory)
                                              live-system registered-streams assets
                                              principal-source)
-                 ;; Original physical read route comes from the original
-                 ;; HTTP owner; Live GET routes come from this Live owner.
-                 ;; In the granted fixture, original-source declared read
-                 ;; principals, NOT mutation grants, govern the selected
-                 ;; panel/fragment/source-view/SSE acquisitions. Public JS
-                 ;; assets do not reveal the protected slot state.
-                 physical-views (into #{}
-                                      (for [[uri operation] (:http-routes app)
-                                            :when (= operation :read-only)] uri))
-                 read-uris (into physical-views
-                                 [panel-uri fragment-uri events-uri])]
-             (when-not (= 1 (count physical-views))
-               (reject! :incomplete-original-physical-read-routes))
+                 read-uris (:read-uris inventory)]
+             (reset! inventory* inventory)
              (reset! guarded* (when principal-source delegated))
              ((:wrap admission)
               (if principal-source
@@ -494,6 +505,7 @@
              (when-not (and (fn? installed)
                             (identical? installed (:handler app))
                             (not (identical? installed (:delegate-handler app)))
+                            (= @inventory* (checked-route-inventory! app assets))
                             (or (nil? principal-source)
                                 (and (fn? guarded)
                                      (not (identical? guarded installed))
@@ -524,7 +536,9 @@
                          :sse-retirement-status (fn [] (:retirement @registered-streams))
                          :live-report
                          (cond-> (assoc (report app)
-                                        :ring-admission-startup :closed-until-biff-and-handler-checks)
+                                        :ring-admission-startup :closed-until-biff-and-handler-checks
+                                        :selected-route-inventory @inventory*
+                                        :route-closure :selected-original-fixture-only)
                            (= :durable-outbox publication-selection)
                            (assoc :notification-timing :atomic-intent-then-explicit-outbox-cycle
                                   :uncertain-notification-recovery :operator-outbox-reconciliation

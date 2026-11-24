@@ -717,3 +717,52 @@
                (is (= 2 (:revision (read!))))
                (is (= 2 @emissions)))))
          (is (= 5 @acquired)))))))
+
+(deftest selected-route-inventory-controls-installed-live-traffic
+  (let [acquisitions (atom 0)]
+    (fixture/with-granted-live-proving-application!
+     (policy (fn [_] (swap! acquisitions inc) (authenticated :actor/reserver)))
+     (fn [{:keys [handler read! live-report outstanding-sse-count]}]
+       (let [{:keys [routes operations read-uris]} (:selected-route-inventory live-report)]
+         (is (= :selected-original-fixture-only (:route-closure live-report)))
+         (is (= 10 (count routes)))
+         (is (= {:slot/reserve reserve :slot/release release} operations))
+         (is (= #{"/__gesso_proving/slot" panel fixture/fragment-uri fixture/events-uri} read-uris))
+         (doseq [[uri [method capability]] routes]
+           (is (= 405 (:status (handler (request (if (= :post method) :get :post) uri)))))
+           (is (= 400 (:status (handler (assoc (request method uri) :route-params {})))))
+           (when (= :asset capability)
+             (is (= 200 (:status (handler (request :get uri)))))))
+         (is (= 404 (:status (handler (request :post "/__gesso_proving/unknown")))))
+         (is (zero? @acquisitions))
+         (is (zero? (:revision (read!))))
+         (is (zero? (outstanding-sse-count)))
+         (let [response (handler (request :get panel))]
+           (is (= 200 (:status response)))
+           (is (.contains ^String (:body response) (str "hx-post=\"" reserve "\""))))
+         (is (= 200 (:status (handler (request :post reserve)))))
+         (is (= 403 (:status (handler (request :post release)))))
+         (is (= 1 (:revision (read!)))))))))
+
+(deftest selected-route-inventory-rejects-missing-or-misclassified-capability
+  (let [source-var (ns-resolve 'gesso.assurance.example.physical-single-node-live
+                               'declared-route-inventory)
+        original @source-var
+        starts (atom 0)
+        start-var (requiring-resolve 'com.biffweb.core/start)
+        real-start @start-var]
+    (doseq [mutate [(fn [m] (dissoc m fixture/events-uri))
+                    (fn [m] (assoc m fixture/events-uri [:get :asset]))
+                    (fn [m] (assoc m reserve [:post :mutation :slot/release]))
+                    (fn [m] (assoc m reserve [:get :mutation :slot/reserve]))]]
+      (with-redefs-fn
+        {source-var #(mutate (original))
+         start-var (fn [& args] (swap! starts inc) (apply real-start args))}
+        (fn []
+          (is (= :selected-route-inventory-mismatch
+                 (try
+                   (fixture/with-granted-live-proving-application!
+                    (policy (constantly {:status :anonymous}))
+                    (fn [_] (throw (ex-info "unexpected admitted app" {}))))
+                   (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))))))
+    (is (zero? @starts))))
