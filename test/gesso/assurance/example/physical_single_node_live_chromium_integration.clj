@@ -188,7 +188,16 @@
 (defn- with-real-application-browser [f]
   (proving/with-live-proving-application!
    (fn [app]
-     (let [bridge (start-bridge! (:live-handler app))
+     (let [installed (get-in app [:system :biff.ring/handler])
+           _ (when-not (and (fn? installed)
+                            (identical? installed (:live-handler app))
+                            (identical? installed (:handler app))
+                            (not (identical? installed (:delegate-handler app))))
+               (reject! :not-original-biff-installed-live-handler
+                        {:installed (fn? installed)}))
+           ;; All real Chromium traffic now consumes the original Biff
+           ;; system's adopted handler, not a late-composed Ring function.
+           bridge (start-bridge! installed)
            harness* (atom nil)
            contexts* (atom [])]
        (try
@@ -265,7 +274,17 @@
   ;; Chromium installation forbids all URL navigations.
   (proving/with-live-proving-application!
    (fn [app]
-     (let [bridge (start-bridge! (:live-handler app))
+     (let [installed (get-in app [:system :biff.ring/handler])
+           _ (is (identical? installed (:live-handler app))
+                 "Original Biff startup must install the composed Live handler")
+           _ (is (not (identical? installed (:delegate-handler app)))
+                 "Live must be installed before Biff starts, not composed after")
+           _ (is (= :one-original-biff-start-installed-composed-live-handler
+                    (get-in app [:live-report :biff-adopted-live-handler])))
+           _ (is (= :not-established
+                    (get-in app [:live-report :biff-network-consumption]))
+                 "A Biff handler identity does not prove real socket deployment")
+           bridge (start-bridge! installed)
            ^HttpURLConnection sse (.openConnection
                                     (URL. (url bridge proving/events-uri)))]
        (try

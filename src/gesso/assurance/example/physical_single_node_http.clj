@@ -132,50 +132,69 @@
        system)}))
 
 (defn with-http-proving-application!
-  "Start one embedded XTDB pilot and a real Biff lifecycle (without a server)
-   then call f with :system, :handler, :read!, :abstract!, :report and the
-   v1494 application. No arbitrary caller-supplied callbacks or route table.
+  "Start one embedded XTDB pilot and a real Biff lifecycle (without a server),
+   then call f with :system, :handler, :read!, :abstract!, and the v1494 app.
 
-   A returned Biff system is *local*, not evidence of network deployment.
-   Never return or use the handler after f returns and its node is closed."
+   The three-argument, TEST-ONLY form accepts a handler-extension! factory
+   BEFORE Biff init/start, so a composed HTTP/Live handler can be the exact
+   Ring function Biff initially adopts. The extension receives the checked
+   physical app with its original :handler and that original handler as its
+   second argument. It must return one callable Ring function. This cannot
+   certify the new routes, principal, original-source completeness, browser
+   asset, or actual network listener. The returned :handler is the installed
+   handler; :delegate-handler retains the original one.
+
+   No arbitrary callback is a release credential. The Biff system is LOCAL,
+   never deployment evidence. Handlers are invalid after the callback returns
+   and the embedded node is closed."
   ([f] (with-http-proving-application! (str "v1495-" (random-uuid)) f))
   ([slot-id f]
-   (when-not (fn? f)
+   (with-http-proving-application!
+    slot-id (fn [_ original] original) f))
+  ([slot-id handler-extension! f]
+   (when-not (and (fn? handler-extension!) (fn? f))
      (reject! :invalid-test-callback))
    (physical/with-proving-application!
     slot-id
     (fn [app]
       (checked-application! app)
-      (let [handler (ring-handler! app)
-            module (install-module! handler)
-            system (binding [*biff-modules* [module]]
-                     (biff/start (:biff-context app)
-                                 #'*biff-modules* [module-id]))]
-        (when-not (identical? handler (:biff.ring/handler system))
-          (reject! :adopted-handler-not-identical))
-        (let [report
-              {:type :gesso.assurance.example.physical-single-node-http/local-biff-fixture
-               :version 1
-               :routes (into {view-route :read-only}
-                             operation-routes)
-               :physical-table physical/table
-               :module-start :one-observed-biff-start
-               :handler-in-returned-system :identical
-               :physical-transactions :delegated-to-v1494-once-per-post
-               :issued-certified-plan-executors :not-established
-               :certified-plan-compatibility
-               {:persisted-fields :unqualified-v1494-fields
-                :current-v1251-required-fields :qualified-and-exhaustive
-                :application-extra-assertions :not-admitted-by-v1251
-                :safe-next-step :derive-a-supported-physical-plan-without-losing-guards}
-               :installed-checked-router :not-established
-               :canonical-application-preflight :not-established
-               :host-deployment :not-established
-               :writer-completeness :not-established
-               :physical-refinement :not-established
-               :open-obligations open-obligations
-               :certificate :not-issued
-               :admission :not-admitted
-               :authority :none}]
-          (f (assoc app :handler handler :system system :module module
-                        :http-report report))))))))
+      (let [original-handler (ring-handler! app)
+            handler (handler-extension! (assoc app :handler original-handler)
+                                        original-handler)]
+        (when-not (fn? handler)
+          (reject! :invalid-prestart-handler-extension))
+        (let [module (install-module! handler)
+              system (binding [*biff-modules* [module]]
+                       (biff/start (:biff-context app)
+                                   #'*biff-modules* [module-id]))]
+          (when-not (identical? handler (:biff.ring/handler system))
+            (reject! :adopted-handler-not-identical))
+          (let [report
+                {:type :gesso.assurance.example.physical-single-node-http/local-biff-fixture
+                 :version 1
+                 :routes (into {view-route :read-only}
+                               operation-routes)
+                 :physical-table physical/table
+                 :module-start :one-observed-biff-start
+                 :handler-in-returned-system :identical
+                 :handler-extension :test-only-not-checked-or-certified
+                 :physical-transactions :delegated-to-v1494-once-per-post
+                 :issued-certified-plan-executors :not-established
+                 :certified-plan-compatibility
+                 {:persisted-fields :unqualified-v1494-fields
+                  :current-v1251-required-fields :qualified-and-exhaustive
+                  :application-extra-assertions :not-admitted-by-v1251
+                  :safe-next-step :derive-a-supported-physical-plan-without-losing-guards}
+                 :installed-checked-router :not-established
+                 :canonical-application-preflight :not-established
+                 :host-deployment :not-established
+                 :writer-completeness :not-established
+                 :physical-refinement :not-established
+                 :open-obligations open-obligations
+                 :certificate :not-issued
+                 :admission :not-admitted
+                 :authority :none}]
+            (f (assoc app :handler handler
+                          :delegate-handler original-handler
+                          :system system :module module
+                          :http-report report)))))))))

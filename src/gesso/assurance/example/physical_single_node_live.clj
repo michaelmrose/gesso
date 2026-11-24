@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v1505: A minimal server-rendered Live panel on the real v1494/v1495
+  "v2323: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -8,10 +8,12 @@
    fragment GET independently reads current XTDB state. No SSE payload is
    installed as authoritative HTML, and no optimistic success is simulated.
 
-   IMPORTANT: This is a *local, uncertified diagnostic fixture*. Its composed
-   :live-handler is NOT the handler already installed by v1495's Biff start;
-   there is no actual HTTP listener, authenticated principal, CSRF protection,
-   authenticated commit receipt, or certified Gesso application assembly.
+   IMPORTANT: This is a *local, uncertified diagnostic fixture*. The composed
+   :live-handler IS installed as the original Ring handler during Biff startup
+   by the v2323 prestart extension point; this does NOT certify the handler or
+   prove that a real network listener has adopted it. No authenticated
+   principal, CSRF protection, authenticated commit receipt, or certified
+   Gesso application assembly.
    Successful HTTP response and Live publication are distinct boundaries:
    a postcommit publication failure must never trigger a second transaction.
    Only browser integration testing can establish HTMX/SSE adapter behavior."
@@ -47,7 +49,7 @@
 
 (def ^:private obligations
   #{:v1495-delegated-http-outcome-not-authenticated
-    :live-wrapper-not-installed-by-biff-host
+    :actual-network-consumption-of-biff-adopted-handler-not-established
     :http-listener-and-client-connection-not-observed
     :request-principal-authorization-and-csrf-not-checked
     :postcommit-publication-not-atomic-with-xtdb
@@ -173,7 +175,8 @@
    :sse-event :advisory-invalidation-only
    :browser-managed-refresh :declared-not-tested
    :notification-timing :after-delegated-http-success
-   :biff-adopted-live-handler :not-established
+   :biff-adopted-live-handler :one-original-biff-start-installed-composed-live-handler
+   :biff-network-consumption :not-established
    :commit-provenance :not-authenticated
    :complete-writer-coverage :not-established
    :physical-refinement :not-established
@@ -231,34 +234,47 @@
           (original request))))))
 
 (defn with-live-proving-application!
-  "Run f within a real embedded XTDB, Biff-fixture and Gesso Live lifecycle.
+  "Run f within one embedded XTDB and one ORIGINAL Biff start that adopts
+   the composed Live Ring handler BEFORE module init/start. The handler in
+   :system is object-identical to :live-handler and :handler, so an HTTP
+   bridge serving the selected Biff handler exercises real installed routing
+   rather than a late caller-composed wrapper.
 
-   :live-handler composes the v1495 handler with scoped SSE, HTML panel and
-   fresh-fragment GET. :handler and :system still identify the original
-   v1495 Biff-adopted handler; no claim is made that Biff installed this
-   composed Live wrapper. All opened SSE streams and Live resources are closed
-   before the managed application and its embedded XTDB node close.
+   This fixture remains UNCERTIFIED: Biff startup is not an independently
+   authenticated deployment, it opens no HTTP listener itself, the initial
+   v1494 writer lacks complete authorization and provenance, and Live publish
+   after reported HTTP success is not atomic with XTDB. Selected actual
+   listener, proof issuer, writer completeness and release remain open.
 
-   No network listener is created. Caller must not retain callbacks/streams
-   past f's dynamic extent. No automatic transaction retry is permitted."
-  ([f] (with-live-proving-application! (str "v1505-" (random-uuid)) f))
+   Streams, Live resources and the embedded node are scoped to f. No
+   automatic transaction retry is permitted."
+  ([f] (with-live-proving-application! (str "v2323-" (random-uuid)) f))
   ([slot-id f]
    (when-not (fn? f)
      (reject! :invalid-application-callback))
-   (physical-http/with-http-proving-application!
-    slot-id
-    (fn [app]
-      (let [live-system (live/create)
-            registered-streams (atom [])]
-        (try
-          (let [assets (browser-assets!)
-                handler (build-handler app live-system registered-streams assets)]
-            (f (assoc app
-                      :live-handler handler
-                      :live-system live-system
-                      :live-report (report app)
-                      :live-fragment (live-fragment))))
-          (finally
-            (doseq [started @registered-streams]
-              (live/cancel-sse! started))
-            (live/close! live-system))))))))
+   (let [live-system (live/create)
+         registered-streams (atom [])]
+     (try
+       (let [assets (browser-assets!)]
+         (physical-http/with-http-proving-application!
+          slot-id
+          (fn [app original-handler]
+            ;; This factory runs before Biff's ORIGINAL init/start. The
+            ;; delegated physical operation remains the v1495 source path.
+            (build-handler (assoc app :handler original-handler)
+                           live-system registered-streams assets))
+          (fn [app]
+            (let [installed (:biff.ring/handler (:system app))]
+              (when-not (and (fn? installed)
+                             (identical? installed (:handler app))
+                             (not (identical? installed (:delegate-handler app))))
+                (reject! :composed-live-handler-not-adopted-by-original-biff))
+              (f (assoc app
+                        :live-handler installed
+                        :live-system live-system
+                        :live-report (report app)
+                        :live-fragment (live-fragment)))))))
+       (finally
+         (doseq [started @registered-streams]
+           (live/cancel-sse! started))
+         (live/close! live-system))))))
