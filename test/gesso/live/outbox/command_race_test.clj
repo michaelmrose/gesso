@@ -836,6 +836,8 @@
         initial-state (atom nil)
         recovery-state (atom nil)
         submissions (atom [])
+        writers (atom [])
+        execute-adapter xtdb/execute-tx!
         execute xtdb/execute-tx-from!
         observed (atom [])
         projected (atom [])
@@ -857,6 +859,8 @@
         before {:xt/id "r1" :status :open :revision 0 :created-at "t0"
                 :updated-at "t0" :request/location-id "l1"}
         member {:xt/id "m1" :active true :revision 0 :created-at "t0" :updated-at "t0"}
+        seed [[:put-docs :requests before]
+              [:put-docs :memberships (assoc member :xt/id "helper-1") (assoc member :xt/id "helper-2")]]
         assignment {:xt/id "primary-r1" :request-id "r1" :helper "helper-1"
                     :revision 0 :created-at "t1" :updated-at "t1" :request/location-id "l1"}
         ;; Independent closed fixture policy, not extracted from the constructed plan.
@@ -964,7 +968,20 @@
       (is (= :abort-contract-requires-guarded-journal-only
              (reason (assoc-in opts [:abort-contract :construction-contract :allowed-write-tables]
                                #{:requests :gesso_commands})))))
-    (with-redefs [xtdb/execute-tx-from!
+    (with-redefs [xtdb/execute-tx!
+                  (fn [node ops & [options]]
+                    (let [kind (try (semantics/writer-kind! seed "v2480-claim" "v2480" ops)
+                                    (catch Exception e
+                                      (swap! writers conj {:kind :unclassified :ops ops})
+                                      (throw e)))]
+                      (try
+                        (let [result (execute-adapter node ops options)]
+                          (swap! writers conj (assoc kind :result :committed :ops ops))
+                          result)
+                        (catch Exception e
+                          (swap! writers conj (assoc kind :result (:xtdb.error/code (ex-data e)) :ops ops))
+                          (throw e)))))
+                  xtdb/execute-tx-from!
                   (fn [ctx ops & [options]]
                     (if (contains? ctx publication/preparation-key)
                       (let [entry {:ops ops :identity (semantics/submitted-alternative! ops)}]
@@ -1052,8 +1069,7 @@
                                            (protocol/wire->settlement (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))))})
                         (catch Exception e {:failure (ex-data e)})))]
          (try
-           (xt/execute-tx node [[:put-docs :requests before]
-                                [:put-docs :memberships (assoc member :xt/id "helper-1") (assoc member :xt/id "helper-2")]])
+           (xtdb/execute-tx! node seed)
            (reset! initial-state (semantics/snapshot-at-frontier! node))
            (when (= :valid recovery-mode)
              ;; Actual network refusals must not reach either constructor.
@@ -1236,6 +1252,37 @@
                    (is (refused? (conj accepted ["DELETE FROM requests"])))
                    (is (refused? (filterv #(not= :request_assignments (second %)) accepted)))
                    (is (refused? (conj accepted (first (filter #(= :gesso_commands (second %)) accepted))))))
+                 (let [deadline (+ (System/nanoTime) 10000000000)]
+                   (loop []
+                     (when (and (< (System/nanoTime) deadline)
+                                (< (count (filter #(and (= :worker (:kind %))
+                                                       (= :dispatch-accepted (:status %))
+                                                       (= :committed (:result %))) @writers)) 2))
+                       (Thread/sleep 20)
+                       (recur))))
+                 (let [entries @writers
+                       claims (filter #(= :claim (:kind %)) entries)
+                       workers (filter #(= :worker (:kind %)) entries)
+                       intent-ids (set (map :xt/id (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+                       classify #(semantics/writer-kind! seed "v2480-claim" "v2480" %)
+                       refused? (fn [ops] (try (classify ops) false (catch clojure.lang.ExceptionInfo _ true)))
+                       worker-ops (:ops (first workers))]
+                   (is (= #{:initializer :manifest :claim :worker} (set (map :kind entries))))
+                   (is (= 1 (count (filter #(= :initializer (:kind %)) entries))))
+                   (is (= 1 (count (filter #(= :manifest (:kind %)) entries))))
+                   (is (= (count @submissions) (count claims)))
+                   (is (= (frequencies (map #(select-keys % [:alternative :command-id :result]) claims))
+                          (frequencies (map #(assoc (:identity %) :result (:result %)) @submissions))))
+                   (is (= (set (for [intent-id intent-ids status [:leased :dispatch-accepted]] [intent-id status]))
+                          (set (map (juxt :intent-id :status) workers))))
+                   (is (= 4 (count workers)))
+                   (is (every? #(and (= id (:command-id %)) (= :committed (:result %))) workers))
+                   (is (every? #(= :dispatch-accepted (:gesso.live.outbox/status %))
+                               (xt/q node ["SELECT * FROM gesso_live_outbox"])))
+                   (is (refused? (conj worker-ops [:put-docs :memberships {:xt/id helper :active false}])))
+                   (is (refused? (conj worker-ops ["DELETE FROM requests"])))
+                   (is (refused? (assoc-in worker-ops [(dec (count worker-ops)) 2 :gesso.live.outbox/source-id] "other")))
+                   (is (refused? (assoc-in seed [0 2 :status] :claimed))))
                  (when valid?
                    (revoke! (get-in credentials [session :session-id]))
                    (is (= 403 (:status (request! (headers-for session) id "revoked-replay" true))))

@@ -161,3 +161,49 @@
       :refuse (require! (= #{:gesso_commands} (set (keys by-table))))
       (require! false))
     {:alternative (alternative-id helper alternative) :command-id id}))
+
+(defn writer-kind!
+  "Classify synchronous adapter writes in this closed fixture. Background
+   writes must be confined to one manifest or outbox document; the seed must
+   match exactly. This is footprint accounting, not SQL or writer closure."
+  [seed source-id worker-id ops]
+  (require! (and (vector? ops) (seq ops)))
+  (let [puts (filterv #(= :put-docs (first %)) ops)
+        tables (set (map second puts))
+        [head table row :as last-op] (peek ops)
+        guards (pop ops)]
+    (cond
+      (= seed ops) {:kind :initializer}
+      (contains? tables :gesso_commands)
+      (assoc (submitted-alternative! ops) :kind :claim)
+      :else
+      (do
+        (require! (and (= 1 (count puts)) (= :put-docs head)
+                       (= 3 (count last-op)) (map? row)))
+        (case table
+          :gesso_publication_manifests
+          (do (require! (and (= source-id (:xt/id row)) (= 1 (:profile-version row))
+                             (string? (:descriptor row))
+                             (= [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_publication_manifests WHERE _id = ?)" source-id]
+                                 ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = ?)" source-id]] guards)))
+              {:kind :manifest})
+          :gesso_live_outbox
+          (let [id (:xt/id row) status (:gesso.live.outbox/status row)
+                guard (first guards) deadline (:gesso.live.outbox/lease-until row)]
+            (require! (and (uuid? id) (= source-id (:gesso.live.outbox/source-id row))
+                           (= worker-id (:gesso.live.outbox/lease-owner row))
+                           (= :request/claim (:gesso.live.outbox/operation row))
+                           (= "l1" (:gesso.live.outbox/subject-id row))
+                           (#{:request :request-assignment} (:gesso.live.outbox/topic row))
+                           (= id (second guard))))
+            (case status
+              :leased (require! (and (= 3 (count guards)) (= 3 (count guard))
+                                     (= "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)" (first guard))
+                                     (= ["ASSERT CURRENT_TIMESTAMP < ?" deadline] (nth guards 1))
+                                     (= ["ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" deadline] (nth guards 2))))
+              :dispatch-accepted (require! (and (= 1 (count guards)) (= 4 (count guard))
+                                                (= "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)" (first guard))
+                                                (= deadline (nth guard 3))))
+              (require! false))
+            {:kind :worker :intent-id id :status status :command-id (:gesso.live.outbox/command-id row)})
+          (require! false))))))
