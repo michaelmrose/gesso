@@ -1,6 +1,8 @@
 (ns gesso.live.outbox.http-fragment-test
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
+            [clojure.xml :as xml]
+            [gesso.choreo.identity :as identity]
             [clojure.test :refer [deftest is]]
             [gesso.core :as g]
             [gesso.live.acquisition-preflight :as acquisition]
@@ -13,20 +15,25 @@
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http-sse :as sse]
+            [gesso.live.outbox.http-operation :as operation-http]
+            [gesso.live.optimistic.protocol :as protocol]
+            [gesso.live.progression :as progression]
+            [ring.util.codec :as codec]
             [gesso.live.source :as source]
             [xtdb.api :as xt]
             [gesso.live.outbox.http-fragment :as fragment]
             [gesso.live.progression.http :as progression-http])
-  (:import [java.io BufferedReader InputStreamReader]
+  (:import [java.io BufferedReader InputStreamReader ByteArrayInputStream]
            [java.net URI]
            [java.nio.charset StandardCharsets]
-           [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
+           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
            [java.time Duration]))
 
 (defn- with-assembly
   ([f] (with-assembly "/fragments/request-list/:id" f))
   ([list-path f] (with-assembly list-path "/streams/request-list/:id" f))
-  ([list-path stream-path f]
+  ([list-path stream-path f] (with-assembly list-path stream-path nil f))
+  ([list-path stream-path execute! f]
   ;; Preserve the original acquisition products while selecting one concrete
   ;; parameterized fragment route, in addition to the ordinary literal route.
   (let [realization-var (ns-resolve 'gesso.live.application-preflight.fixture 'realization)]
@@ -43,7 +50,10 @@
                                           {:fragment fragment :path (if (= :request-list fragment) stream-path
                                                                       (str "/streams/" (name fragment)))})}))}
       (fn []
-        (let [ops (fixture/standard-operations)]
+        (let [ops (cond-> (fixture/standard-operations)
+                    execute! (assoc :request/claim
+                                    (fixture/trusted-operation :request/claim
+                                     {:published-change-topics #{:request} :execute! execute!})))]
           (fixture/with-surfaced-application
            {:operations ops :route-capabilities (fixture/route-capabilities ops)
             :rendered-surfaces {:board [:main (fixture/rendered-operation-button
@@ -139,21 +149,49 @@
         (is (= expected (reason #(fragment/wrap-handler assembly identity
                                                        {:resolve-id (constantly "r1")}))))))))
 
-(defn- next-invalidation [input]
-  (let [reader (BufferedReader. (InputStreamReader. input StandardCharsets/UTF_8))
-        work (future
-               (loop []
-                 (when-let [line (.readLine reader)]
-                   (if (= "event: live-update" line)
-                     (let [data (.readLine reader)]
-                       (when (and data (str/starts-with? data "data: "))
-                         (edn/read-string (subs data 6))))
-                     (recur)))))]
-    (try (deref work 10000 nil)
-         (finally (future-cancel work)))))
+(defn- read-invalidation [input]
+  (let [reader (BufferedReader. (InputStreamReader. input StandardCharsets/UTF_8))]
+    (loop []
+      (when-let [line (.readLine reader)]
+        (if (= "event: live-update" line)
+          (let [data (.readLine reader)]
+            (when (and data (str/starts-with? data "data: "))
+              (edn/read-string (subs data 6))))
+          (recur))))))
+
+(defn- await-dispatch [worker]
+  (loop [remaining 750]
+    (let [snapshot (lifecycle/status worker)]
+      (if (or (zero? remaining) (= :failed (:status snapshot))
+              (= 1 (:total-dispatch-accepted snapshot)))
+        snapshot
+        (do (Thread/sleep 20) (recur (dec remaining)))))))
 
 (deftest assembled-streams-share-capacity-and-use-original-model-policy
-  (let [seen (atom []) fallback (atom 0)
+  (let [seen (atom []) queries (atom []) invocations (atom []) fallback (atom 0)
+        intent-id (random-uuid)
+        command (protocol/command {:command-id (identity/command-id "v2366-command")
+                                   :execution-id (identity/execution-id "v2366-execution")
+                                   :operation :request/claim :arguments {:request-id "r1"}
+                                   :observed-basis fixture/rendered-basis})
+        form (codec/form-encode {operation-http/command-parameter
+                                 (pr-str (protocol/command->wire command))})
+        execute! (fn [{:keys [ctx arguments] :as invocation}]
+                   (swap! invocations conj invocation)
+                   (let [id (:request-id arguments)
+                         plan (outbox/prepare! {:intent-ids [intent-id]
+                                                 :source-id (get ctx managed/source-id-key)
+                                                 :operation :request/claim :purpose :gesso.live/refresh}
+                                                [{:topic :request :id id :change/kind :updated}])
+                         tx (xt/execute-tx (:xtdb/connectable ctx)
+                                           (into (vec (:guard-ops plan))
+                                                 [[:put-docs :requests {:xt/id id :status :claimed}]
+                                                  (:tx-op plan)]))]
+                     {:resolution :confirmed :outcome :request/claimed
+                      :authoritative (protocol/authoritative
+                                      {:presence :present
+                                       :basis {:tx-id (:tx-id tx) :system-time (str (:system-time tx))}
+                                       :projection {:request/id id :request/status :claimed}})}))
         resolve-id (fn [ctx _]
                      (or (get-in ctx [:path-params :id]) (get-in ctx [:headers "fragment-id"])))]
     (with-redefs [fixture/allow? (fn [ctx id]
@@ -161,11 +199,12 @@
                                    (and (= "allowed" (get-in ctx [:headers "authorization"]))
                                         (= "r1" id)))
                   fixture/generic-query (fn [ctx id]
+                                          (swap! queries conj [id (live/progression ctx)])
                                           {:fragment/id (str "actual-" id)
                                            :status (:status (first (live/q ctx ["SELECT status FROM requests WHERE _id = ?" id])))})
                   fixture/generic-render (fn [{:keys [fragment/id status]}]
                                            [:section {:id id} (name (or status :open))])]
-      (with-assembly
+      (with-assembly "/fragments/request-list/:id" "/streams/request-list/:id" execute!
         (fn [assembly]
           (let [compiled (get-in assembly [:operation-acquisition-assembly :acquisition-assembly :live-app])
                 ;; Explicit trusted mapping: this fixture's outbox subject is
@@ -178,6 +217,7 @@
                                      (fn [_] (swap! fallback inc) (g/html-response [:div "fallback"]))
                                      (assoc (config) :http-jdk {}
                                             :live-options {:rules rules}
+                                            :assembled-operations {:authorize-request? #(= "allowed" (get-in % [:headers "authorization"]))}
                                             :assembled-fragments {:resolve-id resolve-id}
                                             :assembled-sse {:resolve-id resolve-id :max-connections 2
                                                             :sse-options {:keepalive-ms 50}}))
@@ -193,9 +233,17 @@
                           (.timeout builder (Duration/ofSeconds 10))
                           (doseq [[k v] headers] (.header builder k v))
                           (.send client (.build builder) body-handler)))
+                post! (fn [headers]
+                        (let [builder (HttpRequest/newBuilder (URI/create (str (:base-url listener) "/operations/request/claim")))]
+                          (.timeout builder (Duration/ofSeconds 10))
+                          (.header builder "content-type" "application/x-www-form-urlencoded")
+                          (doseq [[k v] headers] (.header builder k v))
+                          (.POST builder (HttpRequest$BodyPublishers/ofString form))
+                          (.send client (.build builder) (HttpResponse$BodyHandlers/ofString))))
                 headers {"authorization" "allowed" "fragment-id" "r1"}
                 list-path "/streams/request-list/r1"
-                toolbar-path "/streams/request-toolbar"]
+                toolbar-path "/streams/request-toolbar"
+                fragments ["/fragments/request-list/r1" "/fragments/request-toolbar"]]
             (try
               (is (= 405 (:status (handler {:uri list-path :request-method :post}))))
               (is (= 403 (:status (handler {:uri "/streams/request-list/.." :request-method :get}))))
@@ -203,6 +251,12 @@
               (is (= 403 (.statusCode (send! list-path {} (HttpResponse$BodyHandlers/ofString)))))
               (is (= 403 (.statusCode (send! "/streams/request-list/r2" headers (HttpResponse$BodyHandlers/ofString)))))
               (is (zero? (:subscription-count (source/stats (:source system)))))
+              (is (= 403 (.statusCode (post! {}))))
+              (is (empty? @invocations))
+              (is (empty? (xt/q node ["SELECT _id FROM requests"])))
+              (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+              (doseq [path fragments]
+                (is (str/includes? (.body (send! path headers (HttpResponse$BodyHandlers/ofString))) ">open<")))
               (let [list-response (send! list-path headers (HttpResponse$BodyHandlers/ofInputStream))
                     toolbar-response (send! toolbar-path headers (HttpResponse$BodyHandlers/ofInputStream))]
                 (with-open [list-body (.body list-response) toolbar-body (.body toolbar-response)]
@@ -212,29 +266,42 @@
                   (is (= 503 (.statusCode (send! list-path headers (HttpResponse$BodyHandlers/ofString)))))
                   (is (identical? node (:xtdb/connectable (second (peek @seen)))))
                   (is (= {:id "r1"} (:path-params (second (peek @seen)))))
-                  (let [plan (outbox/prepare! {:intent-ids [(random-uuid)]
-                                              :source-id (:source-id (config))
-                                              :operation :request/claim :purpose :gesso.live/refresh}
-                                             [{:topic :request :id "r1" :change/kind :updated}])]
-                    (xt/execute-tx node (into (vec (:guard-ops plan))
-                                             [[:put-docs :requests {:xt/id "r1" :status :claimed}]
-                                              (:tx-op plan)])))
-                  (let [worker-state (loop [remaining 750]
-                                       (let [snapshot (lifecycle/status worker)]
-                                         (if (or (zero? remaining) (= :failed (:status snapshot))
-                                                 (= 1 (:total-dispatch-accepted snapshot)))
-                                           snapshot
-                                           (do (Thread/sleep 20) (recur (dec remaining))))))]
-                    (is (= 1 (:total-dispatch-accepted worker-state)) (pr-str worker-state)))
-                  (let [a (next-invalidation list-body) b (next-invalidation toolbar-body)]
-                    (is (= {:topic :fixture/request-list :id "r1"}
-                           (select-keys (:invalidation a) [:topic :id])))
-                    (is (= {:topic :fixture/request-toolbar :id "r1"}
-                           (select-keys (:invalidation b) [:topic :id])))
-                    (is (some? (:progression a)))
-                    (is (some? (:progression b))))
-                  (is (str/includes? (.body (send! "/fragments/request-list/r1" headers
-                                                  (HttpResponse$BodyHandlers/ofString))) ">claimed<"))
+                  ;; Start both readers before mutation. One bounded observation
+                  ;; per stream; timeout is a failed assertion, not a retry.
+                  (let [a (future (read-invalidation list-body))
+                        b (future (read-invalidation toolbar-body))]
+                    (try
+                      (let [response (post! headers)]
+                        (is (= 200 (.statusCode response)))
+                        (let [marker (xml/parse (ByteArrayInputStream. (.getBytes ^String (.body response) StandardCharsets/UTF_8)))
+                              settlement (protocol/wire->settlement
+                                          (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))]
+                          (is (= :confirmed (:resolution settlement)))
+                          (is (= (select-keys command [:command-id :execution-id])
+                                 (select-keys settlement [:command-id :execution-id])))))
+                      (is (= 1 (count @invocations)))
+                      (is (identical? node (get-in (first @invocations) [:ctx :xtdb/connectable])))
+                      (let [worker-state (await-dispatch worker)]
+                        (is (= 1 (:total-dispatch-accepted worker-state)) (pr-str worker-state)))
+                      (doseq [[pending expected-topic path] [[a :fixture/request-list (first fragments)]
+                                                            [b :fixture/request-toolbar (second fragments)]]]
+                        (let [payload (deref pending 10000 nil)
+                              diagnostics (pr-str {:worker (lifecycle/status worker)
+                                                   :source (source/stats (:source system))})]
+                          (is (= {:topic expected-topic :id "r1"}
+                                 (select-keys (:invalidation payload) [:topic :id])) diagnostics)
+                          (is (some? (:progression payload)) diagnostics)
+                          (when-let [wire (:progression payload)]
+                            (let [requirement (progression/wire->requirement wire)
+                                  response (send! path (assoc headers progression-http/request-header-name
+                                                              (progression-http/encode-request-progression requirement))
+                                                  (HttpResponse$BodyHandlers/ofString))]
+                              (is (= 200 (.statusCode response)))
+                              (is (str/includes? (.body response) ">claimed<"))
+                              (is (= ["r1" requirement] (peek @queries)))))))
+                      (finally (future-cancel a) (future-cancel b))))
+                  (is (= [{:status :claimed}] (xt/q node ["SELECT status FROM requests WHERE _id = ?" "r1"])))
+                  (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id])))
                   (is (zero? @fallback))
                   (host/stop! started)
                   (is ((:drained? status)))
