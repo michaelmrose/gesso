@@ -2,7 +2,9 @@
   "Persistent compatibility fence for the selected single-subject publication
    profile. This is not a migration tool or a fence against arbitrary writers."
   (:require [gesso.live.consistency.xtdb :as xtdb]
-            [gesso.live.model :as model]))
+            [gesso.live.model :as model]
+            [xtdb.api :as xt]
+            [xtdb.basis :as basis]))
 
 (defn- keyword-parts [k]
   [(namespace k) (name k)])
@@ -28,9 +30,23 @@
                   {:error/type :gesso.live.outbox/invalid-publication-manifest
                    :reason reason :source-id source-id})))
 
+(defn- startup-read-options! [node source-id]
+  ;; A reopened DataSource does not remember the preceding process's await
+  ;; token. Capture the submitted log frontier, not the completed snapshot:
+  ;; the latter can omit durable work still being indexed on startup.
+  (let [submitted (:latest-submitted-msg-ids (xt/status node))]
+    (when-not (and (map? submitted) (contains? submitted xtdb/default-database-name)
+                   (every? (fn [[db ids]]
+                             (and (string? db) (seq db)
+                                  (vector? ids) (seq ids) (every? integer? ids)))
+                           submitted))
+      (reject! :invalid-startup-log-frontier source-id))
+    {:await-token (basis/->tx-basis-str submitted)}))
+
 (defn require-compatible!
   "Before starting Live or its worker, check the durable manifest for this
-   source. Establish a new manifest only if no previous source intent exists;
+   source, waiting for the captured submitted log frontier even on hosts
+   without a selected profile. Establish a new manifest only if no previous source intent exists;
    do not infer the meaning of old unclassified intents. A non-selected host
    must not consume a previously classified source. Establishment is guarded
    in one XTDB transaction; a competing establishment fails startup rather
@@ -38,7 +54,8 @@
    failure deliberately. This assumes exclusive single-node host ownership
    and trusted writers, not an online multi-deployment migration protocol."
   [node source-id selected]
-  (let [rows (xtdb/q node ["SELECT _id, profile_version, descriptor FROM gesso_publication_manifests WHERE _id = ?" source-id])
+  (let [opts (startup-read-options! node source-id)
+        rows (xtdb/q node ["SELECT _id, profile_version, descriptor FROM gesso_publication_manifests WHERE _id = ?" source-id] opts)
         expected {:xt/id source-id :profile-version 1 :descriptor selected}]
     (when-not (and (vector? rows) (<= (count rows) 1))
       (reject! :invalid-manifest-observation source-id))
