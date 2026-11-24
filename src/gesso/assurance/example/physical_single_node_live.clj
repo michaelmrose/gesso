@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2323: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2325: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -15,7 +15,11 @@
    principal, CSRF protection, authenticated commit receipt, or certified
    Gesso application assembly.
    Successful HTTP response and Live publication are distinct boundaries:
-   a postcommit publication failure must never trigger a second transaction.
+   a postcommit publication failure must never reclassify a committed write
+   as a failed HTTP command or trigger a second transaction. The fixture
+   exposes publication attempt status, not guaranteed SSE delivery. An
+   uncertain notification requests an HTMX full-page reload to reacquire
+   authoritative state, without retrying the protected operation.
    Only browser integration testing can establish HTMX/SSE adapter behavior."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
@@ -175,6 +179,7 @@
    :sse-event :advisory-invalidation-only
    :browser-managed-refresh :declared-not-tested
    :notification-timing :after-delegated-http-success
+   :uncertain-notification-recovery :htmx-2.0.7-full-page-refresh-requested
    :biff-adopted-live-handler :one-original-biff-start-installed-composed-live-handler
    :biff-network-consumption :not-established
    :commit-provenance :not-authenticated
@@ -184,6 +189,37 @@
    :admission :not-admitted
    :authority :none
    :open-obligations obligations})
+
+(def ^:private publication-header "x-gesso-proving-live-publication")
+
+(defn- publish-after-committed-response
+  "Attempt an advisory wakeup after a definitive HTTP success, without
+   changing that result into an apparent failed write if the separate
+   publication step fails. Even :emitted denotes source acceptance only:
+   Manifold puts and browser adoption are asynchronous. A failure may
+   leave publication uncertain, not necessarily absent. This test-only
+   boundary does not replace the required durable XTDB outbox. In
+   pinned HTMX 2.0.7, HX-Refresh: true reloads the current document."
+  [live-system scope response]
+  (if (not= 200 (:status response))
+    response
+    (let [accepted?
+          (try
+            (contains? #{:emitted :queued}
+                       (:status (live/emit!
+                                 live-system
+                                 (assoc scope :change/kind :updated))))
+            (catch Exception _
+              ;; The protected operation has already committed. In
+              ;; particular, NEVER retry it because notification failed.
+              false))]
+      (cond-> (assoc-in response [:headers publication-header]
+                        (if accepted? "source-accepted" "unknown"))
+        ;; HTMX 2.0.7 handles HX-Refresh before swap selection. Thus the
+        ;; existing hx-swap=none command can reacquire server state even if
+        ;; its advisory SSE wakeup did not reach the source. This is a
+        ;; *requested* recovery, not tested browser adoption or durable fanout.
+        (not accepted?) (assoc-in [:headers "HX-Refresh"] "true")))))
 
 (defn- build-handler [app live-system registered-streams assets]
   (let [original (:handler app)
@@ -222,13 +258,10 @@
 
           (and (= :post method) (contains? operation-uris uri))
           (let [response (original request)]
-            ;; Not a commit authenticator. This is a purely advisory wakeup
-            ;; after the uncertified v1495 path reports a successful response.
-            ;; If the publish fails, never resubmit or reinterpret the write.
-            (when (= 200 (:status response))
-              (live/emit! live-system
-                          (assoc scope :change/kind :updated)))
-            response)
+            ;; The delegated write remains authoritative for this fixture.
+            ;; A later source failure cannot transform committed HTTP success
+            ;; into a misleading failed command or cause a second write.
+            (publish-after-committed-response live-system scope response))
 
           :else
           (original request))))))
