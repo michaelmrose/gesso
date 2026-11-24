@@ -465,6 +465,24 @@
   (command/guard-target
    value))
 
+(defn require-distinct-entity-identities!
+  "Reject distinct logical entity names that address one normalized XTDB
+   table. This is a conservative mixed-name admission check, not a general
+   SQL identifier parser. Keep canonical logical targets unchanged."
+  [entities]
+  (reduce (fn [seen entity]
+            (let [entity (require-entity-type! entity)
+                  physical [(xt.util/str->normal-form-str (or (namespace entity) "public"))
+                            (xt.util/str->normal-form-str (name entity))]]
+              (when-let [prior (get seen physical)]
+                (when-not (= prior entity)
+                  (fail! ::aliased-entity-types
+                         "Distinct logical entity types address the same physical table."
+                         {:entity-types #{prior entity} :physical-table physical})))
+              (assoc seen physical entity)))
+          {} (distinct entities))
+  nil)
+
 (defn- duplicate-targets
   [targets]
   (->> targets
@@ -478,6 +496,7 @@
 
 (defn- require-distinct-command-targets!
   [commands]
+  (require-distinct-entity-identities! (map :model/entity-type commands))
   (let [duplicates
         (duplicate-targets
          (map
@@ -517,6 +536,8 @@
        "Transaction :guards must be sequential."
        {:guards guards}))
 
+    (require-distinct-entity-identities!
+     (map (comp :model/entity-type command/require-guard) guards))
     (let [{:keys
            [order
             by-target]}
@@ -583,6 +604,8 @@
 
 (defn- require-command-guard-consistency!
   [commands guards]
+  (require-distinct-entity-identities!
+   (map :model/entity-type (concat commands guards)))
   (let [commands-by-target
         (into
          {}

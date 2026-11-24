@@ -1899,3 +1899,33 @@
       (is (conflict? #(commit! [(command/create :outcome (assoc outcome :xt/id :fixture/missing) version)]
                               {:assertions [(tx/assert-document-exists :widget :fixture/missing)]})))
       (is (= 1 (count (xt/q node ["SELECT _id FROM outcome"])))))))
+
+(deftest canonical-plans-reject-mixed-physical-table-identities
+  (let [left :widget-items
+        aliases [:widget_items :public/widget-items :public/widget_items :Widget_Items]
+        create (fn [entity document] (command/create entity document version))
+        guard (fn [entity] (command/guard entity widget-new version))
+        plan (fn [commands guards] {:commands commands :guards guards :emit false})
+        first-command (create left widget-new)
+        other-doc (assoc widget-new :xt/id :other)]
+    (doseq [alias aliases]
+      ;; Different logical targets can still mutate the same physical row.
+      (is (= ::tx/aliased-entity-types
+             (error-type #(tx/prepare {} (plan [first-command (create alias widget-new)] [])))))
+      (is (= ::tx/aliased-entity-types
+             (error-type #(tx/normalize-plan (plan [first-command (create alias other-doc)] [])))))
+      (is (= ::tx/aliased-entity-types
+             (error-type #(tx/effective-guards [first-command] [(guard alias)]))))
+      (is (= ::tx/aliased-entity-types
+             (error-type #(tx/normalize-guards [(guard left) (guard alias)])))))
+    (with-open [node (xtn/start-node {})]
+      ;; The actual provider maps these two spellings to one table.
+      (xt/execute-tx node [[:put-docs left widget-new]
+                           [:put-docs :public/widget_items (assoc widget-new :widget/name "Alias")]])
+      (is (= [{:widget/name "Alias"}]
+             (xt/q node ["SELECT widget$name FROM widget_items"])))
+      ;; Distinct schemas and multiple IDs of one logical entity are legal.
+      (xt/execute-tx node (:tx-ops (tx/prepare {} (plan [(create left other-doc)
+                                                       (create :other/widget_items widget-new)] []))))
+      (is (= #{:widget-2 :other} (set (map :xt/id (xt/q node ["SELECT _id FROM widget_items"])))))
+      (is (= [{:xt/id :widget-2}] (xt/q node ["SELECT _id FROM other.widget_items"]))))))

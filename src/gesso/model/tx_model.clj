@@ -69,6 +69,7 @@
       (fail! ::invalid-state
              "Reference state contains an invalid target or inconsistent document identity."
              {:target target :document document})))
+  (tx/require-distinct-entity-identities! (map first (keys state)))
   state)
 
 (defn- canonical-document-field-count-check
@@ -115,6 +116,11 @@
     (catch Exception _
       nil)))
 
+(defn- plan-entities [{:keys [commands guards assertions]}]
+  (concat (map :model/entity-type commands)
+          (map :model/entity-type guards)
+          (map (comp first :target canonical-document-field-count-check) assertions)))
+
 (defn admitted-plan
   "Returns an existing normalized model transaction plan in the supported
    abstract subset, otherwise fails with a typed *unsupported* diagnostic.
@@ -143,6 +149,7 @@
              {:unsupported unsupported
               :supported #{:commands :guards
                            :canonical-document-field-count-assertions}}))
+    (tx/require-distinct-entity-identities! (plan-entities plan))
     plan))
 
 (defn- matches-expected?
@@ -218,6 +225,8 @@
   [state plan]
   (let [state (require-state state)
         plan (admitted-plan plan)
+        _ (tx/require-distinct-entity-identities!
+           (concat (map first (keys state)) (plan-entities plan)))
         checks (mapv (partial assess-precondition state)
                      (preconditions plan))
         failed (first (remove :satisfied? checks))
@@ -268,6 +277,8 @@
              "Finite exploration supports between one and six prepared plans."
              {:count (count plans) :maximum 6}))
     (let [plans (mapv admitted-plan plans)]
+      (tx/require-distinct-entity-identities!
+       (concat (map first (keys initial-state)) (mapcat plan-entities plans)))
       {:scope reference-scope
        :exploration {:kind :all-serial-orders
                      :prepared-plans (count plans)

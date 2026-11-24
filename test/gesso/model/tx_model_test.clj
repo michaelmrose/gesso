@@ -342,3 +342,18 @@
     (is (= initial-state state))
     (is (= [membership-guard] (:guards guarded)))
     (is (= 2 (count (:paths exploration-a))))))
+
+(deftest reference-rejects-physical-table-aliases-across-state-and-plans
+  (let [alias :public/request
+        aliased (update-command alias :claim request {:owner :helper-a})
+        other (update-command :other/request :claim request {:owner :helper-a})
+        error ::tx/aliased-entity-types]
+    (is (= error (error-type #(model/require-state
+                               (assoc initial-state [alias :request-1] request)))))
+    (is (= error (error-type #(model/step initial-state (plan [aliased])))))
+    (is (= error (error-type #(model/admitted-plan
+                               (assoc unguarded-claim :assertions
+                                      [(tx/assert-document-field-count alias :request-1 4)])))))
+    (is (= error (error-type #(model/explore-orders {} [(plan [aliased]) unguarded-claim]))))
+    (is (= :committed (:status (model/step (assoc initial-state [:other/request :request-1] request)
+                                           (plan [other])))))))
