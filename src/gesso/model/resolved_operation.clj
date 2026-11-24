@@ -832,7 +832,9 @@
 (defn- post-state-targets [tuples]
   (set (map (fn [[table id _ _]] [table id]) tuples)))
 
-(defn- require-post-state-contract! [declared targets]
+(defn require-post-state-contract!
+  "Admit independently declared exact domain post-state values against write targets."
+  [declared targets]
   (let [required (:required-post-state-values declared)
         allowed (:allowed-post-state-values declared)
         required-targets (set (remove (fn [[table _]]
@@ -866,7 +868,9 @@
                            (command/after entry)))))
                 (get-in incorporated [:plan :commands]))))
 
-(defn- require-plan-post-state-coverage! [declared incorporated]
+(defn require-plan-post-state-coverage!
+  "Check canonical domain command post-state values against the admitted contract."
+  [declared incorporated]
   (when declared
     (let [actual (actual-post-state-values incorporated)
           missing (set/difference (:required-post-state-values declared) actual)
