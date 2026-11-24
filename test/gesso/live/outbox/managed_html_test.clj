@@ -34,7 +34,7 @@
         node (with-meta [:section#panel {:class ["a" "b"] :style {:min-height "12px"}}
                          [:a {:href "/requests"} "Requests"]
                          (map identity [[:span "<script>literal</script>"]
-                                        [:div {:hx-swap-oob "innerHTML"}
+                                        [:div {:id "email-error"}
                                          [:span {:data-validation-error-message true} "Bad"]]])]
                {:example/marker :owned})
         result (http/with-html-response-preflight
@@ -47,3 +47,23 @@
     (is (not (str/includes? (:body result) "<script>")))
     ;; Full-document/unmanaged serialization remains deliberately unchanged.
     (is (str/includes? (:body (http/html-response [:script {:src "/asset.js"}])) "<script"))))
+
+(deftest selected-content-rejects-undeclared-secondary-effects-test
+  (doseq [[attribute node path]
+          [["hx-swap-oob" [:div#foreign {:hx-swap-oob true}] []]
+           ["hx-swap-oob" [:div {:hx-swap-oob "innerHTML:#foreign"}] []]
+           ["data-hx-swap-oob" [:div {"data-hx-swap-oob" "delete:#foreign"}] []]
+           ["hx-swap-oob" [:section [:div {"HX-SWAP-OOB" "beforeend:#foreign"}]] [1]]
+           ["data-hx-swap-oob" [:template (list [:div {:data-hx-swap-oob "outerHTML"}])] [1 0]]
+           ["hx-swap-oob" [:<> [:span "ordinary"] [:div {:hx-swap-oob "false"}]] [2]]]]
+    (let [result (failure node)]
+      (is (= :gesso.live.outbox.managed-html/invalid-content (:error/type result)))
+      (is (= :undeclared-oob-effect (:error/kind result)))
+      (is (= attribute (:attribute result)))
+      (is (= path (:render-path result)))))
+  (is (= 200 (:status (managed-html/html-response
+                      [:section [:button {:hx-swap "innerHTML"} "Ordinary"]]))))
+  ;; Separate unmanaged/validation response paths have not been qualified by
+  ;; this restriction and retain their existing serialization behavior.
+  (is (str/includes? (:body (http/html-response [:div {:hx-swap-oob "innerHTML"}]))
+                    "hx-swap-oob")))

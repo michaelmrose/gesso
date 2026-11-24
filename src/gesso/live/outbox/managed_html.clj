@@ -42,6 +42,11 @@
       (when-not (re-matches #"[A-Za-z_:][A-Za-z0-9_.:-]*" attribute)
         (reject! :invalid-attribute-name path {:attribute attribute}))
       (cond
+        ;; Selected fragment GETs have only a primary-target contract.
+        ;; An OOB marker creates a separate mutation, even inside a template.
+        (#{"hx-swap-oob" "data-hx-swap-oob"} attribute)
+        (reject! :undeclared-oob-effect path {:attribute attribute})
+
         (str/starts-with? attribute "on")
         (reject! :inline-event-handler path {:attribute attribute})
 
@@ -99,8 +104,9 @@
 (defn html-response
   "Admit the selected fragment's actual render data, then serialize through
    the existing canonical HTTP boundary (including any installed preflight).
-   Framework Hyperscript and HTMX attributes are not authorized by this check;
-   response headers, OOB targets, CSP and physical browser admission are separate.
+   This single-target response profile rejects all OOB swap markers; it does
+   not authorize secondary targets. Framework Hyperscript, other HTMX attributes,
+   response headers, request-side OOB selection and physical admission are separate.
    Full-page shell asset scripts and unmanaged responses use other boundaries."
   [node]
   (http/html-response (admitted-node node [])))
