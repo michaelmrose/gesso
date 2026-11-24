@@ -10,7 +10,8 @@
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.optimistic.server :as server]
             [gesso.live.optimistic.resolved-operation :as adapter]
-            [gesso.model.command-resolution :as resolution])
+            [gesso.model.command-resolution :as resolution]
+            [gesso.model.tx :as model-tx])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.nio ByteBuffer]
            [java.security MessageDigest]
@@ -185,6 +186,25 @@
                 tx-op (conj tx-op))]
       {:ops ops :intents intents :record record})))
 
+(defn- model-resolved-plan! [ctx spec model-plan outcome now]
+  ;; This boundary owns publication, execution options and the command ledger.
+  ;; Accept canonical domain fragments, not an alternative transaction driver.
+  (when-not (and (map? model-plan)
+                 (every? (conj model-tx/fragment-keys :emit) (keys model-plan))
+                 (or (not (contains? model-plan :emit)) (false? (:emit model-plan))))
+    (reject! :invalid-durable-model-plan {}))
+  (when-not (and (map? spec) (= #{:purpose} (set (keys spec))))
+    (reject! :invalid-resolved-intent-spec {}))
+  (let [{:keys [plan tx-ops]} (model-tx/prepare ctx (assoc model-plan :emit false))]
+    ;; Reject direct model commands targeting framework-owned tables, including
+    ;; common SQL-normalized spellings. Trusted assertions are not sandboxed.
+    (when (some (fn [{:model/keys [entity-type]}]
+                  (contains? #{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests"}
+                             (-> entity-type name str/lower-case (str/replace "-" "_"))))
+                (:commands plan))
+      (reject! :reserved-durable-model-table {}))
+    (resolved-plan! ctx spec (:changes plan) tx-ops outcome now)))
+
 (defn- execute-resolved-plan! [ctx {:keys [ops intents record]}]
   (assoc (xtdb/execute-tx-from! ctx ops)
          :outbox/intents intents :command/record record))
@@ -203,6 +223,15 @@
    errors propagate; reconcile-command! is a separate read-only operation."
   [ctx spec changes domain-ops outcome now]
   (execute-resolved-plan! ctx (resolved-plan! ctx spec changes domain-ops outcome now)))
+
+(defn transact-model-resolved!
+  "Execute a canonical model domain plan with the selected command journal
+   and durable publication. Reuse model.tx normalization, Biff validation,
+   version guards and assertion compilation. The normalized plan supplies
+   the sole change batch; inline emit, custom entries and transaction options
+   are not admitted. Domain assertions and declared changes remain trusted."
+  [ctx spec model-plan outcome now]
+  (execute-resolved-plan! ctx (model-resolved-plan! ctx spec model-plan outcome now)))
 
 (defn reconcile-command!
   "Authoritatively read the canonical command record for the current trusted
@@ -261,6 +290,8 @@
    trusted, side-effect-free constructor, once, with the invocation. Its
    closed result contains :spec, :changes, :domain-ops, :outcome and :now.
    A journal-only outcome uses nil spec, [] changes and optional ASSERTs.
+   Alternatively return :spec, :model-plan, :outcome and :now to compile
+   a canonical model plan through the same durable boundary.
    On an execution exception, perform at most one authoritative recovery
    read, never resubmit. Only an exact disclosed replay can settle that
    failure; otherwise preserve the original exception. Construction,
@@ -279,13 +310,14 @@
   (let [prior (reconcile-command! ctx may-disclose?)
         result
         (if (and (= :submit mode) (= :unresolved (:status prior)))
-          (let [{:keys [spec changes domain-ops outcome now] :as construction}
+          (let [{:keys [spec changes domain-ops model-plan outcome now] :as construction}
                 (construct! invocation)
-                _ (when-not (and (map? construction)
-                                 (= #{:spec :changes :domain-ops :outcome :now}
-                                    (set (keys construction))))
-                    (reject! :invalid-resolved-construction {}))
-                plan (resolved-plan! ctx spec changes domain-ops outcome now)]
+                plan (case (when (map? construction) (set (keys construction)))
+                       #{:spec :changes :domain-ops :outcome :now}
+                       (resolved-plan! ctx spec changes domain-ops outcome now)
+                       #{:spec :model-plan :outcome :now}
+                       (model-resolved-plan! ctx spec model-plan outcome now)
+                       (reject! :invalid-resolved-construction {}))]
             (try {:status :incorporated :outcome outcome
                   :transaction (execute-resolved-plan! ctx plan)}
                  (catch Exception failure

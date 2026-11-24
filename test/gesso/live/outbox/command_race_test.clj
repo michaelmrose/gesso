@@ -11,6 +11,8 @@
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.model.command :as model-command]
+            [xtdb.node :as xtn]
             [ring.util.codec :as codec]
             [xtdb.api :as xt])
   (:import [java.io ByteArrayInputStream]
@@ -24,6 +26,9 @@
   {:subject-keys {:request :request/location-id
                   :request-assignment :request/location-id
                   :audit :request/location-id}})
+
+(def ^:private version
+  {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at})
 
 (defn- with-assembly [executor f]
   (let [ops (assoc (fixture/standard-operations) :request/claim
@@ -84,8 +89,11 @@
                                    (when-not (.await both-constructing 15 TimeUnit/SECONDS)
                                      (throw (ex-info "Concurrent construction barrier timed out" {})))
                                    {:spec {:purpose :gesso.live/refresh}
-                                    :changes [{:topic :request :request/location-id "r1"}]
-                                    :domain-ops [[:put-docs :requests {:xt/id "r1" :status :claimed :winner attempt}]]
+                                    :model-plan {:commands [(model-command/create
+                                                            :requests {:xt/id "r1" :status :claimed :winner attempt
+                                                                       :revision 0 :created-at "t0" :updated-at "t0"}
+                                                            version)]
+                                                 :changes [{:topic :request :request/location-id "r1"}]}
                                     :outcome {:outcome :request/claimed :winner attempt}
                                     :now "2026-11-24T00:00:00Z"}))
                    :project! (fn [{:keys [ctx execution-id]} result]
@@ -147,3 +155,38 @@
       (finally
         (doseq [entry (reverse (file-seq (.toFile root)))]
           (io/delete-file entry true))))))
+
+(deftest canonical-model-publication-preserves-version-guards-and-plan-admission
+  (with-assembly identity
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile! assembly mapping))
+              ctx (fn [id]
+                    {:xtdb/connectable node
+                     publication/preparation-key
+                     (bind "model-2380" (assoc (command "attempt")
+                                               :command-id (identity/command-id id)
+                                               :principal fixture/trusted-principal))})
+              spec {:purpose :gesso.live/refresh}
+              before {:xt/id "r1" :revision 0 :created-at "t0" :updated-at "t0" :status :open}
+              after (assoc before :revision 1 :updated-at "t1" :status :claimed)
+              plan {:commands [(model-command/update-command :requests :claim before after version)]
+                    :changes [{:topic :request :request/location-id "r1"}]}
+              run! (fn [id p] (publication/transact-model-resolved!
+                               (ctx id) spec p {:outcome :request/claimed} "t1"))
+              error (fn [f] (try (f) nil (catch Exception e (ex-data e))))]
+          (xt/execute-tx node [[:put-docs :requests before]])
+          (doseq [p [(assoc plan :emit :sync) (assoc plan :entry-fn identity)
+                     (assoc plan :tx-options {:database "other"})]]
+            (is (= :invalid-durable-model-plan (:reason (error #(run! "bad" p))))))
+          (doseq [table [:gesso_commands :public/gesso-live-outbox :gesso_publication_manifests]]
+            (is (= :reserved-durable-model-table
+                   (:reason (error #(run! "reserved" (assoc plan :commands
+                                                            [(model-command/create table before version)])))))))
+          (let [receipt (run! "winner" plan)]
+            (is (= 1 (count (:outbox/intents receipt))))
+            (is (some? (:progression receipt))))
+          (is (= :xtdb/assert-failed (:xtdb.error/code (error #(run! "stale" plan)))))
+          (is (= [{:revision 1 :status :claimed}] (xt/q node ["SELECT revision, status FROM requests"])))
+          (is (= [{:xt/id "winner"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
+          (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))))
