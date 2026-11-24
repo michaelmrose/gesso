@@ -113,3 +113,51 @@
         opts {:snapshot-token (xtdb/basis-snapshot-token basis)
               :current-time (Instant/now)}]
     {:basis basis :state (snapshot! #(xtdb/q-from node % opts))}))
+
+(defn submitted-alternative!
+  "Classify the selected actual synchronous submission, not a claimed plan.
+   Only the fixture's canonical ASSERT/put-docs forms are recognized.
+   Diagnostic only: not a general SQL parser or gateway."
+  [ops]
+  (require! (and (vector? ops) (seq ops)))
+  (let [writes (mapcat (fn [[head table & docs :as op]]
+                         (cond
+                           (and (vector? op) (string? head)
+                                (re-find #"(?is)^\s*ASSERT\s+" head)
+                                (not (re-find #";" head))) []
+                           (and (vector? op) (= :put-docs head) (keyword? table)
+                                (seq docs) (every? #(and (map? %) (some? (:xt/id %))) docs))
+                           (map #(vector table %) docs)
+                           :else (require! false))) ops)
+        by-table (group-by first writes)
+        records (map second (get by-table :gesso_commands))
+        record (first records)
+        binding (:gesso.command/binding record)
+        helper (identity/raw-value (:principal binding))
+        id (identity/raw-value (:command-id binding))
+        outcome (:gesso.command/outcome record)
+        alternative (cond (= {:outcome :request/claimed :helper helper} outcome) :accept
+                          (= {:outcome :request/not-claimable :reason :already-claimed} outcome) :refuse)
+        intents (map second (get by-table :gesso_live_outbox))
+        requests (map second (get by-table :requests))
+        assignments (map second (get by-table :request_assignments))]
+    (require! (and (= 1 (count records)) (helpers helper) (= id (:xt/id record))
+                   (= :request/claim (:operation binding))
+                   (= {:request-id "r1"} (:arguments binding))
+                   (= :incorporated (:gesso.command/status record))
+                   (some #(string? (first %)) ops)))
+    (case alternative
+      :accept (require! (and (= #{:requests :request_assignments :gesso_commands :gesso_live_outbox}
+                               (set (keys by-table)))
+                            (= 1 (count requests) (count assignments))
+                            (= {:xt/id "r1" :status :claimed :revision 1}
+                               (select-keys (first requests) [:xt/id :status :revision]))
+                            (= {:xt/id "primary-r1" :request-id "r1" :helper helper}
+                               (select-keys (first assignments) [:xt/id :request-id :helper]))
+                            (= 2 (count intents) (count (set (map :xt/id intents))))
+                            (= #{:request :request-assignment} (set (map :gesso.live.outbox/topic intents)))
+                            (every? #(and (= id (:gesso.live.outbox/command-id %))
+                                          (= "l1" (:gesso.live.outbox/subject-id %))) intents)))
+      :refuse (require! (= #{:gesso_commands} (set (keys by-table))))
+      (require! false))
+    {:alternative (alternative-id helper alternative) :command-id id}))

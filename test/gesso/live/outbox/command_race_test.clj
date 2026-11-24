@@ -835,6 +835,8 @@
         recovery-trace (atom [])
         initial-state (atom nil)
         recovery-state (atom nil)
+        submissions (atom [])
+        execute xtdb/execute-tx-from!
         observed (atom [])
         projected (atom [])
         streams (atom [])
@@ -962,7 +964,19 @@
       (is (= :abort-contract-requires-guarded-journal-only
              (reason (assoc-in opts [:abort-contract :construction-contract :allowed-write-tables]
                                #{:requests :gesso_commands})))))
-    (with-redefs [fixture/allow? (fn [ctx id] (and (= "l1" id) (read-authorized? ctx)))
+    (with-redefs [xtdb/execute-tx-from!
+                  (fn [ctx ops & [options]]
+                    (if (contains? ctx publication/preparation-key)
+                      (let [entry {:ops ops :identity (semantics/submitted-alternative! ops)}]
+                        (try
+                          (let [result (execute ctx ops options)]
+                            (swap! submissions conj (assoc entry :result :committed))
+                            result)
+                          (catch Exception e
+                            (swap! submissions conj (assoc entry :result (:xtdb.error/code (ex-data e))))
+                            (throw e))))
+                      (execute ctx ops options)))
+                  fixture/allow? (fn [ctx id] (and (= "l1" id) (read-authorized? ctx)))
                   fixture/generic-query
                   (fn [ctx id]
                     (let [row (first (live/q ctx ["SELECT r.status, a.helper FROM requests r LEFT JOIN request_assignments a ON r._id = a.request_id WHERE r.request$location_id = ? AND r._id = ?" id "r1"]))]
@@ -1205,6 +1219,23 @@
                      (is (= 2 (count @recovery-trace)))
                      (is (= 2 (count @observed)))))
                  (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+                 ;; Both replays have returned without any new physical submission.
+                 (let [expected (cond-> #{{:identity {:alternative (semantics/alternative-id helper :accept) :command-id id}
+                                            :result :committed}
+                                           {:identity {:alternative (semantics/alternative-id loser-helper :accept) :command-id loser-id}
+                                            :result :xtdb/assert-failed}}
+                                  valid? (conj {:identity {:alternative (semantics/alternative-id loser-helper :refuse) :command-id loser-id}
+                                                :result :committed}))
+                       accepted (:ops (first (filter #(= {:alternative (semantics/alternative-id helper :accept) :command-id id}
+                                                         (:identity %)) @submissions)))
+                       refused? (fn [ops] (try (semantics/submitted-alternative! ops) false
+                                               (catch clojure.lang.ExceptionInfo _ true)))]
+                   (is (= (count expected) (count @submissions)))
+                   (is (= expected (set (map #(dissoc % :ops) @submissions))))
+                   (is (refused? (conj accepted [:put-docs :memberships {:xt/id helper :active false}])))
+                   (is (refused? (conj accepted ["DELETE FROM requests"])))
+                   (is (refused? (filterv #(not= :request_assignments (second %)) accepted)))
+                   (is (refused? (conj accepted (first (filter #(= :gesso_commands (second %)) accepted))))))
                  (when valid?
                    (revoke! (get-in credentials [session :session-id]))
                    (is (= 403 (:status (request! (headers-for session) id "revoked-replay" true))))
