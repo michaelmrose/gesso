@@ -16,6 +16,7 @@
   (:import [com.sun.net.httpserver HttpExchange HttpHandler HttpServer]
            [java.net InetSocketAddress]
            [java.nio.charset StandardCharsets]
+           [java.util Locale]
            [java.util.concurrent Executors ThreadFactory]))
 
 (defn- reject! [reason]
@@ -26,21 +27,25 @@
 (defn- request-map [^HttpExchange exchange]
   (let [uri (.getRequestURI exchange)
         path (.getRawPath uri)
+        method (.getRequestMethod exchange)
         fields (.entrySet (.getRequestHeaders exchange))]
     ;; This selected reference transport does not admit alternative path
     ;; spellings or multi-valued header fields. Never discard information
     ;; before route selection, authorization or progression validation.
     (when (and (string? path) (str/starts-with? path "/")
+               ;; HTTP methods are case-sensitive. Ring uses lowercase
+               ;; keywords, so admit only uppercase ASCII method tokens.
+               (re-matches #"[A-Z][A-Z0-9-]*" method)
                (not (.isAbsolute uri)) (nil? (.getRawAuthority uri))
                (nil? (.getRawFragment uri))
                (= path (.getPath uri) (.getRawPath (.normalize uri)))
                (every? (fn [[_ values]] (= 1 (count values))) fields))
       {:uri path
        :query-string (.getRawQuery uri)
-       :request-method (keyword (str/lower-case (.getRequestMethod exchange)))
+       :request-method (keyword (.toLowerCase ^String method Locale/ROOT))
        :headers (into {}
                       (map (fn [[name values]]
-                             [(str/lower-case name) (first values)])) fields)
+                             [(.toLowerCase ^String name Locale/ROOT) (first values)])) fields)
        :body (.getRequestBody exchange)
        :scheme :http
        :server-port (.getPort (.getLocalAddress exchange))
@@ -110,7 +115,8 @@
 
    Options: :host (default 127.0.0.1), :port (0..65535, default 0),
    :threads (1..64, default 8), :drain-timeout-ms (0..120000, default 5000).
-   Requests must use an unescaped, normalized origin-form path and one
+   Requests must use uppercase ASCII method names (letters, digits or
+   hyphens, beginning with a letter), an unescaped normalized origin-form path and one
    value per physical header name (comma-separated field values remain
    intact). Invalid requests get 400 before Ring dispatch. Raw query
    strings are unchanged. This is a deliberately narrow reference profile,

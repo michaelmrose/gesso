@@ -297,3 +297,24 @@
       (is (= "q=a%2Fb" (:query-string (first @seen))))
       (is (= "text/html, text/plain" (get-in (first @seen) [:headers "accept"])))
       (finally ((:stop! adapter) 2000) (.close client)))))
+
+(deftest physical-jdk-does-not-alias-case-sensitive-methods
+  (let [seen (atom [])
+        adapter (jdk/start! (fn [req]
+                              (swap! seen conj (:request-method req))
+                              {:status 200 :headers {} :body "ok"}) {})
+        client (HttpClient/newHttpClient)
+        send! (fn [method]
+                (.send client
+                       (-> (HttpRequest/newBuilder (URI/create (str (:base-url adapter) "/command")))
+                           (.method method (java.net.http.HttpRequest$BodyPublishers/noBody))
+                           (.build))
+                       (HttpResponse$BodyHandlers/ofString)))]
+    (try
+      (doseq [method ["post" "PoSt" "get" "GeT" "pUt"]]
+        (is (= 400 (.statusCode (send! method))) method))
+      (is (empty? @seen))
+      (doseq [method ["POST" "GET" "PUT" "PATCH"]]
+        (is (= 200 (.statusCode (send! method))) method))
+      (is (= [:post :get :put :patch] @seen))
+      (finally ((:stop! adapter) 2000) (.close client)))))
