@@ -84,10 +84,15 @@
         count-test! (fn [] (t/inc-report-counter :test)
                             (t/inc-report-counter :pass))]
     (with-redefs [t/test-vars (fn [vars]
-                               (reset! observed (mapv #(symbol (str (ns-name (:ns (meta %))))
-                                                             (str (:name (meta %)))) vars))
+                               (swap! observed into (mapv #(symbol (str (ns-name (:ns (meta %))))
+                                                                 (str (:name (meta %)))) vars))
                                (doseq [_ vars] (count-test!)))]
-      (is (= 11 (:test (gate/run-readiness!))))
+      (let [result (gate/run-readiness!)]
+        (is (= 11 (:test result)))
+        (is (= 11 (:pass result)))
+        (is (= @observed (mapv :case (:cases result))))
+        (is (every? #(= {:test 1 :pass 1 :fail 0 :error 0}
+                        (dissoc % :case)) (:cases result))))
       (is (= 11 (count (distinct @observed))))
       (is (every? (set @observed)
                   '[gesso.live.outbox.http-fragment-test/assembled-streams-share-capacity-and-use-original-model-policy
@@ -101,4 +106,24 @@
     (with-redefs [t/test-vars (fn [vars]
                                (doseq [_ (butlast vars)] (count-test!)))]
       (is (= :assertion-failure (reason gate/run-readiness!)))
-      (is (= :assertion-failure (reason gate/run-browser!))))))
+      (is (= :assertion-failure (reason gate/run-browser!))))
+    ;; A test can execute yet produce no assertions. Even with earlier
+    ;; positive counts, that case must fail closed and name the missing evidence.
+    (let [n (atom 0)]
+      (with-redefs [t/test-vars (fn [_]
+                                 (t/inc-report-counter :test)
+                                 (when (= 1 (swap! n inc))
+                                   (t/inc-report-counter :pass)))]
+        (let [data (try (gate/run-readiness!) nil
+                        (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+          (is (= :assertion-failure (:reason data)))
+          (is (= (second @observed) (:case data)))
+          (is (= {:test 1 :pass 0 :fail 0 :error 0} (:results data)))
+          (is (= 2 @n)))))))
+
+(deftest assertion-free-summary-cannot-authorize-gate-test
+  (with-redefs [gate/run-readiness! (constantly {:test 11 :pass 0 :fail 0 :error 0})
+                gate/preflight! (constantly {:status :environment-ready})
+                gate/run-browser! (constantly {:test 4 :pass 0 :fail 0 :error 0})]
+    (is (= :assertion-failure (reason #(gate/execute! :readiness))))
+    (is (= :assertion-failure (reason #(gate/execute! :browser))))))

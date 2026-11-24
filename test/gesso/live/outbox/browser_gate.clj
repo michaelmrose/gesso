@@ -119,21 +119,28 @@
   (when-not (and (seq vars) (= (count vars) (count (distinct vars)))
                  (every? #(and (var? %) (fn? (:test (meta %)))) vars))
     (reject! :invalid-test-selection {:selected (count vars)}))
-  (let [result (binding [test/*report-counters*
-                         (ref test/*initial-report-counters*)]
-                 (test/test-vars vars)
-                 @test/*report-counters*)]
-    (when-not (and (zero? (:fail result)) (zero? (:error result))
-                   (= (count vars) (:test result))
-                   (pos? (:pass result)))
-      (reject! :assertion-failure {:selected (count vars) :results result}))
-    result))
+  ;; Keep individual evidence: an assertion-free test must not borrow
+  ;; passing assertions from other selected scenarios.
+  (let [cases (mapv (fn [v]
+                      (let [identity (symbol (str (ns-name (:ns (meta v))))
+                                             (str (:name (meta v))))
+                            result (binding [test/*report-counters*
+                                             (ref test/*initial-report-counters*)]
+                                     (test/test-vars [v])
+                                     @test/*report-counters*)]
+                        (when-not (and (= 1 (:test result)) (pos? (:pass result))
+                                       (zero? (:fail result)) (zero? (:error result)))
+                          (reject! :assertion-failure {:case identity :results result}))
+                        (assoc result :case identity)))
+                    vars)]
+    (assoc (apply merge-with + (map #(dissoc % :case) cases)) :cases cases)))
 
 (defn- verified-selection! [results]
   ;; Be defensive even if a custom test runner returns a summary instead of
   ;; throwing. A zero-test or failing summary can NEVER authorize the gate.
   (when-not (and (map? results)
                  (integer? (:test results)) (pos? (:test results))
+                 (integer? (:pass results)) (pos? (:pass results))
                  (integer? (:fail results)) (zero? (:fail results))
                  (integer? (:error results)) (zero? (:error results)))
     (reject! :assertion-failure {:results results}))
