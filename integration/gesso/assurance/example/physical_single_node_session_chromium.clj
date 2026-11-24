@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-session-chromium
-  "v2341: Strict real Chromium/Aleph/session/CSRF/XTDB/Live gate.
+  "v2342: Strict real Chromium/Aleph/session/CSRF/XTDB/Live gate.
    Credentials are provisioned out of band, not via a production login."
   (:require [clojure.test :as t :refer [deftest is]]
             [gesso.assurance.example.physical-single-node-session :as session]
@@ -37,8 +37,10 @@
 
 (defn- wait-state! [page status revision]
   (chromium/wait-for-js!
-   page "([status, revision]) => { const f = document.querySelector('[data-gesso-proving-live-target]'); return !!f && f.dataset.slotStatus === status && Number(f.dataset.slotRevision) === revision; }"
-   [status revision]))
+   page "([status, revision]) => { const f = document.querySelector('[data-gesso-proving-live-target]'); return !!f && f.dataset.slotStatus === status && f.dataset.slotRevision === revision; }"
+   ;; Playwright Java 1.61 rejects boxed Clojure Long arguments. The dataset
+   ;; is already a string; compare the exact decimal revision without coercion.
+   [status (str revision)]))
 
 (defn- own-token? [page uri issued]
   ;; Return only a boolean, not the credential itself.
