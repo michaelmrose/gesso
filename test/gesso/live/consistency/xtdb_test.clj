@@ -4417,6 +4417,24 @@
               (is (= before @body-calls)
                   "Unsafe runtime obligations must not reach the request body"))))))))
 
+(deftest strict-request-frontier-refuses-one-empty-observation-test
+  (let [ctx {:xtdb/node :authority-node}
+        calls (atom 0)
+        time (Instant/parse "2026-01-01T00:00:00Z")]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        ;; The database becomes populated immediately after the first status
+        ;; observation. A second observation cannot retroactively admit it.
+        {:latest-completed-txs {"xtdb" (if (= 1 (swap! calls inc)) [] [{:tx-id 1 :system-time time}])}})
+      (fn []
+        (is (nil? (xtdb-live/bind-request-frontier ctx nil {:require-completed? true})))
+        (is (= 1 @calls))
+        (let [bound (xtdb-live/bind-request-frontier ctx nil {:require-completed? true})]
+          (is (= 2 @calls))
+          (is (some? (:biff.xtdb/snapshot-token bound)))
+          (is (some? (:gesso.live/progression bound))))))))
+
 (deftest bind-request-frontier-does-not-fabricate-initial-basis-test
   (let [ctx {:xtdb/node :authority-node
              :request/id :request-2}

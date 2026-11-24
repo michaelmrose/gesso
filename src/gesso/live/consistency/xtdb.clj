@@ -1974,6 +1974,9 @@
    An existing same-database requirement fails closed:
    without a completed frontier, ordinary Biff reads cannot be pinned to a
    snapshot satisfying that requirement. It never fabricates an initial basis.
+   The strict :require-completed? option returns nil on that same empty
+   observation instead of admitting an unconstrained request. It is used by
+   selected read transports that require authorization/query correspondence.
 
    If an HTTP/browser progression requirement is relevant, bind it into canonical
    context before calling this helper. The trusted current XTDB basis is then
@@ -1988,6 +1991,8 @@
   ([ctx]
    (bind-request-frontier ctx nil))
   ([ctx database]
+   (bind-request-frontier ctx database {}))
+  ([ctx database {:keys [require-completed?]}]
    (when-not (map? ctx)
      (throw
       (ex "XTDB request frontier binding requires a context map."
@@ -2062,52 +2067,53 @@
        ;; Returning an unchanged context would silently permit unconstrained
        ;; ordinary reads. Keep the initial empty-db case usable, and leave
        ;; independent requirements for other databases in the context.
-       (let [database-name (normalize-database-name database)
-             required (some (fn [candidate]
-                              (when (= database-name
-                                       (basis-database candidate))
-                                candidate))
-                            xtdb-required-bases)
-             _ (require-empty-selected-db-consistency!
-                database-name admitted-consistency)]
-         (when required
-           (throw
-            (ex "XTDB has no completed transaction and cannot satisfy an existing authoritative progression requirement."
-                {:database database-name
-                 :required required})))
-         ;; With no selected-database frontier, a preexisting Biff snapshot
-         ;; must not claim a timestamp for this unobserved database. A valid
-         ;; foreign-database token is independent evidence and may remain in
-         ;; the context. Reject malformed/noncanonical tokens rather than
-         ;; treating them as foreign, which would silently trust bad state.
-         (when-some [snapshot-token (:biff.xtdb/snapshot-token ctx)]
-           (let [token-databases
-                 (set (keys (decode-canonical-biff-snapshot!
-                             database-name snapshot-token)))]
-             (when (contains? token-databases database-name)
-               (throw
-                (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."
-                    {:database database-name
-                     :snapshot-token snapshot-token
-                     :reason :unobserved-selected-database})))))
-         ;; The selected database is unobserved, but independent databases
-         ;; can still be pinned by both ordinary Biff and Gesso-aware reads.
-         ;; Such overlapping foreign coordinates must agree at admission.
-         (require-compatible-biff-and-query-snapshots!
-          database-name (:biff.xtdb/snapshot-token ctx)
-          admitted-consistency :admission)
-         ;; Even with no admitted constraint or existing Biff wrapper, a
-         ;; fresh handler request can introduce a fabricated selected-db token
-         ;; or progression after binding. Guard that execution boundary for
-         ;; every empty database while leaving its snapshot/progression unset.
-         (assoc ctx :biff.core/wrap-db-snapshot
-                (guarded-empty-biff-snapshot-wrapper
-                 (:biff.core/wrap-db-snapshot ctx)
-                 database-name
-                 (:biff.xtdb/snapshot-token ctx)
-                 existing-requirement
-                 admitted-consistency
-                 bound-node)))))))
+       (when-not require-completed?
+         (let [database-name (normalize-database-name database)
+               required (some (fn [candidate]
+                                (when (= database-name
+                                         (basis-database candidate))
+                                  candidate))
+                              xtdb-required-bases)
+               _ (require-empty-selected-db-consistency!
+                  database-name admitted-consistency)]
+           (when required
+             (throw
+              (ex "XTDB has no completed transaction and cannot satisfy an existing authoritative progression requirement."
+                  {:database database-name
+                   :required required})))
+           ;; With no selected-database frontier, a preexisting Biff snapshot
+           ;; must not claim a timestamp for this unobserved database. A valid
+           ;; foreign-database token is independent evidence and may remain in
+           ;; the context. Reject malformed/noncanonical tokens rather than
+           ;; treating them as foreign, which would silently trust bad state.
+           (when-some [snapshot-token (:biff.xtdb/snapshot-token ctx)]
+             (let [token-databases
+                   (set (keys (decode-canonical-biff-snapshot!
+                               database-name snapshot-token)))]
+               (when (contains? token-databases database-name)
+                 (throw
+                  (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."
+                      {:database database-name
+                       :snapshot-token snapshot-token
+                       :reason :unobserved-selected-database})))))
+           ;; The selected database is unobserved, but independent databases
+           ;; can still be pinned by both ordinary Biff and Gesso-aware reads.
+           ;; Such overlapping foreign coordinates must agree at admission.
+           (require-compatible-biff-and-query-snapshots!
+            database-name (:biff.xtdb/snapshot-token ctx)
+            admitted-consistency :admission)
+           ;; Even with no admitted constraint or existing Biff wrapper, a
+           ;; fresh handler request can introduce a fabricated selected-db token
+           ;; or progression after binding. Guard that execution boundary for
+           ;; every empty database while leaving its snapshot/progression unset.
+           (assoc ctx :biff.core/wrap-db-snapshot
+                  (guarded-empty-biff-snapshot-wrapper
+                   (:biff.core/wrap-db-snapshot ctx)
+                   database-name
+                   (:biff.xtdb/snapshot-token ctx)
+                   existing-requirement
+                   admitted-consistency
+                   bound-node))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options

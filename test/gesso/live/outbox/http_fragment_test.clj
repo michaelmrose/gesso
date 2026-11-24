@@ -86,6 +86,11 @@
 (defn- reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
 
+(defn- initialize-read-frontier! [started]
+  ;; Explicit test setup, not a framework-generated transaction or domain write.
+  (xtdb/execute-tx! (:xtdb/connectable started)
+                    [[:put-docs :fixture_bootstrap {:xt/id "ready"}]]))
+
 (deftest canonical-fragment-admission-and-physical-progression-read
   (let [resolutions (atom []) authorizations (atom []) queries (atom []) fallback (atom 0)
         resolve-id (fn [ctx fragment]
@@ -121,6 +126,7 @@
                 path "/fragments/request-list/r1"
                 header progression-http/request-header-name]
             (try
+              (initialize-read-frontier! started)
               (is (= 405 (:status (handler {:request-method :post :uri path}))))
               (is (= 400 (:status (handler {:request-method :get :uri "/fragments/request-list/.."}))))
               (is (= 400 (.statusCode (send! path {header "%not-valid"}))))
@@ -193,6 +199,7 @@
                                         (zero? remaining) false
                                         :else (do (Thread/sleep 20) (recur (dec remaining))))))]
             (try
+              (initialize-read-frontier! started)
               (doseq [failure [false {:allowed? false} :changed-scope :exception]]
                 (reset! resolved "r1")
                 (reset! decision true)
@@ -281,6 +288,7 @@
                                         (zero? remaining) false
                                         :else (do (Thread/sleep 20) (recur (dec remaining))))))]
             (try
+              (initialize-read-frontier! started)
               ;; Current session authority cannot grant missing model scope authority.
               (reset! scope-allowed? false)
               (is (= 403 (:status (handler request))))
@@ -405,10 +413,15 @@
               (is (zero? (:subscription-count (source/stats (:source system)))))
               (finally (host/stop! started)))))))))
 
-(deftest selected-read-clock-is-fixed-across-authority-and-query-even-at-empty-startup
+(deftest selected-read-clock-is-fixed-across-authority-and-query-after-frontier-admission
   (let [observations (atom [])
         queries (atom [])
-        resolve-id (fn [ctx _] (get-in ctx [:path-params :id]))
+        resolutions (atom [])
+        sessions (atom [])
+        fallback (atom 0)
+        resolve-id (fn [ctx _]
+                     (swap! resolutions conj (:path-params ctx))
+                     (get-in ctx [:path-params :id]))
         observe (fn [ctx]
                   (let [clock (:current-time (live/consistency ctx))
                         sql "SELECT CURRENT_TIMESTAMP AS clock"
@@ -426,16 +439,35 @@
                                           {:fragment/id id})]
       (with-assembly
         (fn [assembly]
-          (let [started (host/start! assembly (constantly {:status 418})
-                                     (assoc (config) :assembled-fragments {:resolve-id resolve-id}))
+          (let [started (host/start! assembly (fn [_] (swap! fallback inc) {:status 418})
+                                     (assoc (config)
+                                            :assembled-fragments {:resolve-id resolve-id}
+                                            :assembled-sse {:resolve-id resolve-id
+                                                            :session-authorized? (fn [ctx] (swap! sessions conj (:path-params ctx)) true)
+                                                            :sse-options {:keepalive-ms nil}}))
                 node (:xtdb/connectable started)
                 handler (:biff.ring/handler started)
-                request {:request-method :get :uri "/fragments/request-list/r1"}]
+                request {:request-method :get :uri "/fragments/request-list/r1"}
+                stream-request (assoc request :uri "/streams/request-list/r1")
+                status (get started host/sse-status-key)
+                src (:source (:gesso.live/system started))]
             (try
               (is (nil? (xtdb/latest-completed-basis node)))
-              (is (= 200 (:status (handler request))))
-              (is (nil? (:progression (peek @observations))))
+              (is (= 400 (:status (handler request))))
+              (let [response (handler stream-request)]
+                (try (is (= 403 (:status response)))
+                     (finally (when (= 200 (:status response)) (stream/close! (:body response))))))
+              (is (empty? @resolutions))
+              (is (empty? @sessions))
+              (is (empty? @observations))
+              (is (empty? @queries))
+              (is (zero? @fallback))
+              (is (zero? ((:occupied-count status))))
+              (is (zero? ((:pending-authorization-count status))))
+              (is (zero? (:subscription-count (source/stats src))))
+              (is (nil? (xtdb/latest-completed-basis node)) "Refusal must not create a bootstrap transaction.")
               (xtdb/execute-tx! node [[:put-docs :requests {:xt/id "r1" :allowed true}]])
+              (is (= 200 (:status (handler request))))
               (is (= 200 (:status (handler request))))
               (is (some? (:progression (peek @observations))))
               (is (= 2 (count @observations) (count @queries)))
@@ -445,6 +477,12 @@
                 (is (= sql plan))
                 (is (= :conflicting-selected-read-clock override plan-override)))
               (is (not= (:clock (first @observations)) (:clock (second @observations))))
+              (let [response (handler stream-request)]
+                (try
+                  (is (= 200 (:status response)))
+                  (is (= 1 (:subscription-count (source/stats src))))
+                  (is (= [{:id "r1"}] @sessions))
+                  (finally (when (= 200 (:status response)) (stream/close! (:body response))))))
               (finally (host/stop! started)))))))))
 
 (deftest selected-authority-and-query-share-current-completed-xtdb-frontier
@@ -551,6 +589,7 @@
                 stream-path "/streams/request-list/r1"
                 request! (fn [path] (handler {:request-method :get :uri path}))]
             (try
+              (initialize-read-frontier! started)
               (is (= 200 (:status (request! fragment-path))))
               (let [response (request! stream-path)]
                 (is (= 200 (:status response)))
