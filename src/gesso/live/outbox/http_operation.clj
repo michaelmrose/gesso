@@ -47,6 +47,26 @@
                             "content-type" "text/plain; charset=utf-8"}
    :body "Command request not admitted."})
 
+(defn- run-command-or-deny [prepared context command bind-publication]
+  (try
+    (if bind-publication
+      (server/run-command
+       prepared context command
+       (fn [boundary]
+         (assoc (:ctx boundary) publication/preparation-key
+                (bind-publication boundary))))
+      (server/run-command prepared context command))
+    (catch clojure.lang.ExceptionInfo failure
+      (let [{:keys [error/type error/kind error/details]} (ex-data failure)]
+        ;; Both denial classes have the same public response. Neither is a
+        ;; semantic settlement. Unresolved and arbitrary execution failures
+        ;; must escape, since a transaction may already have committed.
+        (if (and (= :gesso.live.optimistic.resolved-operation/invalid-adapter type)
+                 (= :resolution-not-settleable kind)
+                 (#{:unavailable :incompatible} (:status details)))
+          nil
+          (throw failure))))))
+
 (defn- utf8-text [^ByteBuffer bytes]
   ;; A new decoder reports malformed/unmappable input by default. Neither
   ;; raw request bytes nor percent escapes may introduce replacement text.
@@ -198,18 +218,13 @@
                                   (assoc :form-params form :path-params captured))]
                   (if-not (true? (authorize? context))
                     (response 403)
-                    (let [send (if bind-publication
-                                 (server/run-command
-                                  prepared context command
-                                  (fn [boundary]
-                                    (assoc (:ctx boundary) publication/preparation-key
-                                           (bind-publication boundary))))
-                                 (server/run-command prepared context command))
-                          result (http/html-response (ui/optimistic-settlement-marker (:settlement send)))]
-                      ;; Serialize before recording handoff. No exception from
-                      ;; execution or serialization becomes a fabricated rejection.
-                      (server/complete-settlement-send send)
-                      (update result :headers assoc "cache-control" "no-store"
-                              "HX-Reswap" "none"))))))
+                    (if-let [send (run-command-or-deny prepared context command bind-publication)]
+                      (let [result (http/html-response (ui/optimistic-settlement-marker (:settlement send)))]
+                        ;; Serialize before recording handoff. No exception from
+                        ;; execution or serialization becomes a fabricated rejection.
+                        (server/complete-settlement-send send)
+                        (update result :headers assoc "cache-control" "no-store"
+                                "HX-Reswap" "none"))
+                      (response 403))))))
             (response 400)))
         (fallback (dissoc request publication/preparation-key)))))))

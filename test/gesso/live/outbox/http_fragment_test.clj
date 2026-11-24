@@ -585,9 +585,11 @@
                         intents (xt/q node ["SELECT * FROM gesso_live_outbox"])
                         observed (atom [])
                         reconcile publication/reconcile-command!
-                        attempt! (fn [cmd]
-                                   (try (post-command! headers cmd)
-                                        (catch java.io.IOException e e)))]
+                        denied (fn [response]
+                                 [(.statusCode response) (.body response)
+                                  (.orElse (.firstValue (.headers response) "cache-control") "")
+                                  (.orElse (.firstValue (.headers response) "content-type") "")])
+                        expected [403 "Command request not admitted." "no-store" "text/plain; charset=utf-8"]]
                     (is (= 403 (.statusCode (post-command! (dissoc headers "authorization") retry))))
                     (is (= before (counts)))
                     (with-redefs [publication/reconcile-command!
@@ -597,10 +599,9 @@
                                       result))]
                       (reset! disclosure-allowed? false)
                       (try
-                        (is (instance? java.io.IOException (attempt! retry)))
+                        (is (= expected (denied (post-command! headers retry))))
                         (finally (reset! disclosure-allowed? true)))
-                      (is (instance? java.io.IOException
-                                     (attempt! (assoc retry :arguments {:request-id "r2"}))))
+                      (is (= expected (denied (post-command! headers (assoc retry :arguments {:request-id "r2"})))))
                       (is (= [{:status :unavailable} {:status :incompatible}] @observed)))
                     (is (= (+ 2 (first before)) (count @invocations)))
                     (is (= (subvec before 1) (subvec (counts) 1)))
