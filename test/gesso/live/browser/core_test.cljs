@@ -951,7 +951,13 @@
         cleanup (fn [root] (core/on-before-cleanup!
                             runtime (:event (make-event "htmx:beforeCleanupElement" {:elt root}))))]
     (core/notify-fragment! runtime "panel" requirement)
-    (bind-request! runtime old xhr)
+    (core/on-before-request!
+     runtime (:event (make-event "htmx:beforeRequest"
+                                 {:elt old :xhr xhr
+                                  :extra-detail {:requestConfig
+                                                 #js {:triggeringEvent
+                                                      #js {:type core/refresh-event-name :target old
+                                                           :detail (:detail (first @(:calls htmx)))}}}})))
     (core/notify-fragment! runtime "panel")
     (reset! policy "explicit-refresh")
     (is (= :acquisition-owner-replacement
@@ -1443,6 +1449,78 @@
     (is (true? (core/on-before-request! runtime (:event fixture))))
     (is (nil? (core/active-request runtime root)))
     (is (false? @(:prevented? fixture)))))
+
+(deftest automatic-managed-root-requires-exact-coordinator-grant-test
+  (doseq [policy [nil "automatic"]]
+    (let [attrs (atom (cond-> {"hx-trigger" core/refresh-event-name "hx-swap" "outerHTML"}
+                        policy (assoc core/acquisition-policy-attribute policy)))
+          root (make-managed-root "panel")
+          original (.-getAttribute root)
+          _ (aset root "getAttribute" (fn [k] (if (= k core/fragment-attribute)
+                                               (original k) (get @attrs k))))
+          doc (make-document [root])
+          htmx (make-htmx)
+          runtime (core/create {:document (:document doc) :htmx (:htmx htmx)})
+          requirement (progression/requirement {:tx-id 811 :system-time "2026-08-26T08:10:11Z"})
+          request (fn [source trigger]
+                    (let [headers #js {}
+                          xhr (:xhr (make-xhr 200))
+                          config (make-event "htmx:configRequest"
+                                             {:elt source :extra-detail {:headers headers :triggeringEvent trigger}})
+                          before (make-event "htmx:beforeRequest"
+                                             {:elt source :xhr xhr
+                                              :extra-detail {:requestConfig #js {:triggeringEvent trigger}}})]
+                      (core/on-config-request! runtime (:event config))
+                      (core/on-before-request! runtime (:event before))
+                      {:config @(:prevented? config) :before @(:prevented? before)
+                       :headers headers :xhr xhr}))
+          refused? #(and (:config %) (:before %)
+                         (nil? (aget (:headers %) progression.http/request-header-name)))]
+      (is (refused? (request root nil)))
+      (swap! attrs #(-> % (dissoc "hx-trigger") (assoc "data-hx-trigger" core/refresh-event-name)))
+      (is (refused? (request root nil)))
+      (swap! attrs #(-> % (dissoc "data-hx-trigger")
+                        (assoc "hx-trigger" "click" core/acquisition-policy-attribute "automatic")))
+      (is (refused? (request root nil)))
+      (swap! attrs #(cond-> (assoc % "hx-trigger" core/refresh-event-name)
+                      (nil? policy) (dissoc core/acquisition-policy-attribute)))
+      (is (nil? (core/active-request runtime root)))
+      (begin-refresh! runtime "panel" requirement)
+      (let [pending (core/pending-refresh runtime root)
+            detail (:detail (first @(:calls htmx)))
+            trigger #js {:type core/refresh-event-name :target root :detail detail}
+            forged #js {:type core/refresh-event-name :target root
+                        :detail #js {:fragmentId "panel"
+                                     :requestGeneration (:request-generation pending)
+                                     :gessoRefreshGrant #js {}}}]
+        (is (refused? (request root nil)))
+        (is (refused? (request root #js {:type "click" :target root})))
+        (is (refused? (request root forged)))
+        (is (refused? (request root #js {:type core/refresh-event-name :target (make-child root) :detail detail})))
+        (let [nested (request (make-child root) nil)]
+          (is (not (:config nested)))
+          (is (not (:before nested))))
+        (swap! attrs assoc "hx-trigger" "click")
+        (is (refused? (request root nil)))
+        (is (refused? (request root trigger)))
+        (swap! attrs assoc "hx-trigger" core/refresh-event-name)
+        (is (= pending (core/pending-refresh runtime root)))
+        (is (nil? (core/active-request runtime root)))
+        (let [{:keys [config before headers xhr]} (request root trigger)]
+          (is (not config))
+          (is (not before))
+          (is (= requirement (progression.http/decode-request-progression
+                              (aget headers progression.http/request-header-name))))
+          (is (nil? (core/pending-refresh runtime root)))
+          (is (some? (core/active-request runtime root)))
+          (is (refused? (request root trigger)))
+          (before-swap! runtime root xhr)
+          (after-swap! runtime root xhr)
+          (after-request! runtime root xhr true)
+          (is (nil? (core/active-request runtime root)))
+          (is (refused? (request root nil)))
+          (swap! attrs dissoc "hx-trigger" core/acquisition-policy-attribute)
+          (is (refused? (request root nil))))))))
 
 (deftest managed-before-request-consumes-pending-and-binds-exact-physical-request-test
   (let [{:keys [runtime root]}

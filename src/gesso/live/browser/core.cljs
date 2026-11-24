@@ -653,6 +653,13 @@
     "explicit-refresh" :explicit-refresh
     nil))
 
+(defn- managed-acquisition-candidate?
+  [root]
+  (and (fragment-root? root)
+       (or (managed-fragment-root? root)
+           (= refresh-event-name (some-> (element-attr root "data-hx-trigger") str/trim))
+           (some? (element-attr root acquisition-policy-attribute)))))
+
 (defn- current-acquisition-owner?
   [runtime root]
   (let [owner (get @(:acquisition-owners runtime) (fragment-id-from-root root))]
@@ -673,7 +680,8 @@
                (not (.has (:retired-acquisition-roots runtime) root)))
       (if owner
         (current-acquisition-owner? runtime root)
-        (do (swap! (:acquisition-owners runtime) assoc id {:root root :policy policy})
+        (do (swap! (:acquisition-owners runtime) assoc id {:root root :policy policy
+                                                            :managed? (boolean (managed-acquisition-candidate? root))})
             true)))))
 
 (defn- weak-get
@@ -794,7 +802,7 @@
                         {:fragment-id fragment-id
                          :effect effect})))
              explicit? (explicit-refresh-root? root)
-             grant (when explicit? (js-obj))
+             grant (when (managed-acquisition-candidate? root) (js-obj))
              pending (cond-> {:fragment-id fragment-id
                               :request-generation (:request-generation effect)
                               :requirements (set (:requirements effect))}
@@ -1312,21 +1320,29 @@
   [root event]
   (identical? root (detail-field event "elt")))
 
-(defn- explicit-request-authorized?
+(defn- managed-request-authorized?
   [runtime root event pending]
   (let [config (or (detail-field event "requestConfig") (event-detail event))
         trigger (some-> config (aget "triggeringEvent"))
         grant (:grant pending)]
     (and grant
-         (explicit-refresh-root? root)
-         (unique-current-root? runtime root)
+         (managed-fragment-root? root)
+         (current-acquisition-owner? runtime root)
          (= refresh-event-name (some-> trigger .-type))
          (identical? root (some-> trigger .-target))
          (identical? grant (some-> trigger .-detail (aget "gessoRefreshGrant"))))))
 
-(defn- explicit-boundary?
-  [root pending]
-  (or (:grant pending) (explicit-refresh-root? root)))
+(defn- managed-request-boundary?
+  "A policy marker or admitted managed owner keeps the request boundary
+   in force even if its trigger is subsequently damaged. Legacy unmanaged
+   roots retain their separate compatibility path."
+  [runtime root pending]
+  (or (:grant pending)
+      (managed-acquisition-candidate? root)
+      (and root
+           (or (.has (:retired-acquisition-roots runtime) root)
+               (:managed? (get @(:acquisition-owners runtime)
+                               (fragment-id-from-root root)))))))
 
 (defn- stale-managed-trigger?
   [runtime root event pending]
@@ -1366,12 +1382,12 @@
            (not (current-acquisition-owner? runtime root)))
       (prevent-event! event)
 
-      (and (explicit-boundary? root pending)
+      (and (managed-request-boundary? runtime root pending)
            (not (root-issued-request? root event)))
       nil
 
-      (and (explicit-boundary? root pending)
-           (not (explicit-request-authorized? runtime root event pending)))
+      (and (managed-request-boundary? runtime root pending)
+           (not (managed-request-authorized? runtime root event pending)))
       (prevent-event! event)
 
       (stale-managed-trigger? runtime root event pending)
@@ -1438,12 +1454,12 @@
            (not (current-acquisition-owner? runtime root)))
       (prevent-event! event)
 
-      (and (explicit-boundary? root pending)
+      (and (managed-request-boundary? runtime root pending)
            (not (root-issued-request? root event)))
       nil
 
-      (and (explicit-boundary? root pending)
-           (not (explicit-request-authorized? runtime root event pending)))
+      (and (managed-request-boundary? runtime root pending)
+           (not (managed-request-authorized? runtime root event pending)))
       (prevent-event! event)
 
       (stale-managed-trigger? runtime root event pending)
