@@ -5,6 +5,7 @@
   (:require
    [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight :as application]
+   [gesso.live.ui :as ui]
    [gesso.live.application-preflight.fixture
     :refer [error-data error-kind error-kinds render-context
             rendered-operation-button standard-operations
@@ -321,3 +322,22 @@
                (set (map :kind (application/open-obligations assembly)))))
         (is (= :application-runtime-backbone-preflight-closed
                (:guarantee (application/explain assembly))))))))
+
+(deftest managed-acquisition-errors-prevent-actual-response-rendering
+  (let [panel (ui/fragment-panel {:id "panel" :src "/fragment" :stream-url "/stream"})
+        rendered [:main {:hx-select-oob "#foreign"} panel]
+        calls (atom 0)]
+    (with-closed-application
+      (fn [{:keys [assembly]}]
+        (let [report (application/check-rendered-surface assembly :board rendered)
+              data (error-data #(application/checked-rendered-response!
+                                 assembly :board (fn [_] (swap! calls inc)) rendered))]
+          (is (not (application/rendered-surface-valid? report)))
+          (is (some #(= :rendered-managed-acquisition-config (:kind %)) (:errors report)))
+          (is (= :rendered-surface-preflight-failed (:error/kind data)))
+          (is (zero? @calls)))))
+    (with-surfaced-application
+      {:board rendered}
+      (fn [{:keys [report]}]
+        (is (false? (:valid? report)))
+        (is (some #(= :rendered-managed-acquisition-config (:kind %)) (:errors report)))))))

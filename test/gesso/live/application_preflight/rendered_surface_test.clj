@@ -381,3 +381,33 @@
     (is (vector? (:errors first-result)))
     (is (vector? (:affordances first-result)))
     (is (empty? (:errors first-result)))))
+
+(defn- managed-panel []
+  (ui/fragment-panel {:id "panel" :src "/fragment" :stream-url "/stream"
+                      :acquisition-policy :explicit-refresh}))
+
+(deftest managed-acquisition-config-is-checked-on-rendered-surfaces
+  (let [panel (managed-panel)]
+    (is (empty? (:errors (analyze {:page [:main panel]}))))
+    (doseq [[rendered reason path attribute]
+            [[[:main {:hx-select-oob "#other"} panel] :unsupported-selection [] "hx-select-oob"]
+             [[:main {"DATA-HX-PUSH-URL" "/other"} panel] :unsupported-history [] "data-hx-push-url"]
+             [[:main {:hx-ext "ignore:debug"} (list [:<> panel])] :unsupported-extension [] "hx-ext"]
+             [(assoc-in panel [1 :hx-swap] "none") :unsupported-swap [] "hx-swap"]
+             [(update-in panel [1] dissoc :hx-swap) :unsupported-swap [] "hx-swap"]
+             [(update-in panel [3] conj [:span {:hx-ext "debug"}]) :unsupported-extension [3 2] "hx-ext"]
+             [(update-in panel [3] conj [:span {:hx-trigger "sse:update"}]) :unsupported-sse-affordance [3 2] "hx-trigger"]
+             [(assoc-in panel [2 1 :data-gesso-live-invalidation] "foreign") :unsupported-sse-affordance [2] "data-gesso-live-invalidation"]]]
+      (let [result (analyze {:page rendered})
+            found (some #(when (and (= reason (:reason %)) (= attribute (:attribute %))) %) (:errors result))]
+        (is (= :rendered-managed-acquisition-config (:kind found)))
+        (is (= :page (:surface found)))
+        (is (= "panel" (:fragment-id found)))
+        (is (= path (:render-path found)))
+        (is (vector? (:owner-render-path found)))))
+    (is (empty? (:errors (analyze {:page [:main [:section {:hx-ext "debug"}]
+                                         [:script {:src "/assets/app.js"}]
+                                         panel]}))))
+    (is (empty? (:errors (analyze {:page [:div {:data-gesso-live-fragment "legacy"
+                                               :hx-trigger "sse:update"
+                                               :hx-swap "none"}]}))))))
