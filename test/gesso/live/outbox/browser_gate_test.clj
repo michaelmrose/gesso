@@ -2,7 +2,7 @@
   "v2113: fail-closed browser-gate orchestration and reason classification.
 
    These are JVM unit tests and do NOT count as real Chromium convergence."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :as t :refer [deftest is]]
             [gesso.live.outbox.browser-gate :as gate]))
 
 (defn- reason [f]
@@ -77,3 +77,24 @@
            (reason #(gate/execute! :browser)))))
   (with-redefs [gate/run-readiness! (fn [] {:test 0 :pass 0 :fail 0 :error 0})]
     (is (= :assertion-failure (reason #(gate/execute! :readiness))))))
+
+
+(deftest readiness-selection-requires-every-selected-case-test
+  (let [observed (atom [])
+        count-test! (fn [] (t/inc-report-counter :test)
+                            (t/inc-report-counter :pass))]
+    (with-redefs [t/test-vars (fn [vars]
+                               (reset! observed (mapv #(symbol (str (ns-name (:ns (meta %))))
+                                                             (str (:name (meta %)))) vars))
+                               (doseq [_ vars] (count-test!)))]
+      (is (= 7 (:test (gate/run-readiness!))))
+      (is (= 7 (count (distinct @observed))))
+      (is (every? (set @observed)
+                  '[gesso.live.outbox.http-fragment-test/assembled-streams-share-capacity-and-use-original-model-policy
+                    gesso.live.outbox.http-fragment-test/installed-model-command-recovers-submitted-transaction-without-replay-write
+                    gesso.live.outbox.frontier-recovery-test/submitted-receipt-survives-cycle-interruption-and-rescan-test])))
+    ;; Positive but incomplete test counts used to satisfy the gate.
+    (with-redefs [t/test-vars (fn [vars]
+                               (doseq [_ (butlast vars)] (count-test!)))]
+      (is (= :assertion-failure (reason gate/run-readiness!)))
+      (is (= :assertion-failure (reason gate/run-browser!))))))

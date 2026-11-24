@@ -20,7 +20,9 @@
             [clojure.test :as test]
             [gesso.live.browser.chromium :as chromium]
             [gesso.live.outbox.browser-integration :as integration]
-            [gesso.live.outbox.browser-restart-test :as restart])
+            [gesso.live.outbox.browser-restart-test :as restart]
+            [gesso.live.outbox.frontier-recovery-test :as frontier]
+            [gesso.live.outbox.http-fragment-test :as installed])
   (:import [com.sun.net.httpserver HttpHandler HttpServer]
            [java.net InetSocketAddress]
            [java.nio.charset StandardCharsets]))
@@ -112,13 +114,17 @@
                 ((:stop! server))))))))))
 
 (defn- test-selection! [vars]
+  (when-not (and (seq vars) (= (count vars) (count (distinct vars)))
+                 (every? #(and (var? %) (fn? (:test (meta %)))) vars))
+    (reject! :invalid-test-selection {:selected (count vars)}))
   (let [result (binding [test/*report-counters*
                          (ref test/*initial-report-counters*)]
                  (test/test-vars vars)
                  @test/*report-counters*)]
     (when-not (and (zero? (:fail result)) (zero? (:error result))
-                   (pos? (:test result)))
-      (reject! :assertion-failure {:results result}))
+                   (= (count vars) (:test result))
+                   (pos? (:pass result)))
+      (reject! :assertion-failure {:selected (count vars) :results result}))
     result))
 
 (defn- verified-selection! [results]
@@ -138,7 +144,10 @@
    [#'integration/canonical-browser-page-and-authoritative-fragment-over-loopback-test
     #'integration/actual-http-fragment-read-honors-source-progression-test
     #'integration/physical-sse-frame-progresses-exact-authoritative-fragment-http-test
-    #'integration/two-source-events-refresh-one-http-sse-connection-test]))
+    #'integration/two-source-events-refresh-one-http-sse-connection-test
+    #'installed/assembled-streams-share-capacity-and-use-original-model-policy
+    #'installed/installed-model-command-recovers-submitted-transaction-without-replay-write
+    #'frontier/submitted-receipt-survives-cycle-interruption-and-rescan-test]))
 
 (defn run-browser!
   "The STRICT real-browser scenario, not the HTTP-only readiness selection."
