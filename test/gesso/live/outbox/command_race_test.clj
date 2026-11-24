@@ -837,6 +837,8 @@
         recovery-state (atom nil)
         submissions (atom [])
         writers (atom [])
+        seed-admitted? (atom false)
+        policy-admissions (atom [])
         execute-adapter xtdb/execute-tx!
         execute xtdb/execute-tx-from!
         observed (atom [])
@@ -952,6 +954,15 @@
         resolve-id (fn [ctx _] (or (get-in ctx [:headers "fragment-id"])
                                   (when (= "scope=l1" (:query-string ctx)) "l1")))
         config {:xtdb-config {} :source-id "v2480-claim" :rules-context {}
+                :xtdb-submission-policy!
+                (fn [{:keys [api tx-ops tx-options]}]
+                  (when (and (= :execute-tx api) (empty? tx-options))
+                    (let [kind (try (semantics/writer-kind! seed "v2480-claim" "v2480" tx-ops)
+                                    (catch clojure.lang.ExceptionInfo _ nil))]
+                      (when (and kind (or (not= :initializer (:kind kind))
+                                          (compare-and-set! seed-admitted? false true)))
+                        (swap! policy-admissions conj kind)
+                        true))))
                 :worker-options {:worker-id "v2480" :poll-ms 20} :live-options {}
                 :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                               :require-derived-model? true
@@ -1282,7 +1293,18 @@
                    (is (refused? (conj worker-ops [:put-docs :memberships {:xt/id helper :active false}])))
                    (is (refused? (conj worker-ops ["DELETE FROM requests"])))
                    (is (refused? (assoc-in worker-ops [(dec (count worker-ops)) 2 :gesso.live.outbox/source-id] "other")))
-                   (is (refused? (assoc-in seed [0 2 :status] :claimed))))
+                   (is (refused? (assoc-in seed [0 2 :status] :claimed)))
+                   (is (= (frequencies @policy-admissions)
+                          (frequencies (map #(dissoc % :result :ops) entries))))
+                   ;; Direct adapter callers cannot repeat initialization or
+                   ;; use the asynchronous API to bypass the installed policy.
+                   (let [before (semantics/snapshot-at-frontier! node)
+                         denied (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+                     (is (= :submission-policy-refused (denied #(execute-adapter node seed nil))))
+                     (is (= :submission-policy-refused (denied #(xtdb/submit-tx! node seed))))
+                     (is (= :submission-policy-refused
+                            (denied #(execute-adapter node [[:put-docs :requests (assoc (get-in seed [0 2]) :status :claimed)]] nil))))
+                     (is (= before (semantics/snapshot-at-frontier! node)))))
                  (when valid?
                    (revoke! (get-in credentials [session :session-id]))
                    (is (= 403 (:status (request! (headers-for session) id "revoked-replay" true))))

@@ -21,6 +21,7 @@
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.affordance :as affordance]
             [gesso.live.core :as live]
+            [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http :as http]
             [gesso.live.outbox.http-jdk :as jdk]
@@ -53,7 +54,7 @@
                          :reason reason))))
 
 (def ^:private allowed-config
-  #{:xtdb-config :live-options :source-id :worker-options :rules-context
+  #{:xtdb-config :xtdb-submission-policy! :live-options :source-id :worker-options :rules-context
     :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
@@ -78,6 +79,9 @@
                      (every? #{:poll-ms :min-interval-ms :max-attempts
                                :max-failure-interval-ms} (keys options)))
         (reject! :invalid-sse-recovery-options {}))))
+  (when (and (contains? config :xtdb-submission-policy!)
+             (not (fn? (:xtdb-submission-policy! config))))
+    (reject! :invalid-xtdb-submission-policy {}))
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -142,16 +146,22 @@
                    {:path path :conflicts conflicts}))))))
 
 (defn- start-xtdb! [system]
-  (let [node (managed/acquire-startup-resource!
+  (let [release (atom nil)
+        close! (fn [node]
+                 (.close ^java.lang.AutoCloseable node)
+                 (when-let [f @release] (f)))
+        node (managed/acquire-startup-resource!
               :gesso.live.outbox.host/node
               #(xtn/start-node (get-in system [config-key :xtdb-config]))
-              #(.close ^java.lang.AutoCloseable %))]
+              close!)]
+    (when-let [policy (get-in system [config-key :xtdb-submission-policy!])]
+      (reset! release (xtdb/register-submission-policy! node policy)))
     (manifest/require-compatible! node (get-in system [config-key :source-id])
                                   (::publication-manifest system))
-    (assoc system :xtdb/connectable node)))
+    (assoc system :xtdb/connectable node ::close-node! close!)))
 
 (defn- stop-xtdb! [system]
-  (.close ^java.lang.AutoCloseable (:xtdb/connectable system)))
+  ((::close-node! system) (:xtdb/connectable system)))
 
 (defn- start-live! [system]
   (when-not (:xtdb/connectable system)
@@ -286,6 +296,9 @@
    :assembly must be the current Gesso ApplicationAssembly. :handler must
    return actual Ring responses suitable for the canonical HTML preflight.
    :xtdb-config is explicitly required; {} requests volatile XTDB storage.
+   Optional :xtdb-submission-policy! is a trusted admission predicate installed
+   on the owned node before manifest establishment and retained until close.
+   It covers adapter submit/execute calls, not direct or external XTDB writes.
    :live-options allows only owned :rules, :source-options, :dispatch-options.
    :source-id, :worker-options and :rules-context are mandatory. The worker
    is installed AFTER providers, and cannot be omitted or re-ordered.

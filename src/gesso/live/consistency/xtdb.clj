@@ -146,7 +146,36 @@
              (restore-interrupt! error)
              nil)))))
 
+(def ^:private submission-policies (java.util.IdentityHashMap.))
+
+(defn register-submission-policy!
+  "Install a trusted admission predicate for this exact connectable identity.
+   Install before exposing the node or starting writers. Both adapter APIs
+   require literal true on the exact operations and filtered options. The
+   returned zero-arg release function is for use AFTER closing the node;
+   this is not a drain mechanism or protection against raw XTDB callers."
+  [connectable admit?]
+  (when-not (and connectable (fn? admit?))
+    (throw (ex-info "Invalid XTDB submission policy." {:reason :invalid-submission-policy})))
+  (let [entry {:admit? admit?}]
+    (locking submission-policies
+      (when (.containsKey submission-policies connectable)
+        (throw (ex-info "XTDB submission policy already registered." {:reason :duplicate-submission-policy})))
+      (.put submission-policies connectable entry))
+    (fn []
+      (locking submission-policies
+        (when (identical? entry (.get submission-policies connectable))
+          (.remove submission-policies connectable)))
+      nil)))
+
+(defn- require-submission-admission! [api connectable tx-ops tx-options]
+  (when-let [entry (locking submission-policies (.get submission-policies connectable))]
+    (when-not (true? ((:admit? entry) {:api api :tx-ops tx-ops :tx-options tx-options}))
+      (throw (ex-info "XTDB submission refused before API invocation."
+                      {:error/type ::submission-refused :reason :submission-policy-refused})))))
+
 (defn- invoke-xtdb-api! [api operation connectable tx-ops tx-options]
+  (require-submission-admission! api connectable tx-ops tx-options)
   ;; Capture immediately adjacent to the *actual* adapter API invocation, not
   ;; by replaying prepare or accepting an application-reported operation list.
   ;; The recorded argument object is the exact argument handed to the bound

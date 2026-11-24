@@ -77,6 +77,7 @@
 (deftest concrete-host-fails-closed-before-starting-invalid-config-test
   (doseq [[change reason]
           [[{:xtdb-config nil} :invalid-xtdb-config]
+           [{:xtdb-submission-policy! nil} :invalid-xtdb-submission-policy]
            [{:live-options {:rules {}}} :invalid-live-rules]
            [{:live-options {:rules [] :source (atom nil)}} :unowned-live-component]
            [{:live-options {:rules [] :dispatcher (atom nil)}} :unowned-live-component]
@@ -756,3 +757,27 @@
              (host/stop! started)
              (is ((:drained? listener)))))
          (finally (host/stop! started) (.close client)))))))
+
+(deftest host-policy-refuses-manifest-and-rolls-back-node-test
+  (setup
+   (fn [assembly handler]
+     (let [opened (atom nil) decisions (atom []) original-start xtn/start-node
+           data (with-redefs [xtn/start-node (fn [opts] (let [node (original-start opts)]
+                                                         (reset! opened node) node))]
+                  (problem #(host/start! assembly handler
+                               (assoc (config) :live-options {}
+                                      :assembled-publication {:subject-keys {:request :request/location-id
+                                                                            :request-assignment :request/location-id
+                                                                            :audit :request/location-id}}
+                                      :xtdb-submission-policy!
+                                      (fn [input] (swap! decisions conj input) false)))))]
+       (is (= :gesso.live.outbox/checked-startup-failed (:error/type data)))
+       (is (= :drained (:rollback/status data)))
+       (is (= 1 (count @decisions)))
+       (is (= :execute-tx (:api (first @decisions))))
+       (is (some? @opened))
+       (is (thrown? Exception (xt/q @opened ["SELECT 1 AS x"])))
+       ;; The rollback releases the registration after closing the node.
+       (let [release (live.xtdb/register-submission-policy! @opened (constantly false))]
+         (is (fn? release))
+         (release))))))

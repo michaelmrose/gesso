@@ -503,3 +503,35 @@
       (is (identical? (:tx-result finished) (:tx-result result)))
       (is (= [{:xt/id id :name "committed"}] rows))
       (is (= :not-issued (:certificate report))))))
+
+(deftest installed-policy-refuses-both-apis-before-capture-test
+  (let [node (Object.) other (Object.) calls (atom []) decisions (atom [])
+        admit? (fn [input] (swap! decisions conj input)
+                 (and (= source-ops (:tx-ops input)) (= {:database :xtdb} (:tx-options input))))
+        release (live/register-submission-policy! node admit?)]
+    (try
+      (is (= :duplicate-submission-policy
+             (:reason (try (live/register-submission-policy! node (constantly true)) nil
+                           (catch clojure.lang.ExceptionInfo e (ex-data e))))))
+      (with-seams {'*submit-tx* (fn [& args] (swap! calls conj args) {:tx-id 71})
+                   '*execute-tx* (fn [& args] (swap! calls conj args) (transaction-key 72))}
+        (fn []
+          (doseq [[api call] [[:submit-tx live/submit-tx!] [:execute-tx live/execute-tx!]]]
+            (let [bad (capture #(call node source-ops {:database :other}))]
+              (is (= :threw (:outcome bad)))
+              (is (= :submission-policy-refused (:reason (ex-data (:error bad)))))
+              (is (empty? (:events bad)))
+              (is (= {:api api :tx-ops source-ops :tx-options {:database :other}} (peek @decisions))))
+            (is (= :returned (:outcome (capture #(call node source-ops {:database :xtdb :debug-fn identity})))))
+            (is (= :returned (:outcome (capture #(call other source-ops))))))
+          (is (= 4 (count @calls)))
+          (is (= 4 (count @decisions)))))
+      (finally (release)))
+    ;; A stale release cannot remove a later registration for the same object.
+    (let [next-release (live/register-submission-policy! node (constantly :truthy))]
+      (try
+        (release)
+        (let [r (capture #(live/submit-tx! node source-ops))]
+          (is (= :submission-policy-refused (:reason (ex-data (:error r)))))
+          (is (empty? (:events r))))
+        (finally (next-release))))))
