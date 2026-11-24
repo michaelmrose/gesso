@@ -675,7 +675,9 @@
 (defn- check-targets [checks]
   (set (map (fn [[table id _ _]] [table id]) checks)))
 
-(defn- require-predicate-contract! [declared targets]
+(defn require-predicate-contract!
+  "Admit independently declared exact guard and update checks against targets."
+  [declared targets]
   ;; This trusted callback is evaluated BEFORE :construct! and has no access
   ;; to the constructed plan. The ledger is a create, not an update version
   ;; check: domain code must never declare ledger predicates.
@@ -719,7 +721,9 @@
                          (get-in entry [:model/expected :model/checks])))))
         entries))
 
-(defn- require-plan-predicate-coverage! [declared incorporated]
+(defn require-plan-predicate-coverage!
+  "Check actual canonical guard and update predicates against admitted checks."
+  [declared incorporated]
   (when declared
     (let [plan (:plan incorporated)
           guards (actual-checks (:guards plan) tx/guard-target)

@@ -498,7 +498,8 @@
   (let [mode (atom :wrong)
         trace (atom [])
         submissions (atom 0)
-        tables {:required-guard-tables #{} :allowed-guard-tables #{}
+        member {:xt/id "m1" :revision 0 :created-at "t0" :updated-at "t0" :active true}
+        tables {:required-guard-tables #{:memberships} :allowed-guard-tables #{:memberships}
                 :required-write-tables #{:requests :gesso_commands}
                 :allowed-write-tables #{:requests :gesso_commands}}
         doc (fn [id] {:xt/id id :status :claimed :revision 0
@@ -511,9 +512,17 @@
               :target-contract! (fn [_ binding]
                                   (swap! trace conj :declare)
                                   (let [target [:requests (get-in binding [:arguments :request-id])]]
-                                    {:required-guard-targets #{} :allowed-guard-targets #{}
+                                    {:required-guard-targets #{[:memberships "m1"]}
+                                     :allowed-guard-targets #{[:memberships "m1"]}
                                      :required-write-targets (if (= :invalid @mode) #{} #{target})
                                      :allowed-write-targets #{target}}))
+              :predicate-contract! (fn [_ _]
+                                     (swap! trace conj :declare-predicate)
+                                     {:required-guard-checks (if (= :invalid-predicate @mode) #{} #{[:memberships "m1" :active true]})
+                                      :allowed-guard-checks #{[:memberships "m1" :active true]
+                                                              [:memberships "m1" :revision 0]
+                                                              [:memberships "m1" :updated-at "t0"]}
+                                      :required-update-checks #{} :allowed-update-checks #{}})
               :command-operation-contract! (fn [_ binding]
                                              (swap! trace conj :declare-operation)
                                              (let [entry [:requests (get-in binding [:arguments :request-id])
@@ -523,7 +532,11 @@
               :construct! (fn [_]
                             (swap! trace conj :construct)
                             {:spec {:purpose :gesso.live/refresh}
-                             :model-plan {:commands (mapv #(model-command/create :requests (doc %) version)
+                             :model-plan {:guards [(model-command/guard
+                                                    :memberships (cond-> member (= :wrong-predicate @mode) (assoc :active false))
+                                                    (if (= :missing-predicate @mode) version
+                                                        (assoc version :compare-keys [:revision :updated-at :active])))]
+                                          :commands (mapv #(model-command/create :requests (doc %) version)
                                                           (case @mode
                                                             :wrong ["r2"]
                                                             :extra ["r1" "r2"]
@@ -560,6 +573,11 @@
     (is (= :invalid-command-operation-callback
            (:reason (error #(publication/build-executor
                              (assoc opts :command-operation-contract! nil))))))
+    (is (= :predicate-contract-requires-document-targets
+           (:reason (error #(publication/build-executor
+                             (dissoc opts :construction-contract :target-contract! :command-operation-contract!))))))
+    (is (= :invalid-predicate-callback
+           (:reason (error #(publication/build-executor (assoc opts :predicate-contract! nil))))))
     (with-operations {:request/claim (claim-operation executor)}
       (fn [assembly]
         (with-open [client (HttpClient/newHttpClient)]
@@ -567,17 +585,21 @@
                 node (:xtdb/connectable started)
                 execute xtdb/execute-tx-from!]
             (try
+              (xt/execute-tx node [[:put-docs :memberships member]])
               (with-redefs [xtdb/execute-tx-from! (fn [ctx ops & [options]]
                                                    ;; Count one call at the actual submission boundary,
                                                    ;; not the delegating arity or outbox-worker writes.
                                                    (when (contains? ctx publication/preparation-key)
                                                      (swap! submissions inc))
                                                    (execute ctx ops options))]
-                (doseq [[scenario events] [[:wrong [:declare :declare-operation :construct]]
-                                           [:extra [:declare :declare-operation :construct]]
+                (doseq [[scenario events] [[:wrong [:declare :declare-predicate :declare-operation :construct]]
+                                           [:extra [:declare :declare-predicate :declare-operation :construct]]
                                            [:invalid [:declare]]
-                                           [:invalid-operation [:declare :declare-operation]]
-                                           [:wrong-operation [:declare :declare-operation :construct]]]]
+                                           [:invalid-operation [:declare :declare-predicate :declare-operation]]
+                                           [:wrong-operation [:declare :declare-predicate :declare-operation :construct]]
+                                           [:invalid-predicate [:declare :declare-predicate]]
+                                           [:missing-predicate [:declare :declare-predicate :declare-operation :construct]]
+                                           [:wrong-predicate [:declare :declare-predicate :declare-operation :construct]]]]
                   (reset! mode scenario)
                   (reset! trace [])
                   (let [failure (error #((:biff.ring/handler started)
@@ -591,6 +613,9 @@
                              :invalid :invalid-target-contract
                              :invalid-operation :invalid-command-operation-contract
                              :wrong-operation :construction-command-operation-mismatch
+                             :invalid-predicate :invalid-predicate-contract
+                             :missing-predicate :construction-predicate-mismatch
+                             :wrong-predicate :construction-predicate-mismatch
                              :construction-target-mismatch)
                            (:error/kind failure)))
                     (is (= events @trace))
@@ -601,7 +626,7 @@
                 (reset! mode :right)
                 (reset! trace [])
                 (is (= :confirmed (:resolution (settlement! (send-command! client started "right")))))
-                (is (= [:declare :declare-operation :construct :project] @trace))
+                (is (= [:declare :declare-predicate :declare-operation :construct :project] @trace))
                 (is (= 1 @submissions))
                 (is (= [{:xt/id "r1"}] (xt/q node ["SELECT _id FROM requests"])))
                 (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))

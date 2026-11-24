@@ -267,7 +267,9 @@
               (resolved/require-document-target-coverage!
                (:tables contract) (:targets contract) {:plan incorporated})
               (resolved/require-plan-command-operation-coverage!
-               (:operations contract) {:plan incorporated}))
+               (:operations contract) {:plan incorporated})
+              (resolved/require-plan-predicate-coverage!
+               (:predicates contract) {:plan incorporated}))
           derived (if (and derive (not journal-only?)) (derive fragment) fragment)
           {:keys [plan tx-ops]}
           (model-tx/prepare ctx (assoc incorporated
@@ -395,7 +397,8 @@
 (defn- require-target-options! [options]
   (let [table? (contains? options :construction-contract)
         target? (contains? options :target-contract!)
-        operation? (contains? options :command-operation-contract!)]
+        operation? (contains? options :command-operation-contract!)
+        predicate? (contains? options :predicate-contract!)]
     (when-not (= table? target?)
       (reject! :incomplete-document-target-contract {}))
     (when table?
@@ -406,7 +409,12 @@
       (when-not target?
         (reject! :command-operation-contract-requires-document-targets {}))
       (when-not (fn? (:command-operation-contract! options))
-        (reject! :invalid-command-operation-callback {}))))
+        (reject! :invalid-command-operation-callback {})))
+    (when predicate?
+      (when-not target?
+        (reject! :predicate-contract-requires-document-targets {}))
+      (when-not (fn? (:predicate-contract! options))
+        (reject! :invalid-predicate-callback {}))))
   options)
 
 (defn execute-resolved!
@@ -438,17 +446,19 @@
    same admitted requirements constrain guarded abort outcomes. Optional
    :command-operation-contract! (ctx binding) requires those contracts and
    independently declares the permitted canonical operation triples; names
-   alone do not establish predicate or post-state correspondence. Raw SQL
+   alone do not establish predicate or post-state correspondence. Optional
+   :predicate-contract! (ctx binding) requires document targets and checks
+   exact canonical guard and update conditions, not arbitrary SQL assertions. Raw SQL
    construction cannot satisfy this selected contract. Replay does not
    invoke the declaration or constructor. Callback policy is still trusted."
   [{:keys [ctx operation] :as invocation}
    {:keys [mode construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract!] :as options}]
+           construction-contract target-contract! command-operation-contract! predicate-contract!] :as options}]
   (when-not (and (map? options)
                  (#{#{:mode :construct! :may-disclose? :project!}
                     #{:mode :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys options)) :construction-contract :target-contract!
-                        :command-operation-contract!))
+                        :command-operation-contract! :predicate-contract!))
                  (or (not (contains? options :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (#{:submit :reconcile} mode)
@@ -467,6 +477,9 @@
                                           (target-contract! ctx binding) binding)]
                              {:tables construction-contract
                               :targets targets
+                              :predicates (when predicate-contract!
+                                            (resolved/require-predicate-contract!
+                                             (predicate-contract! ctx binding) targets))
                               :operations (when command-operation-contract!
                                             (resolved/require-command-operation-contract!
                                              (command-operation-contract! ctx binding)
@@ -507,12 +520,12 @@
    Only the exact returned function is recognized by host admission. This
    is local wiring validation, not certification of business policy."
   [{:keys [operation submission-mode! construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract!] :as config}]
+           construction-contract target-contract! command-operation-contract! predicate-contract!] :as config}]
   (when-not (and (map? config)
                  (#{#{:operation :submission-mode! :construct! :may-disclose? :project!}
                     #{:operation :submission-mode! :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys config)) :construction-contract :target-contract!
-                        :command-operation-contract!))
+                        :command-operation-contract! :predicate-contract!))
                  (or (not (contains? config :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (qualified-keyword? operation)
@@ -533,7 +546,9 @@
                                  (assoc :construction-contract construction-contract
                                         :target-contract! target-contract!)
                                  command-operation-contract!
-                                 (assoc :command-operation-contract! command-operation-contract!))))]
+                                 (assoc :command-operation-contract! command-operation-contract!)
+                                 predicate-contract!
+                                 (assoc :predicate-contract! predicate-contract!))))]
     (locking registered-executors
       (.put registered-executors executor
             {:reference (WeakReference. executor) :operation operation}))
