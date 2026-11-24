@@ -4,6 +4,7 @@
   (:require [clojure.test :refer [deftest is]]
             [gesso.live.outbox.claim-semantic-fixture :as claim]
             [gesso.assurance.proof.induction :as induction]
+            [gesso.assurance.proof.guarded-substitution :as guarded]
             [gesso.assurance.proof.finite-model-oracle :as oracle]))
 
 (defn- eq [field value] [:= [:read field] [:literal value]])
@@ -103,3 +104,48 @@
     (is (= :not-issued (:certificate r)))
     (is (= :not-established (:physical-write-path-coverage r)))
     (is (= :none (:authority r)))))
+
+(defn- guarded-report [c id]
+  (guarded/check-guarded-preservation!
+   {:construction (:construction (first (filter #(= id (:id %)) (:operations c))))
+    :initial-condition (:initial-condition c) :invariants (:invariants c)}))
+
+(deftest guarded-substitution-checks-every-claim-alternative
+  (let [c (catalog)]
+    (doseq [id (:declared-operation-ids c)]
+      (let [r (guarded-report c id)]
+        (is (= #{[:preservation :claim/ownership-and-journal]}
+               (:conditionally-checked-preservation-ids r)) (pr-str r))
+        (is (= :not-issued (:certificate r)))
+        (is (= :none (:authority r)))))
+    (let [accept (claim/alternative-id "helper-1" :accept)
+          refuse (claim/alternative-id "helper-1" :refuse)]
+      (doseq [[id mutant]
+              [[accept (alter-source c accept #(assoc-in % [:replacements :assignment/helper] [:literal "helper-2"]))]
+               [accept (alter-source c accept #(assoc-in % [:replacements :journal/one] [:literal nil]))]
+               [refuse (alter-source c refuse #(-> % (update :reads disj :journal/one)
+                                                   (update-in [:guard :readers] disj :journal/one)
+                                                   (update-in [:guard :expression] (fn [expr] (vec (remove #{(eq :journal/one nil)} expr))))))]]]
+        (let [r (guarded-report mutant id)]
+          (is (empty? (:conditionally-checked-preservation-ids r)))
+          (is (= :post-branch-not-established
+                 (:reason (first (filter #(= :claim/ownership-and-journal (:invariant %)) (:preservation-outcomes r)))))))))))
+
+(deftest guarded-substitution-leaves-unsupported-cases-open
+  (let [c (catalog)
+        accept (claim/alternative-id "helper-1" :accept)
+        replay (claim/alternative-id "helper-1" :replay-accepted)
+        ownership-id :claim/ownership-and-journal
+        no-proof? (fn [report]
+                    (= :open (:status (first (filter #(= ownership-id (:invariant %))
+                                                     (:preservation-outcomes report))))))]
+    (is (no-proof? (guarded-report (alter-source c accept #(assoc-in % [:replacements :request/status]
+                                                                    [:read :request/status])) accept)))
+    (is (no-proof? (guarded-report (alter-source c replay #(assoc % :guard {:readers #{} :expression [:literal false]}
+                                                                   :reads #{})) replay)))
+    (is (no-proof? (guarded-report (assoc-in c [:invariants ownership-id]
+                                            {:readers #{:request/status}
+                                             :expression [:not (eq :request/status :claimed)]}) replay)))
+    (is (no-proof? (guarded-report (assoc-in c [:invariants ownership-id]
+                                            {:readers #{:request/revision}
+                                             :expression (into [:or] (map #(eq :request/revision %) (range 129)))}) replay)))))
