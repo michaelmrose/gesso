@@ -172,6 +172,22 @@
   ;; the ordinary server/settlement-contract verifies their declared relation.
   (assoc result :commit/status server/committed-status))
 
+(defn project-resolution!
+  "Shared trusted projection boundary for durable incorporation and replay.
+   Only a settleable result reaches the projector. The caller must have
+   obtained the result through an authorized durable resolution read or
+   commit, not from browser input. This does not establish projection truth."
+  [context result project!]
+  (require-context (:operation context) context)
+  (when-not (fn? project!)
+    (fail! :invalid-projector "The authoritative result projector must be a function." {}))
+  (let [status (:status result)]
+    (if (contains? #{:incorporated :replay} status)
+      (require-projection context status (project! context result))
+      (fail! :resolution-not-settleable
+             "Authoritative command resolution is not settleable; reconciliation or trusted recovery is required."
+             {:status status}))))
+
 (def ^:private ^WeakHashMap constructed-executors
   ;; Weak keys avoid retaining every executor ever built during hot reload.
   ;; The value must not retain its key strongly; even its identity witness is
@@ -246,13 +262,8 @@
             (let [binding (require-context operation context)
                   mode (require-mode (submission-mode! context))
                   result (resolved-operation (:ctx context)
-                                             {:binding binding :mode mode})
-                  status (:status result)]
-              (if (contains? #{:incorporated :replay} status)
-                (require-projection context status (project! context result))
-                (fail! :resolution-not-settleable
-                       "Authoritative command resolution is not settleable; reconciliation or trusted recovery is required."
-                       {:status status}))))
+                                             {:binding binding :mode mode})]
+              (project-resolution! context result project!)))
           ;; This metadata is advisory and can be copied. It is NOT the
           ;; identity witness stored by the private construction registry.
           {:gesso.model/operation-id operation

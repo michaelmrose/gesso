@@ -177,27 +177,45 @@
 (deftest assembled-streams-share-capacity-and-use-original-model-policy
   (let [seen (atom []) queries (atom []) invocations (atom []) fallback (atom 0)
         prepared-intents (atom nil)
+        replay? (atom false)
+        projections (atom [])
         command (protocol/command {:command-id (identity/command-id "v2366-command")
                                    :execution-id (identity/execution-id "v2366-execution")
                                    :operation :request/claim :arguments {:request-id "r1"}
                                    :observed-basis fixture/rendered-basis})
-        form (codec/form-encode {operation-http/command-parameter
-                                 (pr-str (protocol/command->wire command))})
+        form (fn [command]
+               (codec/form-encode {operation-http/command-parameter
+                                   (pr-str (protocol/command->wire command))}))
         execute! (fn [{:keys [ctx arguments] :as invocation}]
                    (swap! invocations conj invocation)
-                   (let [id (:request-id arguments)
-                         receipt (publication/transact-resolved!
-                                  ctx {:purpose :gesso.live/refresh}
-                                  [{:topic :request :request/location-id id :change/kind :updated}]
-                                  [[:put-docs :requests {:xt/id id :status :claimed}]]
-                                  {:outcome :request/claimed} "2026-11-24T00:00:00Z")
-                         _ (reset! prepared-intents (:outbox/intents receipt))
-                         tx (:tx-result receipt)]
-                     {:resolution :confirmed :outcome :request/claimed
-                      :authoritative (protocol/authoritative
-                                      {:presence :present
-                                       :basis {:tx-id (:tx-id tx) :system-time (str (:system-time tx))}
-                                       :projection {:request/id id :request/status :claimed}})}))
+                   (if @replay?
+                     (publication/reconcile-settlement!
+                      invocation (fn [binding record]
+                                   (= (:principal binding) (get-in record [:gesso.command/binding :principal])))
+                      (fn [{:keys [ctx arguments]} result]
+                        (swap! projections conj result)
+                        (let [id (:request-id arguments)
+                              basis (xtdb/latest-completed-basis ctx)
+                              row (first (xtdb/q-from ctx ["SELECT status FROM requests WHERE _id = ?" id]
+                                                       {:snapshot-token (xtdb/basis-snapshot-token basis)}))]
+                          {:resolution :already-incorporated
+                           :outcome (get-in result [:outcome :outcome])
+                           :authoritative (protocol/authoritative
+                                           {:presence :present :basis basis
+                                            :projection {:request/id id :request/status (:status row)}})})))
+                     (let [id (:request-id arguments)
+                           receipt (publication/transact-resolved!
+                                    ctx {:purpose :gesso.live/refresh}
+                                    [{:topic :request :request/location-id id :change/kind :updated}]
+                                    [[:put-docs :requests {:xt/id id :status :claimed}]]
+                                    {:outcome :request/claimed} "2026-11-24T00:00:00Z")
+                           _ (reset! prepared-intents (:outbox/intents receipt))
+                           tx (:tx-result receipt)]
+                       {:resolution :confirmed :outcome :request/claimed
+                        :authoritative (protocol/authoritative
+                                        {:presence :present
+                                         :basis {:tx-id (:tx-id tx) :system-time (str (:system-time tx))}
+                                         :projection {:request/id id :request/status :claimed}})})))
         resolve-id (fn [ctx _]
                      (or (get-in ctx [:path-params :id]) (get-in ctx [:headers "fragment-id"])))]
     (with-redefs [fixture/allow? (fn [ctx id]
@@ -233,13 +251,14 @@
                           (.timeout builder (Duration/ofSeconds 10))
                           (doseq [[k v] headers] (.header builder k v))
                           (.send client (.build builder) body-handler)))
-                post! (fn [headers]
+                post-command! (fn [headers command]
                         (let [builder (HttpRequest/newBuilder (URI/create (str (:base-url listener) "/operations/request/claim")))]
                           (.timeout builder (Duration/ofSeconds 10))
                           (.header builder "content-type" "application/x-www-form-urlencoded")
                           (doseq [[k v] headers] (.header builder k v))
-                          (.POST builder (HttpRequest$BodyPublishers/ofString form))
+                          (.POST builder (HttpRequest$BodyPublishers/ofString (form command)))
                           (.send client (.build builder) (HttpResponse$BodyHandlers/ofString))))
+                post! #(post-command! % command)
                 headers {"authorization" "allowed" "fragment-id" "r1"}
                 list-path "/streams/request-list/r1"
                 toolbar-path "/streams/request-toolbar"
@@ -319,6 +338,39 @@
                          (select-keys (first @prepared-intents)
                                       [:gesso.live.outbox/source-id :gesso.live.outbox/operation
                                        :gesso.live.outbox/command-id :gesso.live.outbox/subject-id])))
+                  (let [invocation (first @invocations)
+                        error-kind (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e
+                                                        (:error/kind (ex-data e)))))
+                        forbidden (fn [& _] (throw (ex-info "projector must not run" {})))]
+                    (is (= :resolution-not-settleable
+                           (error-kind #(publication/reconcile-settlement! invocation (constantly false) forbidden))))
+                    (is (= :mismatched-command-binding
+                           (reason #(publication/reconcile-settlement!
+                                     (assoc invocation :arguments {:request-id "other"})
+                                     (constantly true) forbidden))))
+                    (is (= :invalid-resolution
+                           (error-kind #(publication/reconcile-settlement!
+                                         invocation (constantly true) (constantly {:resolution :failed}))))))
+                  ;; A later domain mutation changes the authoritative state.
+                  ;; Replay must report that state, not the original projection.
+                  (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :status :done}]])
+                  (reset! replay? true)
+                  (let [retry (assoc command :execution-id (identity/execution-id "v2374-retry"))
+                        response (post-command! headers retry)
+                        marker (xml/parse (ByteArrayInputStream. (.getBytes ^String (.body response) StandardCharsets/UTF_8)))
+                        settlement (protocol/wire->settlement
+                                    (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))]
+                    (is (= 200 (.statusCode response)))
+                    (is (= :already-incorporated (:resolution settlement)))
+                    (is (= (select-keys retry [:command-id :execution-id])
+                           (select-keys settlement [:command-id :execution-id])))
+                    (is (= :request/claimed (:outcome settlement)))
+                    (is (= :done (get-in settlement [:authoritative :projection :request/status])))
+                    (is (= 2 (count @invocations)))
+                    (is (= 1 (count @projections)))
+                    (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+                    (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+                    (is (= [{:status :done}] (xt/q node ["SELECT status FROM requests WHERE _id = ?" "r1"]))))
                   (is (zero? @fallback))
                   (host/stop! started)
                   (is ((:drained? status)))

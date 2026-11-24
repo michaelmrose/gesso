@@ -8,6 +8,7 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.optimistic.server :as server]
+            [gesso.live.optimistic.resolved-operation :as adapter]
             [gesso.model.command-resolution :as resolution])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.nio ByteBuffer]
@@ -189,6 +190,24 @@
     (when-not (and (vector? rows) (<= (count rows) 1) (every? map? rows))
       (reject! :invalid-command-record-observation {}))
     (resolution/reconcile binding (first rows) may-disclose?)))
+
+(defn reconcile-settlement!
+  "Return a validated replay operation result for the original optimistic
+   server, not a transport settlement. The invocation must match its bound
+   command context. Read and authorize the durable record before calling
+   the trusted projector (fn [invocation resolution-result] result).
+   Projection must use a fresh authoritative observation. Unresolved,
+   unavailable and incompatible results never call the projector or execute
+   a mutation. Choose reconciliation using trusted server evidence; this
+   helper never decides to submit, and never invents a failure settlement."
+  [{:keys [ctx] :as invocation} may-disclose? project!]
+  (when-not (= (command-binding! ctx)
+               (resolution/require-binding
+                (select-keys invocation [:operation :command-id :principal :arguments])))
+    (reject! :mismatched-command-binding {}))
+  (adapter/project-resolution! invocation
+                               (reconcile-command! ctx may-disclose?)
+                               project!))
 
 (defn profile!
   "Compile an explicit topic -> subject field declaration against the exact
