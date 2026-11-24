@@ -10,9 +10,9 @@
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.optimistic.choreo :as choreo]
             [gesso.live.optimistic.server :as server]
-            [gesso.live.ui :as ui]
-            [ring.util.codec :as codec])
-  (:import [java.io InputStream PushbackReader StringReader]
+            [gesso.live.ui :as ui])
+  (:import [java.io ByteArrayOutputStream InputStream PushbackReader StringReader]
+           [java.nio ByteBuffer CharBuffer]
            [java.nio.charset StandardCharsets]))
 
 (def command-parameter "__gesso_live_optimistic_command")
@@ -47,13 +47,45 @@
                             "content-type" "text/plain; charset=utf-8"}
    :body "Command request not admitted."})
 
+(defn- utf8-text [^ByteBuffer bytes]
+  ;; A new decoder reports malformed/unmappable input by default. Neither
+  ;; raw request bytes nor percent escapes may introduce replacement text.
+  (str (.decode (.newDecoder StandardCharsets/UTF_8) bytes)))
+
+(defn- hex-digit [n]
+  (cond
+    (<= 48 n 57) (- n 48)
+    (<= 65 n 70) (- n 55)
+    (<= 97 n 102) (- n 87)
+    :else (throw (IllegalArgumentException. "Malformed form escape"))))
+
+(defn- decode-field [^String text]
+  ;; The raw body was already decoded strictly. Re-encode this field, decode
+  ;; form escapes exactly once, then validate the resulting UTF-8 bytes.
+  (let [bytes (.getBytes text StandardCharsets/UTF_8)
+        length (alength bytes)
+        out (ByteArrayOutputStream. length)]
+    (loop [i 0]
+      (if (= i length)
+        (utf8-text (ByteBuffer/wrap (.toByteArray out)))
+        (let [n (aget bytes i)]
+          (case n
+            37 (do
+                 (when (>= (+ i 2) length)
+                   (throw (IllegalArgumentException. "Incomplete form escape")))
+                 (.write out (int (+ (* 16 (hex-digit (aget bytes (inc i))))
+                                     (hex-digit (aget bytes (+ i 2))))))
+                 (recur (+ i 3)))
+            43 (do (.write out 32) (recur (inc i)))
+            (do (.write out (int n)) (recur (inc i)))))))))
+
 (defn- decode-form [text]
   ;; Reject ambiguous/malformed fields rather than silently dropping them.
   ;; The selected command transport uses single-valued form fields only.
   (reduce (fn [form field]
             (let [[k v] (str/split field #"=" 2)
-                  key (codec/form-decode-str k)
-                  value (when v (codec/form-decode-str v))]
+                  key (decode-field k)
+                  value (when v (decode-field v))]
               (if (and (string? key) (not (str/blank? key)) (string? value)
                        (not (contains? form key)))
                 (assoc form key value)
@@ -67,11 +99,13 @@
                (= "application/x-www-form-urlencoded"
                   (str/lower-case (str/trim (first (str/split content-type #";" 2)))))
                (not (seq (:query-string request))))
-      (let [bytes (cond
-                    (string? body) (.getBytes ^String body StandardCharsets/UTF_8)
-                    (instance? InputStream body) (.readNBytes ^InputStream body (inc max-form-bytes)))]
-        (when (and bytes (<= (alength ^bytes bytes) max-form-bytes))
-          (let [form (decode-form (String. ^bytes bytes StandardCharsets/UTF_8))
+      (let [^ByteBuffer bytes (cond
+                                (and (string? body) (<= (count body) max-form-bytes))
+                                (.encode (.newEncoder StandardCharsets/UTF_8) (CharBuffer/wrap ^String body))
+                                (instance? InputStream body)
+                                (ByteBuffer/wrap (.readNBytes ^InputStream body (inc max-form-bytes))))]
+        (when (and bytes (<= (.remaining bytes) max-form-bytes))
+          (let [form (decode-form (utf8-text bytes))
                 encoded (get form command-parameter)]
             (when (string? encoded)
               (with-open [reader (PushbackReader. (StringReader. encoded))]

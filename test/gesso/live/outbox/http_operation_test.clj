@@ -221,3 +221,35 @@
       (fn [assembly]
         (is (= expected (reason #(transport/wrap-handler assembly identity
                                                         {:authorize-request? (constantly true)}))))))))
+
+(deftest command-form-rejects-invalid-utf8-before-authority
+  (let [gates (atom []) calls (atom []) fallbacks (atom [])]
+    (with-assembly (fn [ctx] (swap! calls conj ctx) {:resolution :rejected :reason :test-only})
+      (fn [assembly]
+        (let [handler (transport/wrap-handler assembly
+                                             (fn [ctx] (swap! fallbacks conj ctx) {:status 404})
+                                             {:authorize-request? (fn [ctx] (swap! gates conj (:form-params ctx)) false)})
+              valid (form :request/claim "valid")
+              prefix (.getBytes (str valid "&extra=") StandardCharsets/UTF_8)]
+          (doseq [bad ["%FF" "%C0%AF" "%ED%A0%80" "%E2%82" "%" "%GG" "%1"]]
+            (is (= 400 (:status (handler (request (str valid "&extra=" bad))))) bad))
+          (is (= 400 (:status (handler (request (str valid "&%FF=x"))))))
+          (is (= 400 (:status (handler (request (ByteArrayInputStream.
+                                                  (byte-array (concat prefix [(unchecked-byte 0xff)]))))))))
+          (is (= 400 (:status (handler (request (str valid "&%63srf=valid"))))))
+          (is (= 400 (:status (handler (request (str valid "&extra=" (char 0xd800)))))))
+          (is (empty? @gates))
+          (is (empty? @calls))
+          (is (empty? @fallbacks))
+          ;; Valid Unicode, literal percent signs, and plus/space retain their
+          ;; exact once-decoded meaning at the original request gate.
+          (is (= 403 (:status (handler (request (str valid "&extra=%E9%9B%AA+%25FF%2B"))))))
+          (is (= "雪 %FF+" (get (peek @gates) "extra")))
+          (is (= 403 (:status (handler (request (ByteArrayInputStream.
+                                                  (.getBytes (str valid "&extra=雪") StandardCharsets/UTF_8)))))))
+          (is (= "雪" (get (peek @gates) "extra")))
+          (let [escaped (apply str (repeat 16000 "%41"))]
+            (is (= 403 (:status (handler (request (str valid "&extra=" escaped))))))
+            (is (= (apply str (repeat 16000 "A")) (get (peek @gates) "extra"))))
+          (is (= 3 (count @gates)))
+          (is (empty? @calls)))))))
