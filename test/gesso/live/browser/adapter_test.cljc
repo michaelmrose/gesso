@@ -2076,6 +2076,46 @@
       (is (nil? (get-in finished [:fragments :panel :inflight])))
       (is (empty? (effects-of :fragment/refresh effects))))))
 
+(deftest terminal-transport-releases-only-abandoned-continuity-test
+  (doseq [terminal [:htmx/after-request :http/failed]
+          adopted? [false true]
+          queued? [false true]]
+    (let [{state-a :state generation :generation}
+          (begin-fragment (adapter/initial-state) :panel :basis-1)
+          [bound _] (bind-request state-a :panel generation :xhr-1)
+          [captured capture-effects] (before-swap bound :panel generation :xhr-1)
+          slot (effect-data :continuity/capture capture-effects)
+          event {:fragment-id :panel
+                 :request-generation generation
+                 :request-id :xhr-1}
+          prepared (if adopted?
+                     (first (adapter/step captured (assoc event :event :htmx/after-swap)))
+                     captured)
+          prepared (if queued?
+                     (first (adapter/step prepared (invalidation :panel :basis-2)))
+                     prepared)
+          terminal-event (cond-> (assoc event :event terminal)
+                           (= :http/failed terminal) (assoc :reason :send-error))
+          [finished effects] (adapter/step prepared terminal-event)
+          releases (effects-of :continuity/release effects)
+          [duplicate duplicate-effects] (adapter/step finished terminal-event)
+          [late late-effects]
+          (adapter/step finished (assoc event :event :htmx/after-swap))]
+      (is (= (if adopted? 0 1) (count releases)))
+      (is (= adopted? (contains? (:continuity finished) (:slot-id slot))))
+      (when-not adopted?
+        (is (= (select-keys slot [:slot-id :slot-generation :fragment-id :request-generation])
+               (select-keys (second (first releases))
+                            [:slot-id :slot-generation :fragment-id :request-generation])))
+        (is (= :swap-abandoned (:reason (second (first releases)))))
+        (when queued?
+          (is (= [:continuity/release :fragment/refresh]
+                 (filterv #{:continuity/release :fragment/refresh} (mapv first effects))))))
+      (is (= queued? (boolean (effect-of :fragment/refresh effects))))
+      (is (= finished duplicate late))
+      (is (empty? (effects-of :continuity/release duplicate-effects)))
+      (is (empty? (effects-of :continuity/restore late-effects))))))
+
 (deftest queued-requirements-start-next-generation-after-current-request-finishes-test
   (let [{state-a :state gen-1 :generation}
         (begin-fragment (adapter/initial-state) :panel :basis-1)

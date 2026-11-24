@@ -1982,20 +1982,33 @@
           (if (:adopted? inflight)
             queued
             (into queued (:requirements inflight)))
+          slot-id [fragment-id request-generation]
+          slot (get-in state [:continuity slot-id])
+          abandoned? (and slot (not (:restore-issued? slot)))
+          ;; A terminal request without an observed swap cannot leave its
+          ;; capture alive. An issued restore has its own completion lifetime.
           state'
-          (assoc-in state
-                    [:fragments fragment-id]
-                    {:inflight nil
-                     :queued-refresh? false
-                     ;; Preserve uncovered requirements even when there is
-                     ;; no permission to start a successor yet.
-                     :queued-requirements successor-requirements})]
+          (cond-> (assoc-in state
+                            [:fragments fragment-id]
+                            {:inflight nil
+                             :queued-refresh? false
+                             ;; Debt survives without acquisition permission.
+                             :queued-requirements successor-requirements})
+            abandoned? (update :continuity dissoc slot-id))
+          releases
+          (if abandoned?
+            [(effect :continuity/release
+                     {:slot-id slot-id
+                      :slot-generation (:generation slot)
+                      :fragment-id fragment-id
+                      :request-generation request-generation
+                      :reason :swap-abandoned})]
+            [])]
       (if queued-refresh?
-        (begin-fragment-request
-         state'
-         fragment-id
-         successor-requirements)
-        [state' []]))))
+        (let [[next-state effects]
+              (begin-fragment-request state' fragment-id successor-requirements)]
+          [next-state (into releases effects)])
+        [state' releases]))))
 
 (defn- after-request
   [state event]
