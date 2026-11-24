@@ -1378,6 +1378,69 @@
 ;; Fragment single-flight and request generation
 ;; =============================================================================
 
+(deftest advisory-debt-requires-an-explicit-idle-refresh-intent-test
+  (doseq [terminal [:installed :no-swap :failed]]
+    (let [observe (fn [state requirement]
+                    (adapter/step state
+                                  (cond-> {:event :live/advisory-observed
+                                           :fragment-id :panel}
+                                    requirement (assoc :requirement requirement))))
+          refresh {:event :fragment/refresh-requested :fragment-id :panel}
+          [advisory-a effects-a] (observe (adapter/initial-state) nil)
+          [advisory-b effects-b] (observe advisory-a :basis-1)
+          [started effects-c] (adapter/step advisory-b refresh)
+          generation (:request-generation (effect-data :fragment/refresh effects-c))
+          [bound _] (bind-request started :panel generation :xhr-1)
+          [same duplicate-effects] (observe bound :basis-1)
+          [later effects-d] (observe same :basis-2)
+          [busy busy-effects] (adapter/step later refresh)
+          prepared (if (= terminal :installed)
+                     (adopt-fragment busy :panel generation :xhr-1)
+                     busy)
+          terminal-event (cond-> {:event (if (= terminal :failed)
+                                           :http/failed :htmx/after-request)
+                                 :fragment-id :panel
+                                 :request-generation generation
+                                 :request-id :xhr-1}
+                           (= terminal :failed) (assoc :reason :send-error))
+          [finished effects-e] (adapter/step prepared terminal-event)
+          [next-state next-effects] (adapter/step finished refresh)
+          next-read (effect-data :fragment/refresh next-effects)]
+      (is (empty? (concat effects-a effects-b effects-d duplicate-effects)))
+      (is (nil? (get-in advisory-b [:fragments :panel :inflight])))
+      (is (true? (get-in advisory-b [:fragments :panel :queued-advisory?])))
+      (is (= #{:basis-1} (:requirements (effect-data :fragment/refresh effects-c))))
+      (is (= 1 (count (effects-of :fragment/refresh effects-c))))
+      (is (= bound same))
+      (is (= later busy))
+      (is (= :fragment-busy (ignored-reason busy-effects)))
+      (is (false? (get-in busy [:fragments :panel :queued-refresh?])))
+      (is (nil? (get-in finished [:fragments :panel :inflight])))
+      (is (empty? (effects-of :fragment/refresh effects-e)))
+      (is (= (not= terminal :installed)
+             (get-in finished [:fragments :panel :queued-advisory?])))
+      (is (= (if (= terminal :installed) #{:basis-2} #{:basis-1 :basis-2})
+             (:requirements next-read)))
+      (is (false? (get-in next-state [:fragments :panel :queued-advisory?]))))))
+
+(deftest headerless-advisory-during-explicit-refresh-remains-uncovered-test
+  (let [advisory {:event :live/advisory-observed :fragment-id :panel}
+        refresh {:event :fragment/refresh-requested :fragment-id :panel}
+        [state _] (adapter/step (adapter/initial-state) advisory)
+        [started effects] (adapter/step state refresh)
+        generation (:request-generation (effect-data :fragment/refresh effects))
+        [bound _] (bind-request started :panel generation :xhr-1)
+        [observed observed-effects] (adapter/step bound advisory)
+        adopted (adopt-fragment observed :panel generation :xhr-1)
+        [finished finished-effects]
+        (adapter/step adopted {:event :htmx/after-request :fragment-id :panel
+                               :request-generation generation :request-id :xhr-1})]
+    (is (empty? observed-effects))
+    (is (empty? (effects-of :fragment/refresh finished-effects)))
+    (is (true? (get-in finished [:fragments :panel :queued-advisory?])))
+    (is (false? (get-in finished [:fragments :panel :queued-refresh?])))
+    (is (= #{} (get-in finished [:fragments :panel :queued-requirements])))))
+
 (deftest first-invalidation-starts-one-fragment-refresh-test
   (let [{:keys [state effects generation refresh]}
         (begin-fragment

@@ -49,8 +49,10 @@
    :advances. The truth of that witness remains a trusted boundary outside this
    pure transition system.
 
-   Live invalidations may be advisory or carry opaque authoritative refresh
-   requirements. A queued refresh is represented independently from its
+   Automatic invalidations authorize refresh under the legacy automatic policy.
+   Advisory observations only record debt; a normalized explicit refresh intent
+   admits one idle generation, never a successor while busy. Both paths may
+   carry opaque authoritative refresh requirements. A queued refresh is represented independently from its
    requirement set: an advisory wakeup that arrives during one active request
    must still survive until that request retires. Canonical requirements are
    accumulated conservatively as a set. Once a physical HTMX request is bound,
@@ -90,6 +92,8 @@
     :timer/cancel
     :timer/fired
     :live/invalidated
+    :live/advisory-observed
+    :fragment/refresh-requested
     :fragment/retire
     :htmx/before-request
     :htmx/before-swap
@@ -276,6 +280,12 @@
    :live/invalidated
    #{:event :fragment-id :requirement}
 
+   :live/advisory-observed
+   #{:event :fragment-id :requirement}
+
+   :fragment/refresh-requested
+   #{:event :fragment-id}
+
    :fragment/retire
    #{:event :fragment-id :reason}
 
@@ -377,6 +387,7 @@
   (and
    (map? value)
    (boolean? (:queued-refresh? value))
+   (boolean? (:queued-advisory? value))
    (set? (:queued-requirements value))
    (let [inflight (:inflight value)]
      (or
@@ -386,6 +397,7 @@
        (positive-integer? (:generation inflight))
        (set? (:requirements inflight))
        (boolean? (:adopted? inflight))
+       (boolean? (:advisory? inflight))
        (or (nil? (:request-id inflight))
            (some? (:request-id inflight)))
        (or (nil? (:authoritative inflight))
@@ -1584,15 +1596,20 @@
     #{(:requirement event)}
     #{}))
 
+(defn- empty-fragment
+  []
+  {:inflight nil
+   :queued-refresh? false
+   :queued-advisory? false
+   :queued-requirements #{}})
+
 (defn- begin-fragment-request
   [state fragment-id requirements]
   (let [[state' request-generation]
         (allocate-generation state)
         fragment
         (or (get-in state' [:fragments fragment-id])
-            {:inflight nil
-             :queued-refresh? false
-             :queued-requirements #{}})
+            (empty-fragment))
         ;; Retained debt does not itself authorize acquisition. Once a new
         ;; generation is authorized, include it in that generation's read.
         requirements (into (:queued-requirements fragment) requirements)
@@ -1601,7 +1618,8 @@
          :request-id nil
          :requirements (set requirements)
          :authoritative nil
-         :adopted? false}
+         :adopted? false
+         :advisory? (:queued-advisory? fragment)}
         state''
         (assoc-in
          state'
@@ -1609,6 +1627,7 @@
          (assoc fragment
                 :inflight inflight
                 :queued-refresh? false
+                :queued-advisory? false
                 :queued-requirements #{}))]
     [state''
      [(effect
@@ -1634,9 +1653,7 @@
         requirements (requirement-set event)
         fragment
         (or (get-in state [:fragments fragment-id])
-            {:inflight nil
-             :queued-refresh? false
-             :queued-requirements #{}})]
+            (empty-fragment))]
     (cond
       (active-request-covers-requirement? fragment event)
       ;; Once HTMX has bound a physical request, configRequest has already
@@ -1662,6 +1679,30 @@
        (assoc-in state [:fragments fragment-id] fragment)
        fragment-id
        requirements))))
+
+(defn- observe-advisory
+  "Record debt without authorizing acquisition, including headerless debt.
+   A bound read already carrying an exact requirement need not repeat it."
+  [state event]
+  (let [fragment-id (require-non-nil! "Fragment id" (:fragment-id event))
+        fragment (get-in state [:fragments fragment-id] (empty-fragment))]
+    (if (active-request-covers-requirement? fragment event)
+      [state []]
+      [(assoc-in state [:fragments fragment-id]
+                 (if (contains? event :requirement)
+                   (update fragment :queued-requirements into (requirement-set event))
+                   (assoc fragment :queued-advisory? true)))
+       []])))
+
+(defn- request-explicit-refresh
+  "Consume one normalized refresh intent at the idle coordinator boundary.
+   Busy intents never authorize a successor. Physical user-action and owner
+   admission must precede this event; this is not a replay-proof grant API."
+  [state event]
+  (let [fragment-id (require-non-nil! "Fragment id" (:fragment-id event))]
+    (if (get-in state [:fragments fragment-id :inflight])
+      [state [(ignored-effect event :fragment-busy {:fragment-id fragment-id})]]
+      (begin-fragment-request state fragment-id #{}))))
 
 (defn- current-fragment-generation?
   [state fragment-id request-generation]
@@ -1982,6 +2023,9 @@
           (if (:adopted? inflight)
             queued
             (into queued (:requirements inflight)))
+          successor-advisory?
+          (or (get-in state [:fragments fragment-id :queued-advisory?])
+              (and (not (:adopted? inflight)) (:advisory? inflight)))
           slot-id [fragment-id request-generation]
           slot (get-in state [:continuity slot-id])
           abandoned? (and slot (not (:restore-issued? slot)))
@@ -1992,6 +2036,7 @@
                             [:fragments fragment-id]
                             {:inflight nil
                              :queued-refresh? false
+                             :queued-advisory? successor-advisory?
                              ;; Debt survives without acquisition permission.
                              :queued-requirements successor-requirements})
             abandoned? (update :continuity dissoc slot-id))
@@ -2348,6 +2393,12 @@
           :live/invalidated
           (invalidate-fragment state' event')
 
+          :live/advisory-observed
+          (observe-advisory state' event')
+
+          :fragment/refresh-requested
+          (request-explicit-refresh state' event')
+
           :fragment/retire
           (retire-fragment state' event')
 
@@ -2442,9 +2493,12 @@
                      :request-id
                      :requirements
                      :adopted?
+                     :advisory?
                      :authoritative]))
            :queued-refresh?
            (:queued-refresh? fragment)
+           :queued-advisory?
+           (:queued-advisory? fragment)
            :queued-requirements
            (:queued-requirements fragment)}]))
       (:fragments state'))
