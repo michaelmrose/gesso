@@ -604,6 +604,20 @@
         matches (filterv #(= id (fragment-id-from-root %)) (fragment-roots runtime))]
     (and (= 1 (count matches)) (identical? root (first matches)))))
 
+(defn- primary-target
+  "Resolve the single replaceable direct child of the stable owner. The
+   canonical panel declares its logical fragment id on that child. Never
+   infer mutation authority from a selector or an id on a foreign element."
+  [root]
+  (let [id (fragment-id-from-root root)
+        matches (when id
+                  (filterv #(and (node-element? %)
+                                 (= id (element-attr % "id"))
+                                 (identical? root (.-parentElement %)))
+                           (array-seq (.-children root))))]
+    (when (= 1 (count matches))
+      (first matches))))
+
 (defn- acquisition-policy
   [root]
   (case (element-attr root acquisition-policy-attribute)
@@ -1312,6 +1326,14 @@
       (stale-managed-trigger? runtime root event pending)
       (prevent-event! event)
 
+      (and pending (not (root-issued-request? root event)))
+      nil
+
+      (and pending
+           (not (when-let [target (primary-target root)]
+                  (identical? target (detail-field event "target")))))
+      (prevent-event! event)
+
       pending
       (try
         (when-some [requirement
@@ -1370,6 +1392,14 @@
       (stale-managed-trigger? runtime root event pending)
       (prevent-event! event)
 
+      (and pending (not (root-issued-request? root event)))
+      nil
+
+      (and pending
+           (not (when-let [target (primary-target root)]
+                  (identical? target (detail-field event "target")))))
+      (prevent-event! event)
+
       pending
       (let [disposition (atom :undecided)]
         (try
@@ -1380,6 +1410,7 @@
                 record (assoc pending
                               :request-id request-id
                               :xhr (xhr-from-event event)
+                              :primary-target (primary-target root)
                               :before-send-observed? (atom false))
                 physical
                 (physical-context runtime event root record disposition)
@@ -1474,6 +1505,14 @@
             (false? (detail-field event "shouldSwap"))
             nil
 
+            (not (and (:primary-target record)
+                      (identical? (:primary-target record) (primary-target root))
+                      (identical? (:primary-target record) (detail-field event "target"))))
+            (do
+              (cancel-swap-event! event)
+              (.warn js/console
+                     "Gesso managed fragment swap refused: primary target identity changed."))
+
             (not (single-target-selection? root))
             (do
               (cancel-swap-event! event)
@@ -1506,7 +1545,12 @@
   [runtime event]
   (let [runtime (require-core! runtime)
         {:keys [root record]} (active-request-from-event runtime event)]
-    (when (and record (current-acquisition-owner? runtime root))
+    ;; HTMX afterSwap carries the original responseInfo.target even after
+    ;; outerHTML has detached that element. Do not re-resolve its replacement
+    ;; here; admission concerned the exact object that was mutated.
+    (when (and record (current-acquisition-owner? runtime root)
+               (:primary-target record)
+               (identical? (:primary-target record) (detail-field event "target")))
       (shell/dispatch!
        (:shell runtime)
        (normalized-request-event :htmx/after-swap record)

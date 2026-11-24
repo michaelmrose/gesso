@@ -107,6 +107,15 @@
             (if (= selector core/fragment-selector)
               (to-array nested)
               #js [])))
+    (when fragment-id
+      (let [target (js-obj)]
+        (aset target "nodeType" 1)
+        (aset target "parentElement" element)
+        (aset target "children" #js [])
+        (aset target "getAttribute" #(when (= % "id") fragment-id))
+        (aset target "closest" #(when (= % core/fragment-selector) element))
+        (aset element "testPrimaryTarget" target)
+        (aset element "children" #js [target])))
     element))
 
 (defn- make-root
@@ -204,7 +213,14 @@
   ([type]
    (make-event type nil))
   ([type {:keys [elt target xhr successful should-swap extra-detail]}]
-   (let [prevented? (atom false)
+   (let [;; Most lifecycle fixtures describe the issuing root as shorthand.
+         ;; HTMX actually carries the distinct replaceable inner target.
+         target (if (and (#{"htmx:configRequest" "htmx:beforeRequest"
+                            "htmx:beforeSwap" "htmx:afterSwap"} type)
+                         (or (nil? target) (identical? target elt)))
+                  (or (some-> elt .-testPrimaryTarget) target)
+                  target)
+         prevented? (atom false)
          detail (js-obj)
          event (js-obj)]
      (when elt
@@ -1576,6 +1592,80 @@
                (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
         (is (nil? (core/active-request runtime root)))
         (is (empty? (:continuity (core/state runtime))))))))
+
+(deftest managed-primary-target-must-be-the-exact-bound-inner-element-test
+  (doseq [scenario [:normal :foreign :same-id :root :missing :replaced :duplicate :moved]]
+    (let [captures (atom 0)
+          {:keys [runtime root]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          target (.-testPrimaryTarget root)
+          foreign (make-element {})
+          replacement (.-testPrimaryTarget (make-root "fragment-1"))
+          requirement (progression/requirement
+                       {:tx-id 803 :system-time "2026-08-26T08:10:03Z"})]
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (case scenario
+        :replaced (do (aset replacement "parentElement" root)
+                      (aset root "children" #js [replacement]))
+        :duplicate (do (aset replacement "parentElement" root)
+                       (aset root "children" #js [target replacement]))
+        :moved (aset target "parentElement" foreign)
+        nil)
+      (let [actual (case scenario
+                     :foreign foreign
+                     :same-id replacement
+                     :root root
+                     :missing nil
+                     :replaced replacement
+                     target)
+            fixture (make-event "htmx:beforeSwap"
+                                {:elt root :xhr xhr :should-swap true
+                                 :extra-detail {:target actual}})
+            allowed? (= :normal scenario)]
+        (core/on-before-swap! runtime (:event fixture))
+        (is (= (not allowed?) @(:prevented? fixture)) (name scenario))
+        (is (= allowed? (aget (:detail fixture) "shouldSwap")))
+        (is (= (if allowed? 1 0) @captures))
+        (when-not allowed?
+          (after-request! runtime root xhr true)
+          (is (= #{requirement}
+                 (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+          (is (empty? (:continuity (core/state runtime)))))))))
+
+(deftest managed-request-rejects-foreign-target-before-binding-test
+  (let [{:keys [runtime root]} (runtime-fixture "fragment-1")
+        {xhr :xhr} (make-xhr 200)
+        foreign (.-testPrimaryTarget (make-root "fragment-1"))
+        config (make-event "htmx:configRequest" {:elt root :target foreign})
+        before (make-event "htmx:beforeRequest" {:elt root :target foreign :xhr xhr})]
+    (begin-refresh! runtime "fragment-1")
+    (core/on-config-request! runtime (:event config))
+    (core/on-before-request! runtime (:event before))
+    (is @(:prevented? config))
+    (is @(:prevented? before))
+    (is (some? (core/pending-refresh runtime root)))
+    (is (nil? (core/active-request runtime root)))))
+
+(deftest after-swap-correlates-original-target-even-after-outerhtml-replacement-test
+  (let [{:keys [runtime root]} (runtime-fixture "fragment-1")
+        {xhr :xhr} (make-xhr 200)
+        original (.-testPrimaryTarget root)
+        replacement (.-testPrimaryTarget (make-root "fragment-1"))]
+    (begin-refresh! runtime "fragment-1")
+    (bind-request! runtime root xhr)
+    (before-swap! runtime root xhr)
+    (aset original "parentElement" nil)
+    (aset replacement "parentElement" root)
+    (aset root "children" #js [replacement])
+    (core/on-after-swap! runtime (:event (make-event "htmx:afterSwap"
+                                                    {:elt replacement :xhr xhr :target replacement})))
+    (is (false? (get-in (core/state runtime) [:fragments "fragment-1" :inflight :adopted?])))
+    (core/on-after-swap! runtime (:event (make-event "htmx:afterSwap"
+                                                    {:elt replacement :xhr xhr :target original})))
+    (is (true? (get-in (core/state runtime) [:fragments "fragment-1" :inflight :adopted?])))))
 
 (deftest ordinary-managed-swap-captures-and-restores-continuity-without-owning-semantics-test
   (let [captures (atom [])
