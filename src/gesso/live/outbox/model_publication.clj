@@ -332,7 +332,7 @@
                                (reconcile-command! ctx may-disclose?)
                                project!))
 
-(defn- recover-after-execute! [ctx may-disclose? failure]
+(defn- recover-after-execute! [ctx may-disclose? failure after-abort!]
   ;; An interrupted request must not start another provider call.
   (when (instance? InterruptedException failure)
     (.interrupt (Thread/currentThread)))
@@ -345,7 +345,32 @@
                      (when-not (identical? failure read-error)
                        (.addSuppressed failure read-error))
                      (throw failure)))]
-    (if (= :replay (:status prior)) prior (throw failure))))
+    (cond
+      (= :replay (:status prior)) prior
+      (and after-abort! (= :unresolved (:status prior))
+           (= :xtdb/assert-failed (:xtdb.error/code (ex-data failure)))
+           (not (xtdb/post-execute-result-failure? failure))
+           (not (.isInterrupted (Thread/currentThread))))
+      (after-abort! failure)
+      :else (throw failure))))
+
+(defn- guarded-abort-outcome! [invocation may-disclose? construct! failure]
+  (let [ctx (:ctx invocation)
+        {:keys [spec model-plan outcome now] :as construction} (construct! invocation)]
+    (when (nil? construction) (throw failure))
+    (when-not (and (map? construction)
+                   (= #{:spec :model-plan :outcome :now} (set (keys construction)))
+                   (nil? spec) (map? model-plan)
+                   (or (seq (:guards model-plan)) (seq (:assertions model-plan))))
+      (reject! :invalid-abort-outcome-construction {}))
+    ;; The ordinary journal-only compiler excludes model commands, changes
+    ;; and publication. A second abort may reconcile a winning record but
+    ;; cannot invoke another constructor.
+    (let [plan (model-resolved-plan! ctx nil model-plan outcome now)]
+      (try {:status :incorporated :outcome outcome
+            :transaction (execute-resolved-plan! ctx plan)}
+           (catch Exception second-failure
+             (recover-after-execute! ctx may-disclose? second-failure nil))))))
 
 (defn execute-resolved!
   "Compose a trusted initial submission or read-only reconciliation with
@@ -364,12 +389,21 @@
    read, never resubmit. Only an exact disclosed replay can settle that
    failure; otherwise preserve the original exception. Construction,
    validation and projection exceptions are not transaction exceptions.
-   Mode remains a trusted server decision, not a browser retry flag.
+   Optional :construct-after-abort! is a trusted policy callback invoked once
+   only after an explicit XTDB assertion abort and unresolved recovery read.
+   It returns nil to preserve the failure, or a fresh canonical guarded
+   journal-only outcome. It never retries the domain mutation. A second
+   failure receives reconciliation only. Mode and this policy are trusted
+   server decisions, not browser retry flags.
    Absence in :reconcile never authorizes a new mutation."
   [{:keys [ctx operation] :as invocation}
-   {:keys [mode construct! may-disclose? project!] :as options}]
+   {:keys [mode construct! may-disclose? project! construct-after-abort!] :as options}]
   (when-not (and (map? options)
-                 (= #{:mode :construct! :may-disclose? :project!} (set (keys options)))
+                 (#{#{:mode :construct! :may-disclose? :project!}
+                    #{:mode :construct! :may-disclose? :project! :construct-after-abort!}}
+                  (set (keys options)))
+                 (or (not (contains? options :construct-after-abort!))
+                     (fn? construct-after-abort!))
                  (#{:submit :reconcile} mode)
                  (every? fn? [construct! may-disclose? project!]))
     (reject! :invalid-resolved-execution-options {}))
@@ -389,7 +423,10 @@
             (try {:status :incorporated :outcome outcome
                   :transaction (execute-resolved-plan! ctx plan)}
                  (catch Exception failure
-                   (recover-after-execute! ctx may-disclose? failure))))
+                   (recover-after-execute! ctx may-disclose? failure
+                                           (when construct-after-abort!
+                                             #(guarded-abort-outcome! invocation may-disclose?
+                                                                      construct-after-abort! %))))))
           prior)]
     (adapter/project-resolution! invocation result project!)))
 
@@ -408,10 +445,13 @@
    The invocation must match its installed binding before mode selection.
    Only the exact returned function is recognized by host admission. This
    is local wiring validation, not certification of business policy."
-  [{:keys [operation submission-mode! construct! may-disclose? project!] :as config}]
+  [{:keys [operation submission-mode! construct! may-disclose? project! construct-after-abort!] :as config}]
   (when-not (and (map? config)
-                 (= #{:operation :submission-mode! :construct! :may-disclose? :project!}
-                    (set (keys config)))
+                 (#{#{:operation :submission-mode! :construct! :may-disclose? :project!}
+                    #{:operation :submission-mode! :construct! :may-disclose? :project! :construct-after-abort!}}
+                  (set (keys config)))
+                 (or (not (contains? config :construct-after-abort!))
+                     (fn? construct-after-abort!))
                  (qualified-keyword? operation)
                  (every? fn? [submission-mode! construct! may-disclose? project!]))
     (reject! :invalid-publication-executor-config {}))
@@ -420,9 +460,11 @@
                                 (adapter/require-context operation invocation))
                      (reject! :mismatched-command-binding {}))
                    (execute-resolved!
-                    invocation {:mode (submission-mode! invocation)
-                                :construct! construct! :may-disclose? may-disclose?
-                                :project! project!}))]
+                    invocation (cond-> {:mode (submission-mode! invocation)
+                                        :construct! construct! :may-disclose? may-disclose?
+                                        :project! project!}
+                                 construct-after-abort!
+                                 (assoc :construct-after-abort! construct-after-abort!))))]
     (locking registered-executors
       (.put registered-executors executor
             {:reference (WeakReference. executor) :operation operation}))

@@ -189,6 +189,8 @@
         lost (ex-info "submitted command reply lost" {:test/lost-reply true})
         constructions (atom 0)
         current-policy? (atom false)
+        abort-policy? (atom false)
+        abort-constructions (atom 0)
         projections (atom [])
         version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at}
         before {:xt/id "r1" :status :open :revision 0 :created-at "t0" :updated-at "t0"
@@ -229,6 +231,17 @@
                                                                 :requests :claim before after version)]}
                                       :outcome {:outcome :request/claimed}
                                       :now "2026-11-24T00:00:00Z"}))
+                     :construct-after-abort!
+                     (fn [{:keys [ctx arguments]}]
+                       (when @abort-policy?
+                         (swap! abort-constructions inc)
+                         (let [row (first (frontier/q-from! ctx
+                                           ["SELECT * FROM requests WHERE _id = ?" (:request-id arguments)]))]
+                           (when (= :done (:status row))
+                             {:spec nil
+                              :model-plan {:guards [(model-command/guard :requests row version)]}
+                              :outcome {:outcome :request/not-claimable :reason :request-closed}
+                              :now "2026-11-24T00:00:02Z"}))))
                      :project! (fn [{:keys [ctx arguments]} result]
                                  (swap! projections conj (:status result))
                                  (when (= :incorporated (:status result))
@@ -494,6 +507,28 @@
                     (is (= {:status :replay :outcome {:outcome :request/not-claimable :reason :request-closed}}
                            (select-keys (publication/reconcile-command! (:ctx (peek @invocations)) (constantly true))
                                         [:status :outcome]))))
+                  (reset! current-policy? false)
+                  (reset! abort-policy? true)
+                  (let [cmd (assoc command
+                                   :command-id (identity/command-id "v2413-guarded-refusal")
+                                   :execution-id (identity/execution-id "v2413-original-execution"))
+                        intents-before (xt/q node ["SELECT * FROM gesso_live_outbox"])
+                        response (post-command! headers cmd)
+                        marker (xml/parse (ByteArrayInputStream. (.getBytes ^String (.body response) StandardCharsets/UTF_8)))
+                        settlement (protocol/wire->settlement
+                                    (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))]
+                    (is (= 200 (.statusCode response)))
+                    (is (= :rejected (:resolution settlement)))
+                    (is (= :request/not-claimable (:outcome settlement)))
+                    (is (= (select-keys cmd [:command-id :execution-id])
+                           (select-keys settlement [:command-id :execution-id])))
+                    (is (= :done (get-in settlement [:authoritative :projection :request/status])))
+                    (is (= 1 @abort-constructions))
+                    (is (= 4 @constructions))
+                    (is (= 3 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+                    (is (= intents-before (xt/q node ["SELECT * FROM gesso_live_outbox"])))
+                    (is (= [{:status :done :revision 2}]
+                           (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"]))))
                   (is (zero? @fallback))
                   (host/stop! started)
                   (is ((:drained? status)))
@@ -866,7 +901,9 @@
           ;; Absent record after an execution failure preserves the original
           ;; exception. No retry or projection occurs.
           (with-redefs [xtdb/execute-tx-from! (fn [& _] (swap! calls inc) (throw lost))]
-            (is (identical? lost (try (run! absent options) nil (catch Exception e e)))))
+            (is (identical? lost (try (run! absent (assoc options :construct-after-abort!
+                                                            (fn [_] (throw (AssertionError. "Unknown outcome retried")))))
+                                      nil (catch Exception e e)))))
           (is (= 2 @calls @constructed))
           (let [reads (atom 0)
                 failed-read (ex-info "recovery read failed" {})
