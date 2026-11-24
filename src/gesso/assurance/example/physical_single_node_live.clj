@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2353: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2354: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -394,23 +394,33 @@
   ;; This owns synchronous Ring invocations ONLY. A returned SSE body or
   ;; asynchronous HTTP writer is not drained by this boundary. Do not use
   ;; this receipt in place of outbox.http-listener's physical writer drain.
-  (let [state (atom {:accepting? true :active 0})
+  ;; Startup and retirement are different closed-admission states. A
+  ;; request cannot enter while Biff is still starting modules, and a
+  ;; failed startup or retirement must never reopen the admission fence.
+  (let [state (atom {:phase :starting :active 0})
         drained (promise)
-        signal! (fn [{:keys [accepting? active]}]
-                  (when (and (not accepting?) (zero? active))
+        signal! (fn [{:keys [phase active]}]
+                  (when (and (= :closed phase) (zero? active))
                     (deliver drained true)))]
     {:wrap (fn [handler]
              (fn [request]
                (let [[before _] (swap-vals! state
-                                           #(if (:accepting? %)
+                                           #(if (= :open (:phase %))
                                               (update % :active inc) %))]
-                 (if (:accepting? before)
+                 (if (= :open (:phase before))
                    (try (handler request)
                         (finally (signal! (swap! state update :active dec))))
                    (unsupported 503)))))
-     :status (fn [] @state)
+     :open! (fn []
+              (let [[before _] (swap-vals! state
+                                           #(if (= :starting (:phase %))
+                                              (assoc % :phase :open) %))]
+                (when-not (= :starting (:phase before))
+                  (reject! :invalid-ring-admission-open))))
+     :status (fn [] (let [{:keys [phase active]} @state]
+                      {:accepting? (= :open phase) :active active}))
      :close-and-await! (fn []
-                         (signal! (swap! state assoc :accepting? false))
+                         (signal! (swap! state assoc :phase :closed))
                          ;; Lexically owned providers cannot be closed while
                          ;; a synchronous handler remains active. Interruption
                          ;; is not evidence of a completed drain.
@@ -498,6 +508,13 @@
                                             (get-in app [:http-report :routes]))))))
                (reject! :composed-live-handler-not-adopted-by-original-biff))
              (try
+               ;; Biff has returned the complete selected module inventory,
+               ;; and the installed handler and policy have been rechecked.
+               ;; Only now may the actual listener enter the delegate.
+               (when (and worker-options
+                          (nil? (get (:system app) managed/handle-key)))
+                 (reject! :missing-started-managed-worker))
+               ((:open! admission))
                (f (cond->
                   (assoc app
                          :ring-admission-status (:status admission)
@@ -507,7 +524,8 @@
                          :outstanding-sse-count (fn [] (count (:sessions @registered-streams)))
                          :sse-retirement-status (fn [] (:retirement @registered-streams))
                          :live-report
-                         (cond-> (report app)
+                         (cond-> (assoc (report app)
+                                        :ring-admission-startup :closed-until-biff-and-handler-checks)
                            (= :durable-outbox publication-selection)
                            (assoc :notification-timing :atomic-intent-then-explicit-outbox-cycle
                                   :uncertain-notification-recovery :operator-outbox-reconciliation

@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-durable-live-test
-  "v2353: Explicit atomic publication mode through the installed session handler."
+  "v2354: Explicit atomic publication mode through the installed session handler."
   (:require [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [gesso.assurance.example.physical-single-node-live :as fixture]
@@ -372,6 +372,8 @@
     (with-redefs [biff/start (fn [initial modules order]
                               (let [started (real-start initial modules order)]
                                 (reset! started* started)
+                                (is (= 503 (:status ((:biff.ring/handler started)
+                                                     {:request-method :get :uri fixture/panel-uri}))))
                                 (throw failure)))]
       (is (identical? failure
                       (try
@@ -388,4 +390,69 @@
       (is (some? handle))
       (is (= :stopped (:status (lifecycle/status handle))))
       (is (true? (:stop-requested? (lifecycle/status handle))))
-      (is (live/closed? (:gesso.live/system system))))))
+      (is (live/closed? (:gesso.live/system system)))
+      (is (= 503 (:status ((:biff.ring/handler system)
+                           {:request-method :post :uri reserve})))))))
+
+(deftest native-startup-fences-authenticated-socket-traffic-until-complete
+  (let [entered (promise)
+        release-start (promise)
+        listener (promise)
+        writer* (promise)
+        jetty-var (requiring-resolve 'ring.adapter.jetty9/run-jetty)
+        real-jetty @jetty-var
+        real-start @#'managed/start-module!]
+    (with-redefs-fn
+      {jetty-var (fn [& args]
+                   (let [server (apply real-jetty args)]
+                     (deliver listener server)
+                     server))
+       #'managed/start-module! (fn [system]
+                                 (deliver entered system)
+                                 (when-not (= true (deref release-start 15000 false))
+                                   (throw (ex-info "startup test barrier timed out" {})))
+                                 (real-start system))}
+      (fn []
+        (let [scope (future
+                      (session/with-session-policy!
+                       policy
+                       (fn [{:keys [source issue!]}]
+                         (let [writer (issue! :actor/writer)]
+                           (deliver writer* writer)
+                           (fixture/with-managed-durable-granted-live-proving-application!
+                            "native-startup-fence" source :biff-jetty-http1
+                            {:worker-id "native-startup-fence-worker" :poll-ms 20}
+                            (fn [{:keys [node read! loopback-base-url ring-admission-status
+                                         outbox-worker-status live-report]}]
+                              (is (= {:accepting? true :active 0} (ring-admission-status)))
+                              (is (= :closed-until-biff-and-handler-checks
+                                     (:ring-admission-startup live-report)))
+                              (is (= 0 (:revision (read!))))
+                              (is (= {:status 200 :publication "intent-recorded"}
+                                     (post! loopback-base-url reserve (headers writer))))
+                              (is (= 1 (:revision (read!))))
+                              (is (eventually #(= 1 (:total-dispatch-accepted
+                                                     (outbox-worker-status)))))
+                              :ready))))))]
+          (try
+            (let [system (deref entered 10000 nil)
+                  server (deref listener 1000 nil)
+                  writer (deref writer* 1000 nil)]
+              (is (some? system))
+              (is (some? server))
+              (is (some? writer))
+              (when (and system server writer)
+                (let [port (.getLocalPort (first (.getConnectors server)))
+                      base (str "http://127.0.0.1:" port)
+                      node (:biff.xtdb/node system)]
+                  ;; Valid credentials already exist and the real listener
+                  ;; accepts sockets, but the worker has NOT started yet.
+                  (is (nil? (get system managed/handle-key)))
+                  (is (= 503 (:status (post! base reserve (headers writer)))))
+                  (is (= 503 (:status ((:biff.ring/handler system)
+                                       {:request-method :get :uri fixture/events-uri
+                                        :headers (headers writer)}))))
+                  (is (empty? (rows node)))
+                  (is (= ::blocked (deref scope 100 ::blocked))))))
+            (finally (deliver release-start true)))
+          (is (= :ready (deref scope 15000 ::timeout))))))))
