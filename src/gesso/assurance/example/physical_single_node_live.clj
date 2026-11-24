@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2348: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2349: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -341,6 +341,42 @@
           :else
           (original request))))))
 
+(defn- ring-admission []
+  ;; This owns synchronous Ring invocations ONLY. A returned SSE body or
+  ;; asynchronous HTTP writer is not drained by this boundary. Do not use
+  ;; this receipt in place of outbox.http-listener's physical writer drain.
+  (let [state (atom {:accepting? true :active 0})
+        drained (promise)
+        signal! (fn [{:keys [accepting? active]}]
+                  (when (and (not accepting?) (zero? active))
+                    (deliver drained true)))]
+    {:wrap (fn [handler]
+             (fn [request]
+               (let [[before _] (swap-vals! state
+                                           #(if (:accepting? %)
+                                              (update % :active inc) %))]
+                 (if (:accepting? before)
+                   (try (handler request)
+                        (finally (signal! (swap! state update :active dec))))
+                   (unsupported 503)))))
+     :status (fn [] @state)
+     :close-and-await! (fn []
+                         (signal! (swap! state assoc :accepting? false))
+                         ;; Lexically owned providers cannot be closed while
+                         ;; a synchronous handler remains active. Interruption
+                         ;; is not evidence of a completed drain.
+                         (let [interrupted? (volatile! (Thread/interrupted))]
+                           (try
+                             (loop []
+                               (when-not (try @drained
+                                              (catch InterruptedException _
+                                                (vreset! interrupted? true)
+                                                false))
+                                 (recur)))
+                             (finally
+                               (when @interrupted?
+                                 (.interrupt (Thread/currentThread)))))))}))
+
 (defn- with-live-application* [slot-id principal-source listener-selection publication-selection storage-selection f]
   (when-not (fn? f)
     (reject! :invalid-application-callback))
@@ -350,7 +386,8 @@
     (principal/checked-test-policy! principal-source))
   (let [live-system (live/create)
         registered-streams (atom {:accepting? true :sessions {}})
-        guarded* (atom nil)]
+        guarded* (atom nil)
+        admission (ring-admission)]
     (try
       (let [assets (browser-assets!)]
         (physical-http/with-http-proving-application!
@@ -381,10 +418,11 @@
              (when-not (= 1 (count physical-views))
                (reject! :incomplete-original-physical-read-routes))
              (reset! guarded* (when principal-source delegated))
-             (if principal-source
-               (principal/guarded-test-read-handler!
-                principal-source app read-uris live-handler)
-               live-handler)))
+             ((:wrap admission)
+              (if principal-source
+                (principal/guarded-test-read-handler!
+                 principal-source app read-uris live-handler)
+                live-handler))))
          listener-selection publication-selection storage-selection
          (fn [app]
            (let [installed (:biff.ring/handler (:system app))
@@ -404,8 +442,11 @@
                                          (= (:http-routes app)
                                             (get-in app [:http-report :routes]))))))
                (reject! :composed-live-handler-not-adopted-by-original-biff))
-             (f (cond->
+             (try
+               (f (cond->
                   (assoc app
+                         :ring-admission-status (:status admission)
+                         :close-ring-admission! (:close-and-await! admission)
                          :live-handler installed
                          :live-system live-system
                          :outstanding-sse-count (fn [] (count (:sessions @registered-streams)))
@@ -445,7 +486,8 @@
                                              (:biff-context app) physical/outbox-source-id opts)))
                   principal-source
                   (assoc :principal-handler guarded
-                         :principal-source principal-source)))))))
+                         :principal-source principal-source)))
+               (finally ((:close-and-await! admission))))))))
       (finally
         (let [[before _] (swap-vals! registered-streams assoc :accepting? false)]
           (try
@@ -561,10 +603,13 @@
    The callback receives read-only :outbox-worker-status, not a second manual
    dispatcher or restart handle. Retire before leaving the Biff callback,
    including exceptional exit, so an in-flight cycle cannot outlive XTDB or
-   Live. An optional trusted storage selection is passed to the same durable
+   Live. Close and drain synchronous Ring admission BEFORE worker retirement.
+   This does not drain SSE writers or guarantee all pending work is delivered.
+   An optional trusted storage selection is passed to the same durable
    fixture; the existing arity stays ephemeral. Shutdown can wait indefinitely
    for a blocked provider. This is NOT native checked Biff worker-module
-   adoption, ingress drain, arbitrary crash tolerance, or release qualification."
+   adoption, physical listener drain, arbitrary crash tolerance, or release
+   qualification."
   ([slot-id source listener-selection worker-options f]
    (with-managed-durable-granted-live-proving-application!
     slot-id source listener-selection :ephemeral worker-options f))
@@ -579,9 +624,12 @@
                                      worker-options)]
         (try
           (f (-> app
-                 (dissoc :process-outbox!)
+                 (dissoc :process-outbox! :close-ring-admission!)
                  (assoc :outbox-worker-status #(lifecycle/status handle))
                  (update :live-report assoc
                          :notification-timing :atomic-intent-then-scoped-managed-worker
-                         :outbox-worker-lifecycle :retired-before-provider-scope-exit)))
-          (finally (retire-scoped-worker! handle))))))))
+                         :outbox-worker-lifecycle :retired-before-provider-scope-exit
+                         :ring-admission-drain :synchronous-before-worker-retirement)))
+          (finally
+            ((:close-ring-admission! app))
+            (retire-scoped-worker! handle))))))))

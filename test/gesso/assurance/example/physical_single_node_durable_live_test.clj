@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-durable-live-test
-  "v2347: Explicit atomic publication mode through the installed session handler."
+  "v2349: Explicit atomic publication mode through the installed session handler."
   (:require [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [gesso.assurance.example.physical-single-node-live :as fixture]
@@ -7,6 +7,7 @@
             [gesso.assurance.example.physical-single-node-session :as session]
             [gesso.live.core :as live]
             [gesso.live.outbox.cycle :as cycle]
+            [gesso.model.tx :as tx]
             [manifold.stream :as stream]
             [xtdb.api :as xt])
   (:import (java.net HttpURLConnection URL)
@@ -242,3 +243,57 @@
       (finally
         (doseq [file (reverse (file-seq (.toFile root)))]
           (io/delete-file file true))))))
+
+(deftest managed-retirement-fences-new-ring-invocations-before-draining-admitted-command
+  (let [entered (promise)
+        release-command (promise)
+        app* (promise)
+        admitted* (promise)
+        real-transact @#'tx/transact-with-outbox!]
+    (with-redefs [tx/transact-with-outbox!
+                  (fn [& args]
+                    (deliver entered true)
+                    @release-command
+                    (apply real-transact args))]
+      (let [scope (future
+                    (session/with-session-policy!
+                     policy
+                     (fn [{:keys [source issue!]}]
+                       (let [writer (issue! :actor/writer)]
+                         (fixture/with-managed-durable-granted-live-proving-application!
+                          "managed-ring-drain" source :biff-jetty-http1
+                          {:worker-id "managed-ring-drain-worker" :poll-ms 20}
+                          (fn [{:keys [handler] :as app}]
+                            (deliver app* [app writer])
+                            ;; An already admitted synchronous Ring execution
+                            ;; may still own the domain transaction. Its return
+                            ;; is not an assertion about a socket writer.
+                            (deliver admitted*
+                                     (future (handler {:request-method :post
+                                                       :uri reserve
+                                                       :headers (headers writer)})))
+                            (when-not (= true (deref entered 5000 ::timeout))
+                              (throw (ex-info "command did not reach transaction" {})))
+                            :callback-finished))))))]
+        (try
+          (is (= true (deref entered 10000 ::timeout)))
+          (let [[{:keys [node read! live-system loopback-base-url handler
+                         ring-admission-status outbox-worker-status]} writer]
+                (deref app* 5000 nil)]
+            (is (eventually #(= {:accepting? false :active 1}
+                               (ring-admission-status))))
+            (is (false? (:stop-requested? (outbox-worker-status))))
+            (is (= 503 (:status (post! loopback-base-url release (headers writer)))))
+            (is (= 503 (:status (handler {:request-method :get :uri fixture/events-uri
+                                         :headers (headers writer)}))))
+            (is (zero? (:revision (read!))))
+            (is (empty? (rows node)))
+            (is (not (live/closed? live-system)))
+            (is (= ::blocked (deref scope 100 ::blocked))))
+          (finally (deliver release-command true)))
+        (is (= 200 (:status (deref (deref admitted* 5000 nil) 5000 nil))))
+        (is (= :callback-finished (deref scope 10000 ::timeout)))
+        (let [[{:keys [ring-admission-status outbox-worker-status live-system]} _] @app*]
+          (is (= {:accepting? false :active 0} (ring-admission-status)))
+          (is (= :stopped (:status (outbox-worker-status))))
+          (is (live/closed? live-system)))))))
