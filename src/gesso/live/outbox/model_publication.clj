@@ -461,6 +461,32 @@
             (reject! :unmapped-publication-executor-topics
                      {:operation operation :topics (into #{} (remove derived-topics) topics)})))))))
 
+(defn- physical-entity-name! [entity]
+  ;; Restrict the selected profile to simple lowercase SQL identifiers.
+  ;; XTDB normalizes hyphens to underscores; unqualified tables use public.
+  ;; Do not guess how exotic keywords, quoting or system schemas behave.
+  (let [schema (or (namespace entity) "public")
+        table (name entity)
+        simple? #(boolean (re-matches #"[a-z][a-z0-9_-]*" %))]
+    (when-not (and (simple? schema) (simple? table)
+                   (not (#{"xt" "xtdb" "information_schema" "pg_catalog"}
+                         (str/replace schema "-" "_"))))
+      (reject! :unsupported-model-entity-name {:entity-type entity}))
+    [(str/replace schema "-" "_") (str/replace table "-" "_")]))
+
+(defn- require-distinct-physical-entities! [entity-topics]
+  (reduce (fn [seen entity]
+            (let [physical (physical-entity-name! entity)]
+              (when (#{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests"}
+                      (second physical))
+                (reject! :reserved-durable-model-table {:entity-type entity}))
+              (when-let [previous (get seen physical)]
+                (reject! :aliased-model-entities
+                         {:entities #{previous entity} :physical-table physical}))
+              (assoc seen physical entity)))
+          {} (sort (keys entity-topics)))
+  nil)
+
 (defn- require-operation-entities! [operations entity-topics inventory]
   (when-not (and (map? inventory) (= (set (keys operations)) (set (keys inventory))))
     (reject! :incomplete-operation-model-entities {}))
@@ -485,7 +511,9 @@
    Optional :model-entity-topics maps canonical entity keywords to nonempty
    sets of graph topics. Canonical mutations must then map every command
    and derive subjects from its before/after fields (:id means :xt/id).
-   Old subjects are asserted against current storage. Select
+   Mapped entity names must be simple lowercase SQL identifiers with
+   distinct physical XTDB table identities. Old subjects are asserted
+   against current storage. Select
    :require-derived-model? true with that mapping to refuse raw preparation,
    raw transactions and raw journal-only plans at this command boundary.
    The canonical host requires all assembled operations to use recognized
@@ -528,7 +556,8 @@
                      (every? (fn [[entity topics]]
                                (and (keyword? entity) (set? topics) (seq topics)
                                     (every? #(contains? subjects %) topics))) entity-topics))
-        (reject! :invalid-model-entity-topics {})))
+        (reject! :invalid-model-entity-topics {}))
+      (require-distinct-physical-entities! entity-topics))
     (when (and (contains? options :require-derived-model?) (not (true? strict?)))
       (reject! :invalid-derived-model-requirement {}))
     (when (contains? options :operation-model-entities)

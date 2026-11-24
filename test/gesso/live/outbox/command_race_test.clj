@@ -387,3 +387,53 @@
                                          (ctx :request/cancel "noop") nil {} {:reason :unavailable} "t0"))))
             (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
             (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))))))
+
+(deftest derived-publication-inventory-rejects-physical-table-aliases
+  (let [executor (publication/build-executor
+                  {:operation :request/claim :submission-mode! (constantly :submit)
+                   :may-disclose? (constantly true)
+                   :construct! (fn [_] (throw (ex-info "unexpected construction" {})))
+                   :project! (fn [& _] (throw (ex-info "unexpected projection" {})))})
+        selected (assoc mapping :model-entity-topics {:request-items #{:request}}
+                                :require-derived-model? true
+                                :operation-model-entities {:request/claim #{:request-items}})
+        config {:xtdb-config {} :source-id "strict-2386" :rules-context {}
+                :worker-options {:worker-id "strict-2386" :poll-ms 20}
+                :live-options {} :assembled-publication selected
+                :assembled-operations {:authorize-request? (constantly true)}}
+        error (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))]
+    ;; Establish the actual provider alias rather than relying only on
+    ;; a string normalization assumption in the admission checker.
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node [[:put-docs :request-items {:xt/id "r1" :status :open}]])
+      (xt/execute-tx node [[:put-docs :public/request_items {:xt/id "r1" :status :claimed}]])
+      (is (= [{:xt/id "r1" :status :claimed}]
+             (xt/q node ["SELECT _id, status FROM request_items"])))
+      (xt/execute-tx node [[:put-docs :other/request_items {:xt/id "r1" :status :other}]])
+      (is (= [{:status :other}] (xt/q node ["SELECT status FROM other.request_items"])))
+      (is (= [{:status :claimed}] (xt/q node ["SELECT status FROM request_items"]))))
+    (with-operations {:request/claim (claim-operation executor)}
+      (fn [assembly]
+        (let [starts (atom 0)]
+          (with-redefs [managed/start-biff-application! (fn [& _] (swap! starts inc))]
+            (doseq [alias [:request_items :public/request-items :public/request_items]]
+              (let [failure (error #(host/start! assembly identity
+                                       (assoc-in config [:assembled-publication :model-entity-topics alias]
+                                                 #{:request})))]
+                (is (= :aliased-model-entities (:reason failure)))
+                (is (= #{:request-items alias} (:entities failure)))
+                (is (= ["public" "request_items"] (:physical-table failure)))))
+            (doseq [entity [:RequestItems :public/request.items :xt/requests :pg_catalog/requests]]
+              (is (= :unsupported-model-entity-name
+                     (:reason (error #(host/start! assembly identity
+                                      (assoc-in config [:assembled-publication :model-entity-topics entity]
+                                                #{:request})))))))
+            (doseq [entity [:gesso-commands :public/gesso_live_outbox :gesso-publication-manifests]]
+              (is (= :reserved-durable-model-table
+                     (:reason (error #(host/start! assembly identity
+                                      (assoc-in config [:assembled-publication :model-entity-topics entity]
+                                                #{:request})))))))
+            (is (zero? @starts))))
+        (is (map? (publication/profile! assembly selected)))
+        (is (map? (publication/profile! assembly
+                    (assoc-in selected [:model-entity-topics :other/request_items] #{:request}))))))))
