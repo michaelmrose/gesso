@@ -37,11 +37,8 @@
   (when-not (application/application-assembly? assembly)
     (reject! :stale-stream-assembly {}))
   (when-let [selected (route/matching-route routes (:uri request))]
-    (when-let [captures (route/captured-arguments selected (:uri request))]
-      (let [context (-> request
-                        (dissoc :params :query-params :form-params :route-params :path-params)
-                        (assoc :path-params captures))
-            {:keys [live-app fragment]} selected
+    (when-let [context (route/selected-read-context selected request)]
+      (let [{:keys [live-app fragment]} selected
             id (resolve-id context fragment)]
         (when (and (or (keyword? id) (integer? id) (uuid? id)
                        (and (string? id) (not (str/blank? id))))

@@ -2,7 +2,8 @@
   "Shared selected HTTP route ownership and strict segment capture. Not a
    general Ring router or URL coercion system."
   (:require [clojure.string :as str]
-            [gesso.live.application-preflight.affordance :as affordance]))
+            [gesso.live.application-preflight.affordance :as affordance]
+            [gesso.live.progression.http :as progression-http]))
 
 (defn- segments [path]
   (str/split path #"/" -1))
@@ -50,3 +51,20 @@
                        (when (parameter-segment? segment)
                          [(keyword (subs segment 1)) value])))
             (map vector template parts)))))
+
+(defn selected-read-context
+  "Prepare the same captured scope and minimum-read context for selected
+   fragment GET and SSE authorization. Malformed captures or progression
+   carriers refuse admission before identity resolution. Request progression
+   is not proof of authority; authentication and policy remain separate."
+  [route request]
+  (when-let [captures (captured-arguments route (:uri request))]
+    (try
+      (progression-http/bind-request-progression
+       (-> request
+           (dissoc :params :query-params :form-params :route-params :path-params)
+           (assoc :path-params captures)))
+      (catch clojure.lang.ExceptionInfo e
+        (if (= :gesso.live.progression.http/error (:error/type (ex-data e)))
+          nil
+          (throw e))))))

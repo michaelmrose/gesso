@@ -5,8 +5,7 @@
             [gesso.live.application-preflight :as application]
             [gesso.live.core :as live]
             [gesso.live.outbox.http-route :as route]
-            [gesso.live.outbox.managed-html :as managed-html]
-            [gesso.live.progression.http :as progression-http]))
+            [gesso.live.outbox.managed-html :as managed-html]))
 
 (defn- reject! [reason data]
   (throw (ex-info "Canonical fragment transport not admitted."
@@ -42,15 +41,6 @@
   (or (and (string? id) (not (str/blank? id)))
       (keyword? id) (integer? id) (uuid? id)))
 
-(defn- valid-progression? [request]
-  ;; Validate the wire before invoking application identity selection. The
-  ;; original canonical render boundary performs the actual context binding.
-  (try (progression-http/progression-from-request request) true
-       (catch clojure.lang.ExceptionInfo e
-         (if (= :gesso.live.progression.http/error (:error/type (ex-data e)))
-           false
-           (throw e)))))
-
 (defn wrap-handler
   "Own every method on the selected fragment routes. :resolve-id is a
    trusted (fn [request fragment-name] id-or-nil) mapping from the physical
@@ -75,23 +65,18 @@
           (not (application/application-assembly? assembly))
           (reject! :stale-fragment-assembly {})
           :else
-          (if-let [captures (route/captured-arguments selected (:uri request))]
-            (let [context (-> request
-                              (dissoc :params :query-params :form-params :route-params :path-params)
-                              (assoc :path-params captures))]
-              (if-not (valid-progression? context)
+          (if-let [context (route/selected-read-context selected request)]
+            (let [id (resolve-id context (:fragment selected))]
+              (if-not (valid-id? id)
                 (denied 400)
-                (let [id (resolve-id context (:fragment selected))]
-                  (if-not (valid-id? id)
-                    (denied 400)
-                    (try
-                      (update (live/render-fragment-response
-                               (:live-app selected) context (:fragment selected) id
-                               {:response managed-html/html-response})
-                              :headers assoc "cache-control" "no-store")
-                      (catch clojure.lang.ExceptionInfo e
-                        (if (= :gesso.live/not-authorized (:error/type (ex-data e)))
-                          (denied 403)
-                          (throw e))))))))
+                (try
+                  (update (live/render-fragment-response
+                           (:live-app selected) context (:fragment selected) id
+                           {:response managed-html/html-response})
+                          :headers assoc "cache-control" "no-store")
+                  (catch clojure.lang.ExceptionInfo e
+                    (if (= :gesso.live/not-authorized (:error/type (ex-data e)))
+                      (denied 403)
+                      (throw e))))))
             (denied 400)))
         (fallback request)))))

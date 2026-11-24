@@ -154,6 +154,84 @@
               (is (= 1 @fallback))
               (finally (host/stop! started) (.close client)))))))))
 
+(deftest selected-read-and-subscription-share-prepared-authority-context
+  (let [resolutions (atom [])
+        authorizations (atom [])
+        queries (atom [])
+        trusted (progression/requirement {:tx-id 31 :system-time "2026-08-29T06:00:00Z"})
+        browser (progression/requirement {:tx-id 32 :system-time "2026-08-29T06:00:01Z"})
+        combined (progression/compose trusted browser)
+        header progression-http/request-header-name
+        observe (fn [ctx id]
+                  {:id id :path-params (:path-params ctx)
+                   :principal (:principal ctx) :progression (live/progression ctx)
+                   :provider (:xtdb/connectable ctx)
+                   :untrusted-params (select-keys ctx [:params :query-params :form-params :route-params])})
+        resolve-id (fn [ctx fragment]
+                     (swap! resolutions conj [fragment (observe ctx nil)])
+                     (get-in ctx [:path-params :id]))]
+    (with-redefs [fixture/allow? (fn [ctx id]
+                                   (swap! authorizations conj (observe ctx id))
+                                   (and (= "member" (:principal ctx)) (= "r1" id)
+                                        (= combined (live/progression ctx))))
+                  fixture/generic-query (fn [ctx id]
+                                          (swap! queries conj (observe ctx id))
+                                          {:fragment/id id})]
+      (with-assembly
+        (fn [assembly]
+          (let [started (host/start! assembly (constantly {:status 418})
+                                     (assoc (config)
+                                            :assembled-fragments {:resolve-id resolve-id}
+                                            :assembled-sse {:resolve-id resolve-id :max-connections 1}))
+                handler (:biff.ring/handler started)
+                system (:gesso.live/system started)
+                status (get started host/sse-status-key)
+                fragment-path "/fragments/request-list/r1"
+                stream-path "/streams/request-list/r1"
+                request {:request-method :get :principal "member"
+                         :gesso.live/progression trusted
+                         :headers {header (progression-http/encode-request-progression browser)}
+                         :path-params {:id "forged"} :params {:id "forged"}
+                         :query-params {:id "forged"} :form-params {:id "forged"}
+                         :route-params {:id "forged"} :xtdb/connectable :forged}
+                send! (fn [path req] (handler (assoc req :uri path)))
+                expected {:id "r1" :path-params {:id "r1"}
+                          :principal "member" :progression combined
+                          :provider (:xtdb/connectable started) :untrusted-params {}}]
+            (try
+              (is (= 200 (:status (send! fragment-path request))))
+              (let [response (send! stream-path request)]
+                (try
+                  (is (= 200 (:status response)))
+                  (is (= 1 (:subscription-count (source/stats (:source system)))))
+                  (finally (when (= 200 (:status response)) (stream/close! (:body response))))))
+              (is (loop [remaining 250]
+                    (cond (and (zero? ((:occupied-count status)))
+                               (zero? (:subscription-count (source/stats (:source system))))) true
+                          (zero? remaining) false
+                          :else (do (Thread/sleep 20) (recur (dec remaining))))))
+              (is (= (vec (repeat 2 [:request-list (assoc expected :id nil)])) @resolutions))
+              (is (= [expected expected] @authorizations))
+              (is (= [expected] @queries))
+              ;; Valid progression cannot replace a missing principal.
+              (doseq [path [fragment-path stream-path]]
+                (let [response (send! path (dissoc request :principal))]
+                  (try (is (= 403 (:status response)))
+                       (finally (when (= 200 (:status response)) (stream/close! (:body response)))))))
+              (is (= 4 (count @authorizations)))
+              (is (= 4 (count @resolutions)))
+              (doseq [[path expected-status] [[fragment-path 400] [stream-path 403]]
+                      headers [{header "%not-valid"}
+                               {header (progression-http/encode-request-progression browser)
+                                "GESSO-LIVE-PROGRESSION" "%not-valid"}]]
+                (is (= expected-status (:status (send! path (assoc request :headers headers))))))
+              (is (= 4 (count @resolutions)))
+              (is (= 4 (count @authorizations)))
+              (is (= [expected] @queries))
+              (is (zero? ((:occupied-count status))))
+              (is (zero? (:subscription-count (source/stats (:source system)))))
+              (finally (host/stop! started)))))))))
+
 (deftest selected-read-and-subscription-require-affirmative-scope-decision
   (let [decision (atom true)
         authorizations (atom [])
