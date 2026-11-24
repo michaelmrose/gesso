@@ -184,6 +184,7 @@
 (defn- exercise-installed-claim! [lose-reply?]
   (let [seen (atom []) queries (atom []) invocations (atom []) fallback (atom 0)
         prepared-intents (atom nil)
+        read-allowed? (atom true)
         submitted (atom 0)
         execute xtdb/execute-tx-from!
         lost (ex-info "submitted command reply lost" {:test/lost-reply true})
@@ -263,7 +264,8 @@
                      (or (get-in ctx [:path-params :id]) (get-in ctx [:headers "fragment-id"])))]
     (with-redefs [fixture/allow? (fn [ctx id]
                                    (swap! seen conj [id ctx])
-                                   (and (= "allowed" (get-in ctx [:headers "authorization"]))
+                                   (and @read-allowed?
+                                        (= "allowed" (get-in ctx [:headers "authorization"]))
                                         (= "r1" id)))
                   fixture/generic-query (fn [ctx id]
                                           (swap! queries conj [id (live/progression ctx)])
@@ -377,12 +379,26 @@
                           (is (some? (:progression payload)) diagnostics)
                           (when-let [wire (:progression payload)]
                             (let [requirement (progression/wire->requirement wire)
-                                  response (send! path (assoc headers progression-http/request-header-name
-                                                              (progression-http/encode-request-progression requirement))
-                                                  (HttpResponse$BodyHandlers/ofString))]
-                              (is (= 200 (.statusCode response)))
-                              (is (str/includes? (.body response) ">claimed<"))
-                              (is (= ["r1" requirement] (peek @queries)))))))
+                                  refresh-headers (assoc headers progression-http/request-header-name
+                                                         (progression-http/encode-request-progression requirement))
+                                  before-queries @queries]
+                              ;; An actual delivered progression is not a read capability.
+                              ;; Revoke authorization after SSE delivery, before the GET.
+                              (reset! read-allowed? false)
+                              (try
+                                (is (= 403 (.statusCode (send! path refresh-headers
+                                                               (HttpResponse$BodyHandlers/ofString)))))
+                                (is (= before-queries @queries))
+                                (finally (reset! read-allowed? true)))
+                              (is (= 403 (.statusCode (send! path (dissoc refresh-headers "authorization")
+                                                             (HttpResponse$BodyHandlers/ofString)))))
+                              (is (= 403 (.statusCode (send! "/fragments/request-list/r2" refresh-headers
+                                                             (HttpResponse$BodyHandlers/ofString)))))
+                              (is (= before-queries @queries))
+                              (let [response (send! path refresh-headers (HttpResponse$BodyHandlers/ofString))]
+                                (is (= 200 (.statusCode response)))
+                                (is (str/includes? (.body response) ">claimed<"))
+                                (is (= ["r1" requirement] (peek @queries))))))))
                       (finally (future-cancel a) (future-cancel b))))
                   (is (= [{:status :claimed :revision 1}]
                          (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"])))
