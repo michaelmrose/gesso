@@ -1440,6 +1440,20 @@
                (= "transition:false" transition)
                (not (some-> config (aget "globalViewTransitions")))))))))
 
+(defn- single-target-selection?
+  "The managed single-target profile does not admit request-side OOB
+   selection. HTMX resolves hx-select-oob from the issuing element and its
+   ancestors after beforeSwap. Conservatively refuse either spelling anywhere
+   on that chain, even if current inheritance settings would suppress it."
+  [root]
+  (loop [element root]
+    (if (node-element? element)
+      (if (or (some? (element-attr element "hx-select-oob"))
+              (some? (element-attr element "data-hx-select-oob")))
+        false
+        (recur (.-parentElement element)))
+      true)))
+
 (defn on-before-swap!
   "Normalize HTMX beforeSwap for the exact currently correlated managed request."
   [runtime event]
@@ -1459,6 +1473,12 @@
 
             (false? (detail-field event "shouldSwap"))
             nil
+
+            (not (single-target-selection? root))
+            (do
+              (cancel-swap-event! event)
+              (.warn js/console
+                     "Gesso managed fragment swap refused: request-side OOB selection is unsupported."))
 
             (not (synchronous-managed-swap? runtime root event))
             (do

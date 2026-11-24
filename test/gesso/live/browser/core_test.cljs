@@ -1539,6 +1539,44 @@
         (is (nil? (core/active-request runtime root)))
         (is (empty? (:continuity (core/state runtime))))))))
 
+(deftest managed-swap-refuses-request-side-oob-selection-test
+  (doseq [{:keys [local parent grandparent allowed?]}
+          [{:allowed? true}
+           {:local {"hx-select-oob" "#foreign"} :allowed? false}
+           {:local {"data-hx-select-oob" "#foreign:delete"} :allowed? false}
+           {:parent {"hx-select-oob" "#foreign"} :allowed? false}
+           {:grandparent {"data-hx-select-oob" "#foreign"} :allowed? false}
+           {:local {"hx-select-oob" "unset"} :allowed? false}
+           {:parent {"hx-select-oob" ""} :allowed? false}
+           {:parent {"hx-select-oob" "#foreign" "hx-disinherit" "*"}
+            :allowed? false}]]
+    (let [captures (atom 0)
+          {:keys [runtime root]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          old-attr (.-getAttribute root)
+          requirement (progression/requirement
+                       {:tx-id 802 :system-time "2026-08-26T08:10:02Z"})
+          ancestor (make-element {:attrs parent})
+          outer (make-element {:attrs grandparent})]
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      ;; Configuration can change after binding; check the live issuing chain.
+      (aset root "getAttribute" (fn [name] (get local name (old-attr name))))
+      (aset root "parentElement" ancestor)
+      (aset ancestor "parentElement" outer)
+      (let [fixture (before-swap! runtime root xhr)]
+        (is (= (not allowed?) @(:prevented? fixture)) (pr-str [local parent grandparent]))
+        (is (= allowed? (aget (:detail fixture) "shouldSwap")))
+        (is (= (if allowed? 1 0) @captures)))
+      (when-not allowed?
+        (after-request! runtime root xhr true)
+        (is (= #{requirement}
+               (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+        (is (nil? (core/active-request runtime root)))
+        (is (empty? (:continuity (core/state runtime))))))))
+
 (deftest ordinary-managed-swap-captures-and-restores-continuity-without-owning-semantics-test
   (let [captures (atom [])
         restores (atom [])
