@@ -1,11 +1,14 @@
 (ns gesso.live.outbox.discovery-test
   "v2093: physical XTDB discovery of pending and expired-lease intent IDs."
   (:require [clojure.test :refer [deftest is testing]]
+            [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.discovery :as discovery]
+            [gesso.live.outbox.read-frontier :as frontier]
             [gesso.live.outbox.worker :as worker]
             [xtdb.api :as xt]
+            [xtdb.basis :as basis]
             [xtdb.node :as xtn])
   (:import [java.time Instant]))
 
@@ -212,7 +215,7 @@
           queries (atom 0)]
       (try
         (Thread/interrupted)
-        (let [outcome (with-redefs [xt/q (fn [& _]
+        (let [outcome (with-redefs [live.xtdb/q-from (fn [& _]
                                           (swap! queries inc)
                                           (throw cause))]
                         (try
@@ -243,7 +246,7 @@
           _ (seed-intents! node [{:id a :status :pending}
                                  {:id b :status :pending}])
           cause (InterruptedException. "second discovery page interrupted")
-          original-query xt/q
+          original-query live.xtdb/q-from
           pages (atom 0)
           opts {:source-id "gesso/test-discovery"
                 :worker-id "interrupted-page-worker"
@@ -251,7 +254,7 @@
       (try
         (Thread/interrupted)
         (let [outcome (with-redefs
-                        [xt/q (fn [& args]
+                        [live.xtdb/q-from (fn [& args]
                                 (let [query (second args)]
                                   (if (and (= 3 (count args))
                                            (vector? query)
@@ -315,7 +318,8 @@
     (doseq [[label request ids reason] cases]
       (let [queries (atom 0)
             rows (mapv synthetic-discovery-row ids)]
-        (with-redefs [xt/q (fn [& _] (swap! queries inc) rows)]
+        (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {"xtdb" [42]}})
+                     live.xtdb/q-from (fn [& _] (swap! queries inc) rows)]
           (is (rejected? #(discovery/discover-eligible! :synthetic request)
                          reason)
               (str label " must not invent a safe discovery cursor"))
@@ -335,11 +339,13 @@
                                            :xt/id "not-a-uuid")]]
         opts {:source-id "gesso/test-discovery" :limit 2}]
     (doseq [[label extra] bad-lookaheads]
-      (with-redefs [xt/q (fn [& _] (conj valid extra))]
+      (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {"xtdb" [42]}})
+                     live.xtdb/q-from (fn [& _] (conj valid extra))]
         (is (rejected? #(discovery/discover-eligible! :synthetic opts)
                        :invalid-physical-candidate)
             (str label " lookahead must fail before returning a cursor"))))
-    (with-redefs [xt/q (fn [& _] (conj valid (synthetic-discovery-row c)
+    (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {"xtdb" [42]}})
+                     live.xtdb/q-from (fn [& _] (conj valid (synthetic-discovery-row c)
                                           (synthetic-discovery-row
                                            (synthetic-discovery-id 414))))]
       (is (rejected? #(discovery/discover-eligible! :synthetic opts)
@@ -352,10 +358,12 @@
   (let [a (java.util.UUID/fromString "7fffffff-ffff-ffff-ffff-ffffffffffff")
         b (java.util.UUID/fromString "80000000-0000-0000-0000-000000000000")
         opts {:source-id "gesso/test-discovery" :limit 1}
-        page (with-redefs [xt/q (fn [& _] [(synthetic-discovery-row a)
+        page (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {"xtdb" [42]}})
+                     live.xtdb/q-from (fn [& _] [(synthetic-discovery-row a)
                                            (synthetic-discovery-row b)])]
                (discovery/discover-eligible! :synthetic opts))
-        resumed (with-redefs [xt/q (fn [& _] [(synthetic-discovery-row b)])]
+        resumed (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {"xtdb" [42]}})
+                     live.xtdb/q-from (fn [& _] [(synthetic-discovery-row b)])]
                   (discovery/discover-eligible! :synthetic
                                                (assoc opts :after a)))]
     (is (= [{:intent-id a :action :acquire-pending}] (:candidates page)))
@@ -382,7 +390,8 @@
         opts {:source-id "gesso/test-discovery" :limit 2}]
     (doseq [[label physical] cases]
       (let [queries (atom 0)]
-        (with-redefs [xt/q (fn [& _]
+        (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {"xtdb" [42]}})
+                     live.xtdb/q-from (fn [& _]
                              (swap! queries inc)
                              physical)]
           (is (try
@@ -400,7 +409,8 @@
         opts {:source-id "gesso/test-discovery" :worker-id "worker-a"
               :page-size 1 :max-pages 1}]
     (doseq [physical [nil {} '()]]
-      (with-redefs [xt/q (fn [& _] physical)
+      (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {"xtdb" [42]}})
+                     live.xtdb/q-from (fn [& _] physical)
                     acquisition/acquire-pending!
                     (fn [& _]
                       (swap! attempts inc)
@@ -419,3 +429,42 @@
                   node {:source-id "gesso/test-discovery" :limit 1})]
       (is (vector? raw) "The physical XTDB query contract returns a vector")
       (is (= {:candidates [] :has-more? false :next-after nil} result)))))
+
+(deftest discovery-captures-selected-node-frontier-on-each-page-test
+  (let [node :selected-node
+        after (synthetic-discovery-id 601)
+        opts {:source-id "gesso/test-discovery" :limit 1}
+        calls (atom [])
+        frontier-id (atom 40)]
+    (with-redefs [xt/status (fn [n]
+                             (swap! calls conj [:status n])
+                             {:latest-submitted-msg-ids {"xtdb" [(swap! frontier-id inc)]}})
+                  live.xtdb/q-from (fn [n query actual]
+                                     (swap! calls conj [:query n query actual])
+                                     [])]
+      (is (empty? (:candidates (discovery/discover-eligible! node opts))))
+      (is (empty? (:candidates (discovery/discover-eligible! node (assoc opts :after after)))))
+      (let [[s1 q1 s2 q2] @calls]
+        (is (= [[:status node] [:status node]] [s1 s2]))
+        (is (= [[:query node] [:query node]] (mapv #(subvec % 0 2) [q1 q2])))
+        (is (= [{:await-token (basis/->tx-basis-str {"xtdb" [41]})}
+                {:await-token (basis/->tx-basis-str {"xtdb" [42]})}]
+               (mapv last [q1 q2])))
+        (is (= after (last (nth q2 2))))))
+    (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {}})
+                  live.xtdb/q-from (fn [& _] (throw (AssertionError. "Invalid frontier queried")))]
+      (is (= ::frontier/invalid-frontier
+             (try (discovery/discover-eligible! node opts)
+                  nil (catch clojure.lang.ExceptionInfo e (:error/type (ex-data e)))))))))
+
+(deftest discovery-observes-submitted-intent-without-client-await-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          plan (outbox/prepare!
+                {:intent-ids [id] :source-id "gesso/test-discovery"
+                 :operation :request/claim :purpose :gesso.live/refresh}
+                [{:topic :request :id "submitted-request"}])]
+      (xt/submit-tx node (conj (vec (:guard-ops plan)) (:tx-op plan)))
+      (is (= {:candidates [{:intent-id id :action :acquire-pending}]
+              :has-more? false :next-after nil}
+             (discovery/discover-eligible! node {:source-id "gesso/test-discovery"}))))))

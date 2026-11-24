@@ -16,7 +16,7 @@
    asserted by this query API."
   (:require [clojure.string :as str]
             [gesso.live.outbox :as outbox]
-            [xtdb.api :as xt]))
+            [gesso.live.outbox.read-frontier :as frontier]))
 
 (def ^:private max-page-size 128)
 (def ^:private default-page-size 64)
@@ -91,7 +91,8 @@
    Only version-1 outbox records with :pending status, or
    :leased records expired by XTDB CURRENT_TIMESTAMP, qualify. Delivered or
    nonmatching records never qualify. The query runs against XTDB's CURRENT
-   view and orders by _id; its values are passed as SQL parameters.
+   view after awaiting the selected node's freshly captured submitted-log
+   frontier, and orders by _id; its values are passed as SQL parameters.
 
    Returns {:candidates [{:intent-id UUID :action :acquire-pending |
    :reclaim-expired} ...] :has-more? boolean :next-after UUID-or-nil}.
@@ -111,14 +112,7 @@
   ([node opts]
    (validate-options! opts)
    (let [limit (get opts :limit default-page-size)
-         rows (try
-                (xt/q node (into [(query-sql opts)] (query-args opts)))
-                (catch InterruptedException cause
-                  ;; A failed provider query does not establish that the
-                  ;; queue is empty. Keep the exact cause and restore the
-                  ;; interrupt signal that the physical read may have cleared.
-                  (.interrupt (Thread/currentThread))
-                  (throw cause)))
+         rows (frontier/q-from! node (into [(query-sql opts)] (query-args opts)))
          ;; XTDB q returns a vector, including [] for a genuinely empty
          ;; selection. Nil, maps and other containers are provider-contract
          ;; failures, NOT evidence that the queue was observed empty. Guard
