@@ -112,6 +112,7 @@
            (:required-gates report)))
     (is (= :matched (get-in report [:initial-inventory :status])))
     (is (= :matched (get-in report [:final-inventory :status])))
+    (is (= (zipmap decision/phases (repeat :matched)) (:final-subjects report)))
     (is (= (set decision/phases) (set (keys (:decisions report)))))
     (is (= 8 (reduce + (map (comp count :rows) (vals (:decisions report))))))
     (doseq [phase decision/phases]
@@ -148,12 +149,14 @@
     (is (= 2 (get event-count [:discover])))
     (is (= 8 (count (filter #(= :gate (first %)) @trace))))
     ;; Once before and after each phase; reread each completed predecessor
-    ;; before evaluating any following phase.
+    ;; before evaluating any following phase, plus one final observation.
     (doseq [[phase expected-count]
-            {:candidate 5 :installation 4 :activation 3 :completion 2}]
+            {:candidate 6 :installation 5 :activation 4 :completion 3}]
       (is (= expected-count (get event-count [:subject phase]))))
     (is (= [:discover] (first @trace)))
-    (is (= [:discover] (last @trace)))))
+    (is (= [[:discover] [:subject :candidate] [:subject :installation]
+            [:subject :activation] [:subject :completion]]
+           (vec (take-last 5 @trace))))))
 
 (deftest malformed-options-reject-before-any-callback
   (let [calls (atom 0)
@@ -462,3 +465,39 @@
       (is (= :not-examined (get-in new-report [:decisions :candidate :status])))
       (is (= :none (:release-authority first-report)))
       (is (= :none (:release-authority new-report))))))
+
+(deftest final-subject-drift-cannot-borrow-historical-green-phase-rows
+  (doseq [when-drift [:completion-gate :final-inventory]
+          phase [:candidate :installation :activation]
+          failure [:changed :unavailable]]
+    (let [drift? (atom false)
+          reads (atom 0)
+          calls (atom 0)
+          report (decision/assess!
+                  (assoc (options)
+                         :discover! (fn []
+                                      (when (and (= 2 (swap! reads inc))
+                                                 (= :final-inventory when-drift))
+                                        (reset! drift? true))
+                                      (inventory))
+                         :subject! (fn [p]
+                                     (if (and @drift? (= p phase))
+                                       (if (= :changed failure)
+                                         (assoc (phase-subject p) :subject-id "changed-subject")
+                                         (throw (ex-info "subject unavailable" {})))
+                                       (phase-subject p)))
+                         :run-gate! (fn [args]
+                                      (swap! calls inc)
+                                      (when (and (= :completion-gate when-drift)
+                                                 (= :completion/negative (get-in args [:gate :id])))
+                                        (reset! drift? true))
+                                      (passed-evidence args))))
+          expected (if (= :changed failure) :subject-diverged :subject-unavailable)]
+      (is (= 8 @calls))
+      (is (= :matched (get-in report [:final-inventory :status])))
+      (is (every? #(= :checks-passed-only (:status %)) (vals (:decisions report))))
+      (is (= :blocked (:status report)))
+      (is (= {phase expected} (get-in report [:blockers :final-subjects])))
+      (is (= (assoc (zipmap decision/phases (repeat :matched)) phase expected)
+             (:final-subjects report)))
+      (is (= :none (:release-authority report))))))

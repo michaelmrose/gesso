@@ -278,8 +278,10 @@
    reduce the requested denominator. Stop at the first blocked phase; later
    phases are explicitly unexamined, not passed. Reacquire source inventory
    before and after checking, and reacquire subjects on each phase, to detect
-   drift in this bounded invocation. These reads are not atomic with a real
-   network activation; activation is never performed by assess!."
+   drift in this bounded invocation. Reobserve every passing phase after
+   the final inventory read before reporting a fully passing evaluation.
+   These reads are not atomic with one another or a real network activation;
+   activation is never performed by assess!."
   [{:keys [intent discover! subject! run-gate!] :as options}]
   (when-not (and (plain-map? options)
                  (= #{:intent :discover! :subject! :run-gate!}
@@ -311,6 +313,18 @@
           stable? (and (= :matched (:status initial))
                        (= initial final-inventory))
           phase-ok? (every? #(= :checks-passed-only (:status %)) decisions)
+          ;; A completion gate (or the final inventory callback) may change
+          ;; an earlier subject after its last predecessor check. Do not
+          ;; treat historical passing rows as a current passing evaluation.
+          final-subjects (when (and stable? phase-ok?)
+                           (into {} (map (fn [{:keys [phase subject]}]
+                                          (let [observed (current-subject subject! intent phase)]
+                                            [phase (if (= {:status :matched :observation subject} observed)
+                                                     :matched
+                                                     (:status observed))]))
+                                        decisions)))
+          subjects-ok? (and (some? final-subjects)
+                            (every? #{:matched} (vals final-subjects)))
           accepted (into #{} (mapcat :accepted-premises) decisions)]
       {:type report-type
        :version report-version
@@ -323,12 +337,16 @@
        :required-gates (:gate-ids intent)
        :initial-inventory initial
        :final-inventory final-inventory
+       :final-subjects final-subjects
        :decisions (zipmap phases decisions)
-       :status (if (and stable? phase-ok?)
+       :status (if (and stable? phase-ok? subjects-ok?)
                  :selected-checks-passed-only
                  :blocked)
        :blockers (cond-> {}
                    (not stable?) (assoc :source-inventory :not-current-or-incomplete)
+                   (and final-subjects (not subjects-ok?))
+                   (assoc :final-subjects (into {} (remove (fn [[_ status]] (= :matched status)))
+                                                final-subjects))
                    (not phase-ok?) (assoc :decision
                                           (into {} (keep (fn [row]
                                                            (when (not= :checks-passed-only
