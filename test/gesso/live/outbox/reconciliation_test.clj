@@ -2,12 +2,15 @@
   "Physical single-node observation of interrupted cycle lease/receipt debt."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.live.outbox :as outbox]
+            [gesso.live.consistency.xtdb :as live.xtdb]
+            [gesso.live.outbox.read-frontier :as frontier]
             [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.acknowledgment :as acknowledgment]
             [gesso.live.outbox.cycle :as cycle]
             [gesso.live.outbox.delivery :as delivery]
             [gesso.live.outbox.reconciliation :as reconciliation]
             [xtdb.api :as xt]
+            [xtdb.basis :as basis]
             [xtdb.node :as xtn])
   (:import [java.time Instant ZoneOffset]))
 
@@ -411,3 +414,56 @@
              (get-in examined [:completed-observations 0 :status])))
       (is (true? (:rescan-required? examined)))
       (is (not (contains? examined :may-replay?))))))
+
+(deftest reconciliation-awaits-the-selected-provider-frontier-test
+  (let [id (random-uuid)
+        report (envelope {:intent-id id :lease-id (random-uuid)
+                          :worker-id "worker-a"})
+        node :selected-node
+        calls (atom [])
+        opts {:await-token (basis/->tx-basis-str {"xtdb" [42]})}]
+    (with-redefs [xt/status (fn [n]
+                             (swap! calls conj [:status n])
+                             {:latest-submitted-msg-ids {"xtdb" [42]}})
+                  live.xtdb/q-from (fn [n query actual]
+                                     (swap! calls conj [:query n query actual])
+                                     [])]
+      (is (= :missing (:status (reconciliation/inspect! node source-id report))))
+      (is (= [[:status node]
+              [:query node ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" id] opts]]
+             @calls))
+      (reset! calls [])
+      (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {}})]
+        (is (= ::frontier/invalid-frontier
+               (try (reconciliation/inspect! node source-id report)
+                    nil (catch clojure.lang.ExceptionInfo e (:error/type (ex-data e))))))
+        (is (empty? @calls)))
+      (let [lost (InterruptedException. "interrupted reconciliation")]
+        (try
+          (with-redefs [live.xtdb/q-from (fn [& _] (throw lost))]
+            (is (= [lost true]
+                   (try (reconciliation/inspect! node source-id report)
+                        nil (catch Exception e [e (.isInterrupted (Thread/currentThread))])))))
+          (finally (Thread/interrupted)))))))
+
+(deftest reconciliation-observes-submitted-acknowledgment-without-client-await-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (seed! node id)
+          lease (claim! node id "worker-a")
+          receipt-id (random-uuid)
+          report (envelope (assoc lease :receipt-id receipt-id
+                                  :receipt-evidence :unverified-post-dispatch-receipt))
+          row (physical-row node id)
+          terminal (-> row
+                       (dissoc :xt/system-from)
+                       (assoc :gesso.live.outbox/status :dispatch-accepted
+                              :gesso.live.outbox/dispatch-receipt-id receipt-id
+                              :gesso.live.outbox/dispatch-adapter :gesso.live/synchronous-source))]
+      ;; Simulate a submitted terminal write whose response was lost. Do not
+      ;; execute-tx or issue another query between submission and inspection.
+      (xt/submit-tx node [[:put-docs outbox/intent-table terminal]])
+      (let [observed (reconciliation/inspect! node source-id report)]
+        (is (= :matching-acknowledgment-recorded (:status observed)))
+        (is (true? (:rescan-required? observed)))
+        (is (not (contains? observed :may-replay?)))))))

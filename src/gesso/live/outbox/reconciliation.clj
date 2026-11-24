@@ -13,7 +13,7 @@
    browser adoption, or exactly-once external effects."
   (:require [clojure.string :as str]
             [gesso.live.outbox :as outbox]
-            [xtdb.api :as xt])
+            [gesso.live.outbox.read-frontier :as frontier])
   (:import [java.time ZonedDateTime]))
 
 (def ^:private current-sql
@@ -52,14 +52,7 @@
     claim))
 
 (defn- current-intent! [node intent-id]
-  (let [rows (try
-               (xt/q node [current-sql intent-id])
-               (catch Throwable cause
-                 ;; The provider may clear the JVM interrupt flag before
-                 ;; throwing. A failed read must never become an empty page.
-                 (when (instance? InterruptedException cause)
-                   (.interrupt (Thread/currentThread)))
-                 (throw cause)))]
+  (let [rows (frontier/q-from! node [current-sql intent-id])]
     (when-not (and (vector? rows) (<= (count rows) 1)
                    (every? map? rows))
       (reject! :invalid-physical-current-page {:intent-id intent-id}))
@@ -178,7 +171,8 @@
 
 (defn inspect!
   "Inspect the interrupted cycle's bounded completed prefix and in-flight
-   lease against CURRENT physical XTDB rows. Neither a completed cycle report
+   lease against CURRENT physical XTDB rows after awaiting a freshly captured
+   submitted log frontier for each read. Neither a completed cycle report
    nor a matching stored acknowledgment establishes SSE/browser delivery.
 
    When :completed is present, check every reported entry in UUID order.
