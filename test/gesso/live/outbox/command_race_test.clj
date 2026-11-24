@@ -950,7 +950,7 @@
                 :assembled-fragments {:resolve-id resolve-id}
                 :assembled-sse {:resolve-id resolve-id
                                 :session-authorized? read-authorized?
-                                :sse-options {:keepalive-ms 50} :max-connections 4}}]
+                                :sse-options {:keepalive-ms 50} :max-connections (if *claim-browser-observer?* 6 4)}}]
     (let [reason (fn [config] (try (publication/build-executor config) nil
                                    (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
       (is (= :invalid-abort-contract (reason (dissoc opts :construct-after-abort!))))
@@ -1085,19 +1085,17 @@
                      (reset! observer (browser/open! (get-in started [host/listener-key :base-url])
                                                     (get credentials "reader")
                                                     #(= 3 (:subscription-count (live-source/stats (get-in started [:gesso.live/system :source])))))))
-                 a (future (invoke "a" "claim-a" "attempt-a"))
-                 b (future (invoke "b" "claim-b" "attempt-b"))
-                 results [(deref a 40000 ::timeout) (deref b 40000 ::timeout)]]
-             (when (some #{::timeout} results)
-               (future-cancel a) (future-cancel b)
-               (throw (ex-info "Claim race timed out" {})))
+                 results (if-let [opened @observer]
+                           (browser/compete! opened (get-in started [host/listener-key :base-url]) credentials
+                                             #(= % (:subscription-count (live-source/stats (get-in started [:gesso.live/system :source])))))
+                           (browser/http-race! invoke))]
              (let [winner-index (if (= :confirmed (get-in (first results) [:settlement :resolution])) 0 1)
                    winner (nth results winner-index) loser (nth results (- 1 winner-index))
-                   actors [["a" "claim-a" "helper-1"] ["b" "claim-b" "helper-2"]]
+                   actors (browser/race-actors (some? @observer) results)
                    [session id helper] (nth actors winner-index)
                    [loser-session loser-id loser-helper] (nth actors (- 1 winner-index))
                    valid? (= :valid recovery-mode)]
-               (is (= #{["claim-a" "helper-1" before] ["claim-b" "helper-2" before]} (set @observed)))
+               (is (= (set (map (fn [[_ id helper]] [id helper before]) actors)) (set @observed)))
                (is (= 2 (count @observed)))
                (is (= 1 (count (filter #(= :confirmed (get-in % [:settlement :resolution])) results))))
                (is (= :confirmed (get-in winner [:settlement :resolution])))
@@ -1193,6 +1191,6 @@
                          t/*report-counters* (ref t/*initial-report-counters*)]
                  (t/test-vars [#'distinct-claim-commands-contend-for-one-primary-assignment])
                  @t/*report-counters*)]
-    (println "GESSO CLAIM CHROMIUM OBSERVER GATE" (pr-str result))
+    (println "GESSO CLAIM CHROMIUM RACE GATE" (pr-str result))
     (shutdown-agents)
     (System/exit (if (and (= 1 (:test result)) (zero? (:fail result)) (zero? (:error result))) 0 1))))
