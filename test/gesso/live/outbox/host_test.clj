@@ -2,6 +2,8 @@
   "v2106: concrete canonical Biff host inventory and physically owned XTDB,
    Live, outbox worker and handler. No production HTTP listener is started."
   (:require [clojure.test :refer [deftest is testing]]
+            [com.biffweb.core :as biff]
+            [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.core :as g]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.fixture
@@ -187,10 +189,10 @@
            node (:xtdb/connectable started)
            system (:gesso.live/system started)
            worker (get started managed/handle-key)
-           original-stop lifecycle/stop!
+           original-stop lifecycle/retire!
            initial-timeout? (atom true)]
        (try
-         (let [failure (with-redefs [lifecycle/stop!
+         (let [failure (with-redefs [lifecycle/retire!
                                     (fn [handle timeout]
                                       (if (compare-and-set! initial-timeout? true false)
                                         {:outcome :timed-out}
@@ -205,3 +207,82 @@
        (is (= :stopped (:status (lifecycle/status worker))))
        (is (live/closed? system))
        (is (thrown? Exception (xt/q node ["SELECT 1 AS x"])))))))
+
+(deftest concrete-host-binds-owned-providers-and-fences-retained-handler
+  (setup
+   (fn [assembly render]
+     (let [seen (atom nil)
+           during-start (atom nil)
+           real-start managed/start-biff-application!
+           started (with-redefs [managed/start-biff-application!
+                                 (fn [& args]
+                                   (let [system (apply real-start args)]
+                                     (reset! during-start
+                                             ((:biff.ring/handler system) {:uri "/early"}))
+                                     system))]
+                     (host/start! assembly
+                                  (fn [request]
+                                    (reset! seen request)
+                                    (is (= [{:x 1}] (xt/q (live.xtdb/connectable-from request)
+                                                          ["SELECT 1 AS x"])))
+                                    (render request))
+                                  (config)))
+           handler (:biff.ring/handler started)]
+       (try
+         (is (= 503 (:status @during-start)))
+         (is (nil? @seen))
+         (is (= 200 (:status (handler {:uri "/"
+                                      :xtdb/connectable :forged
+                                      :xtdb/node :forged :xtdb/conn :forged
+                                      :biff.xtdb/node :forged
+                                      :biff.xtdb/connection-pool :forged
+                                      :gesso.live/system :forged
+                                      managed/source-id-key "foreign"}))))
+         (is (identical? (:xtdb/connectable started) (:xtdb/connectable @seen)))
+         (is (identical? (:xtdb/connectable started) (:biff.xtdb/node @seen)))
+         (is (identical? (:gesso.live/system started) (:gesso.live/system @seen)))
+         (is (= (:source-id (config)) (get @seen managed/source-id-key)))
+         (is (not-any? #(contains? @seen %) [:xtdb/node :xtdb/conn :biff.xtdb/connection-pool]))
+         (is (= "/" (:uri @seen)))
+         (finally (biff/stop started)))
+       (let [before @seen]
+         (is (= 503 (:status (handler {:uri "/late"}))))
+         (is (identical? before @seen)))))))
+
+(deftest concrete-host-request-drain-fences-native-provider-stop-and-retries
+  (setup
+   (fn [assembly render]
+     (let [entered (promise)
+           release (promise)
+           started (host/start! assembly
+                                (fn [request]
+                                  (deliver entered true)
+                                  (when-not (= true (deref release 10000 false))
+                                    (throw (ex-info "test request timed out" {})))
+                                  (is (= [{:x 1}] (xt/q (:xtdb/connectable request)
+                                                        ["SELECT 1 AS x"])))
+                                  (render request))
+                                (assoc (config) :stop-timeout-ms 50))
+           handler (:biff.ring/handler started)
+           node (:xtdb/connectable started)
+           source (:gesso.live/system started)
+           response (future (handler {:uri "/active"}))]
+       (try
+         (is (= true (deref entered 5000 false)))
+         (let [failure (problem #(biff/stop started))]
+           (is (= :request-drain-timed-out (:reason failure)))
+           (is (= 1 (:active failure))))
+         (is (= 503 (:status (handler {:uri "/new"}))))
+         (is (false? (live/closed? source)))
+         (is (= [{:x 1}] (xt/q node ["SELECT 1 AS x"])))
+         (finally
+           (deliver release true)
+           (is (= 200 (:status (deref response 10000 {}))))
+           (loop [attempt 0]
+             (let [failure (problem #(host/stop! started))]
+               (when failure
+                 (if (and (= :drain-timed-out (:reason failure)) (< attempt 100))
+                   (do (Thread/sleep 20) (recur (inc attempt)))
+                   (throw (ex-info "Host teardown failed" failure))))))))
+       (is (live/closed? source))
+       (is (= 503 (:status (handler {:uri "/after"}))))))))

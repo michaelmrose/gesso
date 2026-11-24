@@ -122,6 +122,66 @@
   []
   (mapv :biff.core/id modules))
 
+(defn- request-admission [handler timeout-ms]
+  ;; Own synchronous Ring invocations, NOT returned asynchronous bodies or
+  ;; physical HTTP writers. The same gate protects direct calls to the
+  ;; installed canonical handler and calls through a future listener.
+  (let [state (atom {:phase :starting :active 0})
+        drained (promise)
+        signal! (fn [{:keys [phase active]}]
+                  (when (and (= :closed phase) (zero? active))
+                    (deliver drained true)))
+        unavailable {:status 503
+                     :headers {"content-type" "text/plain; charset=utf-8"
+                               "cache-control" "no-store"}
+                     :body "Gesso host is not accepting requests."}]
+    {:handler
+     (fn [request]
+       (let [[before _] (swap-vals! state
+                                   #(if (= :open (:phase %))
+                                      (update % :active inc) %))]
+         (if (= :open (:phase before))
+           (try
+             (when-not (map? request)
+               (reject! :invalid-ring-request {}))
+             ;; The request cannot select a different XTDB provider through
+             ;; any recognized alias. Do not expose the worker/stop handle.
+             (handler (merge (dissoc request :xtdb/conn :xtdb/node
+                                     :biff.xtdb/connection-pool)
+                             (:context before)))
+             (finally (signal! (swap! state update :active dec))))
+           unavailable)))
+     :open!
+     (fn [system]
+       (let [node (:xtdb/connectable system)
+             source (:gesso.live/system system)
+             worker (get system managed/handle-key)]
+         (when-not (and node source worker (not (live/closed? source)))
+           (reject! :missing-started-providers {}))
+         (let [[before _] (swap-vals!
+                           state
+                           #(if (= :starting (:phase %))
+                              (assoc % :phase :open
+                                     :context {:xtdb/connectable node
+                                               :biff.xtdb/node node
+                                               :gesso.live/system source
+                                               managed/source-id-key
+                                               (get system managed/source-id-key)})
+                              %))]
+           (when-not (= :starting (:phase before))
+             (reject! :invalid-request-admission-open {})))))
+     :close-and-await!
+     (fn []
+       ;; Permanently fence new invocations even when drain times out. In
+       ;; flight handlers have captured their own exact provider context.
+       (signal! (swap! state #(-> % (assoc :phase :closed) (dissoc :context))))
+       (try
+         (when-not (true? (deref drained timeout-ms false))
+           (reject! :request-drain-timed-out {:active (:active @state)}))
+         (catch InterruptedException error
+           (.interrupt (Thread/currentThread))
+           (throw error))))}))
+
 (defn start!
   "Start a concrete canonical Gesso/Biff host with the exact module order.
 
@@ -132,6 +192,13 @@
    :source-id, :worker-options and :rules-context are mandatory. The worker
    is installed AFTER providers, and cannot be omitted or re-ordered.
 
+   The installed handler receives the exact owned XTDB and Live providers,
+   overriding request-supplied provider aliases. Admission opens only after
+   checked startup returns. Both stop! and native Biff stop fence new calls
+   and drain synchronous invocations before retiring the worker/providers.
+   A timed-out or interrupted request drain leaves providers open for retry.
+   Returned asynchronous response bodies are outside this drain guarantee.
+
    Returns a native Biff system; call stop! on that exact system before
    discarding it. Checked startup failures retain the v2103/v2105 rollback
    and :cleanup/handle semantics. No HTTP listener is opened by this host."
@@ -141,15 +208,43 @@
     (reject! :invalid-handler {}))
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
-  (let [initial (cond-> {config-key config
-                         :biff.ring/handler handler
+  (let [admission (request-admission handler (get config :stop-timeout-ms 10000))
+        initial (cond-> {config-key config
+                         :biff.ring/handler (:handler admission)
                          managed/source-id-key (:source-id config)
                          managed/options-key (:worker-options config)
                          managed/context-key (:rules-context config)}
                   (contains? config :stop-timeout-ms)
                   (assoc managed/stop-timeout-key (:stop-timeout-ms config)))]
-    (managed/start-biff-application!
-     assembly initial #'modules start-order)))
+    (let [started (managed/start-biff-application!
+                   assembly initial #'modules start-order)
+          native-stop (:biff.core/stop-system started)
+          stop-lock (Object.)]
+      ;; Wrap the actual native stop chain, not just host/stop!: a caller of
+      ;; biff/stop on this returned system must encounter the same fence.
+      (try
+        ((:open! admission) started)
+        (assoc started :biff.core/stop-system
+               (fn []
+                 (locking stop-lock
+                   ((:close-and-await! admission))
+                   (native-stop))))
+        (catch Throwable startup-error
+          ;; No traffic has been handed to the caller. Keep the original
+          ;; error when cleanup also fails; retain the native owner for retry.
+          (try
+            ((:close-and-await! admission))
+            (native-stop)
+            (catch Throwable cleanup-error
+              (let [error (ex-info "Host startup cleanup is blocked."
+                                   {:error/type :gesso.live.outbox/host-cleanup-blocked
+                                    :cleanup/stop! (fn []
+                                                     ((:close-and-await! admission))
+                                                     (native-stop))}
+                                   startup-error)]
+                (.addSuppressed error cleanup-error)
+                (throw error))))
+          (throw startup-error))))))
 
 (defn stop!
   "Use the exact Biff system returned by start!. A drain timeout propagates
