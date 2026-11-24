@@ -49,7 +49,64 @@
           low (bit-or (bit-and (.getLong digest) 4611686018427387903) Long/MIN_VALUE)]
       (UUID. high low))))
 
+(defn- require-derived-command! [principal command-id]
+  (when-not (and (identity/principal? principal)
+                 (identity/command-id? command-id)
+                 (portable-subject? (identity/raw-value principal))
+                 (portable-subject? (identity/raw-value command-id)))
+    (reject! :invalid-derived-command-identity {})))
+
+(def ^:private observation-sql
+  ;; Fixed projection: worker lease/ack fields may evolve the row schema
+  ;; while this read runs. Do not select them, or leak model subjects.
+  (str "SELECT _id, gesso$live$outbox$type AS intent_type, "
+       "gesso$live$outbox$version AS intent_version, "
+       "gesso$live$outbox$source_id AS source_id, "
+       "gesso$live$outbox$operation AS operation_id, "
+       "gesso$live$outbox$command_id AS command_id, "
+       "gesso$live$outbox$status AS intent_status "
+       "FROM gesso_live_outbox WHERE _id = ?"))
+
+(defn- observe-intent! [ctx source operation principal command-id]
+  (require-derived-command! principal command-id)
+  (let [raw-command (identity/raw-value command-id)
+        id (derived-intent-id source operation (identity/raw-value principal) raw-command 0)
+        rows (try (xtdb/q-from ctx [observation-sql id])
+                  (catch InterruptedException e
+                    (.interrupt (Thread/currentThread))
+                    (throw e)))]
+    (when-not (and (vector? rows) (<= (count rows) 1))
+      (reject! :invalid-intent-observation {}))
+    (if (empty? rows)
+      {:outcome :not-observed :intent-id id}
+      (let [row (first rows)]
+        (when-not (and (map? row)
+                       (= {:xt/id id :intent-type outbox/intent-type
+                           :intent-version outbox/intent-version :source-id source
+                           :operation-id operation :command-id raw-command}
+                          (select-keys row [:xt/id :intent-type :intent-version
+                                            :source-id :operation-id :command-id]))
+                       (#{:pending :leased :dispatch-accepted} (:intent-status row)))
+          (reject! :inconsistent-intent-observation {:intent-id id}))
+        {:outcome :prior-intent-present :intent-id id
+         :publication-status (:intent-status row)}))))
+
 (def preparation-key :gesso.live.outbox.model-publication/prepare!)
+
+(defn observe-command!
+  "Read the current slot-zero intent for the installed derived-ID command.
+   Requires the same trusted source/operation/principal/command binding as
+   preparation. No caller-supplied identity or lookup arguments. A present
+   row is evidence of a durable intent under the selected trusted writer
+   convention, NOT a reconstructed settlement, domain projection, original
+   transaction basis or proof of matching command arguments. Absence is an
+   observation, not proof of noncommit or permission to bypass guards.
+   Explicit-ID batches, removed rows and arbitrary writers are outside the
+   guarantee. Never retries, mutates, publishes or acknowledges anything."
+  [ctx]
+  (if-let [observe (::observe (meta (get ctx preparation-key)))]
+    (observe ctx)
+    (reject! :missing-command-preparation {})))
 
 (defn prepare!
   "Prepare an atomic outbox contribution using the installed command context.
@@ -134,42 +191,43 @@
      (fn [source-id {:keys [operation command-id principal]}]
        (let [entry (get operations operation)
              topics (when entry (server/operation-published-change-topics entry))]
-         (fn [spec changes]
-           (when-not (and (map? spec) (#{#{:intent-ids :purpose} #{:purpose}} (set (keys spec))))
-             (reject! :invalid-command-intent-spec {}))
-           (when-not (and (vector? changes) (seq changes))
-             (reject! :missing-model-changes {}))
-           (when-not (set? topics)
-             (reject! :undeclared-operation-publication {:operation operation}))
-           (let [spec (if (contains? spec :intent-ids)
-                        spec
-                        (do
-                          (when-not (and (identity/principal? principal)
-                                         (identity/command-id? command-id)
-                                         (portable-subject? (identity/raw-value principal))
-                                         (portable-subject? (identity/raw-value command-id)))
-                            (reject! :invalid-derived-command-identity {}))
-                          (assoc spec :intent-ids
-                                 (mapv #(derived-intent-id source-id operation
-                                                           (identity/raw-value principal)
-                                                           (identity/raw-value command-id) %)
-                                       (range (count changes))))))]
-             (outbox/prepare!
-              (assoc spec :source-id source-id :operation operation
-                          :command-id (identity/raw-value command-id))
-              (mapv (fn [{:keys [topic] :as change}]
-                      (when-not (and (map? change) (contains? topics topic))
-                        (reject! :undeclared-operation-topic {:operation operation :topic topic}))
-                      (let [field (get subjects topic)
-                            id (get change field)]
-                        (when-not field
-                          (reject! :unknown-change-topic {:topic topic}))
-                        (when-not (portable-subject? id)
-                          (reject! :invalid-subject {:topic topic :field field}))
-                        (when (and (contains? change :id) (not= id (:id change)))
-                          (reject! :conflicting-subject-field {:topic topic :field field}))
-                        (assoc (select-keys change [:topic :change/kind]) :id id)))
-                    changes))))))}))
+         (with-meta
+           (fn [spec changes]
+             (when-not (and (map? spec) (#{#{:intent-ids :purpose} #{:purpose}} (set (keys spec))))
+               (reject! :invalid-command-intent-spec {}))
+             (when-not (and (vector? changes) (seq changes))
+               (reject! :missing-model-changes {}))
+             (when-not (set? topics)
+               (reject! :undeclared-operation-publication {:operation operation}))
+             (let [spec (if (contains? spec :intent-ids)
+                          spec
+                          (do
+                            (require-derived-command! principal command-id)
+                            (assoc spec :intent-ids
+                                   (mapv #(derived-intent-id source-id operation
+                                                             (identity/raw-value principal)
+                                                             (identity/raw-value command-id) %)
+                                         (range (count changes))))))]
+               (outbox/prepare!
+                (assoc spec :source-id source-id :operation operation
+                            :command-id (identity/raw-value command-id))
+                (mapv (fn [{:keys [topic] :as change}]
+                        (when-not (and (map? change) (contains? topics topic))
+                          (reject! :undeclared-operation-topic {:operation operation :topic topic}))
+                        (let [field (get subjects topic)
+                              id (get change field)]
+                          (when-not field
+                            (reject! :unknown-change-topic {:topic topic}))
+                          (when-not (portable-subject? id)
+                            (reject! :invalid-subject {:topic topic :field field}))
+                          (when (and (contains? change :id) (not= id (:id change)))
+                            (reject! :conflicting-subject-field {:topic topic :field field}))
+                          (assoc (select-keys change [:topic :change/kind]) :id id)))
+                      changes))))
+           {::observe (fn [ctx]
+                        (when-not entry
+                          (reject! :undeclared-operation-publication {:operation operation}))
+                        (observe-intent! ctx source-id operation principal command-id))})))}))
 
 (defn rules! [assembly options]
   (:rules (profile! assembly options)))

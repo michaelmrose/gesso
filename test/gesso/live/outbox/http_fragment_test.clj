@@ -303,6 +303,10 @@
                   (let [intent-id (:xt/id (first @prepared-intents))]
                     (is (uuid? intent-id))
                     (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id]))))
+                  (is (= {:outcome :prior-intent-present
+                          :intent-id (:xt/id (first @prepared-intents))
+                          :publication-status :dispatch-accepted}
+                         (publication/observe-command! (:ctx (first @invocations)))))
                   (is (= {:gesso.live.outbox/source-id (:source-id (config))
                           :gesso.live.outbox/operation :request/claim
                           :gesso.live.outbox/command-id "v2366-command"
@@ -497,3 +501,57 @@
                       nil (catch Exception e (:xtdb.error/code (ex-data e))))))
           (is (= [{:xt/id "r1"}] (xt/q node ["SELECT _id FROM requests"])))
           (is (= [{:xt/id (first expected)}] (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))))
+
+(deftest command-recovery-observes-commit-without-inventing-settlement
+  (with-assembly
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile! assembly subject-mapping))
+              command {:operation :request/claim
+                       :principal (identity/principal "helper-1")
+                       :command-id (identity/command-id "command-2372")
+                       :execution-id (identity/execution-id "first")}
+              context (fn [source command]
+                        {:xtdb/connectable node publication/preparation-key (bind source command)})
+              ctx (context "owned-source" command)
+              retry (context "owned-source" (assoc command :execution-id (identity/execution-id "retry")))
+              spec {:purpose :gesso.live/refresh}
+              change {:topic :request :request/location-id "r1"}
+              id (:xt/id (first (:intents (publication/prepare! ctx spec [change]))))
+              write [:put-docs :requests {:xt/id "r1" :status :claimed}]
+              lost (ex-info "lost provider receipt" {:commit/status :unknown})
+              execute xtdb/execute-tx-from!]
+          (is (= {:outcome :not-observed :intent-id id} (publication/observe-command! retry)))
+          ;; The real physical transaction commits; simulate losing its
+          ;; response before the registered executor can construct settlement.
+          (with-redefs [xtdb/execute-tx-from! (fn [& args]
+                                               (apply execute args)
+                                               (throw lost))]
+            (is (identical? lost (try (publication/transact! ctx spec [change] [write])
+                                      nil (catch Exception e e)))))
+          (is (= {:outcome :prior-intent-present :intent-id id :publication-status :pending}
+                 (publication/observe-command! retry)))
+          (doseq [[source other] [["other-source" command]
+                                  ["owned-source" (assoc command :principal (identity/principal "helper-2"))]
+                                  ["owned-source" (assoc command :command-id (identity/command-id "other"))]]]
+            (is (= :not-observed (:outcome (publication/observe-command! (context source other))))))
+          (is (= :missing-command-preparation (reason #(publication/observe-command! {}))))
+          (is (= :invalid-derived-command-identity
+                 (reason #(publication/observe-command! (context "owned-source" (dissoc command :principal))))))
+          (is (= :xtdb/assert-failed
+                 (try (publication/transact! retry spec [change]
+                                             [[:put-docs :requests {:xt/id "r2" :status :claimed}]])
+                      nil (catch Exception e (:xtdb.error/code (ex-data e))))))
+          (is (= [{:xt/id "r1"}] (xt/q node ["SELECT _id FROM requests"])))
+          (doseq [rows [nil {} [nil] [{:xt/id id}] [{} {}]]]
+            (with-redefs [xtdb/q-from (fn [& _] rows)]
+              (is (#{:invalid-intent-observation :inconsistent-intent-observation}
+                   (reason #(publication/observe-command! retry))))))
+          (with-redefs [xtdb/q-from (fn [& _] (throw lost))]
+            (is (identical? lost (try (publication/observe-command! retry)
+                                      nil (catch Exception e e)))))
+          ;; An inconsistent physical row must not certify prior publication.
+          (xt/execute-tx node [[:put-docs :gesso_live_outbox
+                               (assoc (first (:intents (publication/prepare! ctx spec [change])))
+                                      :gesso.live.outbox/source-id "wrong-source")]])
+          (is (= :inconsistent-intent-observation (reason #(publication/observe-command! retry)))))))))
