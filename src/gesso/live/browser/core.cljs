@@ -1476,6 +1476,14 @@
             (prevent-event! event))))))
   true)
 
+(defn- managed-swap-spec
+  [root event]
+  (let [override (detail-field event "swapOverride")]
+    (if (and (some? override) (not= "" override))
+      override
+      (or (not-empty (element-attr root "hx-swap"))
+          (element-attr root "data-hx-swap")))))
+
 (defn- synchronous-managed-swap?
   "The managed fragment lifecycle currently requires installation before
    HTMX afterRequest. HTMX 2.0.7 may schedule a swap timer or View Transition
@@ -1486,11 +1494,7 @@
    Require the issuing root's explicit swap specification (or the response
    override); do not guess inherited HTMX configuration."
   [runtime root event]
-  (let [override (detail-field event "swapOverride")
-        spec (if (and (some? override) (not= "" override))
-               override
-               (or (not-empty (element-attr root "hx-swap"))
-                   (element-attr root "data-hx-swap")))
+  (let [spec (managed-swap-spec root event)
         config (some-> (:htmx runtime) (aget "config"))
         source (some-> (detail-field event "requestConfig") (aget "elt"))]
     (when (and (or (nil? source) (identical? root source))
@@ -1520,6 +1524,52 @@
         false
         (recur (.-parentElement element)))
       true)))
+
+(defn- replacement-selection?
+  [root event]
+  (and (nil? (detail-field event "select"))
+       (nil? (detail-field event "selectOverride"))
+       (loop [element root]
+         (if (node-element? element)
+           (if (or (some? (element-attr element "hx-select"))
+                   (some? (element-attr element "data-hx-select")))
+             false
+             (recur (.-parentElement element)))
+           true))))
+
+(defn- replacement-response-shape?
+  "Inspect inert parsed partial HTML, never insert it into the live document.
+   Outer replacement must leave one canonical direct-child target; inner
+   replacement must not introduce a duplicate of the surviving target id.
+   Full documents and template delimiters are outside this restricted profile
+   because HTMX's wrapper parser can interpret them differently. Selection
+   and extension transformations are not part of this shape contract."
+  [runtime root event]
+  (try
+    (let [response (detail-field event "serverResponse")
+          id (fragment-id-from-root root)
+          outer? (= "outerHTML" (first (str/split (str/trim (managed-swap-spec root event)) #"\s+")))]
+      (when (and (string? response) id
+                 (replacement-selection? root event)
+                 (not (re-find #"<\s*(?:/?\s*(?:html|head|body|template)(?:\s|/|>)|!doctype)"
+                               (str/lower-case response))))
+        (let [template (.createElement (:document runtime) "template")
+              _ (set! (.-innerHTML template) response)
+              content (.-content template)
+              nodes (array-seq (.-childNodes content))
+              significant (remove #(and (= 3 (.-nodeType %))
+                                        (str/blank? (.-nodeValue %))) nodes)
+              matching (filter #(= id (element-attr % "id"))
+                               (array-seq (.querySelectorAll content "[id]")))]
+          (if outer?
+            (let [candidate (first significant)]
+              (and (= 1 (count significant))
+                   (node-element? candidate)
+                   (= (.-localName (primary-target root)) (.-localName candidate))
+                   (= 1 (count matching))
+                   (identical? candidate (first matching))))
+            (empty? matching)))))
+    (catch :default _ false)))
 
 (defn on-before-swap!
   "Normalize HTMX beforeSwap for the exact currently correlated managed request."
@@ -1561,6 +1611,12 @@
               (cancel-swap-event! event)
               (.warn js/console
                      "Gesso managed fragment swap refused: synchronous replacement mode required."))
+
+            (not (replacement-response-shape? runtime root event))
+            (do
+              (cancel-swap-event! event)
+              (.warn js/console
+                     "Gesso managed fragment swap refused: invalid replacement response shape."))
 
             :else
             (let [candidate (event-authoritative-candidate runtime event)

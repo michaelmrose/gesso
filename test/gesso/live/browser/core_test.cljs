@@ -110,6 +110,7 @@
     (when fragment-id
       (let [target (js-obj)]
         (aset target "nodeType" 1)
+        (aset target "localName" "div")
         (aset target "parentElement" element)
         (aset target "children" #js [])
         (aset target "getAttribute" #(when (= % "id") fragment-id))
@@ -154,7 +155,31 @@
   (let [roots* (atom (vec roots))
         added (atom [])
         removed (atom [])
-        document (js-obj)]
+        document (js-obj)
+        parsed-responses (atom {})]
+    ;; Supply controlled parsed DOM shapes, not a substitute HTML parser.
+    (aset document "createElement"
+          (fn [tag]
+            (assert (= "template" tag))
+            (let [template (js-obj)]
+              (js/Object.defineProperty
+               template "innerHTML"
+               #js {:set (fn [html]
+                           (let [nodes (or (get @parsed-responses html)
+                                           (if (= "" html)
+                                             []
+                                             (let [[_ id] (re-matches #"<div id=\"([^\"]+)\"></div>" html)]
+                                               (assert id "Unexpected mock response")
+                                               [(.-testPrimaryTarget (make-root id))])))
+                                 ids (filter #(and (= 1 (.-nodeType %)) (.getAttribute % "id"))
+                                             (tree-seq #(= 1 (.-nodeType %))
+                                                       #(array-seq (.-children %))
+                                                       #js {:nodeType 1 :children (to-array nodes)
+                                                            :getAttribute (constantly nil)}))]
+                             (aset template "content"
+                                   #js {:childNodes (to-array nodes)
+                                        :querySelectorAll (fn [_] (to-array ids))})))})
+              template)))
     (aset document
           "querySelectorAll"
           (fn [selector]
@@ -171,6 +196,7 @@
             (swap! removed conj [name handler capture?])))
     {:document document
      :roots roots*
+     :parsed-responses parsed-responses
      :added added
      :removed removed}))
 
@@ -233,6 +259,12 @@
        (aset detail "successful" successful))
      (when (some? should-swap)
        (aset detail "shouldSwap" should-swap))
+     (when (= "htmx:beforeSwap" type)
+       (let [spec (or (:swapOverride extra-detail) (when elt (.getAttribute elt "hx-swap")))
+             id (when elt (core/fragment-id-from-root elt))]
+         (aset detail "serverResponse"
+               (if (and id (not (and (string? spec) (= "innerHTML" (first (re-seq #"\S+" spec))))))
+                 (str "<div id=\"" id "\"></div>") ""))))
      (doseq [[k v] extra-detail]
        (aset detail (name k) v))
      (aset event "type" type)
@@ -1554,6 +1586,66 @@
                (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
         (is (nil? (core/active-request runtime root)))
         (is (empty? (:continuity (core/state runtime))))))))
+
+(deftest managed-replacement-response-shape-test
+  (doseq [{:keys [mode shape selection override response allowed?]}
+          [{:shape :canonical :allowed? true}
+           {:shape :whitespace :allowed? true}
+           {:shape :empty :allowed? false}
+           {:shape :wrong-id :allowed? false}
+           {:shape :wrong-tag :allowed? false}
+           {:shape :siblings :allowed? false}
+           {:shape :text-sibling :allowed? false}
+           {:shape :nested-duplicate :allowed? false}
+           {:shape :canonical :selection {"hx-select" "#other"} :allowed? false}
+           {:shape :canonical :selection {"data-hx-select" "#other"} :allowed? false}
+           {:shape :canonical :override {:selectOverride "#other"} :allowed? false}
+           {:shape :canonical :override {:select "#other"} :allowed? false}
+           {:shape :canonical :response "<html><body>full</body></html>" :allowed? false}
+           {:shape :canonical :response "<template></template>" :allowed? false}
+           {:shape :canonical :override {:serverResponse nil} :allowed? false}
+           {:mode "innerHTML" :shape :empty :allowed? true}
+           {:mode "innerHTML" :shape :wrong-id :allowed? true}
+           {:mode "innerHTML" :shape :canonical :allowed? false}]]
+    (let [captures (atom 0)
+          {:keys [runtime root document-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          candidate (.-testPrimaryTarget (make-root "fragment-1"))
+          foreign (.-testPrimaryTarget (make-root "foreign"))
+          duplicate (.-testPrimaryTarget (make-root "fragment-1"))
+          text-node (fn [text] #js {:nodeType 3 :nodeValue text})
+          nodes (case shape
+                  :canonical [candidate]
+                  :whitespace [(text-node "  ") candidate (text-node "\n")]
+                  :empty []
+                  :wrong-id [foreign]
+                  :wrong-tag (do (aset candidate "localName" "span") [candidate])
+                  :siblings [candidate foreign]
+                  :text-sibling [candidate (text-node "extra")]
+                  :nested-duplicate (do (aset candidate "children" #js [duplicate]) [candidate]))
+          html (or response "test parsed shape")
+          old-attr (.-getAttribute root)
+          requirement (progression/requirement
+                       {:tx-id 806 :system-time "2026-08-26T08:10:06Z"})]
+      (swap! (:parsed-responses document-fixture) assoc html nodes)
+      (aset root "getAttribute" (fn [k] (if (= k "hx-swap") (or mode "outerHTML") (old-attr k))))
+      (aset root "parentElement" (make-element {:attrs selection}))
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (let [fixture (make-event "htmx:beforeSwap"
+                                {:elt root :xhr xhr :should-swap true
+                                 :extra-detail (merge {:serverResponse html} override)})]
+        (core/on-before-swap! runtime (:event fixture))
+        (is (= (not allowed?) @(:prevented? fixture)) (pr-str [mode shape selection override response]))
+        (is (= allowed? (aget (:detail fixture) "shouldSwap")))
+        (is (= (if allowed? 1 0) @captures)))
+      (when allowed? (after-swap! runtime root xhr))
+      (after-request! runtime root xhr true)
+      (is (= (if allowed? #{} #{requirement})
+             (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+      (is (nil? (core/active-request runtime root))))))
 
 (deftest managed-swap-requires-explicit-replacement-mode-test
   (doseq [{:keys [spec override default-style allowed?]}
