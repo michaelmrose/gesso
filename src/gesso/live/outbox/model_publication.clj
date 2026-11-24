@@ -432,6 +432,47 @@
         (reject! :invalid-outcome-callback {}))))
   options)
 
+(def ^:private contract-option-keys
+  #{:construction-contract :target-contract! :command-operation-contract!
+    :predicate-contract! :post-state-contract! :outcome-contract!})
+
+(defn- require-abort-contract! [options]
+  (when (contains? options :abort-contract)
+    (let [abort (:abort-contract options)]
+      (when-not (and (fn? (:construct-after-abort! options))
+                     (= contract-option-keys (set (keys (select-keys options contract-option-keys))))
+                     (map? abort) (= contract-option-keys (set (keys abort))))
+        (reject! :invalid-abort-contract {}))
+      (require-target-options! abort)
+      (let [tables (:construction-contract abort)]
+        (when-not (and (seq (:required-guard-tables tables))
+                       (= #{resolution/command-entity-type}
+                          (:required-write-tables tables) (:allowed-write-tables tables)))
+          (reject! :abort-contract-requires-guarded-journal-only {})))))
+  options)
+
+(defn- admit-contract! [ctx {:keys [construction-contract target-contract!
+                                    predicate-contract! command-operation-contract!
+                                    post-state-contract! outcome-contract!]}]
+  (when target-contract!
+    (let [binding (command-binding! ctx)
+          targets (resolved/admit-document-targets!
+                   construction-contract (target-contract! ctx binding) binding)]
+      {:tables construction-contract
+       :targets targets
+       :predicates (when predicate-contract!
+                     (resolved/require-predicate-contract!
+                      (predicate-contract! ctx binding) targets))
+       :operations (when command-operation-contract!
+                     (resolved/require-command-operation-contract!
+                      (command-operation-contract! ctx binding) targets binding))
+       :post-state (when post-state-contract!
+                     (resolved/require-post-state-contract!
+                      (post-state-contract! ctx binding) targets))
+       :outcome (when outcome-contract!
+                  (resolved/require-outcome-contract!
+                   (outcome-contract! ctx binding) binding))})))
+
 (defn execute-resolved!
   "Compose a trusted initial submission or read-only reconciliation with
    the original settlement validator. Check the durable command before
@@ -458,7 +499,8 @@
    Absence in :reconcile never authorizes a new mutation.
    Optional paired :construction-contract and :target-contract! (ctx binding)
    use the existing resolved-operation contracts before construction. The
-   same admitted requirements constrain guarded abort outcomes. Optional
+   same admitted requirements constrain guarded abort outcomes unless a
+   separate complete :abort-contract is registered. Optional
    :command-operation-contract! (ctx binding) requires those contracts and
    independently declares the permitted canonical operation triples; names
    alone do not establish predicate or post-state correspondence. Optional
@@ -468,48 +510,34 @@
    and checks canonical domain command values, not physical readback.
    Optional :outcome-contract! (ctx binding) additionally requires operation
    and post-state contracts and checks the exact durable command outcome,
-   including a guarded abort construction. It does not verify projection. Raw SQL
+   including a guarded abort construction. A separate :abort-contract map
+   must contain the full six contract options, require guarded journal-only
+   writes, and is admitted only after the physical abort and unresolved
+   recovery, before the abort constructor. It cannot authorize domain writes.
+   Neither contract verifies projection. Raw SQL
    construction cannot satisfy this selected contract. Replay does not
    invoke the declaration or constructor. Callback policy is still trusted."
   [{:keys [ctx operation] :as invocation}
    {:keys [mode construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract!] :as options}]
+           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract] :as options}]
   (when-not (and (map? options)
                  (#{#{:mode :construct! :may-disclose? :project!}
                     #{:mode :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys options)) :construction-contract :target-contract!
-                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract!))
+                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract))
                  (or (not (contains? options :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (#{:submit :reconcile} mode)
                  (every? fn? [construct! may-disclose? project!]))
     (reject! :invalid-resolved-execution-options {}))
   (require-target-options! options)
+  (require-abort-contract! options)
   (when-not (= (command-binding! ctx) (adapter/require-context operation invocation))
     (reject! :mismatched-command-binding {}))
   (let [prior (reconcile-command! ctx may-disclose?)
         result
         (if (and (= :submit mode) (= :unresolved (:status prior)))
-          (let [contract (when target-contract!
-                           (let [binding (command-binding! ctx)
-                                 targets (resolved/admit-document-targets!
-                                          construction-contract
-                                          (target-contract! ctx binding) binding)]
-                             {:tables construction-contract
-                              :targets targets
-                              :predicates (when predicate-contract!
-                                            (resolved/require-predicate-contract!
-                                             (predicate-contract! ctx binding) targets))
-                              :operations (when command-operation-contract!
-                                            (resolved/require-command-operation-contract!
-                                             (command-operation-contract! ctx binding)
-                                             targets binding))
-                              :post-state (when post-state-contract!
-                                            (resolved/require-post-state-contract!
-                                             (post-state-contract! ctx binding) targets))
-                              :outcome (when outcome-contract!
-                                         (resolved/require-outcome-contract!
-                                          (outcome-contract! ctx binding) binding))}))
+          (let [contract (admit-contract! ctx options)
                 {:keys [spec changes domain-ops model-plan outcome now] :as construction}
                 (construct! invocation)
                 plan (case (when (map? construction) (set (keys construction)))
@@ -526,7 +554,10 @@
                    (recover-after-execute! ctx may-disclose? failure
                                            (when construct-after-abort!
                                              #(guarded-abort-outcome! invocation may-disclose?
-                                                                      construct-after-abort! % contract))))))
+                                                                      construct-after-abort! %
+                                                                      (if abort-contract
+                                                                        (admit-contract! ctx abort-contract)
+                                                                        contract)))))))
           prior)]
     (adapter/project-resolution! invocation result project!)))
 
@@ -546,18 +577,19 @@
    Only the exact returned function is recognized by host admission. This
    is local wiring validation, not certification of business policy."
   [{:keys [operation submission-mode! construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract!] :as config}]
+           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract] :as config}]
   (when-not (and (map? config)
                  (#{#{:operation :submission-mode! :construct! :may-disclose? :project!}
                     #{:operation :submission-mode! :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys config)) :construction-contract :target-contract!
-                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract!))
+                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract))
                  (or (not (contains? config :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (qualified-keyword? operation)
                  (every? fn? [submission-mode! construct! may-disclose? project!]))
     (reject! :invalid-publication-executor-config {}))
   (require-target-options! config)
+  (require-abort-contract! config)
   (let [executor (fn [invocation]
                    (when-not (= (command-binding! (:ctx invocation))
                                 (adapter/require-context operation invocation))
@@ -578,7 +610,9 @@
                                  post-state-contract!
                                  (assoc :post-state-contract! post-state-contract!)
                                  outcome-contract!
-                                 (assoc :outcome-contract! outcome-contract!))))]
+                                 (assoc :outcome-contract! outcome-contract!)
+                                 abort-contract
+                                 (assoc :abort-contract abort-contract))))]
     (locking registered-executors
       (.put registered-executors executor
             {:reference (WeakReference. executor) :operation operation}))

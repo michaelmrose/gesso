@@ -807,7 +807,9 @@
               (finally (host/stop! started)))))))))
 
 (deftest distinct-claim-commands-contend-for-one-primary-assignment
-  (let [ready (CountDownLatch. 2)
+  (doseq [recovery-mode [:valid :wrong-outcome :missing-guard :domain-write]]
+   (let [ready (CountDownLatch. 2)
+        recovery-trace (atom [])
         observed (atom [])
         projected (atom [])
         principal-fn (fn [ctx]
@@ -834,8 +836,11 @@
                       [:request_assignments "primary-r1" {:xt/id "primary-r1" :request-id "r1"
                                                          :helper helper :revision 0 :created-at "t1"
                                                          :updated-at "t1" :request/location-id "l1"}]]))
-        executor (publication/build-executor
-                  {:operation :request/claim :submission-mode! (constantly :submit)
+        refusal {:outcome :request/not-claimable :reason :already-claimed}
+        refusal-guards #{[:requests "r1" :status :claimed]
+                         [:requests "r1" :revision 1]
+                         [:requests "r1" :updated-at "t1"]}
+        opts {:operation :request/claim :submission-mode! (constantly :submit)
                    :may-disclose? (fn [binding record] (= binding (:gesso.command/binding record)))
                    :construction-contract {:required-guard-tables #{:memberships} :allowed-guard-tables #{:memberships}
                                            :required-write-tables tables :allowed-write-tables tables}
@@ -866,13 +871,40 @@
                                                              (assoc version :compare-keys [:revision :updated-at :status]))
                                                             (model-command/create :request_assignments (assoc assignment :helper helper) version)]}
                                     :outcome {:outcome :request/claimed :helper helper} :now "t1"}))
+                   :abort-contract
+                   {:construction-contract {:required-guard-tables #{:requests} :allowed-guard-tables #{:requests}
+                                            :required-write-tables #{:gesso_commands} :allowed-write-tables #{:gesso_commands}}
+                    :target-contract! (fn [_ binding]
+                                        (swap! recovery-trace conj [:declare (:command-id binding)])
+                                        {:required-guard-targets #{[:requests "r1"]} :allowed-guard-targets #{[:requests "r1"]}
+                                         :required-write-targets #{} :allowed-write-targets #{}})
+                    :predicate-contract! (fn [_ _] {:required-guard-checks refusal-guards :allowed-guard-checks refusal-guards
+                                                    :required-update-checks #{} :allowed-update-checks #{}})
+                    :command-operation-contract! (fn [_ _] {:required-command-operations #{} :allowed-command-operations #{}})
+                    :post-state-contract! (fn [_ _] {:required-post-state-values #{} :allowed-post-state-values #{}})
+                    :outcome-contract! (fn [_ _] {:expected-outcome refusal})}
+                   :construct-after-abort!
+                   (fn [{:keys [ctx command-id]}]
+                     (swap! recovery-trace conj [:construct command-id])
+                     (let [row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))]
+                       (when (= :claimed (:status row))
+                         {:spec nil
+                          :model-plan (cond-> {:guards [(model-command/guard :requests row
+                                                    (if (= :missing-guard recovery-mode) version
+                                                        (assoc version :compare-keys [:revision :updated-at :status])))]}
+                                        (= :domain-write recovery-mode)
+                                        (assoc :commands [(model-command/create :request_assignments (assoc assignment :xt/id "illegal") version)]))
+                          :outcome (if (= :wrong-outcome recovery-mode) {:outcome :request/claimed} refusal)
+                          :now "t2"})))
                    :project! (fn [{:keys [ctx command-id]} result]
                                (let [{:keys [basis rows]} (frontier/q-with-basis!
                                                            ctx ["SELECT r.status, a.helper FROM requests r JOIN request_assignments a ON r._id = a.request_id WHERE r._id = ? AND a._id = ?" "r1" "primary-r1"])]
                                  (swap! projected conj [(identity/raw-value command-id) (:status result)])
-                                 {:resolution (if (= :incorporated (:status result)) :confirmed :already-incorporated)
+                                 {:resolution (if (= refusal (:outcome result)) :rejected
+                                                  (if (= :incorporated (:status result)) :confirmed :already-incorporated))
                                   :outcome (get-in result [:outcome :outcome])
-                                  :authoritative (protocol/authoritative {:presence :present :basis basis :projection (first rows)})}))})
+                                  :authoritative (protocol/authoritative {:presence :present :basis basis :projection (first rows)})}))}
+        executor (publication/build-executor opts)
         operation (fixture/trusted-operation :request/claim {:published-change-topics #{:request :request-assignment} :execute! executor})
         config {:xtdb-config {} :source-id "v2480-claim" :rules-context {}
                 :worker-options {:worker-id "v2480" :poll-ms 20} :live-options {}
@@ -880,6 +912,13 @@
                                               :require-derived-model? true
                                               :operation-model-entities {:request/claim #{:requests :request_assignments}})
                 :http-jdk {} :assembled-operations {:authorize-request? (comp some? principal-fn)}}]
+    (let [reason (fn [config] (try (publication/build-executor config) nil
+                                   (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+      (is (= :invalid-abort-contract (reason (dissoc opts :construct-after-abort!))))
+      (is (= :invalid-abort-contract (reason (update opts :abort-contract dissoc :outcome-contract!))))
+      (is (= :abort-contract-requires-guarded-journal-only
+             (reason (assoc-in opts [:abort-contract :construction-contract :allowed-write-tables]
+                               #{:requests :gesso_commands})))))
     (fixture/with-surfaced-application
      {:operations {:request/claim operation}
       :route-capabilities (fixture/route-capabilities {:request/claim operation})
@@ -912,29 +951,51 @@
              (when (some #{::timeout} results)
                (future-cancel a) (future-cancel b)
                (throw (ex-info "Claim race timed out" {})))
-             (let [winner-index (if (= 200 (:status (first results))) 0 1)
+             (let [winner-index (if (= :confirmed (get-in (first results) [:settlement :resolution])) 0 1)
                    winner (nth results winner-index) loser (nth results (- 1 winner-index))
-                   [session id helper] (nth [["a" "claim-a" "helper-1"] ["b" "claim-b" "helper-2"]] winner-index)]
+                   actors [["a" "claim-a" "helper-1"] ["b" "claim-b" "helper-2"]]
+                   [session id helper] (nth actors winner-index)
+                   [loser-session loser-id loser-helper] (nth actors (- 1 winner-index))
+                   valid? (= :valid recovery-mode)]
                (is (= #{["claim-a" "helper-1" before] ["claim-b" "helper-2" before]} (set @observed)))
                (is (= 2 (count @observed)))
-               (is (= 1 (count (filter #(= 200 (:status %)) results))))
+               (is (= 1 (count (filter #(= :confirmed (get-in % [:settlement :resolution])) results))))
                (is (= :confirmed (get-in winner [:settlement :resolution])))
                (is (= :request/claimed (get-in winner [:settlement :outcome])))
                (is (= {:status :claimed :helper helper} (get-in winner [:settlement :authoritative :projection])))
-               (is (= :xtdb/assert-failed (get-in loser [:failure :xtdb.error/code])))
+               (is (= [[:declare (identity/command-id loser-id)] [:construct (identity/command-id loser-id)]] @recovery-trace))
+               (if valid?
+                 (do (is (= :rejected (get-in loser [:settlement :resolution])))
+                     (is (= :request/not-claimable (get-in loser [:settlement :outcome])))
+                     (is (= {:status :claimed :helper helper} (get-in loser [:settlement :authoritative :projection]))))
+                 (case recovery-mode
+                   :wrong-outcome (is (= :construction-outcome-mismatch (get-in loser [:failure :error/kind])))
+                   :missing-guard (is (= :construction-predicate-mismatch (get-in loser [:failure :error/kind])))
+                   :domain-write (is (= :journal-only-requires-no-model-commands (get-in loser [:failure :reason])))))
                (is (= [{:status :claimed :revision 1}] (xt/q node ["SELECT status, revision FROM requests"])))
                (is (= [{:xt/id "primary-r1" :request-id "r1" :helper helper}] (xt/q node ["SELECT _id, request_id, helper FROM request_assignments"])))
-               (let [records (xt/q node ["SELECT * FROM gesso_commands"])]
-                 (is (= [id] (mapv :xt/id records)))
-                 (is (= (identity/principal helper) (get-in (first records) [:gesso.command/binding :principal])))
-                 (is (= {:outcome :request/claimed :helper helper} (:gesso.command/outcome (first records)))))
+               (let [records (into {} (map (juxt :xt/id clojure.core/identity)) (xt/q node ["SELECT * FROM gesso_commands"]))]
+                 (is (= (cond-> #{id} valid? (conj loser-id)) (set (keys records))))
+                 (is (= (identity/principal helper) (get-in records [id :gesso.command/binding :principal])))
+                 (is (= {:outcome :request/claimed :helper helper} (get-in records [id :gesso.command/outcome])))
+                 (when valid?
+                   (is (= (identity/principal loser-helper) (get-in records [loser-id :gesso.command/binding :principal])))
+                   (is (= refusal (get-in records [loser-id :gesso.command/outcome])))))
                (is (= #{{:topic :request :command-id id} {:topic :request-assignment :command-id id}}
                       (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$command_id AS command_id FROM gesso_live_outbox"]))))
-               (is (= [[id :incorporated]] @projected))
+               (is (= (cond-> #{[id :incorporated]} valid? (conj [loser-id :incorporated])) (set @projected)))
                (let [replay (invoke session id "winner-replay")]
                  (is (= :already-incorporated (get-in replay [:settlement :resolution])))
                  (is (= {:status :claimed :helper helper} (get-in replay [:settlement :authoritative :projection])))
                  (is (= 2 (count @observed)))
-                 (is (= [[id :incorporated] [id :replay]] @projected))
+                 (is (= [id :replay] (last @projected)))
+                 (when valid?
+                   (let [replay (invoke loser-session loser-id "loser-replay")]
+                     (is (= :rejected (get-in replay [:settlement :resolution])))
+                     (is (= :request/not-claimable (get-in replay [:settlement :outcome])))
+                     (is (= {:status :claimed :helper helper} (get-in replay [:settlement :authoritative :projection])))
+                     (is (= [loser-id :replay] (last @projected)))
+                     (is (= 2 (count @recovery-trace)))
+                     (is (= 2 (count @observed)))))
                  (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))
-           (finally (host/stop! started))))))))
+           (finally (host/stop! started)))))))))
