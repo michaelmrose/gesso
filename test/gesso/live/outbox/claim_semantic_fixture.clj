@@ -23,6 +23,9 @@
    :membership/one {:type :boolean}
    :membership/two {:type :boolean}})
 
+(defn alternative-id [helper alternative]
+  (keyword (str "fixture.claim." helper) (name alternative)))
+
 (defn source [helper alternative]
   (let [[slot membership] (or (helpers helper) (throw (ex-info "Unknown helper" {})))
         accept? (= :accept alternative)
@@ -43,9 +46,8 @@
         reads (set (keys conditions))
         checks (mapv (fn [[k v]] [:= [:read k] [:literal v]]) (sort-by key conditions))
         writes (set (keys replacements))]
-    {:subject {:kind :operation :id :fixture/multi-record-claim
-               :interface {:version 1 :helper helper :alternative alternative
-                           :request "r1" :assignment "primary-r1"}}
+    {:subject {:kind :operation :id (alternative-id helper alternative)
+               :interface {:operation (alternative-id helper alternative)}}
      :state-types state-types :input-types {}
      :guard {:readers reads
              :expression (if (= 1 (count checks)) (first checks) (into [:and] checks))}
