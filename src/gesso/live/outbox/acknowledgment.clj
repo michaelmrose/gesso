@@ -20,7 +20,7 @@
   (:require [clojure.string :as str]
             [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox :as outbox]
-            [xtdb.api :as xt])
+            [gesso.live.outbox.read-frontier :as frontier])
   (:import [java.time ZonedDateTime]))
 
 (def ^:private submission-keys
@@ -68,15 +68,7 @@
 
 (defn- current-intent!
   [node intent-id]
-  (let [rows (try
-               (xt/q node [current-sql intent-id])
-               (catch InterruptedException cause
-                 ;; An interrupted physical lease read does not establish
-                 ;; whether the intent is missing, current, or already leased.
-                 ;; Preserve the exact failure and the caller's JVM cancellation
-                 ;; signal instead of admitting an invented outcome.
-                 (.interrupt (Thread/currentThread))
-                 (throw cause)))]
+  (let [rows (frontier/q-from! node [current-sql intent-id])]
     ;; A real XTDB q returns a vector, including [] only when the row was
     ;; observed missing. Other containers, and non-map row entries, are
     ;; provider contract failures: never turn an indeterminate lease read

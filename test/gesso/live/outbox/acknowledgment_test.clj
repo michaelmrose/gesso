@@ -6,7 +6,9 @@
             [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.acknowledgment :as acknowledgment]
             [gesso.live.outbox.discovery :as discovery]
+            [gesso.live.outbox.read-frontier :as frontier]
             [xtdb.api :as xt]
+            [xtdb.basis :as basis]
             [xtdb.node :as xtn])
   (:import [java.time Instant]))
 
@@ -277,7 +279,7 @@
           (try
             (Thread/interrupted)
             (let [failure (with-redefs
-                            [xt/q (fn [& _]
+                            [live.xtdb/q-from (fn [& _]
                                     (swap! queries inc)
                                     (throw cause))
                              live.xtdb/execute-tx! (fn [& _]
@@ -334,7 +336,7 @@
         (let [queries (atom 0)
               writes (atom 0)
               failure (with-redefs
-                       [xt/q (fn [& _] (swap! queries inc) physical)
+                       [live.xtdb/q-from (fn [& _] (swap! queries inc) physical)
                         live.xtdb/execute-tx!
                         (fn [& _]
                           (swap! writes inc)
@@ -370,3 +372,42 @@
       (is (empty? current-rows))
       (is (= {:status :unavailable :reason :missing :intent-id id}
              (acknowledgment/acknowledge-dispatch! node request))))))
+
+(deftest acknowledgment-awaits-selected-node-frontier-before-write-test
+  (let [node :selected-node id (random-uuid)
+        request (submit id (random-uuid) "worker-a") calls (atom [])]
+    (with-redefs [xt/status (fn [n]
+                             (swap! calls conj [:status n])
+                             {:latest-submitted-msg-ids {"xtdb" [42]}})
+                  live.xtdb/q-from (fn [n q opts]
+                                     (swap! calls conj [:query n q opts]) [])
+                  live.xtdb/execute-tx! (fn [& _] (throw (AssertionError. "Unexpected write")))]
+      (is (= {:status :unavailable :reason :missing :intent-id id}
+             (acknowledgment/acknowledge-dispatch! node request)))
+      (is (= [[:status node]
+              [:query node ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" id]
+               {:await-token (basis/->tx-basis-str {"xtdb" [42]})}]] @calls))
+      (reset! calls [])
+      (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {}})]
+        (is (= ::frontier/invalid-frontier
+               (try (acknowledgment/acknowledge-dispatch! node request)
+                    nil (catch clojure.lang.ExceptionInfo e (:error/type (ex-data e))))))
+        (is (empty? @calls))))))
+
+(deftest acknowledgment-observes-submitted-terminal-write-before-cas-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          _ (seed! node id)
+          lease-id (pending->leased! node id "worker-a")
+          request (submit id lease-id "worker-a")
+          receipt-id (random-uuid)
+          terminal (-> (row node id)
+                       (dissoc :xt/system-from)
+                       (assoc :gesso.live.outbox/status :dispatch-accepted
+                              :gesso.live.outbox/dispatch-receipt-id receipt-id
+                              :gesso.live.outbox/dispatch-adapter :gesso.live/dispatch))]
+      (xt/submit-tx node [[:put-docs outbox/intent-table terminal]])
+      (with-redefs [live.xtdb/execute-tx! (fn [& _] (throw (AssertionError. "Terminal intent rewritten")))]
+        (is (= {:status :unavailable :reason :not-leased :intent-id id}
+               (acknowledgment/acknowledge-dispatch! node request))))
+      (is (= receipt-id (:gesso.live.outbox/dispatch-receipt-id (row node id)))))))

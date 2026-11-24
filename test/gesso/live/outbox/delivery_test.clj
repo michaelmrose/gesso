@@ -13,7 +13,9 @@
             [gesso.live.outbox.worker :as worker]
             [gesso.live.source :as source]
             [manifold.stream :as s]
+            [gesso.live.outbox.read-frontier :as frontier]
             [xtdb.api :as xt]
+            [xtdb.basis :as basis]
             [xtdb.node :as xtn])
   (:import [java.time Instant]))
 
@@ -269,7 +271,7 @@
             (try
               (Thread/interrupted)
               (let [failure
-                    (with-redefs [xt/q (fn [& _]
+                    (with-redefs [live.xtdb/q-from (fn [& _]
                                          (swap! reads inc)
                                          (throw cause))
                                   acknowledgment/acknowledge-dispatch!
@@ -456,7 +458,7 @@
                   acks (atom 0)]
               (try
                 (let [failure (with-redefs
-                                [xt/q (fn [& _]
+                                [live.xtdb/q-from (fn [& _]
                                         (swap! reads inc)
                                         provider-result)
                                  acknowledgment/acknowledge-dispatch!
@@ -506,7 +508,7 @@
             (is (vector? physical))
             (is (= 1 (count physical)))
             (is (= :missing-or-ambiguous-intent
-                   (:reason (with-redefs [xt/q (fn [& _] [])]
+                   (:reason (with-redefs [live.xtdb/q-from (fn [& _] [])]
                               (rejection
                                #(delivery/dispatch-acquired!
                                  node system {} lease source-id))))))
@@ -830,3 +832,48 @@
               (s/close! tap))))
         (finally
           (live/close! system))))))
+
+(deftest delivery-awaits-selected-node-frontier-before-emission-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system) id (random-uuid)]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id)
+              selected :selected-node
+              calls (atom [])]
+          (with-redefs [xt/status (fn [n]
+                                   (swap! calls conj [:status n])
+                                   {:latest-submitted-msg-ids {"xtdb" [42]}})
+                        live.xtdb/q-from (fn [n q opts]
+                                           (swap! calls conj [:query n q opts]) [])
+                        dispatch/run-sync! (fn [& _] (throw (AssertionError. "Unexpected emission")))
+                        acknowledgment/acknowledge-dispatch! (fn [& _] (throw (AssertionError. "Unexpected ack")))]
+            (is (= :missing-or-ambiguous-intent
+                   (:reason (rejection #(delivery/dispatch-acquired!
+                                         selected system {} lease source-id)))))
+            (is (= [[:status selected]
+                    [:query selected ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" id]
+                     {:await-token (basis/->tx-basis-str {"xtdb" [42]})}]] @calls))
+            (reset! calls [])
+            (with-redefs [xt/status (constantly {:latest-submitted-msg-ids {}})]
+              (is (= ::frontier/invalid-frontier
+                     (:error/type (rejection #(delivery/dispatch-acquired!
+                                               selected system {} lease source-id)))))
+              (is (empty? @calls)))))
+        (finally (live/close! system))))))
+
+(deftest delivery-observes-submitted-lease-change-before-emission-test
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system) id (random-uuid)]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id) old (row node id)]
+          (xt/submit-tx node [[:put-docs outbox/intent-table
+                               (assoc (dissoc old :xt/system-from)
+                                      :gesso.live.outbox/lease-owner "other-worker")]])
+          (with-redefs [dispatch/run-sync! (fn [& _] (throw (AssertionError. "Stale lease emitted")))]
+            (is (= :stale-or-unsupported-lease
+                   (:reason (rejection #(delivery/dispatch-acquired!
+                                         node system {} lease source-id))))))
+          (is (= :leased (:gesso.live.outbox/status (row node id)))))
+        (finally (live/close! system))))))

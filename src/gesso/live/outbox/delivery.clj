@@ -25,7 +25,7 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acknowledgment :as acknowledgment]
             [gesso.live.progression :as progression]
-            [xtdb.api :as xt])
+            [gesso.live.outbox.read-frontier :as frontier])
   (:import [java.time Instant ZonedDateTime]))
 
 (def ^:private select-current-sql
@@ -69,15 +69,7 @@
 (defn- require-current-intent!
   [node acquisition expected-source-id]
   (let [intent-id (:intent-id acquisition)
-        rows (try
-               (xt/q node [select-current-sql intent-id])
-               (catch InterruptedException cause
-                 ;; The physical pre-dispatch read is indeterminate after an
-                 ;; interrupted XTDB operation. Preserve JVM cancellation
-                 ;; while propagating the exact error; never infer that the
-                 ;; lease is missing or admit a source emission from it.
-                 (.interrupt (Thread/currentThread))
-                 (throw cause)))]
+        rows (frontier/q-from! node [select-current-sql intent-id])]
     ;; XTDB q returns a vector of maps (or [] for an observed absence).
     ;; An arbitrary countable or seq of valid-looking rows is not a physical
     ;; query result. In particular, it must not authorize source emission.
