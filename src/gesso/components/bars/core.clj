@@ -300,7 +300,7 @@
 
 (defn- render-menu-item
   [item mode]
-  (let [{:keys [text href icon current? class attrs]} item
+  (let [{:keys [text href icon current? class attrs disabled?]} item
         script   (when (= mode :hamburger)
                    (bars-close-script))
         attrs    (merge-script-attr attrs script)
@@ -310,12 +310,15 @@
                       (item-icon-node icon)]])
                   (nodes text))
         defaults (bars-menu-item-attrs mode current? class)
-        attrs    (if href
-                   attrs
-                   (merge {:type "button"} attrs))]
-    (if href
-      (el :a defaults attrs content)
-      (el :button defaults attrs content))))
+        link?    (and href (not disabled?))
+        attrs    (cond-> attrs
+                   href (dissoc :href "href" :type "type")
+                   link? (assoc :href href)
+                   (and href (not link?)) (assoc :type "button")
+                   disabled? (assoc :disabled true))]
+    (el (if link? :a :button)
+        (cond-> defaults (not link?) (assoc :type "button"))
+        attrs content)))
 
 (defn- render-topbar-simple-menu
   [menu]
@@ -326,20 +329,16 @@
         attrs
         [(render-menu-item item :topbar)])))
 
-(defn- navigate-js
-  [href]
-  (str "window.location.href=" (pr-str href)))
-
 (defn- dropdown-item-opts
   [item]
   (let [{:keys [class attrs href disabled? current?]} item
         attrs (cond-> (or attrs {})
-                href (assoc :onclick (navigate-js href))
                 current? (assoc :aria-current "page"))]
     (cond-> {:class (class-names
                      (when current? "weight-semibold-theme")
                      class)}
       (seq attrs) (assoc :attrs attrs)
+      href (assoc :href href)
       disabled? (assoc :disabled? true))))
 
 (defn- dropdown-item-children

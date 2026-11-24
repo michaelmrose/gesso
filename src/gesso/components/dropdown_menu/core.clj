@@ -101,11 +101,28 @@
         attrs
         children)))
 
+(defn- render-dropdown-item
+  [{:keys [class attrs props]} children]
+  (let [{:keys [href disabled? keep-open?]} props
+        link? (and href (not disabled?))
+        defaults (dropdown-menu-item-attrs class disabled?)
+        attrs (merge-script-attr attrs (dropdown-menu-item-script {:keep-open? keep-open?}))
+        ;; A navigation item is a native anchor, not a button executing JS.
+        ;; The descriptor owns its destination, including the disabled case.
+        attrs (if href
+                (cond-> (dissoc attrs :href "href" :type "type" :disabled "disabled")
+                  link? (assoc :href href))
+                attrs)]
+    (el (if link? :a :button)
+        (if link? (dissoc defaults :type :disabled) defaults)
+        attrs
+        children)))
+
 (defn dropdown-menu-item
-  "Renders a menu item button.
+  "Renders a menu item button or a native navigation link.
 
    Short form:
-     (dropdown-menu-item {:text \"Profile\"})
+     (dropdown-menu-item {:text \"Profile\" :href \"/profile\"})
 
    Long form:
      (dropdown-menu-item {}
@@ -113,27 +130,19 @@
        (dropdown-menu-right-slot {} \"⌘P\"))
 
    Options:
+     :href        native link destination; omitted for a disabled item
      :disabled?   marks the item unavailable
      :keep-open?  prevents the menu from closing when selected"
   [& args]
   (if (only-map-arg? args)
-    (let [{:keys [props class attrs]} (split-opts (first args))
-          {:keys [text right-slot disabled? keep-open?]} props
-          attrs (merge-script-attr attrs (dropdown-menu-item-script {:keep-open? keep-open?}))]
-      (el :button
-          (dropdown-menu-item-attrs class disabled?)
-          attrs
-          [(nodes text)
-           (when right-slot
-             (dropdown-menu-right-slot {} right-slot))]))
-    (let [[opts children] (normalize-component-args args)
-          {:keys [props class attrs]} (split-opts opts)
-          {:keys [disabled? keep-open?]} props
-          attrs (merge-script-attr attrs (dropdown-menu-item-script {:keep-open? keep-open?}))]
-      (el :button
-          (dropdown-menu-item-attrs class disabled?)
-          attrs
-          children))))
+    (let [{:keys [props] :as opts} (split-opts (first args))
+          {:keys [text right-slot]} props]
+      (render-dropdown-item opts
+                            [(nodes text)
+                             (when right-slot
+                               (dropdown-menu-right-slot {} right-slot))]))
+    (let [[opts children] (normalize-component-args args)]
+      (render-dropdown-item (split-opts opts) children))))
 
 (defn dropdown-menu
    "Renders a dropdown menu root.
