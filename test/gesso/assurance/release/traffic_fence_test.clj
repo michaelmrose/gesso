@@ -491,3 +491,39 @@
     (is (= :finished (:status ((:finish! f) @lease))))
     (is (= :retired (:status ((:retire! f) token))))
     (is (= :closed (:status ((:close! f)))))))
+
+(deftest nested-guard-cannot-borrow-outer-request-ownership
+  (let [f (issue!)
+        observations (atom [])
+        tokens (atom [])
+        t (activate! f :test/nested-guard
+                     (fn [req]
+                       (if (:nested req)
+                         (do (swap! tokens conj ((:retain-current! f))) response)
+                         (do
+                           (swap! tokens conj ((:retain-current! f)))
+                           (doseq [mode [:denied :throws :allowed]]
+                             (swap! observations conj
+                                    (:status ((:handler f) {:nested mode}))))
+                           (swap! tokens conj ((:retain-current! f)))
+                           response)))
+                     (fn [req]
+                       (if-let [mode (:nested req)]
+                         (do
+                           (swap! observations conj
+                                  (try
+                                    (let [lease ((:retain-current! f))]
+                                      ((:finish! f) lease)
+                                      :borrowed-owner)
+                                    (catch clojure.lang.ExceptionInfo e
+                                      (:reason (ex-data e)))))
+                           (case mode :denied false :throws (throw (Exception. "guard failed")) :allowed true))
+                         true)))]
+    (is (= response ((:handler f) {})))
+    (is (= [:no-current-admitted-request 503
+            :no-current-admitted-request 503
+            :no-current-admitted-request 200] @observations))
+    (is (= 3 (count @tokens)))
+    (is (= 3 (:retained-continuations ((:summary! f)))))
+    (doseq [lease @tokens] (is (= :finished (:status ((:finish! f) lease)))))
+    (is (= :closed (:status ((:close! f)))))))

@@ -242,21 +242,23 @@
          unavailable
          (with-read
            (fn []
-             (let [{:keys [phase active]} @state]
-               (if (and (= :active phase)
-                        active
-                        (true? (try ((:guard! active) request)
-                                    (catch Throwable error
-                                      (when (instance? InterruptedException error)
-                                        (.interrupt (Thread/currentThread)))
-                                      false))))
-                 (let [previous-owner (.get request-owner)
-                       previous-permit (.get current-sse-permit)]
-                   (.set request-owner (RequestOwner. (:token active)))
-                   ;; A nested protected request may not inherit its parent's
-                   ;; stream permit; restore it only after the nested call.
-                   (.remove current-sse-permit)
-                   (try
+             (let [{:keys [phase active]} @state
+                   previous-owner (.get request-owner)
+                   previous-permit (.get current-sse-permit)]
+               ;; A nested request must not borrow its caller's ownership
+               ;; during authorization, even if the guard denies or throws.
+               (.remove request-owner)
+               (.remove current-sse-permit)
+               (try
+                 (if (and (= :active phase)
+                          active
+                          (true? (try ((:guard! active) request)
+                                      (catch Throwable error
+                                        (when (instance? InterruptedException error)
+                                          (.interrupt (Thread/currentThread)))
+                                        false))))
+                   (do
+                     (.set request-owner (RequestOwner. (:token active)))
                      (let [response ((:handler active) request)
                            permit (.get current-sse-permit)]
                        (cond
@@ -275,15 +277,15 @@
                                             (.get continuations (:lease permit)))))
                          response
 
-                         :else (refuse-opaque-result response)))
-                     (finally
-                       (if previous-permit
-                         (.set current-sse-permit previous-permit)
-                         (.remove current-sse-permit))
-                       (if previous-owner
-                         (.set request-owner previous-owner)
-                         (.remove request-owner)))))
-                 unavailable))))))
+                         :else (refuse-opaque-result response))))
+                   unavailable)
+                 (finally
+                   (if previous-permit
+                     (.set current-sse-permit previous-permit)
+                     (.remove current-sse-permit))
+                   (if previous-owner
+                     (.set request-owner previous-owner)
+                     (.remove request-owner)))))))))
 
      :retain-current!
      (fn []
