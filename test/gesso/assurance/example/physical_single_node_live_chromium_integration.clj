@@ -1,9 +1,9 @@
 (ns gesso.assurance.example.physical-single-node-live-chromium-integration
-  "v1506: Real Chromium/HTMX/SSE integration against embedded XTDB.
+  "v2326: Real Chromium/HTMX/SSE integration against embedded XTDB.
 
    This is a dedicated real-browser gate, deliberately NOT an ordinary *_test
    namespace. Call -main after building the production browser artifact.
-   Its loopback HTTP bridge delegates to v1505's *actual* :live-handler and
+   Its loopback HTTP bridge delegates to the *actual Biff-installed* :live-handler and
    forwards its Manifold SSE body over a real socket. Playwright controls only
    the browser; it does not mock HTTP, EventSource, HTMX, or database state.
 
@@ -15,6 +15,7 @@
             [clojure.test :refer [deftest is run-tests testing]]
             [gesso.assurance.example.physical-single-node-live :as proving]
             [gesso.live.browser.chromium :as chromium]
+            [gesso.live.core :as live]
             [manifold.stream :as stream])
   (:import (com.sun.net.httpserver HttpExchange HttpHandler HttpServer)
            (java.io BufferedReader IOException InputStreamReader)
@@ -261,6 +262,12 @@
                           (.getInputStream connection)
                           (.getErrorStream connection))]
         {:status status
+         ;; Read response headers from the actual socket adapter, never
+         ;; from a fabricated Ring map. In particular, HX-Refresh must cross
+         ;; the transport unchanged to become a browser-visible recovery cue.
+         :headers {"HX-Refresh" (.getHeaderField connection "HX-Refresh")
+                   "x-gesso-proving-live-publication"
+                   (.getHeaderField connection "x-gesso-proving-live-publication")}
          :body (if body-stream
                  (with-open [input body-stream]
                    (slurp input :encoding "UTF-8"))
@@ -331,6 +338,78 @@
          (finally
            (.disconnect sse)
            (stop-bridge! bridge)))))))
+
+(deftest loopback-unknown-publication-preserves-committed-write-and-reacquisition-test
+  ;; Browser-independent physical transport validation of v2325. A real
+  ;; local HTTP POST crosses the Biff-adopted handler while postcommit
+  ;; publication deliberately fails. The successful XTDB write must remain
+  ;; successful, HX-Refresh must survive real HTTP response serialization,
+  ;; and a subsequent GET must reacquire authoritative committed state.
+  ;; This does NOT establish that Chromium/HTMX actually follows HX-Refresh.
+  (proving/with-live-proving-application!
+   (fn [app]
+     (let [installed (get-in app [:system :biff.ring/handler])
+           _ (is (identical? installed (:live-handler app)))
+           bridge (start-bridge! installed)
+           emit-attempts (atom 0)]
+       (try
+         (let [post-result
+               (with-redefs [live/emit!
+                             (fn [& _]
+                               (swap! emit-attempts inc)
+                               (throw (ex-info "Simulated postcommit Live failure" {})))]
+                 (loopback-response! bridge :post reservation-uri))]
+           (is (= 200 (:status post-result))
+               "A committed operation may not become an HTTP failure")
+           (is (= "unknown"
+                  (get-in post-result [:headers "x-gesso-proving-live-publication"])))
+           (is (= "true" (get-in post-result [:headers "HX-Refresh"]))
+               "Full-page recovery header must survive real HTTP transport")
+           (is (= 1 @emit-attempts) "Never retry notification as a transaction")
+           (is (= 1 (:revision ((:read! app)))))
+           (is (= :reserved (:slot/status ((:abstract! app)))))
+           (is (= 1 (count-requests bridge :post reservation-uri)))
+           (let [fresh (loopback-response! bridge :get proving/panel-uri)]
+             (is (= 200 (:status fresh)))
+             (is (str/includes? (:body fresh) "data-slot-status=\"reserved\""))
+             (is (str/includes? (:body fresh) "data-slot-revision=\"1\""))
+             (is (= 1 (:revision ((:read! app)))))
+             (is (= 1 (count-requests bridge :get proving/panel-uri)))))
+         (is (= 409 (:status (loopback-response! bridge :post reservation-uri)))
+             "A duplicate reserve must not replay a committed reservation")
+         (is (= 1 (:revision ((:read! app)))))
+         (is (empty? @(:errors bridge)) (pr-str @(:errors bridge)))
+         (finally
+           (stop-bridge! bridge)))))))
+
+(deftest chromium-unknown-publication-requests-full-authoritative-reload-test
+  ;; A proof of browser adoption requires genuine Chromium, not the loopback
+  ;; test above. An unavailable browser is a missed mandatory test, not a pass.
+  (with-real-application-browser
+    (fn [{:keys [app bridge new-page!]}]
+      (let [{:keys [context page]} (open-page! bridge new-page!)]
+        (wait-state! page "available" 0)
+        (is (= 1 (count-requests bridge :get proving/panel-uri)))
+        (let [attempts (atom 0)]
+          (with-redefs [live/emit!
+                        (fn [& _]
+                          (swap! attempts inc)
+                          (throw (ex-info "Publication unavailable after commit" {})))]
+            (.click (.locator ^Page page "button[hx-post='/__gesso_proving/slot/reserve']"))
+            (wait-state! page "reserved" 1)
+            (await-observation!
+             bridge
+             #(when (>= (count-requests bridge :get proving/panel-uri) 2) true)
+             "HTMX full-page reload after postcommit notification uncertainty"))
+          (is (= 1 @attempts) "Only one attempted advisory publication")
+          (is (= 1 (count-requests bridge :post reservation-uri))
+              "Browser recovery must not resubmit the protected command")
+          (is (= 1 (:revision ((:read! app)))))
+          (is (= {"status" "reserved" "revision" 1} (state-from-dom page)))
+          (is (= 2 (count-requests bridge :get proving/panel-uri))
+              "HTMX must reload the whole panel rather than silently retain stale DOM")
+          (is (empty? @(:errors bridge)) (pr-str @(:errors bridge)))
+          (is (true? (chromium/assert-clean! context))))))))
 
 (deftest chromium-htmx-actions-and-authoritative-sse-refresh-test
   (with-real-application-browser
