@@ -22,6 +22,7 @@
             [ring.util.codec :as codec]
             [gesso.live.source :as source]
             [xtdb.api :as xt]
+            [xtdb.node :as xtn]
             [gesso.live.outbox.http-fragment :as fragment]
             [gesso.live.progression.http :as progression-http])
   (:import [java.io BufferedReader InputStreamReader ByteArrayInputStream]
@@ -186,14 +187,12 @@
         execute! (fn [{:keys [ctx arguments] :as invocation}]
                    (swap! invocations conj invocation)
                    (let [id (:request-id arguments)
-                         plan (publication/prepare! ctx {:intent-ids [intent-id]
-                                                        :purpose :gesso.live/refresh}
-                                                   [{:topic :request :request/location-id id :change/kind :updated}])
-                         _ (reset! prepared-intents (:intents plan))
-                         tx (xt/execute-tx (:xtdb/connectable ctx)
-                                           (into (vec (:guard-ops plan))
-                                                 [[:put-docs :requests {:xt/id id :status :claimed}]
-                                                  (:tx-op plan)]))]
+                         receipt (publication/transact!
+                                  ctx {:intent-ids [intent-id] :purpose :gesso.live/refresh}
+                                  [{:topic :request :request/location-id id :change/kind :updated}]
+                                  [[:put-docs :requests {:xt/id id :status :claimed}]])
+                         _ (reset! prepared-intents (:outbox/intents receipt))
+                         tx (:tx-result receipt)]
                      {:resolution :confirmed :outcome :request/claimed
                       :authoritative (protocol/authoritative
                                       {:presence :present
@@ -408,3 +407,41 @@
                  [{publication/preparation-key (bind "owned-source" (assoc command :operation :request/reassign))}
                   spec [(assoc change :topic :external/audit)] :unknown-change-topic]]]
           (is (= expected (reason #(publication/prepare! ctx' spec' changes)))))))))
+
+(deftest command-publication-transact-preserves-atomicity-and-provider-receipt
+  (with-assembly
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile! assembly subject-mapping))
+              ctx {:xtdb/connectable node
+                   publication/preparation-key
+                   (bind "owned-source" {:operation :request/claim
+                                         :command-id (identity/command-id "command-2370")})}
+              spec {:intent-ids [(random-uuid)] :purpose :gesso.live/refresh}
+              change {:topic :request :request/location-id "r1"}
+              write (fn [id] [:put-docs :requests {:xt/id id :status :claimed}])
+              domain-ids #(set (map :xt/id (xt/q node ["SELECT _id FROM requests"])))
+              outbox-ids #(set (map :xt/id (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+              conflict? (fn [f]
+                          (try (f) false
+                               (catch Exception e
+                                 (= :xtdb/assert-failed (:xtdb.error/code (ex-data e))))))]
+          (is (= :invalid-domain-ops (reason #(publication/transact! ctx spec [change] []))))
+          (is (= :invalid-subject (reason #(publication/transact! ctx spec [{:topic :request}] [(write "bad")]))))
+          (is (empty? (domain-ids)))
+          (is (empty? (outbox-ids)))
+          (let [receipt (publication/transact! ctx spec [change] [(write "r1")])]
+            (is (some? (:progression receipt)))
+            (is (= (:tx-id (:tx-result receipt)) (get-in receipt [:consistency :tx-id])))
+            (is (= (:intent-ids spec) (mapv :xt/id (:outbox/intents receipt)))))
+          (is (conflict? #(publication/transact! ctx spec [change] [(write "duplicate")])))
+          (is (conflict? #(publication/transact!
+                           ctx (assoc spec :intent-ids [(random-uuid)]) [change]
+                           [["ASSERT 1 = 0"] (write "guard-failed")])))
+          (is (= #{"r1"} (domain-ids)))
+          (is (= (set (:intent-ids spec)) (outbox-ids)))
+          (let [failure (ex-info "provider result failed" {:commit/status :committed})]
+            (with-redefs [xtdb/execute-tx-from! (fn [& _] (throw failure))]
+              (is (identical? failure
+                              (try (publication/transact! ctx spec [change] [(write "r2")])
+                                   nil (catch Exception e e)))))))))))

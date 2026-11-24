@@ -6,6 +6,7 @@
             [gesso.live.model :as model]
             [gesso.choreo.identity :as identity]
             [gesso.live.outbox :as outbox]
+            [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.optimistic.server :as server]))
 
 (defn- reject! [reason data]
@@ -28,6 +29,25 @@
   (if-let [prepare (get ctx preparation-key)]
     (prepare spec changes)
     (reject! :missing-command-preparation {})))
+
+(defn transact!
+  "Prepare and execute one command-bound durable publication transaction.
+   Put every intent absence guard before the trusted domain transaction
+   operations and append the intent write. Return the original XTDB receipt
+   (including progression) and prepared :outbox/intents; do not emit or
+   acknowledge publication here. Original provider exceptions, including
+   committed post-execute-result failures, propagate unchanged.
+
+   Domain ops are trusted, including any domain ASSERTs; this does not
+   validate their semantics or prohibit arbitrary raw writes to the outbox.
+   The caller retains stable intent IDs across retries."
+  [ctx spec changes domain-ops]
+  (when-not (and (vector? domain-ops) (seq domain-ops))
+    (reject! :invalid-domain-ops {}))
+  (let [{:keys [intents guard-ops tx-op]} (prepare! ctx spec changes)
+        ops (into (into guard-ops domain-ops) [tx-op])
+        receipt (xtdb/execute-tx-from! ctx ops)]
+    (assoc receipt :outbox/intents intents)))
 
 (defn profile!
   "Compile an explicit topic -> subject field declaration against the exact
