@@ -103,6 +103,19 @@
         (throw cause)))
     body))
 
+(defn- read-single-wire [encoded]
+  ;; An EDN value must never be able to impersonate the end of input.
+  ;; Limit the overflow recovery to the untrusted recursive EDN reader;
+  ;; neither command validation nor application execution is covered by it.
+  (let [eof (Object.)]
+    (try
+      (with-open [reader (PushbackReader. (StringReader. encoded))]
+        (let [wire (edn/read {:eof eof} reader)]
+          (when (and (not (identical? eof wire))
+                     (identical? eof (edn/read {:eof eof} reader)))
+            wire)))
+      (catch StackOverflowError _ nil))))
+
 (defn- parse-body [body]
   (try
     (let [^ByteBuffer bytes (cond
@@ -113,10 +126,8 @@
         (let [form (decode-form (utf8-text bytes))
               encoded (get form command-parameter)]
           (when (string? encoded)
-            (with-open [reader (PushbackReader. (StringReader. encoded))]
-              (let [wire (edn/read {:eof ::eof} reader)]
-                (when (= ::eof (edn/read {:eof ::eof} reader))
-                  {:form form :command (server/decode-command wire)})))))))
+            (when-let [wire (read-single-wire encoded)]
+              {:form form :command (server/decode-command wire)})))))
     (catch InterruptedException cause
       (.interrupt (Thread/currentThread))
       (throw cause))

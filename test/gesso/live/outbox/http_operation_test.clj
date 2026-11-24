@@ -291,3 +291,36 @@
           (is (= 403 (:status (handler (request (form :request/claim "valid"))))))
           (is (= 1 (count @gates)))
           (is (empty? @calls)))))))
+
+(deftest command-envelope-requires-unambiguous-end-of-input
+  (let [gates (atom []) calls (atom []) fallbacks (atom [])]
+    (with-assembly (fn [ctx] (swap! calls conj ctx) {:resolution :rejected :reason :test-only})
+      (fn [assembly]
+        (let [handler (transport/wrap-handler assembly
+                                             (fn [ctx] (swap! fallbacks conj ctx) {:status 404})
+                                             {:authorize-request? (fn [ctx] (swap! gates conj ctx) false)})
+              wire (pr-str (protocol/command->wire (command :request/claim)))
+              body (fn [encoded]
+                     (codec/form-encode {transport/command-parameter encoded "csrf" "valid"}))
+              sentinel ":gesso.live.outbox.http-operation/eof"
+              deep (str (apply str (repeat 9000 "[")) "nil"
+                        (apply str (repeat 9000 "]")))]
+          (doseq [suffix [(str " " sentinel)
+                          (str " " sentinel " nil")
+                          (str " " sentinel " [")
+                          " nil" " {}"]]
+            (is (= 400 (:status (handler (request (body (str wire suffix)))))) suffix))
+          ;; A body below the byte limit can still exceed the EDN reader's
+          ;; recursive stack capacity. Neither first nor trailing values may
+          ;; escape the malformed-input boundary in that case.
+          (doseq [encoded [deep (str wire " " deep)]]
+            (let [form-body (body encoded)]
+              (is (< (count form-body) 65536))
+              (is (= 400 (try (:status (handler (request form-body)))
+                              (catch StackOverflowError _ :reader-overflow))))))
+          (is (empty? @gates))
+          (is (empty? @calls))
+          (is (empty? @fallbacks))
+          (is (= 403 (:status (handler (request (body (str wire " \n; trailing comment\n")))))))
+          (is (= 1 (count @gates)))
+          (is (empty? @calls)))))))
