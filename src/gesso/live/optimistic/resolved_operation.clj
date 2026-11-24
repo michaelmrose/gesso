@@ -118,7 +118,9 @@
              "The authoritative result projector must be a function." {})))
   config)
 
-(defn- require-context [operation context]
+(defn require-context
+  "Validate trusted invocation correlation and return its canonical binding."
+  [operation context]
   (when-not (and (map? context)
                  (every? #(contains? context %)
                          [:ctx :principal :command-id :execution-id

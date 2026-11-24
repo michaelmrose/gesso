@@ -149,15 +149,7 @@
     (binding)
     (reject! :missing-command-preparation {})))
 
-(defn transact-resolved!
-  "Commit the canonical model command-result record, domain operations and
-   derived publication intents together. Use the existing database-global
-   gesso_commands identity convention (string or UUID command ID). The
-   trusted executor supplies its portable business outcome and timestamp,
-   not a browser settlement. All absence guards precede all writes.
-   Do not mix this profile with other writers of the same command ID.
-   Domain operations and outcome truth remain trusted. Unknown commit
-   errors propagate; reconcile-command! is a separate read-only operation."
+(defn- resolved-plan!
   [ctx spec changes domain-ops outcome now]
   (when-not (and (map? spec) (= #{:purpose} (set (keys spec))))
     (reject! :invalid-resolved-intent-spec {}))
@@ -169,9 +161,24 @@
                               ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)"
                                (:xt/id record)])
                         domain-ops)
-                  [[:put-docs resolution/command-entity-type record] tx-op])
-        receipt (xtdb/execute-tx-from! ctx ops)]
-    (assoc receipt :outbox/intents intents :command/record record)))
+                  [[:put-docs resolution/command-entity-type record] tx-op])]
+    {:ops ops :intents intents :record record}))
+
+(defn- execute-resolved-plan! [ctx {:keys [ops intents record]}]
+  (assoc (xtdb/execute-tx-from! ctx ops)
+         :outbox/intents intents :command/record record))
+
+(defn transact-resolved!
+  "Commit the canonical model command-result record, domain operations and
+   derived publication intents together. Use the existing database-global
+   gesso_commands identity convention (string or UUID command ID). The
+   trusted executor supplies its portable business outcome and timestamp,
+   not a browser settlement. All absence guards precede all writes.
+   Do not mix this profile with other writers of the same command ID.
+   Domain operations and outcome truth remain trusted. Unknown commit
+   errors propagate; reconcile-command! is a separate read-only operation."
+  [ctx spec changes domain-ops outcome now]
+  (execute-resolved-plan! ctx (resolved-plan! ctx spec changes domain-ops outcome now)))
 
 (defn reconcile-command!
   "Authoritatively read the canonical command record for the current trusted
@@ -202,12 +209,64 @@
    helper never decides to submit, and never invents a failure settlement."
   [{:keys [ctx] :as invocation} may-disclose? project!]
   (when-not (= (command-binding! ctx)
-               (resolution/require-binding
-                (select-keys invocation [:operation :command-id :principal :arguments])))
+               (adapter/require-context (:operation invocation) invocation))
     (reject! :mismatched-command-binding {}))
   (adapter/project-resolution! invocation
                                (reconcile-command! ctx may-disclose?)
                                project!))
+
+(defn- recover-after-execute! [ctx may-disclose? failure]
+  ;; An interrupted request must not start another provider call.
+  (when (instance? InterruptedException failure)
+    (.interrupt (Thread/currentThread)))
+  (when (.isInterrupted (Thread/currentThread))
+    (throw failure))
+  (let [prior (try (reconcile-command! ctx may-disclose?)
+                   (catch Exception read-error
+                     (when (instance? InterruptedException read-error)
+                       (.interrupt (Thread/currentThread)))
+                     (when-not (identical? failure read-error)
+                       (.addSuppressed failure read-error))
+                     (throw failure)))]
+    (if (= :replay (:status prior)) prior (throw failure))))
+
+(defn execute-resolved!
+  "Compose a trusted initial submission or read-only reconciliation with
+   the original settlement validator. Check the durable command before
+   construction in either mode. Only an unresolved :submit may invoke the
+   trusted, side-effect-free constructor, once, with the invocation. Its
+   closed result contains :spec, :changes, :domain-ops, :outcome and :now.
+   On an execution exception, perform at most one authoritative recovery
+   read, never resubmit. Only an exact disclosed replay can settle that
+   failure; otherwise preserve the original exception. Construction,
+   validation and projection exceptions are not transaction exceptions.
+   Mode remains a trusted server decision, not a browser retry flag.
+   Absence in :reconcile never authorizes a new mutation."
+  [{:keys [ctx operation] :as invocation}
+   {:keys [mode construct! may-disclose? project!] :as options}]
+  (when-not (and (map? options)
+                 (= #{:mode :construct! :may-disclose? :project!} (set (keys options)))
+                 (#{:submit :reconcile} mode)
+                 (every? fn? [construct! may-disclose? project!]))
+    (reject! :invalid-resolved-execution-options {}))
+  (when-not (= (command-binding! ctx) (adapter/require-context operation invocation))
+    (reject! :mismatched-command-binding {}))
+  (let [prior (reconcile-command! ctx may-disclose?)
+        result
+        (if (and (= :submit mode) (= :unresolved (:status prior)))
+          (let [{:keys [spec changes domain-ops outcome now] :as construction}
+                (construct! invocation)
+                _ (when-not (and (map? construction)
+                                 (= #{:spec :changes :domain-ops :outcome :now}
+                                    (set (keys construction))))
+                    (reject! :invalid-resolved-construction {}))
+                plan (resolved-plan! ctx spec changes domain-ops outcome now)]
+            (try {:status :incorporated :outcome outcome
+                  :transaction (execute-resolved-plan! ctx plan)}
+                 (catch Exception failure
+                   (recover-after-execute! ctx may-disclose? failure))))
+          prior)]
+    (adapter/project-resolution! invocation result project!)))
 
 (defn profile!
   "Compile an explicit topic -> subject field declaration against the exact
