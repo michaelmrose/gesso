@@ -12,7 +12,7 @@
             [gesso.live.optimistic.protocol :as protocol]
             [ring.util.codec :as codec]
             [xtdb.api :as xt])
-  (:import [java.io ByteArrayInputStream]
+  (:import [java.io ByteArrayInputStream IOException InputStream InterruptedIOException]
            [java.nio.charset StandardCharsets]
            [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
@@ -252,4 +252,42 @@
             (is (= 403 (:status (handler (request (str valid "&extra=" escaped))))))
             (is (= (apply str (repeat 16000 "A")) (get (peek @gates) "extra"))))
           (is (= 3 (count @gates)))
+          (is (empty? @calls)))))))
+
+(deftest command-body-read-failure-is-not-a-malformed-request
+  (let [gates (atom []) calls (atom []) fallbacks (atom [])]
+    (with-assembly (fn [ctx] (swap! calls conj ctx) {:resolution :rejected :reason :test-only})
+      (fn [assembly]
+        (let [handler (transport/wrap-handler assembly
+                                             (fn [ctx] (swap! fallbacks conj ctx) {:status 404})
+                                             {:authorize-request? (fn [ctx] (swap! gates conj ctx) false)})
+              interrupted (InterruptedException. "cancelled body read")]
+          (doseq [failure [(IOException. "connection lost")
+                           (InterruptedIOException. "read timed out")
+                           (IllegalStateException. "body adapter failed")
+                           interrupted]]
+            (let [body (proxy [InputStream] []
+                         (read
+                           ([] (throw failure))
+                           ([_] (throw failure))
+                           ([_ _ _] (throw failure))))]
+              (try
+                (let [[caught interrupted?]
+                      (try (handler (request body)) nil
+                           (catch Exception e
+                             [e (.isInterrupted (Thread/currentThread))]))]
+                  ;; Capture the flag before reporting assertions: the test
+                  ;; reporter's synchronization may consume interruption.
+                  (is (identical? failure caught))
+                  (is (= (identical? failure interrupted) interrupted?)))
+                (finally (Thread/interrupted)))))
+          (is (empty? @gates))
+          (is (empty? @calls))
+          (is (empty? @fallbacks))
+          ;; Ordinary parse failures still get a client rejection; a later
+          ;; well-formed request can reach the original gate normally.
+          (is (= 400 (:status (handler (request (ByteArrayInputStream.
+                                                  (byte-array [(unchecked-byte 0xff)])))))))
+          (is (= 403 (:status (handler (request (form :request/claim "valid"))))))
+          (is (= 1 (count @gates)))
           (is (empty? @calls)))))))

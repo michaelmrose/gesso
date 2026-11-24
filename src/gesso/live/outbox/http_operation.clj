@@ -92,6 +92,36 @@
                 (reduced nil))))
           {} (str/split text #"&" -1)))
 
+(defn- read-body [body]
+  ;; A physical read failure is not evidence of malformed client data.
+  ;; Let the owning transport handle it, preserving cancellation semantics.
+  (if (instance? InputStream body)
+    (try
+      (ByteBuffer/wrap (.readNBytes ^InputStream body (inc max-form-bytes)))
+      (catch InterruptedException cause
+        (.interrupt (Thread/currentThread))
+        (throw cause)))
+    body))
+
+(defn- parse-body [body]
+  (try
+    (let [^ByteBuffer bytes (cond
+                              (and (string? body) (<= (count body) max-form-bytes))
+                              (.encode (.newEncoder StandardCharsets/UTF_8) (CharBuffer/wrap ^String body))
+                              (instance? ByteBuffer body) body)]
+      (when (and bytes (<= (.remaining bytes) max-form-bytes))
+        (let [form (decode-form (utf8-text bytes))
+              encoded (get form command-parameter)]
+          (when (string? encoded)
+            (with-open [reader (PushbackReader. (StringReader. encoded))]
+              (let [wire (edn/read {:eof ::eof} reader)]
+                (when (= ::eof (edn/read {:eof ::eof} reader))
+                  {:form form :command (server/decode-command wire)})))))))
+    (catch InterruptedException cause
+      (.interrupt (Thread/currentThread))
+      (throw cause))
+    (catch Exception _ nil)))
+
 (defn- read-form [request]
   (let [content-type (get-in request [:headers "content-type"] "")
         body (:body request)]
@@ -99,19 +129,10 @@
                (= "application/x-www-form-urlencoded"
                   (str/lower-case (str/trim (first (str/split content-type #";" 2)))))
                (not (seq (:query-string request))))
-      (let [^ByteBuffer bytes (cond
-                                (and (string? body) (<= (count body) max-form-bytes))
-                                (.encode (.newEncoder StandardCharsets/UTF_8) (CharBuffer/wrap ^String body))
-                                (instance? InputStream body)
-                                (ByteBuffer/wrap (.readNBytes ^InputStream body (inc max-form-bytes))))]
-        (when (and bytes (<= (.remaining bytes) max-form-bytes))
-          (let [form (decode-form (utf8-text bytes))
-                encoded (get form command-parameter)]
-            (when (string? encoded)
-              (with-open [reader (PushbackReader. (StringReader. encoded))]
-                (let [wire (edn/read {:eof ::eof} reader)]
-                  (when (= ::eof (edn/read {:eof ::eof} reader))
-                    {:form form :command (server/decode-command wire)}))))))))))
+      ;; Only the parser classifies malformed input. Physical reads happen
+      ;; outside its exception boundary, before admission or authorization.
+      (when (or (string? body) (instance? InputStream body))
+        (parse-body (read-body body))))))
 
 (defn wrap-handler
   "Own all methods on every admitted HTMX POST operation path.
@@ -142,7 +163,7 @@
           (not (application/application-assembly? assembly))
           (reject! :stale-command-assembly {})
           :else
-          (if-let [{:keys [form command]} (try (read-form request) (catch Exception _ nil))]
+          (if-let [{:keys [form command]} (read-form request)]
             (let [captured (route/captured-arguments route (:uri request))]
               (if-not (and (some? captured)
                            (every? (fn [[k v]] (= v (get (:arguments command) k))) captured)
