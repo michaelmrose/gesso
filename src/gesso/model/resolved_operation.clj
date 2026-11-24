@@ -755,7 +755,9 @@
 (defn- command-operation-targets [operations]
   (set (map (fn [[table id _]] [table id]) operations)))
 
-(defn- require-command-operation-contract! [declared targets binding]
+(defn require-command-operation-contract!
+  "Admit declared command-operation triples against admitted document targets."
+  [declared targets binding]
   ;; The trusted callback must not declare its own command-ledger operation.
   ;; Only Gesso computes the ledger target and its mandatory :create.
   (let [required (:required-command-operations declared)
@@ -786,7 +788,9 @@
     {:required-command-operations (conj required ledger-operation)
      :allowed-command-operations (conj allowed ledger-operation)}))
 
-(defn- require-plan-command-operation-coverage! [declared incorporated]
+(defn require-plan-command-operation-coverage!
+  "Check actual canonical command-operation triples against the admitted contract."
+  [declared incorporated]
   (when declared
     (let [operations (set (map (fn [entry]
                                  (let [[table id] (tx/command-target entry)]

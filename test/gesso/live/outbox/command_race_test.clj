@@ -514,6 +514,12 @@
                                     {:required-guard-targets #{} :allowed-guard-targets #{}
                                      :required-write-targets (if (= :invalid @mode) #{} #{target})
                                      :allowed-write-targets #{target}}))
+              :command-operation-contract! (fn [_ binding]
+                                             (swap! trace conj :declare-operation)
+                                             (let [entry [:requests (get-in binding [:arguments :request-id])
+                                                          (if (= :wrong-operation @mode) :claim :create)]]
+                                               {:required-command-operations (if (= :invalid-operation @mode) #{} #{entry})
+                                                :allowed-command-operations #{entry}}))
               :construct! (fn [_]
                             (swap! trace conj :construct)
                             {:spec {:purpose :gesso.live/refresh}
@@ -548,6 +554,12 @@
            (:reason (error #(publication/build-executor (assoc opts :target-contract! nil))))))
     (is (= :invalid-construction-contract
            (:error/kind (error #(publication/build-executor (assoc opts :construction-contract {}))))))
+    (is (= :command-operation-contract-requires-document-targets
+           (:reason (error #(publication/build-executor
+                             (dissoc opts :construction-contract :target-contract!))))))
+    (is (= :invalid-command-operation-callback
+           (:reason (error #(publication/build-executor
+                             (assoc opts :command-operation-contract! nil))))))
     (with-operations {:request/claim (claim-operation executor)}
       (fn [assembly]
         (with-open [client (HttpClient/newHttpClient)]
@@ -561,9 +573,11 @@
                                                    (when (contains? ctx publication/preparation-key)
                                                      (swap! submissions inc))
                                                    (execute ctx ops options))]
-                (doseq [[scenario events] [[:wrong [:declare :construct]]
-                                           [:extra [:declare :construct]]
-                                           [:invalid [:declare]]]]
+                (doseq [[scenario events] [[:wrong [:declare :declare-operation :construct]]
+                                           [:extra [:declare :declare-operation :construct]]
+                                           [:invalid [:declare]]
+                                           [:invalid-operation [:declare :declare-operation]]
+                                           [:wrong-operation [:declare :declare-operation :construct]]]]
                   (reset! mode scenario)
                   (reset! trace [])
                   (let [failure (error #((:biff.ring/handler started)
@@ -573,7 +587,11 @@
                                             :body (codec/form-encode
                                                    {transport/command-parameter
                                                     (pr-str (protocol/command->wire (command (name scenario))))})}))]
-                    (is (= (if (= :invalid scenario) :invalid-target-contract :construction-target-mismatch)
+                    (is (= (case scenario
+                             :invalid :invalid-target-contract
+                             :invalid-operation :invalid-command-operation-contract
+                             :wrong-operation :construction-command-operation-mismatch
+                             :construction-target-mismatch)
                            (:error/kind failure)))
                     (is (= events @trace))
                     (is (zero? @submissions))
@@ -583,7 +601,7 @@
                 (reset! mode :right)
                 (reset! trace [])
                 (is (= :confirmed (:resolution (settlement! (send-command! client started "right")))))
-                (is (= [:declare :construct :project] @trace))
+                (is (= [:declare :declare-operation :construct :project] @trace))
                 (is (= 1 @submissions))
                 (is (= [{:xt/id "r1"}] (xt/q node ["SELECT _id FROM requests"])))
                 (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
