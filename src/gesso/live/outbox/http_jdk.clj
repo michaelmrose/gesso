@@ -8,7 +8,8 @@
    small deployments; a thread is occupied for each long-lived SSE response.
 
    Stop this listener through the managed HTTP coordinator, BEFORE stopping
-   the Gesso host. Socket stop closes live connections; no TCP/browser receipt
+   the Gesso host. Socket stop closes live connections and requests cancellation
+   of adapter-owned streaming responses; no TCP/browser receipt
    is inferred from completed server-side writes."
   (:require [clojure.string :as str]
             [gesso.live.outbox.http-listener :as listener]
@@ -56,24 +57,29 @@
                          "cache-control" "no-store"}
    :body "Unsupported or ambiguous HTTP request."})
 
-(defn- write-stream! [body out]
+(defn- write-stream! [body out stopping?]
   ;; Keep the original take! during timeout polling; starting another take!
-  ;; would orphan the first and consume the frame invisibly.
-  (loop [pending (stream/take! body)]
-    (let [frame (deref pending 500 ::pending)]
-      (cond
-        (= ::pending frame) (when-not (stream/closed? body)
-                              (recur pending))
-        (nil? frame) nil
-        :else (do
-                (let [bytes (if (bytes? frame)
-                              frame
-                              (.getBytes (str frame) StandardCharsets/UTF_8))]
-                  (.write out ^bytes bytes)
-                  (.flush out))
-                (recur (stream/take! body)))))))
+  ;; would orphan the first and consume the frame invisibly. Socket shutdown
+  ;; alone cannot wake a quiet producer. The owning writer observes stop and
+  ;; releases the stream in write-response!'s finally before retiring.
+  (loop [pending nil]
+    (when-not @stopping?
+      (let [pending (or pending (stream/take! body))
+            frame (deref pending 500 ::pending)]
+        (when-not @stopping?
+          (cond
+            (= ::pending frame) (when-not (stream/closed? body)
+                                  (recur pending))
+            (nil? frame) nil
+            :else (do
+                    (let [bytes (if (bytes? frame)
+                                  frame
+                                  (.getBytes (str frame) StandardCharsets/UTF_8))]
+                      (.write out ^bytes bytes)
+                      (.flush out))
+                    (recur nil))))))))
 
-(defn- write-response! [^HttpExchange exchange response]
+(defn- write-response! [^HttpExchange exchange response stopping?]
   (let [body (:body response)
         streaming? (stream/stream? body)
         status (:status response)]
@@ -94,7 +100,7 @@
         (do
           (.sendResponseHeaders exchange status 0)
           (with-open [out (.getResponseBody exchange)]
-            (write-stream! body out)))
+            (write-stream! body out stopping?)))
         :else
         (let [bytes (cond
                       (string? body) (.getBytes ^String body StandardCharsets/UTF_8)
@@ -153,13 +159,15 @@
                       (doto (Thread. ^Runnable runnable "gesso-jdk-http")
                         (.setDaemon true))))
           executor (Executors/newFixedThreadPool (int threads) factory)
+          stopping? (atom false)
           owner (listener/prepare!
                  {:dispatch! (fn [^HttpExchange exchange]
                                (try
                                  (write-response! exchange
                                                   (if-let [request (request-map exchange)]
                                                     (ring-handler request)
-                                                    ambiguous-request-response))
+                                                    ambiguous-request-response)
+                                                  stopping?)
                                  (finally (.close exchange))))
                   :on-rejected! (fn [^HttpExchange exchange]
                                   ;; This response is handled without host
@@ -167,6 +175,7 @@
                                   ;; the exchange already; just retire it.
                                   (.close exchange))
                   :stop-accept! (fn []
+                                  (reset! stopping? true)
                                   (.stop server 0)
                                   (.shutdown executor)
                                   {:outcome :stopped})})]

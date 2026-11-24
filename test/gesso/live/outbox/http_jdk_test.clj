@@ -218,10 +218,11 @@
 (deftest physical-jdk-sse-writer-after-ring-return-fences-shutdown-test
   ;; Ring has ALREADY returned the streaming response, yet the real adapter
   ;; still owns the open HTTP response writer. A route close that cannot
-  ;; cancel its producer is insufficient to allow host provider shutdown.
+  ;; cancel its producer must still wait for the listener-owned cancellation
+  ;; and physical writer retirement before shutting down host providers.
   (let [producer (stream/stream 4)
         ring-returned (promise)
-        provider-stops (atom 0)
+        provider-stops (atom [])
         adapter (jdk/start!
                  (fn [_]
                    (deliver ring-returned true)
@@ -232,7 +233,10 @@
                :await-drained! (constantly {:outcome :drained})}
         shutdown (http/prepare-managed-http-shutdown
                   {:route route :stop-listener! (:stop-listener! adapter)
-                   :stop-host! (fn [] (swap! provider-stops inc)
+                   :stop-host! (fn []
+                                 (swap! provider-stops conj
+                                        {:closed? (stream/closed? producer)
+                                         :drained? ((:drained? adapter))})
                                  {:outcome :stopped})
                    :drain-timeout-ms 0})
         client (HttpClient/newHttpClient)]
@@ -243,16 +247,19 @@
           (is (= 200 (.statusCode response)))
           (is (= true (deref ring-returned 2000 ::timeout)))
           (is (= 1 ((:active-count adapter))))
-          (is (= {:outcome :listener-timed-out} ((:stop! shutdown)))
-              "Physical HTTP stream still owns provider despite Ring return")
-          (is (zero? @provider-stops))
-          (is (false? ((:drained? adapter))))
-          (stream/close! producer)
+          ;; A zero-timeout attempt may drain or time out, depending on
+          ;; whether the writer has already observed cancellation. Neither
+          ;; outcome permits stopping providers while the writer is active.
+          (let [result ((:stop! shutdown))]
+            (is (contains? #{:listener-timed-out :stopped} (:outcome result)))
+            (when (= :listener-timed-out (:outcome result))
+              (is (empty? @provider-stops))))
           (is (eventual #((:drained? adapter))))
+          (is (stream/closed? producer))
           (is (= :stopped (:outcome ((:stop! shutdown)))))
-          (is (= 1 @provider-stops))
+          (is (= [{:closed? true :drained? true}] @provider-stops))
           (is (= :stopped (:outcome ((:stop! shutdown)))))
-          (is (= 1 @provider-stops))))
+          (is (= 1 (count @provider-stops)))))
       (finally
         (stream/close! producer)
         ((:stop! adapter) 1000)))))
@@ -341,3 +348,29 @@
         (finally
           (stream/close! producer)
           ((:stop! adapter) 2000))))))
+
+(deftest physical-jdk-stop-cancels-quiet-owned-response-test
+  (let [producer (stream/stream 4)
+        adapter (jdk/start!
+                 (fn [_] {:status 200
+                          :headers {"content-type" "text/event-stream"}
+                          :body producer}) {})
+        client (HttpClient/newHttpClient)]
+    (try
+      (let [response (.send client (request (:base-url adapter) "/quiet-events")
+                            (HttpResponse$BodyHandlers/ofInputStream))]
+        (with-open [input (.body response)]
+          (is (= 200 (.statusCode response)))
+          (is (= 1 ((:active-count adapter))))
+          (is (not (stream/closed? producer)))
+          ;; No producer frame or external close is needed to cancel an
+          ;; adapter-owned writer after listener stop.
+          (is (= {:outcome :drained} ((:stop! adapter) 2000)))
+          (is (stream/closed? producer))
+          (is (zero? ((:active-count adapter))))
+          (is ((:drained? adapter)))
+          (is (= {:outcome :drained} ((:stop! adapter) 0)))))
+      (finally
+        (stream/close! producer)
+        ((:stop! adapter) 2000)
+        (.close client)))))
