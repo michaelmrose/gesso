@@ -1592,6 +1592,9 @@
             {:inflight nil
              :queued-refresh? false
              :queued-requirements #{}})
+        ;; Retained debt does not itself authorize acquisition. Once a new
+        ;; generation is authorized, include it in that generation's read.
+        requirements (into (:queued-requirements fragment) requirements)
         inflight
         {:generation request-generation
          :request-id nil
@@ -1977,7 +1980,9 @@
                      [:fragments fragment-id]
                      {:inflight nil
                       :queued-refresh? false
-                      :queued-requirements #{}})]
+                      ;; Preserve uncovered requirements even when there is
+                      ;; no permission to start a successor yet.
+                      :queued-requirements successor-requirements})]
        (if queued-refresh?
          (begin-fragment-request
           state'

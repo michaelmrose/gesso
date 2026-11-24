@@ -2024,15 +2024,24 @@
           :fragment-id :panel
           :request-generation gen-1
           :request-id :xhr-1
-          :reason :send-error})]
+          :reason :send-error})
+        [state-d retry-effects]
+        (adapter/step state-c (invalidation :panel :basis-2))
+        retry (effect-data :fragment/refresh retry-effects)]
     (is (= 1 (count (effects-of :fragment/request-failed failure-effects))))
     (is (= 0 (count (effects-of :fragment/refresh failure-effects)))
         "Failure alone must not introduce an implicit retry policy.")
     (is (nil? (get-in state-c [:fragments :panel :inflight])))
     (is (false?
          (get-in state-c [:fragments :panel :queued-refresh?])))
+    (is (= #{:basis-1}
+           (get-in state-c [:fragments :panel :queued-requirements]))
+        "Idle coordination retains unsatisfied debt without authorizing a retry.")
+    (is (= #{:basis-1 :basis-2} (:requirements retry)))
+    (is (= #{:basis-1 :basis-2}
+           (get-in state-d [:fragments :panel :inflight :requirements])))
     (is (= #{}
-           (get-in state-c [:fragments :panel :queued-requirements])))))
+           (get-in state-d [:fragments :panel :queued-requirements])))))
 
 (deftest queued-requirements-start-next-generation-after-current-request-finishes-test
   (let [{state-a :state gen-1 :generation}

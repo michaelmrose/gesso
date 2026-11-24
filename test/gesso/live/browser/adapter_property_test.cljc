@@ -1246,7 +1246,7 @@
               (= false
                  (get-in finished
                          [:fragments fragment-id :queued-refresh?]))
-              (= #{}
+              (= (if fail? #{active-requirement} #{})
                  (get-in finished
                          [:fragments fragment-id
                           :queued-requirements]))))
