@@ -299,7 +299,7 @@
    Install after managed startup but before opening admission. Every owned
    SSE route also gets a bounded scheduled orphan-recovery controller;
    :sse-recovery optionally supplies its numeric pacing and batch options.
-   Optional :assembled-operations selects the admitted literal HTMX POST
+   Optional :assembled-operations selects the admitted literal or simple parameterized HTMX POST
    operation transport with an explicit trusted :authorize-request? callback.
    Other routes retain their existing trusted delegate.
    No SSE route means no scheduler. On shutdown, drain Ring requests, stop and

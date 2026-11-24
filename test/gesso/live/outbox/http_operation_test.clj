@@ -18,16 +18,27 @@
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
            [java.time Duration]))
 
-(defn- with-assembly [execute! f]
+(defn- with-routes [execute! specs rendered-path f]
   (let [ops (assoc (fixture/standard-operations) :request/claim
                    (fixture/trusted-operation :request/claim
                     {:published-change-topics #{:request} :execute! execute!}))]
     (fixture/with-surfaced-application
-     {:operations ops :route-capabilities (fixture/route-capabilities ops)
+     {:operations ops :route-capabilities (if specs
+                                           (fixture/custom-route-capabilities specs)
+                                           (fixture/route-capabilities ops))
       :rendered-surfaces {:board [:main (fixture/rendered-operation-button
-                                        (fixture/render-context ops) :request/claim
-                                        "/operations/request/claim")]}}
-     (fn [{:keys [assembly]}] (f assembly)))))
+                                        (fixture/render-context ops) :request/claim rendered-path)]}}
+     (fn [{:keys [assembly report]}]
+       (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
+       (f assembly)))))
+
+(defn- with-assembly [execute! f]
+  (with-routes execute! nil "/operations/request/claim" f))
+
+(def ^:private parameter-routes
+  {:request/claim {:operation :request/claim :path "/operations/request/:request-id/claim"}
+   :request/cancel {:operation :request/cancel :path "/operations/request/cancel"}
+   :request/reassign {:operation :request/reassign :path "/operations/request/reassign"}})
 
 (defn- command [operation]
   (protocol/command {:command-id (identity/command-id "v2362-command")
@@ -83,7 +94,7 @@
 (deftest assembled-operation-over-owned-http-commits-and-returns-correlated-settlement
   (let [intent-id (random-uuid) calls (atom [])
         result* (atom nil)]
-    (with-assembly
+    (with-routes
       (fn [{:keys [ctx arguments principal] :as invocation}]
         (swap! calls conj invocation)
         (let [node (:xtdb/connectable ctx)
@@ -102,6 +113,7 @@
                                        :projection {:request/id id :request/status :claimed}})}]
           (reset! result* result)
           result))
+      parameter-routes "/operations/request/r1/claim"
       (fn [assembly]
         (let [started (host/start! assembly (fn [_] (g/html-response [:div "read"]))
                                    {:xtdb-config {} :source-id "v2362-operation-host"
@@ -115,7 +127,7 @@
               client (HttpClient/newHttpClient)
               send! (fn [body]
                       (.send client
-                             (-> (HttpRequest/newBuilder (URI/create (str (:base-url listener) "/operations/request/claim")))
+                             (-> (HttpRequest/newBuilder (URI/create (str (:base-url listener) "/operations/request/r1/claim")))
                                  (.timeout (Duration/ofSeconds 10))
                                  (.header "content-type" "application/x-www-form-urlencoded")
                                  (.POST (HttpRequest$BodyPublishers/ofString body)) .build)
@@ -140,4 +152,59 @@
             (is (= 1 (count @calls)))
             (is (identical? node (get-in (first @calls) [:ctx :xtdb/connectable])))
             (is (= fixture/trusted-principal (:principal (first @calls))))
+            (is (= {:request-id "r1"} (get-in (first @calls) [:ctx :path-params])))
             (finally (host/stop! started) (.close client))))))))
+
+(deftest parameter-route-binds-command-arguments-before-authority
+  (let [calls (atom []) gates (atom []) fallbacks (atom [])]
+    (with-routes
+      (fn [invocation]
+        (swap! calls conj invocation)
+        {:resolution :rejected :reason :test-only})
+      parameter-routes "/operations/request/r1/claim"
+      (fn [assembly]
+        (let [handler (transport/wrap-handler
+                       assembly (fn [r] (swap! fallbacks conj r) {:status 404})
+                       {:authorize-request? (fn [r] (swap! gates conj r) true)})
+              valid (assoc (request (form :request/claim "valid"))
+                           :uri "/operations/request/r1/claim")]
+          (doseq [uri ["/operations/request/r2/claim"
+                       "/operations/request/../claim"
+                       "/operations/request/has%20space/claim"
+                       "/operations/request/r1/claim?x=1"
+                       "/operations/request/r1/claim#fragment"]]
+            (is (= 400 (:status (handler (assoc valid :uri uri))))))
+          (doseq [arguments [{} {:request-id :r1} {:request-id 1}]]
+            (let [wire (protocol/command->wire (assoc (command :request/claim)
+                                                     :arguments arguments))]
+              (is (= 400 (:status (handler (assoc valid :body
+                                                  (codec/form-encode {transport/command-parameter (pr-str wire)}))))))))
+          (is (= 405 (:status (handler (assoc valid :request-method :get)))))
+          (is (empty? @calls))
+          (is (empty? @gates))
+          (is (empty? @fallbacks))
+          (is (= 200 (:status (handler (assoc valid :path-params {:request-id "forged"}
+                                                   :route-params {:request-id "forged"}
+                                                   :params {:request-id "forged"})))))
+          (is (= 1 (count @calls) (count @gates)))
+          (is (= {:request-id "r1"} (:path-params (first @gates))))
+          (is (= {:request-id "r1"} (get-in (first @calls) [:ctx :path-params])))
+          (is (not-any? #(contains? (first @gates) %) [:params :route-params]))
+          (is (= 404 (:status (handler (assoc valid :uri "/not-owned")))))
+          (is (= 1 (count @fallbacks))))))))
+
+(deftest parameter-route-rejects-overlapping-and-unsupported-templates
+  (doseq [[specs rendered-path expected]
+          [[(assoc-in parameter-routes [:request/cancel :path] "/operations/request/r2/claim")
+            "/operations/request/r1/claim" :ambiguous-command-route]
+           [(assoc-in parameter-routes [:request/cancel :path] "/operations/:kind/r2/claim")
+            "/operations/request/r1/claim" :ambiguous-command-route]
+           [(assoc-in parameter-routes [:request/claim :path] "/fragments/:request-id")
+            "/fragments/r1" :ambiguous-command-route]
+           [(assoc-in parameter-routes [:request/claim :path] "/operations/:request-id/:request-id/claim")
+            "/operations/r1/r1/claim" :unsupported-command-route]]]
+    (with-routes
+      (fn [_] (throw (ex-info "unexpected execution" {}))) specs rendered-path
+      (fn [assembly]
+        (is (= expected (reason #(transport/wrap-handler assembly identity
+                                                        {:authorize-request? (constantly true)}))))))))
