@@ -91,9 +91,9 @@
                                    {:spec {:purpose :gesso.live/refresh}
                                     :model-plan {:commands [(model-command/create
                                                             :requests {:xt/id "r1" :status :claimed :winner attempt
-                                                                       :revision 0 :created-at "t0" :updated-at "t0"}
-                                                            version)]
-                                                 :changes [{:topic :request :request/location-id "r1"}]}
+                                                                       :revision 0 :created-at "t0" :updated-at "t0"
+                                                                       :request/location-id "r1"}
+                                                            version)]}
                                     :outcome {:outcome :request/claimed :winner attempt}
                                     :now "2026-11-24T00:00:00Z"}))
                    :project! (fn [{:keys [ctx execution-id]} result]
@@ -111,7 +111,7 @@
                               :storage [:local {:path (str root "/storage")}]}
                 :source-id "v2379-race" :rules-context {}
                 :worker-options {:worker-id "v2379" :poll-ms 20}
-                :live-options {} :assembled-publication mapping
+                :live-options {} :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request}})
                 :http-jdk {} :assembled-operations {:authorize-request? (constantly true)}}
         handler (fn [_] (g/html-response [:div "ready"]))]
     (try
@@ -190,3 +190,44 @@
           (is (= [{:revision 1 :status :claimed}] (xt/q node ["SELECT revision, status FROM requests"])))
           (is (= [{:xt/id "winner"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
           (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))))
+
+(deftest derived-model-publication-covers-both-subjects-and-checks-old-scope
+  (with-assembly identity
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [selected (assoc mapping :model-entity-topics {:requests #{:request}})
+              bind (:bind-command (publication/profile! assembly selected))
+              context (fn [id]
+                        {:xtdb/connectable node publication/preparation-key
+                         (bind "derived-2382" (assoc (command "attempt")
+                                                    :command-id (identity/command-id id)
+                                                    :principal fixture/trusted-principal))})
+              before {:xt/id "r1" :revision 0 :created-at "t0" :updated-at "t0"
+                      :request/location-id :location/old}
+              after (assoc before :revision 1 :updated-at "t1" :request/location-id :location/new)
+              plan (fn [b a] {:commands [(model-command/update-command :requests :move b a version)]})
+              run! (fn [id p] (publication/transact-model-resolved!
+                               (context id) {:purpose :gesso.live/refresh} p {:outcome :moved} "t1"))
+              error (fn [f] (try (f) nil (catch Exception e (ex-data e))))]
+          (doseq [bad [nil {} {:requests #{}} {:requests [:request]} {:requests #{:unknown}}]]
+            (is (= :invalid-model-entity-topics
+                   (:reason (error #(publication/profile! assembly (assoc mapping :model-entity-topics bad)))))))
+          (xt/execute-tx node [[:put-docs :requests before]])
+          (is (= :explicit-changes-with-derived-model
+                 (:reason (error #(run! "explicit" (assoc (plan before after) :changes [{:topic :request :request/location-id "wrong"}]))))))
+          (is (= :unmapped-model-entity
+                 (:reason (error #(run! "unmapped" {:commands [(model-command/create :other before version)]})))))
+          (is (= :invalid-model-document-subject
+                 (:reason (error #(run! "missing" (plan before (dissoc after :request/location-id)))))))
+          (is (= :xtdb/assert-failed
+                 (:xtdb.error/code (error #(run! "wrong-before" (plan (assoc before :request/location-id :location/wrong) after))))))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+          (let [receipt (run! "move" (plan before after))]
+            (is (= [:location/old :location/new]
+                   (mapv :gesso.live.outbox/subject-id (:outbox/intents receipt)))))
+          (let [next-doc (assoc after :revision 2 :updated-at "t2")
+                receipt (run! "same" (plan after next-doc))]
+            (is (= [:location/new] (mapv :gesso.live.outbox/subject-id (:outbox/intents receipt)))))
+          (is (= [{:revision 2}] (xt/q node ["SELECT revision FROM requests"])))
+          (is (= 3 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))))

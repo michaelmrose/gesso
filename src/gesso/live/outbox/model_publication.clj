@@ -187,6 +187,35 @@
                 tx-op (conj tx-op))]
       {:ops ops :intents intents :record record})))
 
+(defn- derive-model-fragment [fragment subjects entity-topics]
+  (when (seq (:changes fragment))
+    (reject! :explicit-changes-with-derived-model {}))
+  (let [contributions
+        (for [{:model/keys [entity-type id before after]} (:commands fragment)
+              :let [topics (get entity-topics entity-type)]
+              :when (or (seq topics)
+                        (reject! :unmapped-model-entity {:entity-type entity-type}))
+              topic (sort topics)
+              :let [field (get subjects topic)
+                    document-field (if (= :id field) :xt/id field)
+                    old (when before (get before document-field))
+                    new (get after document-field)]]
+          (do
+            (when-not (and (portable-subject? new)
+                           (or (nil? before) (portable-subject? old)))
+              (reject! :invalid-model-document-subject {:entity-type entity-type :topic topic :field field}))
+            {:changes (mapv #(hash-map :topic topic field %)
+                            (distinct (if before [old new] [new])))
+             ;; A version guard alone does not establish the correctness of
+             ;; a caller's claimed old subject. Check that value in XTDB.
+             :assertion (when (and before (not= :xt/id document-field))
+                          (model-tx/assert-one entity-type
+                                               [:and [:= :xt/id [:lift id]]
+                                                [:= document-field [:lift old]]]))}))]
+    (-> fragment
+        (assoc :changes (vec (distinct (mapcat :changes contributions))))
+        (update :assertions into (distinct (keep :assertion contributions))))))
+
 (defn- model-resolved-plan! [ctx spec model-plan outcome now]
   ;; This boundary owns publication, execution options and the command ledger.
   (when-not (and (map? model-plan)
@@ -214,7 +243,9 @@
                              (-> entity-type name str/lower-case (str/replace "-" "_"))))
                 (:commands fragment))
       (reject! :reserved-durable-model-table {}))
-    (let [record (resolution/command-record (command-binding! ctx) outcome now)
+    (let [derive (::derive-model-fragment (meta (get ctx preparation-key)))
+          fragment (if (and derive (not journal-only?)) (derive fragment) fragment)
+          record (resolution/command-record (command-binding! ctx) outcome now)
           {:keys [plan tx-ops]}
           (model-tx/prepare ctx
                             (-> fragment
@@ -317,7 +348,9 @@
    A journal-only outcome uses nil spec, [] changes and optional ASSERTs.
    Alternatively return :spec, :model-plan, :outcome and :now to compile
    a canonical model plan through the same durable boundary (nil spec
-   permits a guards/assertions-only model fragment).
+   permits a guards/assertions-only model fragment). With the optional
+   entity-to-topic mapping, canonical mutations derive changes and guard
+   old subject fields; explicit changes are refused in that mode.
    On an execution exception, perform at most one authoritative recovery
    read, never resubmit. Only an exact disclosed replay can settle that
    failure; otherwise preserve the original exception. Construction,
@@ -414,17 +447,23 @@
    of the domain write. Reject unsupported graphs before provider startup.
    Unknown topics and inconsistent supplied fields fail closed on expansion;
    the ordinary Live runtime retains the physical lease progression. Return
-   both replay rules and a command-bound producer for the same mapping."
+   both replay rules and a command-bound producer for the same mapping.
+   Optional :model-entity-topics maps canonical entity keywords to nonempty
+   sets of graph topics. Canonical mutations must then map every command
+   and derive subjects from its before/after fields (:id means :xt/id).
+   Old subjects are asserted against current storage. Raw paths remain
+   trusted and are not subject to this opt-in derivation."
   [assembly options]
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-assembly {}))
-  (when-not (and (map? options) (= #{:subject-keys} (set (keys options)))
+  (when-not (and (map? options) (#{#{:subject-keys} #{:subject-keys :model-entity-topics}} (set (keys options)))
                  (map? (:subject-keys options)))
     (reject! :invalid-subject-mapping {}))
   (let [compiled (get-in assembly [:operation-acquisition-assembly
                                    :acquisition-assembly :live-app])
         graph (:graph compiled)
         subjects (:subject-keys options)
+        entity-topics (:model-entity-topics options)
         operations (get-in assembly [:operation-acquisition-assembly
                                      :execution-assembly :server :operations])]
     (when-not (and (seq graph) (= (set (keys graph)) (set (keys subjects))))
@@ -438,6 +477,12 @@
                        (every? #(and (= field (:id-key %)) (not (contains? % :when))) targets))
           (reject! :unsupported-subject-graph {:topic topic :field field
                                                :target-fields (set (map :id-key targets))}))))
+    (when (contains? options :model-entity-topics)
+      (when-not (and (map? entity-topics) (seq entity-topics)
+                     (every? (fn [[entity topics]]
+                               (and (keyword? entity) (set? topics) (seq topics)
+                                    (every? #(contains? subjects %) topics))) entity-topics))
+        (reject! :invalid-model-entity-topics {})))
     ;; A catch-all prevents the Live runtime's unmatched :keep default from
     ;; silently publishing a raw outbox topic instead of a model invalidation.
     {:manifest (manifest/descriptor compiled subjects)
@@ -490,6 +535,8 @@
                           (assoc (select-keys change [:topic :change/kind]) :id id)))
                       changes))))
            {::topics topics
+            ::derive-model-fragment (when entity-topics
+                                      #(derive-model-fragment % subjects entity-topics))
             ::binding (fn []
                         (when-not entry
                           (reject! :undeclared-operation-publication {:operation operation}))
