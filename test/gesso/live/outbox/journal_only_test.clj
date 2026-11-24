@@ -9,6 +9,8 @@
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.model.command :as model-command]
+            [gesso.model.tx :as model-tx]
             [ring.util.codec :as codec]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
@@ -59,7 +61,7 @@
                                     (= (:principal binding) (get-in record [:gesso.command/binding :principal])))
                    :construct! (fn [_]
                                  (swap! constructed inc)
-                                 {:spec nil :changes [] :domain-ops [no-request]
+                                 {:spec nil :model-plan {:assertions [(model-tx/assert-document-absent :requests "r1")]}
                                   :outcome outcome :now now})
                    :project! (fn [_ result]
                                (swap! projected conj (:status result))
@@ -139,4 +141,37 @@
           (is (= :xtdb/assert-failed
                  (try (run! nil [] []) nil (catch Exception e (:xtdb.error/code (ex-data e))))))
           (is (empty? (xt/q node ["SELECT _id FROM requests"])))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))))
+
+(deftest canonical-journal-only-uses-model-dependency-guards
+  (with-assembly identity
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile! assembly mapping))
+              ctx {:xtdb/connectable node publication/preparation-key
+                   (bind "source" (assoc (command "first") :principal fixture/trusted-principal))}
+              version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at}
+              before {:xt/id "r1" :revision 0 :created-at "t0" :updated-at "t0" :status :closed}
+              after (assoc before :revision 1 :updated-at "t1")
+              plan {:guards [(model-command/guard :requests before version)]
+                    :assertions [(model-tx/assert-document-exists :requests "r1")]}
+              run! #(publication/transact-model-resolved! ctx %1 %2 outcome now)
+              inspect #(publication/reconcile-command! ctx (constantly true))
+              conflict? (fn [f] (try (f) false (catch Exception e
+                                                (= :xtdb/assert-failed (:xtdb.error/code (ex-data e))))))]
+          (xt/execute-tx node [[:put-docs :requests after]])
+          (is (= :journal-only-requires-no-model-commands
+                 (reason #(run! nil {:commands [(model-command/create :requests before version)]}))))
+          (is (= :journal-only-requires-no-changes
+                 (reason #(run! nil (assoc plan :changes [{:topic :request :request/location-id "r1"}])))))
+          (is (= :missing-domain-model-commands (reason #(run! {:purpose :gesso.live/refresh} plan))))
+          (is (conflict? #(run! nil plan)))
+          (is (= :unresolved (:status (inspect))))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+          (let [receipt (run! nil (assoc plan :guards [(model-command/guard :requests after version)]))]
+            (is (empty? (:outbox/intents receipt)))
+            (is (some? (:progression receipt))))
+          (is (= {:status :replay :outcome outcome} (select-keys (inspect) [:status :outcome])))
+          (is (conflict? #(run! nil {})))
+          (is (= [{:revision 1 :status :closed}] (xt/q node ["SELECT revision, status FROM requests"])))
           (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))))

@@ -11,7 +11,8 @@
             [gesso.live.optimistic.server :as server]
             [gesso.live.optimistic.resolved-operation :as adapter]
             [gesso.model.command-resolution :as resolution]
-            [gesso.model.tx :as model-tx])
+            [gesso.model.tx :as model-tx]
+            [gesso.model.command :as model-command])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.nio ByteBuffer]
            [java.security MessageDigest]
@@ -188,22 +189,44 @@
 
 (defn- model-resolved-plan! [ctx spec model-plan outcome now]
   ;; This boundary owns publication, execution options and the command ledger.
-  ;; Accept canonical domain fragments, not an alternative transaction driver.
   (when-not (and (map? model-plan)
                  (every? (conj model-tx/fragment-keys :emit) (keys model-plan))
                  (or (not (contains? model-plan :emit)) (false? (:emit model-plan))))
     (reject! :invalid-durable-model-plan {}))
-  (when-not (and (map? spec) (= #{:purpose} (set (keys spec))))
-    (reject! :invalid-resolved-intent-spec {}))
-  (let [{:keys [plan tx-ops]} (model-tx/prepare ctx (assoc model-plan :emit false))]
-    ;; Reject direct model commands targeting framework-owned tables, including
-    ;; common SQL-normalized spellings. Trusted assertions are not sandboxed.
+  (let [journal-only? (nil? spec)
+        fragment (model-tx/fragment (select-keys model-plan model-tx/fragment-keys))]
+    (when-not (or journal-only? (and (map? spec) (= #{:purpose} (set (keys spec)))))
+      (reject! :invalid-resolved-intent-spec {}))
+    (if journal-only?
+      (do
+        (when (seq (:commands fragment))
+          (reject! :journal-only-requires-no-model-commands {}))
+        (when (seq (:changes fragment))
+          (reject! :journal-only-requires-no-changes {}))
+        (when-not (set? (::topics (meta (get ctx preparation-key))))
+          (reject! :undeclared-operation-publication {})))
+      (when-not (seq (:commands fragment))
+        (reject! :missing-domain-model-commands {})))
+    ;; Reject direct model commands targeting framework-owned tables before
+    ;; adding the framework's own canonical command-record creation.
     (when (some (fn [{:model/keys [entity-type]}]
                   (contains? #{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests"}
                              (-> entity-type name str/lower-case (str/replace "-" "_"))))
-                (:commands plan))
+                (:commands fragment))
       (reject! :reserved-durable-model-table {}))
-    (resolved-plan! ctx spec (:changes plan) tx-ops outcome now)))
+    (let [record (resolution/command-record (command-binding! ctx) outcome now)
+          {:keys [plan tx-ops]}
+          (model-tx/prepare ctx
+                            (-> fragment
+                                (assoc :emit false)
+                                (update :commands conj
+                                        (model-command/create resolution/command-entity-type
+                                                              record resolution/record-version))))
+          {:keys [intents guard-ops tx-op]}
+          (if journal-only? {:intents [] :guard-ops []}
+              (prepare! ctx spec (:changes plan)))]
+      {:ops (cond-> (into guard-ops tx-ops) tx-op (conj tx-op))
+       :intents intents :record record})))
 
 (defn- execute-resolved-plan! [ctx {:keys [ops intents record]}]
   (assoc (xtdb/execute-tx-from! ctx ops)
@@ -228,7 +251,9 @@
   "Execute a canonical model domain plan with the selected command journal
    and durable publication. Reuse model.tx normalization, Biff validation,
    version guards and assertion compilation. The normalized plan supplies
-   the sole change batch; inline emit, custom entries and transaction options
+   the sole change batch; the command record is compiled as a canonical
+   model create. Nil spec permits only guards and assertions (no domain
+   commands or changes). Inline emit, custom entries and transaction options
    are not admitted. Domain assertions and declared changes remain trusted."
   [ctx spec model-plan outcome now]
   (execute-resolved-plan! ctx (model-resolved-plan! ctx spec model-plan outcome now)))
@@ -291,7 +316,8 @@
    closed result contains :spec, :changes, :domain-ops, :outcome and :now.
    A journal-only outcome uses nil spec, [] changes and optional ASSERTs.
    Alternatively return :spec, :model-plan, :outcome and :now to compile
-   a canonical model plan through the same durable boundary.
+   a canonical model plan through the same durable boundary (nil spec
+   permits a guards/assertions-only model fragment).
    On an execution exception, perform at most one authoritative recovery
    read, never resubmit. Only an exact disclosed replay can settle that
    failure; otherwise preserve the original exception. Construction,
