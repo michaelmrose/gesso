@@ -54,11 +54,13 @@
     (fixture/with-biff-aleph-granted-live-proving-application!
      source
      (fn [{:keys [system handler loopback-base-url loopback-listener-state
-                  read! http-report]}]
+                  read! http-report transport-write-stats]}]
        (reset! listener* loopback-listener-state)
        (is (identical? handler (:biff.ring/handler system)))
        (is (identical? handler (:handler @loopback-listener-state)))
        (is (= :aleph-http1-test-adapter (:biff-owned-loopback-listener http-report)))
+       (is (= :final-frame-capture-not-listener-drain
+              (:aleph-write-observation http-report)))
        (is (= 401 (:status (finite-response loopback-base-url "GET"
                                           fixture/events-uri "anonymous"))))
        (is (= 403 (:status (finite-response loopback-base-url "POST"
@@ -115,7 +117,23 @@
                                        (true? ((:source-closed? session)))))
                      "Both the SSE stream and eager source interest must close")
                  (is (= 401 (:status (finite-response loopback-base-url "GET"
-                                                     fixture/events-uri "reader")))))
+                                                     fixture/events-uri "reader"))))
+                 ;; The real transport must associate every final write with
+                 ;; the corresponding response. The SSE writer's disposition
+                 ;; is deliberately not counted as producer retirement.
+                 (is (eventually
+                      #(let [s (transport-write-stats)]
+                         (and (= 6 (:finite-terminal s))
+                              (= 1 (+ (:stream-final-succeeded s)
+                                      (:stream-final-failed s)))))))
+                 (let [s (transport-write-stats)]
+                   (is (= 6 (:finite-registered s) (:finite-succeeded s)))
+                   (is (zero? (:finite-failed s)))
+                   (is (= 1 (:stream-registered s)))
+                   (is (zero? (:unobserved s)))
+                   (is (= 7 (get-in s [:capture :registered])
+                            (get-in s [:capture :matched])))
+                   (is (every? zero? (map (:capture s) [:pending :unmatched :orphaned])))))
                (finally
                  (.disconnect c)
                  (future-cancel client))))))))

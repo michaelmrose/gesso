@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v2347: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2351: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -293,7 +293,9 @@
   ;; Resolve only when selected. Never substitute a different transport.
   (try
     {:start! (requiring-resolve 'aleph.http/start-server)
-     :port! (requiring-resolve 'aleph.netty/port)}
+     :port! (requiring-resolve 'aleph.netty/port)
+     :prepare-writes! (requiring-resolve
+                       'gesso.assurance.example.physical-single-node-aleph-writes/prepare!)}
     (catch Exception cause
       (throw (ex-info "Selected Aleph test adapter is unavailable."
                       {:physical-single-node-http/rejection true
@@ -307,16 +309,20 @@
    (fn [system]
      (when-not (identical? handler (:biff.ring/handler system))
        (reject! :aleph-not-serving-original-biff-handler))
-     (let [{:keys [start! port!]} (aleph-test-provider!)
-           server (start! handler {:socket-address (InetSocketAddress. "127.0.0.1" 0)
-                                   :http-versions [:http1]
-                                   :transport :nio
-                                   :shutdown-timeout 0})]
+     (let [{:keys [start! port! prepare-writes!]} (aleph-test-provider!)
+           writes (prepare-writes! handler)
+           server (start! (:handler writes)
+                          {:socket-address (InetSocketAddress. "127.0.0.1" 0)
+                           :http-versions [:http1]
+                           :transport :nio
+                           :shutdown-timeout 0
+                           :http1-pipeline-transform (:http1-pipeline-transform writes)})]
        (try
          (let [port (port! server)]
            (when-not (and (integer? port) (pos? port))
              (reject! :aleph-loopback-port-unavailable))
-           (reset! state {:server server :port port :handler handler})
+           (reset! state {:server server :port port :handler handler
+                          :transport-write-stats (:stats writes)})
            system)
          (catch Throwable t
            (.close ^java.io.Closeable server)
@@ -416,6 +422,9 @@
                      :biff-loopback :jdk-short-http-only
                      :biff-jetty-http1 :ring-jetty-http1-test-adapter
                      :biff-aleph-http1 :aleph-http1-test-adapter)
+                   :aleph-write-observation (if (= :biff-aleph-http1 listener-selection)
+                                              :final-frame-capture-not-listener-drain
+                                              :not-selected)
                    :issued-certified-plan-executors :not-established
                    :certified-plan-compatibility
                    {:persisted-fields :unqualified-v1494-fields
@@ -439,6 +448,8 @@
                    listener-module
                    (assoc :loopback-base-url
                           (str "http://127.0.0.1:" (:port @listener-state))
-                          :loopback-listener-state listener-state))))
+                          :loopback-listener-state listener-state)
+                   (= :biff-aleph-http1 listener-selection)
+                   (assoc :transport-write-stats (:transport-write-stats @listener-state)))))
             (finally
               (biff/stop system)))))))))
