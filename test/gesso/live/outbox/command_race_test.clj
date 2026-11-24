@@ -437,3 +437,58 @@
         (is (map? (publication/profile! assembly selected)))
         (is (map? (publication/profile! assembly
                     (assoc-in selected [:model-entity-topics :other/request_items] #{:request}))))))))
+
+(deftest derived-model-rejects-ambiguous-physical-document-fields
+  (with-assembly identity
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile!
+                                  assembly (assoc mapping :model-entity-topics {:requests #{:request}}
+                                                          :require-derived-model? true)))
+              ctx (fn [id]
+                    {:xtdb/connectable node publication/preparation-key
+                     (bind "fields-2387" (assoc (command "attempt")
+                                               :command-id (identity/command-id id)
+                                               :principal fixture/trusted-principal))})
+              before {:xt/id "r1" :revision 0 :created-at "t0" :updated-at "t0"
+                      :request/location-id "old"}
+              after (assoc before :revision 1 :updated-at "t1" :request/location-id "new")
+              run! (fn [id cmd]
+                     (publication/transact-model-resolved!
+                      (ctx id) {:purpose :gesso.live/refresh} {:commands [cmd]}
+                      {:outcome :moved} "t1"))
+              error (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))]
+          ;; A different Clojure key really writes the same physical column.
+          (xt/execute-tx node [[:put-docs :requests (-> before
+                                                      (dissoc :request/location-id)
+                                                      (assoc :request/location_id "old"))]])
+          (is (= [{:subject "old"}]
+                 (xt/q node ["SELECT request$location_id AS subject FROM requests WHERE _id = ?" "r1"])))
+          (doseq [[alias field physical value] [[:request/location_id :request/location-id :request$location_id "other"]
+                                                [:request$location_id :request/location-id :request$location_id "other"]
+                                                [:_id :xt/id :_id "other"]
+                                                [:updated_at :updated-at :updated_at "other"]]
+                  phase [:before :after]]
+            (let [b (cond-> before (= phase :before) (assoc alias value))
+                  a (cond-> after (= phase :after) (assoc alias value))
+                  failure (error #(run! "alias" (model-command/update-command :requests :move b a version)))]
+              (is (= :aliased-model-document-fields (:reason failure)))
+              (is (= phase (:phase failure)))
+              (is (= #{field alias} (:fields failure)))
+              (is (= physical (:physical-field failure)))))
+          (is (= :unsupported-model-document-field
+                 (:reason (error #(run! "string-key" (model-command/create
+                                                       :requests (assoc before "location" "wrong") version))))))
+          (is (= :aliased-model-document-fields
+                 (:reason (error #(run! "create-alias" (model-command/create
+                                                         :requests (assoc before :_id "wrong") version))))))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+          (is (= [{:revision 0 :subject "old"}]
+                 (xt/q node ["SELECT revision, request$location_id AS subject FROM requests"])))
+          (let [receipt (run! "move" (model-command/update-command :requests :move before after version))]
+            (is (= ["old" "new"] (mapv :gesso.live.outbox/subject-id (:outbox/intents receipt)))))
+          (is (= [{:revision 1 :subject "new"}]
+                 (xt/q node ["SELECT revision, request$location_id AS subject FROM requests"])))
+          (is (= [{:xt/id "move"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
+          (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))))
