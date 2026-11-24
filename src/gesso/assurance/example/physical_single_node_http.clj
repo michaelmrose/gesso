@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v1495: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2333: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -12,15 +12,22 @@
    deliberately preserves that boundary while exercising real Biff startup,
    Ring dispatch, Gesso HTML rendering and single-shot model transactions.
 
-   No HTTP listener is opened. Callbacks remain valid only during the supplied
-   managed application lifetime. There is no principal or CSRF verification:
-   NEVER expose this diagnostic handler on a public network. This namespace
+   By default no HTTP listener is opened. An opt-in, JDK-only loopback
+   listener is installed AS A SEPARATE Biff module and managed by the same
+   original start/stop lifecycle. It always binds 127.0.0.1 on an ephemeral
+   port; this is NOT the deployed Biff/Jetty/Aleph listener. Callbacks remain
+   valid only during the managed application lifetime. There is no intrinsic
+   principal or CSRF verification: NEVER expose the unguarded diagnostic
+   handler on a public network. This namespace
    does not register a canonical Gesso ApplicationAssembly, or claim a proof
    certificate, complete writer coverage, physical refinement, or a real
    deployed host. The bootstrap transaction remains a separate writer path."
   (:require [com.biffweb.core :as biff]
             [gesso.assurance.example.physical-single-node-proving :as physical]
-            [gesso.http :as http]))
+            [gesso.http :as http])
+  (:import (com.sun.net.httpserver HttpHandler HttpServer)
+           (java.net InetSocketAddress)
+           (java.nio.charset StandardCharsets)))
 
 (def module-id :gesso.assurance.example.physical-single-node-http/install)
 (def ^:private view-route "/__gesso_proving/slot")
@@ -161,39 +168,90 @@
          (reject! :handler-replaced-before-start))
        system)}))
 
+(def ^:private loopback-module-id
+  :gesso.assurance.example.physical-single-node-http/loopback-listener)
+
+(defn- biff-loopback-module! [handler state]
+  ;; A real socket owned by Biff's module lifecycle, rather than an unrelated
+  ;; test bridge launched after Biff start. This diagnostic JDK transport only
+  ;; supports short, string-backed Ring responses. It does not provide Netty,
+  ;; chunked SSE delivery, TLS, authenticated host middleware or deployment.
+  {:biff.core/id loopback-module-id
+   :biff.core/start
+   (fn [system]
+     (when-not (identical? handler (:biff.ring/handler system))
+       (reject! :loopback-not-serving-original-biff-handler))
+     (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+       (try
+         (.createContext
+          server "/"
+          (reify HttpHandler
+            (handle [_ exchange]
+              (try
+                (let [method (keyword (.toLowerCase (.getRequestMethod exchange)))
+                      uri (.getPath (.getRequestURI exchange))
+                      response (handler {:request-method method :uri uri})
+                      body (:body response)]
+                  ;; Never pretend to have verified streaming/SSE on a JDK
+                  ;; short-response adapter. Tests must use the qualified
+                  ;; separate real SSE transport to claim stream behavior.
+                  (if (and (map? response) (integer? (:status response))
+                           (<= 100 (:status response) 599)
+                           (string? body))
+                    (let [bytes (.getBytes ^String body StandardCharsets/UTF_8)]
+                      (doseq [[k v] (:headers response)
+                              :when (some? v)]
+                        (.add (.getResponseHeaders exchange) (str k) (str v)))
+                      (.sendResponseHeaders exchange (int (:status response))
+                                            (long (alength bytes)))
+                      (with-open [output (.getResponseBody exchange)]
+                        (.write output bytes)))
+                    (.sendResponseHeaders exchange 501 -1)))
+                (catch Exception _
+                  ;; The JDK bridge must not fabricate a successful command
+                  ;; response on exceptions or a non-string SSE body.
+                  (try (.sendResponseHeaders exchange 500 -1)
+                       (catch Exception _ nil)))
+                (finally (.close exchange))))))
+         (.start server)
+         (reset! state {:server server
+                        :port (.getPort (.getAddress server))
+                        :handler handler})
+         system
+         (catch Throwable t
+           (.stop server 0)
+           (throw t)))))
+   :biff.core/stop
+   (fn [_]
+     (when-let [server (:server @state)]
+       (.stop ^HttpServer server 0)
+       (reset! state nil)))})
+
 (defn with-http-proving-application!
-  "Start one embedded XTDB pilot and a real Biff lifecycle (without a server),
-   then call f with :system, :handler, :read!, :abstract!, and the v1494 app.
-
-   The three-argument, TEST-ONLY form accepts a handler-extension! factory
-   BEFORE Biff init/start, so a composed HTTP/Live handler can be the exact
-   Ring function Biff initially adopts. The extension receives the checked
-   physical app with its original :handler, :http-routes derived from the
-   same private Ring route inventory used by :http-report, and the original
-   handler as its second argument. It must return one callable Ring function. This cannot
-   certify the new routes, principal, original-source completeness, browser
-   asset, or actual network listener. The returned :handler is the installed
-   handler; :delegate-handler retains the original one.
-
-   No arbitrary callback is a release credential. The Biff system is LOCAL,
-   never deployment evidence. Handlers are invalid after the callback returns
-   and the embedded node is closed."
+  "Execute a local embedded-XTDB proving application under one Biff start.
+   The default three-arg form installs NO listener. The test-only four-arg
+   form opts in with literal :biff-loopback (not a caller-provided server):
+   a JDK HttpServer is then started/stopped by a SECOND Biff module, always
+   bound to 127.0.0.1, port 0. This demonstrates lifecycle ownership and the
+   identity of the adopted handler over a socket, NOT Biff's real production
+   listener, SSE transport, authenticated principal, CSRF, source-completeness
+   or release eligibility. The system is stopped on normal/exceptional exit."
   ([f] (with-http-proving-application! (str "v1495-" (random-uuid)) f))
   ([slot-id f]
    (with-http-proving-application!
     slot-id (fn [_ original] original) f))
   ([slot-id handler-extension! f]
+   (with-http-proving-application! slot-id handler-extension! :no-listener f))
+  ([slot-id handler-extension! listener-selection f]
    (when-not (and (fn? handler-extension!) (fn? f))
      (reject! :invalid-test-callback))
+   (when-not (contains? #{:no-listener :biff-loopback} listener-selection)
+     (reject! :invalid-test-listener-selection))
    (physical/with-proving-application!
     slot-id
     (fn [app]
       (checked-application! app)
       (let [original-handler (ring-handler! app)
-            ;; Expose the ORIGINAL handler's routes before Biff startup so
-            ;; prestart extensions may check the same source-owned route
-            ;; inventory used in the post-start fixture report. Never ask an
-            ;; extension to maintain an independent operation-route catalog.
             routes (into {view-route :read-only} operation-routes)
             handler (handler-extension! (assoc app :handler original-handler
                                                 :http-routes routes)
@@ -201,39 +259,58 @@
         (when-not (fn? handler)
           (reject! :invalid-prestart-handler-extension))
         (let [module (install-module! handler)
-              system (binding [*biff-modules* [module]]
-                       (biff/start (:biff-context app)
-                                   #'*biff-modules* [module-id]))]
-          (when-not (identical? handler (:biff.ring/handler system))
-            (reject! :adopted-handler-not-identical))
-          (let [report
-                {:type :gesso.assurance.example.physical-single-node-http/local-biff-fixture
-                 :version 1
-                 :routes routes
-                 :physical-table physical/table
-                 :module-start :one-observed-biff-start
-                 :handler-in-returned-system :identical
-                 :handler-extension :test-only-not-checked-or-certified
-                 :physical-transactions :delegated-to-v1494-once-per-post
-                 :postcommit-rendering :independent-physical-readback-may-be-unknown
-                 :postcommit-render-failure :preserve-reported-commit-and-request-refresh
-                 :issued-certified-plan-executors :not-established
-                 :certified-plan-compatibility
-                 {:persisted-fields :unqualified-v1494-fields
-                  :current-v1251-required-fields :qualified-and-exhaustive
-                  :application-extra-assertions :not-admitted-by-v1251
-                  :safe-next-step :derive-a-supported-physical-plan-without-losing-guards}
-                 :installed-checked-router :not-established
-                 :canonical-application-preflight :not-established
-                 :host-deployment :not-established
-                 :writer-completeness :not-established
-                 :physical-refinement :not-established
-                 :open-obligations open-obligations
-                 :certificate :not-issued
-                 :admission :not-admitted
-                 :authority :none}]
-            (f (assoc app :handler handler
-                          :delegate-handler original-handler
-                          :http-routes routes
-                          :system system :module module
-                          :http-report report)))))))))
+              listener-state (atom nil)
+              listener-module (when (= :biff-loopback listener-selection)
+                                (biff-loopback-module! handler listener-state))
+              modules (cond-> [module] listener-module (conj listener-module))
+              order (cond-> [module-id] listener-module (conj loopback-module-id))
+              ;; Listener startup happens AFTER Biff installs its immutable
+              ;; chosen Ring function, and Biff stop owns socket teardown.
+              system (binding [*biff-modules* modules]
+                       (biff/start (:biff-context app) #'*biff-modules* order))]
+          (try
+            (when-not (identical? handler (:biff.ring/handler system))
+              (reject! :adopted-handler-not-identical))
+            (when (and listener-module
+                       (not (identical? handler (:handler @listener-state))))
+              (reject! :loopback-not-serving-original-biff-handler))
+            (let [report
+                  {:type :gesso.assurance.example.physical-single-node-http/local-biff-fixture
+                   :version 1
+                   :routes routes
+                   :physical-table physical/table
+                   :module-start :one-observed-biff-start
+                   :handler-in-returned-system :identical
+                   :handler-extension :test-only-not-checked-or-certified
+                   :physical-transactions :delegated-to-v1494-once-per-post
+                   :postcommit-rendering :independent-physical-readback-may-be-unknown
+                   :postcommit-render-failure :preserve-reported-commit-and-request-refresh
+                   :biff-owned-loopback-listener (if listener-module
+                                                   :jdk-short-http-only
+                                                   :not-selected)
+                   :issued-certified-plan-executors :not-established
+                   :certified-plan-compatibility
+                   {:persisted-fields :unqualified-v1494-fields
+                    :current-v1251-required-fields :qualified-and-exhaustive
+                    :application-extra-assertions :not-admitted-by-v1251
+                    :safe-next-step :derive-a-supported-physical-plan-without-losing-guards}
+                   :installed-checked-router :not-established
+                   :canonical-application-preflight :not-established
+                   :host-deployment :not-established
+                   :writer-completeness :not-established
+                   :physical-refinement :not-established
+                   :open-obligations open-obligations
+                   :certificate :not-issued
+                   :admission :not-admitted
+                   :authority :none}]
+              (f (cond-> (assoc app :handler handler
+                                  :delegate-handler original-handler
+                                  :http-routes routes
+                                  :system system :module module
+                                  :http-report report)
+                   listener-module
+                   (assoc :loopback-base-url
+                          (str "http://127.0.0.1:" (:port @listener-state))
+                          :loopback-listener-state listener-state))))
+            (finally
+              (biff/stop system)))))))))

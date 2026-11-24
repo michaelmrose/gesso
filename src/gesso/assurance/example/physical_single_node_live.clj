@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2332: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2333: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -275,7 +275,7 @@
           :else
           (original request))))))
 
-(defn- with-live-application* [slot-id principal-source f]
+(defn- with-live-application* [slot-id principal-source listener-selection f]
   (when-not (fn? f)
     (reject! :invalid-application-callback))
   ;; A source with invalid operation/grant coverage must fail BEFORE
@@ -319,6 +319,7 @@
                (principal/guarded-test-read-handler!
                 principal-source app read-uris live-handler)
                live-handler)))
+         listener-selection
          (fn [app]
            (let [installed (:biff.ring/handler (:system app))
                  guarded @guarded*]
@@ -380,7 +381,7 @@
    subscriber disclosure, durable outbox or a release credential."
   ([f] (with-live-proving-application! (str "v2323-" (random-uuid)) f))
   ([slot-id f]
-   (with-live-application* slot-id nil f)))
+   (with-live-application* slot-id nil :no-listener f)))
 
 (defn with-granted-live-proving-application!
   "Run one Biff-installed handler whose Live POSTs delegate through the
@@ -401,4 +402,16 @@
   ([slot-id principal-source f]
    ;; nil/invalid source must not silently select the unguarded fixture.
    (principal/checked-test-policy! principal-source)
-   (with-live-application* slot-id principal-source f)))
+   (with-live-application* slot-id principal-source :no-listener f)))
+
+(defn with-biff-loopback-granted-live-proving-application!
+  "Run the SAME guarded Live/principal/XTDB proving fixture with an opt-in
+   JDK loopback listener, started and stopped by an additional Biff module.
+   Its :loopback-base-url accepts short HTTP replies only; a real streaming
+   SSE listener, browser, production Biff server and release remain UNTESTED."
+  ([source f]
+   (with-biff-loopback-granted-live-proving-application!
+    (str "v2333-" (random-uuid)) source f))
+  ([slot-id source f]
+   (principal/checked-test-policy! source)
+   (with-live-application* slot-id source :biff-loopback f)))

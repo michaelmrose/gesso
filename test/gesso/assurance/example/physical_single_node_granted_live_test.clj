@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-granted-live-test
-  "v2332: One actual Biff-installed diagnostic handler combines source-derived
+  "v2333: One actual Biff-installed diagnostic handler combines source-derived
    principal operation grants, authoritative XTDB writes and advisory Live.
    The fixture also rechecks the original reader identity before each outgoing
    advisory SSE event and closes the stream if the recheck fails. It does not
@@ -446,6 +446,73 @@
              (is (= 200 (socket-status base :get panel)))
              (is (= 200 (socket-status base :post release)))
              (is (= 2 (:revision (read!)))))))))))
+
+(deftest original-biff-lifecycle-starts-and-stops-a-real-protected-loopback-listener
+  ;; Unlike the separately managed JDK bridge used by earlier tests, this
+  ;; listener is launched from :biff.core/start AFTER original Biff handler
+  ;; adoption and stopped from :biff.core/stop. It serves only short replies,
+  ;; not SSE, and is emphatically NOT the deployed Biff/Netty HTTP server.
+  (let [who (atom :anonymous)
+        principal-checks (atom 0)
+        source (assoc (policy (fn [_]
+                                (swap! principal-checks inc)
+                                (if (= @who :anonymous)
+                                  {:status :anonymous}
+                                  (authenticated @who))))
+                      :read-principals #{:actor/releaser})
+        state* (atom ::never-entered)]
+    (fixture/with-biff-loopback-granted-live-proving-application!
+     source
+     (fn [{:keys [handler system loopback-base-url loopback-listener-state
+                  read! http-report live-report]}]
+       (reset! state* loopback-listener-state)
+       (is (identical? handler (:biff.ring/handler system)))
+       (is (identical? handler (:handler @loopback-listener-state)))
+       (is (= :jdk-short-http-only (:biff-owned-loopback-listener http-report)))
+       (is (= :not-established (:biff-network-consumption live-report))
+           "The JDK test listener must not be labeled a production server")
+       (is (re-matches #"http://127\.0\.0\.1:[1-9][0-9]*"
+                       loopback-base-url))
+       (is (= 401 (socket-status loopback-base-url :get panel)))
+       (is (= 401 (socket-status loopback-base-url :post reserve)))
+       (is (= 0 (:revision (read!))))
+       (reset! who :actor/reserver)
+       (is (= 403 (socket-status loopback-base-url :get panel)))
+       (is (= 403 (socket-status loopback-base-url :get fixture/events-uri))
+           "Denied SSE requests must never allocate a stream")
+       (let [result (socket-response loopback-base-url :post reserve)]
+         (is (= 200 (:status result)))
+         (is (= "write-only" (:visibility result)))
+         (is (nil? (:readback result)))
+         (is (not (re-find #"data-slot-revision|data-slot-status|reserved"
+                           (:body result)))))
+       (is (= 1 (:revision (read!))))
+       (reset! who :actor/releaser)
+       (is (= 200 (socket-status loopback-base-url :get panel)))
+       (is (= 200 (socket-status loopback-base-url :post release)))
+       (is (= 2 (:revision (read!))))
+       (is (= 7 @principal-checks)
+           "One selected principal check per protected HTTP operation")))
+    (is (instance? clojure.lang.IAtom @state*))
+    (is (nil? @@state*)
+        "The Biff lifecycle must close its owned listener before callback exit")))
+
+(deftest biff-owned-listener-is-stopped-even-on-callback-exception
+  ;; Resource release is a necessary real host guarantee, not just a passing
+  ;; short HTTP sequence. Failure in a user callback must not leak a server.
+  (let [state* (atom nil)
+        expected (ex-info "Intentional proving callback error" {:reason :test-end})
+        caught (try
+                 (fixture/with-biff-loopback-granted-live-proving-application!
+                  (policy (constantly (authenticated :actor/releaser)))
+                  (fn [{:keys [loopback-listener-state]}]
+                    (reset! state* loopback-listener-state)
+                    (throw expected)))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+    (is (identical? expected caught))
+    (is (instance? clojure.lang.IAtom @state*))
+    (is (nil? @@state*))))
 
 (deftest real-socket-denies-selected-read-routes-before-sse-allocation
   ;; Exercise the actual Biff-selected handler over a real loopback socket.
