@@ -33,18 +33,22 @@
                                 :transport-segments parts})))
             [] (sort-by (comp pr-str key) realizations))))
 
-(defn- authorize [assembly routes resolve-id request]
+(defn- authorize [assembly routes resolve-id session-authorized? request]
   (when-not (application/application-assembly? assembly)
     (reject! :stale-stream-assembly {}))
   (when-let [selected (route/matching-route routes (:uri request))]
     (when-let [context (route/selected-read-context selected request)]
-      (let [{:keys [live-app fragment]} selected
-            id (resolve-id context fragment)]
-        (when (and (or (keyword? id) (integer? id) (uuid? id)
-                       (and (string? id) (not (str/blank? id))))
-                   (live/authorized-for-scope? live-app context
-                                               (live/fragment-scope-name live-app fragment) id))
-          (select-keys (live/fragment-scope-instance live-app fragment id) [:topic :id]))))))
+      ;; The original request identifies the session to check; it is not
+      ;; evidence that the session remains valid. This additional predicate
+      ;; cannot replace model scope authority or supply a different principal.
+      (when (or (nil? session-authorized?) (true? (session-authorized? context)))
+        (let [{:keys [live-app fragment]} selected
+              id (resolve-id context fragment)]
+          (when (and (or (keyword? id) (integer? id) (uuid? id)
+                         (and (string? id) (not (str/blank? id))))
+                     (live/authorized-for-scope? live-app context
+                                                 (live/fragment-scope-name live-app fragment) id))
+            (select-keys (live/fragment-scope-instance live-app fragment id) [:topic :id])))))))
 
 (defn prepare!
   "Validate stream inventory before provider startup. :resolve-id selects
@@ -53,13 +57,19 @@
    budget, and rechecked against the same admitted scope before each frame
    under that budget. Exhausted authorization capacity refuses the frame.
    Denied or malformed owned GETs return 403 without allocating interests.
-   Established stream checks reuse the original authenticated request; they
-   do not independently renew authentication or recall handed-off frames.
+   Optional trusted :session-authorized? receives the prepared context at
+   admission and every frame check, before resolution or scope policy. It
+   must return literal true based on current session validity; it cannot
+   replace the principal or grant model scope authority. Without this hook,
+   established checks reuse the original authenticated request and model
+   policy alone. No automatic authentication renewal or frame recall.
    All admitted routes share capacity, cancellation and recovery. No claim
    of general router coverage or independently certified policy is made."
   [assembly options]
   (when-not (and (map? options) (fn? (:resolve-id options))
-                 (every? #{:resolve-id :sse-options :max-connections
+                 (or (not (contains? options :session-authorized?))
+                     (fn? (:session-authorized? options)))
+                 (every? #{:resolve-id :session-authorized? :sse-options :max-connections
                            :max-pending-authorizations} (keys options)))
     (reject! :invalid-stream-options {}))
   (when-not (application/application-assembly? assembly)
@@ -67,6 +77,7 @@
   (let [product (:operation-acquisition-assembly assembly)
         acquisition (:acquisition-assembly product)
         routes (selected-routes! acquisition (get-in product [:execution-assembly :route-assembly :routes]))
-        options' (assoc (dissoc options :resolve-id)
-                        :authorize-subscription #(authorize assembly routes (:resolve-id options) %))]
+        options' (assoc (dissoc options :resolve-id :session-authorized?)
+                        :authorize-subscription #(authorize assembly routes (:resolve-id options)
+                                                             (:session-authorized? options) %))]
     {:wrap! #(http/wrap-authorized-sse % options' routes)}))

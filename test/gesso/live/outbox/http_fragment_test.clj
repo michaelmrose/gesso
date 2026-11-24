@@ -236,6 +236,95 @@
                   (finally (stream/close! body) (.countDown release))))
               (finally (.countDown release) (host/stop! started)))))))))
 
+(deftest selected-subscription-requires-current-session-and-model-authority
+  (let [sessions (atom {"s1" "member"})
+        scope-allowed? (atom true)
+        session-result (atom :lookup)
+        session-calls (atom [])
+        resolutions (atom [])
+        scope-calls (atom [])
+        session-authorized? (fn [ctx]
+                              (swap! session-calls conj
+                                     [(:session-id ctx) (:principal ctx) (:path-params ctx)])
+                              (if (= :lookup @session-result)
+                                (and (some? (:principal ctx))
+                                     (= (:principal ctx) (get @sessions (:session-id ctx))))
+                                @session-result))
+        resolve-id (fn [ctx _]
+                     (swap! resolutions conj (:principal ctx))
+                     (get-in ctx [:path-params :id]))]
+    (with-redefs [fixture/allow? (fn [ctx id]
+                                   (swap! scope-calls conj [(:principal ctx) id])
+                                   @scope-allowed?)]
+      (with-assembly
+        (fn [assembly]
+          (doseq [invalid [nil false :session {}]]
+            (is (= :invalid-stream-options
+                   (reason #(sse/prepare! assembly {:resolve-id resolve-id
+                                                   :session-authorized? invalid})))))
+          (let [started (host/start! assembly (constantly {:status 418})
+                                     (assoc (config)
+                                            :assembled-sse {:resolve-id resolve-id
+                                                            :session-authorized? session-authorized?
+                                                            :max-connections 1
+                                                            :sse-options {:keepalive-ms nil}}))
+                handler (:biff.ring/handler started)
+                status (get started host/sse-status-key)
+                src (:source (:gesso.live/system started))
+                request {:request-method :get :uri "/streams/request-list/r1"
+                         :principal "member" :session-id "s1" :path-params {:id "forged"}}
+                emit! #(source/emit! src {:topic :fixture/request-list :id "r1" :change/kind :updated})
+                retired? (fn [] (loop [remaining 250]
+                                  (cond (and (zero? ((:occupied-count status)))
+                                             (zero? ((:pending-authorization-count status)))
+                                             (zero? (:subscription-count (source/stats src)))) true
+                                        (zero? remaining) false
+                                        :else (do (Thread/sleep 20) (recur (dec remaining))))))]
+            (try
+              ;; Current session authority cannot grant missing model scope authority.
+              (reset! scope-allowed? false)
+              (is (= 403 (:status (handler request))))
+              (is (= [["member" "r1"]] @scope-calls))
+              (reset! scope-allowed? true)
+              ;; Unknown session and principal mismatch stop before model callbacks.
+              (doseq [req [(assoc request :session-id "unknown")
+                           (assoc request :principal "other")
+                           (dissoc request :principal :session-id)]]
+                (is (= 403 (:status (handler req)))))
+              (doseq [decision [false nil {:allowed? false} "true"]]
+                (reset! session-result decision)
+                (let [response (handler request)]
+                  (try (is (= 403 (:status response)))
+                       (finally (when (= 200 (:status response))
+                                  (stream/close! (:body response)))))))
+              (reset! session-result :lookup)
+              (is (= ["member"] @resolutions))
+              (is (= [["member" "r1"]] @scope-calls))
+              (doseq [replacement [nil "other"]]
+                (reset! sessions {"s1" "member"})
+                (let [response (handler request) body (:body response)]
+                  (is (= 200 (:status response)))
+                  (try
+                    (let [pending (stream/take! body)]
+                      (emit!)
+                      (let [frame (deref pending 3000 ::timeout)]
+                        (is (and (string? frame) (str/includes? frame "event: live-update")))))
+                    (let [before [(count @resolutions) (count @scope-calls)]]
+                      ;; The original principal and the model's decision do not change.
+                      (reset! sessions (if replacement {"s1" replacement} {}))
+                      (let [pending (stream/take! body)]
+                        (emit!)
+                        (is (nil? (deref pending 3000 ::timeout))))
+                      (is (retired?))
+                      (is (= 403 (:status (handler request))))
+                      (is (= before [(count @resolutions) (count @scope-calls)])))
+                    (finally (stream/close! body)))))
+              (is (= 5 (count @scope-calls)))
+              (is (= 16 (count @session-calls)))
+              (is (every? #(= {:id "r1"} (last %)) @session-calls))
+              (is (retired?))
+              (finally (host/stop! started)))))))))
+
 (deftest selected-read-and-subscription-share-prepared-authority-context
   (let [resolutions (atom [])
         authorizations (atom [])

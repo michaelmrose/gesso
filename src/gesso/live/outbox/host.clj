@@ -315,7 +315,10 @@
    Optional :assembled-fragments mounts the compiled model fragment GETs
    using a trusted :resolve-id callback and mandatory model authorization.
    Optional :assembled-sse mounts the compiled acquisition stream inventory,
-   using the model scope authorization. Publication rules remain explicit
+   using the model scope authorization and optional trusted :session-authorized?
+   predicate on the prepared request context at admission and every frame.
+   Applications requiring session revocation must consult current session
+   validity, not merely the original request identity. Publication rules remain explicit
    unless :assembled-publication is selected. That profile requires an
    explicit :subject-keys mapping for the admitted graph and replaces
    :live-options :rules (which must be absent). Only unconditional graphs
