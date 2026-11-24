@@ -21,6 +21,7 @@
             [gesso.live.application-preflight :as application]
             [gesso.live.core :as live]
             [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox.http :as http]
             [gesso.live.outbox.http-jdk :as jdk]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [xtdb.node :as xtn]))
@@ -30,6 +31,7 @@
 (def config-key :gesso.live.outbox.host/config)
 (def listener-module-id :gesso.live.outbox.host/jdk-http)
 (def listener-key :gesso.live.outbox.host/listener)
+(def sse-status-key :gesso.live.outbox.host/sse-status)
 
 (def start-order
   [application/application-handler-module-id
@@ -44,7 +46,7 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk})
+    :stop-timeout-ms :http-jdk :authorized-sse})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
 
@@ -55,6 +57,9 @@
     (reject! :unknown-config-fields {:fields (vec unknown)}))
   (when (and (contains? config :http-jdk) (not (map? (:http-jdk config))))
     (reject! :invalid-http-jdk-options {}))
+  (when (and (contains? config :authorized-sse)
+             (not (map? (:authorized-sse config))))
+    (reject! :invalid-authorized-sse-options {}))
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -210,6 +215,13 @@
            (.interrupt (Thread/currentThread))
            (throw error))))}))
 
+(defn- retire-route! [route timeout-ms]
+  (when route
+    ((:close! route))
+    (let [result ((:await-drained! route) timeout-ms)]
+      (when-not (= {:outcome :drained} result)
+        (reject! :sse-route-not-drained {:outcome (:outcome result)})))))
+
 (defn start!
   "Start a concrete canonical Gesso/Biff host with the exact module order.
 
@@ -233,16 +245,27 @@
    existing JDK adapter), Biff owns a real listener before the worker starts.
    The listener is drained before Live/XTDB stop, including physical writers
    that outlive Ring return. A listener timeout retains providers for retry.
-   Without :http-jdk no socket is opened. This does not install an authorized
-   SSE route or cancel arbitrary application streams; their owners must retire
-   them explicitly before listener drain can finish."
+   Without :http-jdk no socket is opened. Optional :authorized-sse selects
+   the existing authorized SSE adapter options (fixed path and trusted
+   authorization callback). Its dispatch runs INSIDE checked request
+   admission with the same provider context as the application handler.
+   Install after managed startup but before opening admission. On shutdown,
+   drain Ring requests, retire route-owned SSE sessions, then run native
+   stop (worker, listener writers, Live, XTDB). Failed SSE retirement retains
+   all providers for retry. Arbitrary application streams remain the caller's
+   responsibility. The returned SSE status exposes no independent handler."
   [assembly handler config]
   (validate-config! config)
   (when-not (fn? handler)
     (reject! :invalid-handler {}))
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
-  (let [admission (request-admission handler (get config :stop-timeout-ms 10000))
+  (let [route* (atom nil)
+        timeout-ms (get config :stop-timeout-ms 10000)
+        admission (request-admission
+                   (fn [request]
+                     ((or (:handler @route*) handler) request))
+                   timeout-ms)
         initial (cond-> {config-key config
                          :biff.ring/handler (:handler admission)
                          managed/source-id-key (:source-id config)
@@ -256,28 +279,37 @@
                    (if network? #'network-modules #'modules)
                    (module-ids network?))
           native-stop (:biff.core/stop-system started)
-          stop-lock (Object.)]
+          stop-lock (Object.)
+          stop-owned! (fn []
+                        (locking stop-lock
+                          ((:close-and-await! admission))
+                          (retire-route! @route* timeout-ms)
+                          (native-stop)))]
       ;; Wrap the actual native stop chain, not just host/stop!: a caller of
       ;; biff/stop on this returned system must encounter the same fence.
       (try
+        (when (contains? config :authorized-sse)
+          ;; The route's fallback must be the original delegate, not the
+          ;; admission wrapper (which would recurse). Its invocation remains
+          ;; inside the canonical HTML guard and owned request context.
+          (reset! route* (http/wrap-authorized-sse
+                          (assoc started :biff.ring/handler handler)
+                          (:authorized-sse config))))
         ((:open! admission) started)
-        (assoc started :biff.core/stop-system
-               (fn []
-                 (locking stop-lock
-                   ((:close-and-await! admission))
-                   (native-stop))))
+        (cond-> (assoc started :biff.core/stop-system stop-owned!)
+          @route* (assoc sse-status-key
+                         (select-keys @route* [:active-count :occupied-count
+                                              :pending-authorization-count
+                                              :disconnected-count :closed? :drained?])))
         (catch Throwable startup-error
           ;; No traffic has been handed to the caller. Keep the original
           ;; error when cleanup also fails; retain the native owner for retry.
           (try
-            ((:close-and-await! admission))
-            (native-stop)
+            (stop-owned!)
             (catch Throwable cleanup-error
               (let [error (ex-info "Host startup cleanup is blocked."
                                    {:error/type :gesso.live.outbox/host-cleanup-blocked
-                                    :cleanup/stop! (fn []
-                                                     ((:close-and-await! admission))
-                                                     (native-stop))}
+                                    :cleanup/stop! stop-owned!}
                                    startup-error)]
                 (.addSuppressed error cleanup-error)
                 (throw error))))

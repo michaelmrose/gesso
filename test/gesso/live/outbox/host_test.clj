@@ -396,3 +396,94 @@
            (host/stop! started)))
        (is (live/closed? source))
        (is (thrown? Exception (xt/q node ["SELECT 1 AS x"])))))))
+
+(deftest canonical-host-owns-authorized-sse-over-real-http
+  (setup
+   (fn [assembly render]
+     (let [seen (atom [])
+           started (host/start! assembly render
+                                (assoc (config) :http-jdk {}
+                                       :authorized-sse
+                                       {:path "/events"
+                                        :authorize-subscription
+                                        (fn [request]
+                                          (swap! seen conj request)
+                                          (when (= "allowed" (get-in request [:headers "authorization"]))
+                                            {:topic :request :id "owned"}))
+                                        :sse-options {:keepalive-ms 50}}))
+           listener (get started host/listener-key)
+           status (get started host/sse-status-key)
+           client (HttpClient/newHttpClient)
+           handler (:biff.ring/handler started)
+           request (-> (HttpRequest/newBuilder (URI/create (str (:base-url listener) "/events")))
+                       (.timeout (Duration/ofSeconds 5))
+                       (.header "authorization" "allowed")
+                       (.build))]
+       (try
+         (is (= 405 (:status (handler {:uri "/events" :request-method :post}))))
+         (is (empty? @seen))
+         (is (= 403 (.statusCode (.send client (network-request listener "/events?scope=owned")
+                                         (HttpResponse$BodyHandlers/ofString)))))
+         (is (= 200 (.statusCode (.send client (network-request listener "/ready")
+                                         (HttpResponse$BodyHandlers/ofString)))))
+         (let [response (.send client request (HttpResponse$BodyHandlers/ofInputStream))]
+           (with-open [input (.body response)]
+             (is (= 200 (.statusCode response)))
+             (is (= 1 ((:active-count status))))
+             (is (= 1 ((:occupied-count status))))
+             (is (identical? (:xtdb/connectable started) (:xtdb/connectable (peek @seen))))
+             (is (identical? (:gesso.live/system started) (:gesso.live/system (peek @seen))))
+             (is (not= -1 (.read input)))
+             (biff/stop started)
+             (is ((:drained? status)))
+             (is ((:drained? listener)))
+             (is (live/closed? (:gesso.live/system started)))
+             (is (= 503 (:status (handler {:uri "/events" :request-method :get}))))
+             (is (= 2 (count @seen)))))
+         (finally (host/stop! started)))))))
+
+(deftest canonical-host-sse-retirement-failure-retains-providers-for-retry
+  (setup
+   (fn [assembly render]
+     (let [started (host/start! assembly render
+                                (assoc (config) :authorized-sse
+                                       {:path "/events"
+                                        :authorize-subscription (constantly {:topic :request :id "owned"})}))
+           status (get started host/sse-status-key)
+           handler (:biff.ring/handler started)
+           node (:xtdb/connectable started)
+           response (handler {:uri "/events" :request-method :get})
+           failure (ex-info "injected SSE cancellation failure" {})]
+       (try
+         (is (= 200 (:status response)))
+         (with-redefs [live/cancel-sse! (fn [_] (throw failure))]
+           (is (identical? failure (try (biff/stop started) nil (catch Exception e e)))))
+         (is ((:closed? status)))
+         (is (not ((:drained? status))))
+         (is (= 1 ((:occupied-count status))))
+         (is (= 503 (:status (handler {:uri "/events" :request-method :get}))))
+         (is (false? (live/closed? (:gesso.live/system started))))
+         (is (= [{:x 1}] (xt/q node ["SELECT 1 AS x"])))
+         (finally (host/stop! started)))
+       (is ((:drained? status)))
+       (is (stream/closed? (:body response)))
+       (is (live/closed? (:gesso.live/system started)))))))
+
+(deftest canonical-host-invalid-sse-route-rolls-back-started-providers
+  (setup
+   (fn [assembly render]
+     (let [system* (atom nil)
+           real-start managed/start-biff-application!
+           failure (with-redefs [managed/start-biff-application!
+                                 (fn [& args]
+                                   (let [system (apply real-start args)]
+                                     (reset! system* system) system))]
+                     (problem #(host/start! assembly render
+                                             (assoc (config) :http-jdk {}
+                                                    :authorized-sse {:path "/bad/../path"
+                                                                     :authorize-subscription (constantly nil)}))))]
+       (is (= :invalid-path (:reason failure)))
+       (is (some? @system*))
+       (is ((:drained? (get @system* host/listener-key))))
+       (is (live/closed? (:gesso.live/system @system*)))
+       (is (thrown? Exception (xt/q (:xtdb/connectable @system*) ["SELECT 1 AS x"])))))))
