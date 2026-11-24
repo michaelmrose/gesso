@@ -733,6 +733,14 @@ Existing evidence: Large adapter/CLJS/browser infrastructure and real Chromium c
 
 ### Stage 9 — Live publication and recovery
 
+**v2473 evidence checkpoint (not a re-estimate):** See
+[selected read authority and temporal correspondence](gesso-selected-read-authority-checkpoint.org)
+for bounded v2465–v2472 authority, frame lifecycle, completed frontier and
+valid-time evidence, the fresh four-namespace regression run and residual
+cross-layer assumptions. This advances packets 28–29 and 31–32 without
+qualifying their full closure. Return to priority 1: the original declared
+operation, installed guarded XTDB submission and durable publication intent.
+
 Existing evidence: Durable outbox/receipt/worker audits, real Chromium restart/reconnect tests (v2211–v2225), bounded source diagnostics, coalescing, pending puts and frame writes (v2226–v2229). v2231–v2257 adds active-consumer caps, HTTP capacity refusal, source-release recovery, bounded scheduled retries, concrete JDK listener and opt-in real Aleph HTTP/1 physical disconnect/Netty completion/healthy-peer recovery. The exact-head four-lane CI runs passed. This does **not** establish original mutation/publication completeness, authorized initial acquisition, whole application read permissions, physical HTTP/2, a universal load envelope or exact browser adoption for the same subject.
 
 | # | Work package to close | Track | Estimated revisions | Status at v2319 |

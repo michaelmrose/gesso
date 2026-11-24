@@ -1,0 +1,204 @@
+#+TITLE: Gesso v2473 — Selected Read Authority and Temporal Correspondence
+#+SUBTITLE: Bounded operational evidence from v2465–v2472
+#+DATE: 2026-11-24
+#+OPTIONS: toc:2 num:t
+#+STARTUP: overview
+
+* Decision and scope
+
+Accept bounded implementation and regression evidence for the selected
+assembled fragment GET and SSE routes on the concrete Biff/XTDB host.
+The inspected code is v2472 (d625671f3f6fc338afd3b7ea8eae646a7bccbc3b).
+This documentation checkpoint continues the v2464 managed acquisition
+checkpoint (=gesso-managed-acquisition-checkpoint.org=).
+
+The evidence contributes to packets 28–29 and 31–32, with dependencies
+on packets 25 and 33 and the physical XTDB mediation work. It does not
+close any original packet, gate, profile or independent requirement
+denominator. No implementation, release policy or forecast is changed.
+
+* Enforcing boundaries
+
+| Revision | First applicable enforcing boundary | Established restriction |
+|----------+-------------------------------------+-------------------------|
+| v2465 | =model/authorized-for-scope?= | Private policy must return literal true; explicitly public scopes remain supported |
+| v2466 | =http-route/selected-read-context= | GET/SSE share canonical capture and progression preparation; malformed carrier refuses before resolution |
+| v2467 | =http= selected SSE admission and =transport.sse= frame task | Reauthorize the same admitted topic/id before every invalidation and keepalive; hold pending authorization reservation until callback returns |
+| v2468 | =transport.sse/observe-frame-authority!= and =handoff-frame!= | Sticky refusal orders subsequent local puts for competing producers; no successful callback can reopen a refused stream |
+| v2469 | =http-sse/authorize= | Optional trusted current-session predicate must return true before resolver and model policy |
+| v2470 | =http-route/selected-read-context= and XTDB frontier binder | Observe completed server frontier, compose admitted progression, reject incompatible demands; repeat for SSE reauthorization |
+| v2471 | =consistency.xtdb/bind-selected-read-clock= and context-aware ordinary/planned queries | Fixed admitted valid-time clock; conflicting current-time overrides rejected |
+| v2472 | Strict completed-frontier binder option | Refuse an empty selected database from one observation before application callbacks; do not synthesize a transaction |
+
+The source anchors are under =src/gesso/live/=; names in the table are
+abbreviations for the actual namespaces, not newly declared interfaces.
+The browser grant from v2464 remains independent of this server authority.
+
+** Selected read and delivery contract
+
+For a concrete selected GET: establish route ownership; capture canonical
+parameters and parse progression; bind the server-observed completed
+frontier; fix the selected read clock; resolve the instance; evaluate the
+compiled scope policy; perform the authorized query and render through the
+checked canonical response boundary. This is not a promise that arbitrary
+application code uses that context correctly.
+
+For selected SSE: perform the shared context preparation; optionally check
+current session validity; resolve the scope and require model authority.
+Admit interest and capacity using the existing transport lifecycle.
+Before each invalidation or keepalive handoff repeat the selected
+authorization using the original request and a fresh completed frontier
+observation. Compare the result with the originally admitted topic/id.
+Account for active policy callbacks in the existing bounded pending
+authorization ledger, even when stream cancellation races them.
+
+A false or throwing frame policy publishes a sticky refusal before the
+asynchronous producer continuation. Refusal and local put initiation are
+ordered under a per-stream fence. Provider evaluation and asynchronous
+put completion do not hold that fence. Termination retires the admitted
+stream and its interest; callback accounting is separate from stream
+retirement.
+
+A database membership revocation, an observed policy refusal, a local
+stream put, an actual network transmission and a browser adoption are
+different events. In particular, v2468 does not establish that no byte can
+arrive after a database revocation. Previously initiated puts cannot
+be recalled. Do not use this evidence to certify that property.
+
+** Temporal and authentication assumptions
+
+- Browser progression is a minimum read requirement, not a credential.
+  The selected database frontier must satisfy the existing same-database
+  requirement; a stale browser carrier cannot select an older authority
+  snapshot. The ordinary Biff snapshot token and wrapped Graph snapshot
+  boundary are installed by the existing frontier binder. Progression-aware
+  queries apply canonical progression after ordinary query options.
+- The selected valid-time clock is fixed across context-aware ordinary and
+  planned reads. The binder preserves an admitted trusted current-time
+  value where one exists, otherwise samples server time. A reused trusted
+  clock is not necessarily a fresh wall-clock sample at each frame.
+  Explicit SQL temporal expressions and raw provider access are outside
+  the claimed correspondence. This is a selected-database contract,
+  not cross-database atomicity or universal bitemporal isolation.
+- No immutable empty snapshot is asserted. The XTDB probe in v2471
+  demonstrated a nil time coordinate in the empty snapshot token.
+  v2472 refuses selected reads without a completed frontier. The current
+  empty-path response statuses are GET 400 and SSE 403. Initialization
+  belongs to the application/deployment; general Biff startup and
+  provider-neutral standalone handlers retain their earlier contracts.
+- The optional session predicate is an SSE configuration hook, not an
+  authentication implementation or a corresponding GET configuration
+  option. GET must receive trusted authenticated context from its host
+  and enforce current authority through the applicable policy. Scope
+  authorization does not itself authenticate a principal, and public
+  scopes intentionally omit private scope authorization. Session registry,
+  expiry, reassignment and identity extraction are application obligations.
+- Policies must consult the appropriate current authority. Model callbacks
+  can still ignore the supplied context. Route capture, session authority,
+  scope policy and endpoint access are independent requirements, not proofs
+  of arbitrary application-defined resolver or policy equivalence.
+- Reauthorization at the next frame is not immediate revocation while
+  idle; disabling keepalives may leave a silent connection until another
+  frame or cleanup. Authorization-capacity exhaustion refuses a frame.
+  Costs of repeated policy evaluation have not been load-qualified.
+
+* Evidence inventory
+
+Fresh execution at v2472 on the available v2428 archive with subsequent
+source overlay. The eight production and four test blobs named below
+matched the remote v2472 tree (75c3cddac047d0c37d2c61950b9decbcda9deef0).
+This is not an independently authenticated whole checkout or dependency
+inventory. JVM execution used the native-access and java.nio access
+options. The following four complete test namespaces ran together:
+
+- =gesso.live.model-test=
+- =gesso.live.consistency.xtdb-test=
+- =gesso.live.outbox.http-fragment-test=
+- =gesso.live.transport.sse-test=
+
+Result: *316 tests, 3243 assertions, zero failures, zero errors, exit 0.*
+The complete HTTP fragment namespace includes real installed-host and
+selected real HTTP/XTDB cases, plus command recovery and publication
+cases. Not every test uses a physical HTTP socket or actual provider.
+No physical Chromium, complete Ygg, release or formal certification run
+is asserted.
+
+Production blob anchors:
+- =src/gesso/live/model.clj=
+- =src/gesso/live/consistency/xtdb.clj=
+- =src/gesso/live/outbox/http_route.clj=
+- =src/gesso/live/outbox/http_fragment.clj=
+- =src/gesso/live/outbox/http_sse.clj=
+- =src/gesso/live/outbox/http.clj=
+- =src/gesso/live/outbox/host.clj=
+- =src/gesso/live/transport/sse.clj=
+
+Test blob anchors correspond to the four namespaces above under =test/=.
+
+** Selected positive and adversarial anchors
+
+In =test/gesso/live/outbox/http_fragment_test.clj=:
+
+- =selected-read-and-subscription-require-affirmative-scope-decision=
+  checks both installed routes without querying or retaining denied interest.
+- =selected-read-and-subscription-share-prepared-authority-context=
+  checks matching prepared identity, scope, provider and progression;
+  malformed carriers and missing principal do not grant access.
+- =established-selected-subscription-rechecks-authority-before-frame-handoff=
+  checks denial, changed scope, throwing callback, cleanup and callback
+  reservation retention during cancellation.
+- =selected-subscription-requires-current-session-and-model-authority=
+  checks missing/reassigned/revoked session and independent model denial.
+  The session registry is a fixture, not a qualified production registry.
+- =selected-authority-and-query-share-current-completed-xtdb-frontier=
+  commits revocation between policy and query, checks the admitted read
+  and subsequent GET, SSE frame and reconnect with historical progression.
+- =selected-read-clock-is-fixed-across-authority-and-query-after-frontier-admission=
+  checks empty refusal, no application callback or bootstrap write,
+  explicit initialization, equal clock observations and override refusal.
+
+In =test/gesso/live/transport/sse_test.clj=:
+=concurrent-producers-cannot-handoff-after-observed-authority-refusal-test=
+delays the first producer's result continuation and lets the other
+producer attempt its write, for both false and throwing policy.
+=keepalive-refuses-frame-after-authority-denial-test= covers comments.
+
+In =test/gesso/live/consistency/xtdb_test.clj=:
+=strict-request-frontier-refuses-one-empty-observation-test= checks an
+empty observation followed by a populated observation, without allowing
+the latter to retroactively admit the first.
+
+** Historical negative controls
+
+| Revision | Earlier behavior / control | Failing assertions |
+|----------+----------------------------+--------------------|
+| v2465 | v2464 truthy private policy; model plus installed routes | 24 |
+| v2466 | v2465 separate context preparation | 6 |
+| v2467 | v2466 no frame authorization, earlier regression version | 17 |
+| v2468 | v2467 without sticky refusal fence | 8 |
+| v2470 | v2469 without selected current frontier binding | 10 |
+| v2471 | v2470 without selected clock | 8 |
+| v2472 | v2471 route preparation admits empty startup | 9 |
+
+Each historical run reported zero errors. These are revision-specific
+counterexamples, not additive passing assertions or a universal negative
+coverage denominator. No separate v2469 negative control is claimed.
+
+* Next operational boundary
+
+Return to priority 1 of the existing work ledger: packets 14–18, 26 and
+30–34, with the source-derived certification connection in packets
+40–43. Choose one existing declared operation and trace its original
+source identity, guarded XTDB submission and durable publication intent
+through the actual installed handler and executor. Inspect the original
+writer/initializer inventory and existing negative evidence before adding
+another abstraction. Prefer one missing join with a positive execution
+and an adversarial bypass or mismatched-subject control at the enforcing
+boundary. Do not relabel committed, attempted, acknowledged, observed and
+adopted outcomes as interchangeable.
+
+The v2464 browser qualification blocker remains open. The demonstrated
+server authority evidence is not sufficient to close the complete
+original-source-to-browser acceptance path. Avoid extending neighboring
+transport restrictions indefinitely; revisit them on concrete defects or
+predeclared acceptance obligations.
