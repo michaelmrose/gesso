@@ -11,7 +11,9 @@
      * an invariant identical to the complete initial condition;
      * an invariant occurring as an obligatory :and conjunct, descending ONLY
        through :and nodes (never :or, :implies, :not, or arbitrary rewrites);
-     * the independently typed closed invariant [:literal true].
+     * the independently typed closed invariant [:literal true];
+     * an obligatory initial node identical to a whole disjunct of the
+       invariant, descending ONLY through consequent :or nodes.
 
    An explicit [:literal false] in a REQUIRED conjunct makes the declared
    initial class manifestly uninhabited. We conservatively leave all results
@@ -30,10 +32,10 @@
             [gesso.assurance.proof.obligation :as obligation]
             [gesso.assurance.subject :as subject]))
 
-(def initial-version 1)
+(def initial-version 2)
 (def report-type :gesso.assurance.proof.initial/unadmitted-initial-consequence)
 
-(def ^:private identity-id :gesso.assurance.proof/initial-consequence-v1)
+(def ^:private identity-id :gesso.assurance.proof/initial-consequence-v2)
 (def ^:private checked-status :checked-conditional-inference)
 (def ^:private open-status :open)
 (def ^:private expected-categories
@@ -138,21 +140,41 @@
 (defn- manifestly-false-initial? [nodes]
   (boolean (some #(= [:literal false] (:expression %)) nodes)))
 
+(defn- disjunct-nodes
+  "Visit whole alternative predicates, never descend through a conjunction,
+   negation, or implication in the consequent."
+  [expression]
+  (letfn [(visit [node path]
+            (cons {:expression node :path path}
+                  (when (= :or (first node))
+                    (mapcat (fn [index]
+                              (visit (nth node index) (conj path index)))
+                            (range 1 (count node))))))]
+    (rest (visit expression []))))
+
 (defn- infer-one [initial-nodes manifestly-false? invariant id]
   (let [goal (:expression invariant)
         match (first (filter #(= goal (:expression %)) initial-nodes))
+        disjunct (when-not (or manifestly-false? match)
+                   (first (for [alternative (disjunct-nodes goal)
+                                node initial-nodes
+                                :when (= (:expression alternative) (:expression node))]
+                            {:initial-path (:path node) :goal-path (:path alternative)})))
         literal-true? (= goal [:literal true])
         support (cond
                   manifestly-false? nil
                   (= [] (:path match)) :identical-initial-rule
                   match :required-conjunct-elimination
                   literal-true? :literal-true-introduction
+                  disjunct :required-conjunct-disjunction-introduction
                   :else nil)]
     {:obligation-id [:initial-state id]
      :invariant id
      :readers (:readers invariant)
      :rule support
-     :conjunct-path (when (and match support) (:path match))
+     :conjunct-path (when support (if match (:path match) (:initial-path disjunct)))
+     :disjunct-path (when (= :required-conjunct-disjunction-introduction support)
+                      (:goal-path disjunct))
      :status (if support checked-status open-status)
      :reason (when-not support
                (if manifestly-false?
@@ -163,9 +185,9 @@
   "Derive restricted, conditional initial-state implications from ORIGINAL
    typed v1241 sources. Never take a cached obligation report as evidence.
 
-   Exact conjunction membership is sufficient for the logical implication
-   assuming the declared typed Boolean interpreter and the :and rule are
-   sound. This does not prove the class has any member or that a real state
+   Exact conjunction membership and whole-disjunct introduction are sufficient
+   for the logical implication assuming the declared typed Boolean interpreter
+   and the :and and :or rules are sound. This does not prove the class has any member or that a real state
    can be created within it; both remain explicit open assumptions."
   [source]
   (let [ledger (rederive-obligations! source)
@@ -206,7 +228,7 @@
      :conditionally-checked-initial-ids supported
      :unsupported-initial-ids unsupported
      :original-open-obligation-ids (:open-obligation-ids ledger)
-     :checking :original-source-typed-rules-and-exact-conjunct-structure
+     :checking :original-source-typed-rules-and-exact-conjunct-disjunct-structure
      :proof-status :restricted-conditional-initial-consequence-checked
      :initial-state-existence :not-established
      :initial-state-coverage :not-established

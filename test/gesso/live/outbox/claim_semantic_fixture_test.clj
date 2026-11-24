@@ -98,10 +98,10 @@
         (is (= :step (get-in r [:counterexample :kind])))
         (is (= :claim/ownership-and-journal (get-in r [:counterexample :invariant-id])))))))
 
-(deftest restricted-induction-does-not-promote-bounded-results
+(deftest complete-conditional-induction-does-not-promote-to-certification
   (let [r (induction/check-induction! (catalog))]
-    (is (= #{:claim/nonnegative-revision} (:conditionally-checked-inductive-invariant-ids r)) (pr-str (:induction-outcomes r)))
-    (is (= #{:claim/ownership-and-journal} (:unsupported-inductive-invariant-ids r)))
+    (is (= #{:claim/nonnegative-revision :claim/ownership-and-journal} (:conditionally-checked-inductive-invariant-ids r)) (pr-str (:induction-outcomes r)))
+    (is (empty? (:unsupported-inductive-invariant-ids r)))
     (is (= :not-issued (:certificate r)))
     (is (= :not-established (:physical-write-path-coverage r)))
     (is (= :none (:authority r)))))
@@ -173,5 +173,23 @@
           row (first (filter #(= id (:invariant %)) (:induction-outcomes induction)))]
       (is (contains? (:unsupported-preservation-ids r) obligation-id))
       (is (= (:declared-operation-ids c) (:preserving-operation-ids row)))
-      (is (= :initial-consequence-open (:reason row)))
+      (is (= :checked-conditional-induction (:status row)))
+      (is (= :required-conjunct-disjunction-introduction (:initial-rule row)))
       (is (= :not-issued (:certificate induction))))))
+
+(deftest claim-induction-refuses-bad-initial-state-or-transition
+  (let [c (catalog)
+        id :claim/ownership-and-journal
+        bad-init (assoc-in c [:initial-condition :expression]
+                           [:and (conjunction (assoc open-state :assignment/helper "helper-1"))
+                            (:expression revision)])
+        accept (claim/alternative-id "helper-1" :accept)
+        bad-step (alter-source c accept #(assoc-in % [:replacements :assignment/helper] [:literal "helper-2"]))
+        row (fn [r] (first (filter #(= id (:invariant %)) (:induction-outcomes r))))
+        init-result (row (induction/check-induction! bad-init))
+        step-result (row (induction/check-induction! bad-step))]
+    (is (= :initial-consequence-open (:reason init-result)))
+    (is (= (:declared-operation-ids c) (:preserving-operation-ids init-result)))
+    (is (= :checked-conditional-inference (:initial-status step-result)))
+    (is (= :some-preservation-open (:reason step-result)))
+    (is (= #{accept} (:unsupported-operation-ids step-result)))))

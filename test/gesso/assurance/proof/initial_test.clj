@@ -121,7 +121,7 @@
     (is (= :declared-abstract-state-projection-only (:scope r)))
     (is (= :initial-condition-implies-invariant-for-all-declared-states
            (:claim r)))
-    (is (= :original-source-typed-rules-and-exact-conjunct-structure
+    (is (= :original-source-typed-rules-and-exact-conjunct-disjunct-structure
            (:checking r)))
     (is (= :restricted-conditional-initial-consequence-checked
            (:proof-status r)))
@@ -590,3 +590,39 @@
                           (select-keys types (:readers invariant))
                           (select-keys bindings (:readers invariant)))))
               (str "Initial consequence failed for " id "/" bindings)))))))
+
+(deftest whole-disjunct-introduction-is-source-bound
+  (let [id :request/alternative
+        readers #{:request/status :request/version}
+        alternative [:or negative-version [:or status-open version-nonnegative]]
+        s (with-invariant id alternative readers)
+        r (check! s)
+        o (outcome r id)]
+    (is (= :checked-conditional-inference (:status o)))
+    (is (= :required-conjunct-disjunction-introduction (:rule o)))
+    (is (= [1] (:conjunct-path o)))
+    (is (= [2 1] (:disjunct-path o)))
+    (is (= r (check! s)))
+    (is (= :none (:authority r)))
+    (is (= :not-established (:initial-state-existence r)))
+    (let [changed (assoc-in s [:invariants id :expression]
+                            [:or negative-version [:and status-open negative-version]])
+          result (check! changed)]
+      (is (not (checked? result id)))
+      (is (not= (:fingerprint r) (:fingerprint result))))))
+
+(deftest disjunct-introduction-does-not-extract-unsafe-antecedent-branches
+  (let [id :request/alternative
+        readers #{:request/status :request/version}
+        goal [:or status-open negative-version]
+        s (with-invariant id goal readers)]
+    (doseq [init [[:or status-open version-nonnegative]
+                  [:implies status-open version-nonnegative]
+                  [:not status-open]
+                  [:and status-open [:literal false]]]]
+      (let [source (assoc s :initial-condition
+                         {:readers (if (#{:not :and} (first init)) #{:request/status} readers)
+                          :expression init})
+            o (outcome (check! source) id)]
+        (is (= :open (:status o)))
+        (is (nil? (:disjunct-path o)))))))

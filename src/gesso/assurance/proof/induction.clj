@@ -287,9 +287,9 @@
          ordered)
         first-base (:initial-outcomes (first checks))
         _ (doseq [entry (rest checks)]
-            (when-not (= (into {} (map (fn [[id x]] [id (select-keys x [:status :rule :conjunct-path :reason])]))
+            (when-not (= (into {} (map (fn [[id x]] [id (select-keys x [:status :rule :conjunct-path :disjunct-path :reason])]))
                                first-base)
-                         (into {} (map (fn [[id x]] [id (select-keys x [:status :rule :conjunct-path :reason])]))
+                         (into {} (map (fn [[id x]] [id (select-keys x [:status :rule :conjunct-path :disjunct-path :reason])]))
                                (:initial-outcomes entry)))
               (reject! :shared-initial-inference-disagreement
                        {:operation-id (:operation-id entry)})))
