@@ -870,6 +870,51 @@
     (continuity/release-height-lock! root height-lock)
     (is (= "144px" (.-minHeight style)))))
 
+(defn- height-lock-root
+  [minimum]
+  #js {:style #js {:minHeight minimum}
+       :offsetHeight 80
+       :getBoundingClientRect (fn [] #js {:height 80})})
+
+(deftest height-lock-cleanup-requires-current-resource-identity-test
+  (doseq [release-order [:older-first :newer-first]]
+    (let [root (height-lock-root "12px")
+          style (.-style root)
+          target #js {}
+          older (continuity/lock-height! root target)
+          newer (continuity/lock-height! root target)]
+      (is (= (:applied older) (:applied newer)))
+      (is (not (identical? older newer)))
+      (case release-order
+        :older-first
+        (do (continuity/release-height-lock! root older)
+            (is (= "80px" (.-minHeight style)))
+            (continuity/release-height-lock! root newer))
+        :newer-first
+        (do (continuity/release-height-lock! root newer)
+            (is (= "12px" (.-minHeight style)))
+            (continuity/release-height-lock! root older)))
+      (is (= "12px" (.-minHeight style)))
+      ;; Neither retired resource may acquire rights by value coincidence.
+      (set! (.-minHeight style) "80px")
+      (continuity/release-height-lock! root older)
+      (continuity/release-height-lock! root newer)
+      (is (= "80px" (.-minHeight style))))))
+
+(deftest height-lock-release-preserves-other-root-and-external-write-test
+  (let [root (height-lock-root "12px")
+        other (height-lock-root "80px")
+        style (.-style root)
+        lock (continuity/lock-height! root #js {})]
+    (continuity/release-height-lock! other lock)
+    (is (= "80px" (.-minHeight (.-style other))))
+    (set! (.-minHeight style) "144px")
+    (continuity/release-height-lock! root lock)
+    (is (= "144px" (.-minHeight style)))
+    (set! (.-minHeight style) "80px")
+    (continuity/release-height-lock! root lock)
+    (is (= "80px" (.-minHeight style)))))
+
 (deftest restore-invalid-or-disabled-resource-resolves-successfully-test
   (async done
     (with-sandbox*

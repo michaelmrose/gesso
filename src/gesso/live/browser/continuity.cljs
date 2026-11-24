@@ -1101,34 +1101,46 @@
 ;; Height stability
 ;; =============================================================================
 
+;; Physical ownership only: the exact lock instance for a DOM root. Weak keys
+;; avoid retaining detached roots; this is not a semantic slot registry.
+(def ^:private height-lock-owners (js/WeakMap.))
+
 (defn lock-height!
   [root target]
   (when (and root target)
     (let [rect (.getBoundingClientRect root)
-          previous (.-minHeight (.-style root))
+          current (.-minHeight (.-style root))
+          owner (.get height-lock-owners root)
           height (max (.-height rect)
                       (.-offsetHeight root))
           applied (str height "px")]
       (when (pos? height)
-        (set! (.-minHeight (.-style root)) applied)
-        {:height height
-         :applied applied
-         :previous previous}))))
+        (let [lock {:height height
+                    :applied applied
+                    ;; Transfer the original restoration baseline when a new
+                    ;; managed lock replaces the still-installed old one.
+                    :previous (if (and owner (= current (:applied owner)))
+                                (:previous owner)
+                                current)}]
+          (set! (.-minHeight (.-style root)) applied)
+          (.set height-lock-owners root lock)
+          lock)))))
 
 (defn release-height-lock!
-  "Release only the min-height value installed by lock-height!.
+  "Release only the current managed lock instance on this physical root.
 
-   This makes cleanup idempotent and prevents a late/duplicate continuity
-   cleanup from overwriting a newer physical style change that occurred after
-   capture. Physical cleanup is best effort; it must not reacquire ownership of
-   browser state it no longer controls."
+   Retire ownership before attempting cleanup. CSS value equality is only an
+   additional non-clobbering check for an observable external style change;
+   it cannot establish ownership. Unmanaged equal-value writes are not
+   distinguishable through CSSOM and must use the managed ownership contract."
   [root height-lock]
   (when (and root
              height-lock
-             (= (:applied height-lock)
-                (.-minHeight (.-style root))))
-    (set! (.-minHeight (.-style root))
-          (or (:previous height-lock) "")))
+             (identical? height-lock (.get height-lock-owners root)))
+    (.delete height-lock-owners root)
+    (when (= (:applied height-lock) (.-minHeight (.-style root)))
+      (set! (.-minHeight (.-style root))
+            (or (:previous height-lock) ""))))
   root)
 
 ;; =============================================================================
