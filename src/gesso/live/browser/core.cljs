@@ -619,6 +619,34 @@
     (when (= 1 (count matches))
       (first matches))))
 
+(defn- admitted-extension-declarations?
+  "Only the pinned SSE extension is supported by this managed acquisition
+   profile. Inspect both spellings without trusting ignore/inheritance to
+   suppress an otherwise unqualified extension. A name is not proof of the
+   registered implementation: the host must retain the trusted SSE asset."
+  [element]
+  (every? (fn [attribute]
+            (every? #{"" "sse" "ignore:sse"}
+                    (str/split (str/replace (or (element-attr element attribute) "")
+                                           " " "") #",")))
+          ["hx-ext" "data-hx-ext"]))
+
+(defn- admitted-extension-subtree?
+  [element]
+  (every? admitted-extension-declarations?
+          (tree-seq node-element? #(array-seq (.-children %)) element)))
+
+(defn- admitted-acquisition-extensions?
+  [root]
+  (and (loop [element root]
+         (if (node-element? element)
+           (and (admitted-extension-declarations? element)
+                (recur (.-parentElement element)))
+           true))
+       (if-let [target (primary-target root)]
+         (admitted-extension-subtree? target)
+         true)))
+
 (defn- acquisition-policy
   [root]
   (case (element-attr root acquisition-policy-attribute)
@@ -775,6 +803,7 @@
              detail (clj->js {:fragmentId fragment-id
                               :requestGeneration (:request-generation effect)})]
          (if-not (and (current-acquisition-owner? runtime root)
+                      (admitted-acquisition-extensions? root)
                       (or (not explicit?) (identical? root (physical-root physical))))
            (do (shell/dispatch! @shell-ref
                                 {:event :fragment/refresh-unbound
@@ -1330,6 +1359,9 @@
       (and pending (not (root-issued-request? root event)))
       nil
 
+      (and pending (not (admitted-acquisition-extensions? root)))
+      (prevent-event! event)
+
       (and pending
            (not (when-let [target (primary-target root)]
                   (identical? target (detail-field event "target")))))
@@ -1395,6 +1427,9 @@
 
       (and pending (not (root-issued-request? root event)))
       nil
+
+      (and pending (not (admitted-acquisition-extensions? root)))
+      (prevent-event! event)
 
       (and pending
            (not (when-let [target (primary-target root)]
@@ -1489,6 +1524,7 @@
         (when-let [{:keys [root record]} (active-request-from-event runtime event)]
           (when (or @(:response-refused? record)
                     (not (current-acquisition-owner? runtime root))
+                    (not (admitted-acquisition-extensions? root))
                     (not (passive-document-request? root event))
                     (not (passive-response-headers? xhr)))
             (reset! (:response-refused? record) true)
@@ -1603,7 +1639,9 @@
                                         (str/blank? (.-nodeValue %))) nodes)
               matching (filter #(= id (element-attr % "id"))
                                (array-seq (.querySelectorAll content "[id]")))]
-          (and (passive-preservation? runtime content)
+          (and (every? admitted-extension-declarations?
+                       (array-seq (.querySelectorAll content "[hx-ext], [data-hx-ext]")))
+               (passive-preservation? runtime content)
                (if outer?
                  (let [candidate (first significant)]
                    (and (= 1 (count significant))
@@ -1642,6 +1680,9 @@
               (cancel-swap-event! event)
               (.warn js/console
                      "Gesso managed fragment swap refused: primary target identity changed."))
+
+            (not (admitted-acquisition-extensions? root))
+            (cancel-swap-event! event)
 
             (not (passive-document-request? root event))
             (cancel-swap-event! event)

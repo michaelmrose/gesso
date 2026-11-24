@@ -182,6 +182,9 @@
                                           (to-array
                                            (filter (case selector
                                                      "[id]" #(some? (.getAttribute % "id"))
+                                                     "[hx-ext], [data-hx-ext]"
+                                                     #(or (some? (.getAttribute % "hx-ext"))
+                                                          (some? (.getAttribute % "data-hx-ext")))
                                                      "[hx-preserve], [data-hx-preserve], [id='--htmx-preserve-pantry--']"
                                                      #(or (some? (.getAttribute % "hx-preserve"))
                                                           (some? (.getAttribute % "data-hx-preserve"))
@@ -1702,6 +1705,72 @@
       (is (= (if allowed? #{} #{requirement})
              (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
       (is (nil? (core/active-request runtime root))))))
+
+(deftest managed-acquisition-extension-boundary-test
+  (doseq [{:keys [phase attrs location allowed?]}
+          [{:phase :trigger :attrs {"hx-ext" "sse"} :allowed? true}
+           {:phase :trigger :attrs {"hx-ext" "sse, debug"} :allowed? false}
+           {:phase :trigger :location :ancestor :attrs {"data-hx-ext" "morph"} :allowed? false}
+           {:phase :trigger :location :target :attrs {"hx-ext" "morph"} :allowed? false}
+           {:phase :bind :attrs {"hx-ext" "morph"} :allowed? false}
+           {:phase :load :location :ancestor :attrs {"hx-ext" "sse,ignore:debug"} :allowed? false}
+           {:phase :swap :location :target :attrs {"data-hx-ext" "debug"} :allowed? false}
+           {:phase :swap :location :existing-child :attrs {"hx-ext" "debug"} :allowed? false}
+           {:phase :swap :attrs {"hx-ext" "sse", "data-hx-ext" "debug"} :allowed? false}
+           {:phase :swap :attrs {"hx-ext" "sse, ignore:sse"} :allowed? true}
+           {:phase :swap :location :incoming :attrs {"hx-ext" "debug"} :allowed? false}
+           {:phase :swap :location :incoming :attrs {"data-hx-ext" "sse"} :allowed? true}]]
+    (let [captures (atom 0)
+          {:keys [runtime root htmx-fixture document-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          target (.-testPrimaryTarget root)
+          candidate (.-testPrimaryTarget (make-root "fragment-1"))
+          html "controlled extension shape"
+          requirement (progression/requirement
+                       {:tx-id 809 :system-time "2026-08-26T08:10:09Z"})
+          install! (fn []
+                     (case location
+                       :ancestor (aset root "parentElement" (make-element {:attrs attrs}))
+                       :existing-child (aset target "children" #js [(make-element {:attrs attrs})])
+                       :incoming (aset candidate "children" #js [(make-element {:attrs attrs})])
+                       (let [element (if (= :target location) target root)
+                             old (.-getAttribute element)]
+                         (aset element "getAttribute" (fn [k] (get attrs k (old k)))))))]
+      (aset xhr "getAllResponseHeaders" (constantly "Content-Type: text/html"))
+      (when (= phase :trigger) (install!))
+      (begin-refresh! runtime "fragment-1" requirement)
+      (if (and (= phase :trigger) (not allowed?))
+        (do (is (= 0 (count @(:calls htmx-fixture))))
+            (is (nil? (core/pending-refresh runtime root))))
+        (do
+          (when (= phase :bind) (install!))
+          (let [config (make-event "htmx:configRequest" {:elt root :extra-detail {:headers #js {}}})
+                before (make-event "htmx:beforeRequest" {:elt root :xhr xhr})]
+            (core/on-config-request! runtime (:event config))
+            (core/on-before-request! runtime (:event before))
+            (is (= (= phase :bind) @(:prevented? config)))
+            (is (= (= phase :bind) @(:prevented? before))))
+          (when-not (= phase :bind)
+            (when (= phase :load) (install!))
+            (let [load (make-event "htmx:beforeOnLoad" {:elt root :xhr xhr})]
+              (core/on-before-on-load! runtime (:event load))
+              (is (= (= phase :load) @(:prevented? load))))
+            (when (= phase :swap) (install!))
+            (swap! (:parsed-responses document-fixture) assoc html [candidate])
+            (let [swap (make-event "htmx:beforeSwap"
+                                   {:elt root :xhr xhr :should-swap true
+                                    :extra-detail {:serverResponse html}})]
+              (core/on-before-swap! runtime (:event swap))
+              (is (= (not allowed?) @(:prevented? swap)))
+              (is (= (if allowed? 1 0) @captures)))
+            (when allowed? (after-swap! runtime root xhr))
+            (after-request! runtime root xhr true))))
+      (when-not (= phase :bind)
+        (is (= (if allowed? #{} #{requirement})
+               (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+        (is (nil? (core/active-request runtime root)))))))
 
 (deftest managed-replacement-response-shape-test
   (doseq [{:keys [mode shape selection override response allowed?]}
