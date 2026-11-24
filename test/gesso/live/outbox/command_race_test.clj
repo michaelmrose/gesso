@@ -692,3 +692,116 @@
                 (is (= [:project] @trace))
                 (is (= 1 @submissions)))
               (finally (host/stop! started)))))))))
+(deftest installed-multi-record-claim-correspondence
+  (let [mode (atom :missing-assignment)
+        calls (atom 0)
+        before {:xt/id "r1" :status :open :revision 0 :created-at "t0"
+                :updated-at "t0" :request/location-id "l1"}
+        member {:xt/id "m1" :active true :revision 0 :created-at "t0" :updated-at "t0"}
+        assignment {:xt/id "primary-r1" :request-id "r1" :helper "helper-1"
+                    :revision 0 :created-at "t1" :updated-at "t1" :request/location-id "l1"}
+        ;; Independent closed fixture policy, not extracted from the constructed plan.
+        tables #{:requests :request_assignments :gesso_commands}
+        targets #{[:requests "r1"] [:request_assignments "primary-r1"]}
+        operations #{[:requests "r1" :claim] [:request_assignments "primary-r1" :create]}
+        guards #{[:memberships "m1" :active true] [:memberships "m1" :revision 0]
+                 [:memberships "m1" :updated-at "t0"]}
+        updates #{[:requests "r1" :status :open] [:requests "r1" :revision 0]
+                  [:requests "r1" :updated-at "t0"]}
+        values (into #{} (mapcat (fn [[table id fields]]
+                                  (map (fn [[k v]] [table id k v]) fields)))
+                     [[:requests "r1" {:xt/id "r1" :status :claimed :revision 1 :created-at "t0"
+                                       :updated-at "t1" :request/location-id "l1"}]
+                      [:request_assignments "primary-r1" {:xt/id "primary-r1" :request-id "r1"
+                                                         :helper "helper-1" :revision 0 :created-at "t1"
+                                                         :updated-at "t1" :request/location-id "l1"}]])
+        executor (publication/build-executor
+                  {:operation :request/claim :submission-mode! (constantly :submit)
+                   :may-disclose? (constantly true)
+                   :construction-contract {:required-guard-tables #{:memberships} :allowed-guard-tables #{:memberships}
+                                           :required-write-tables tables :allowed-write-tables tables}
+                   :target-contract! (fn [_ binding]
+                                       (when-not (= "r1" (get-in binding [:arguments :request-id]))
+                                         (throw (ex-info "Outside fixture request" {})))
+                                       {:required-guard-targets #{[:memberships "m1"]} :allowed-guard-targets #{[:memberships "m1"]}
+                                        :required-write-targets targets :allowed-write-targets targets})
+                   :predicate-contract! (fn [_ _] {:required-guard-checks guards :allowed-guard-checks guards
+                                                   :required-update-checks updates :allowed-update-checks updates})
+                   :command-operation-contract! (fn [_ _] {:required-command-operations operations :allowed-command-operations operations})
+                   :post-state-contract! (fn [_ _] {:required-post-state-values values :allowed-post-state-values values})
+                   :outcome-contract! (fn [_ _] {:expected-outcome {:outcome :request/claimed}})
+                   :construct! (fn [_]
+                                 (swap! calls inc)
+                                 {:spec {:purpose :gesso.live/refresh}
+                                  :model-plan {:guards [(model-command/guard :memberships member
+                                                                             (assoc version :compare-keys [:revision :updated-at :active]))]
+                                               :commands (cond-> [(model-command/update-command
+                                                                   :requests :claim before
+                                                                   (assoc before :status :claimed :revision 1 :updated-at "t1")
+                                                                   (assoc version :compare-keys [:revision :updated-at :status]))]
+                                                           (not= :missing-assignment @mode)
+                                                           (conj (model-command/create :request_assignments
+                                                                                       (cond-> assignment (= :wrong-helper @mode) (assoc :helper "other"))
+                                                                                       version)))}
+                                  :outcome {:outcome :request/claimed} :now "t1"})
+                   :project! (fn [{:keys [ctx]} result]
+                               (let [{:keys [basis rows]} (frontier/q-with-basis!
+                                                           ctx ["SELECT r.status, a.helper FROM requests r JOIN request_assignments a ON r._id = a.request_id WHERE r._id = ? AND a._id = ?" "r1" "primary-r1"])]
+                                 {:resolution (if (= :incorporated (:status result)) :confirmed :already-incorporated)
+                                  :outcome (get-in result [:outcome :outcome])
+                                  :authoritative (protocol/authoritative {:presence :present :basis basis :projection (first rows)})}))})
+        operation (fixture/trusted-operation :request/claim {:published-change-topics #{:request :request-assignment} :execute! executor})
+        config {:xtdb-config {} :source-id "v2479-claim" :rules-context {}
+                :worker-options {:worker-id "v2479" :poll-ms 20} :live-options {}
+                :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
+                                              :require-derived-model? true
+                                              :operation-model-entities {:request/claim #{:requests :request_assignments}})
+                :http-jdk {} :assembled-operations {:authorize-request? (constantly true)}}]
+    (with-operations {:request/claim operation}
+      (fn [assembly]
+        (with-open [client (HttpClient/newHttpClient)]
+          (let [started (host/start! assembly (fn [_] (g/html-response [:div "fallback"])) config)
+                node (:xtdb/connectable started)
+                failure (fn [attempt]
+                          (try ((:biff.ring/handler started)
+                                {:uri "/operations/request/claim" :request-method :post
+                                 :headers {"content-type" "application/x-www-form-urlencoded"}
+                                 :body (codec/form-encode {transport/command-parameter (pr-str (protocol/command->wire (command attempt)))})})
+                               nil (catch Exception e (ex-data e))))
+                unchanged! (fn []
+                             (is (= [{:status :open :revision 0}] (xt/q node ["SELECT status, revision FROM requests"])))
+                             (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+                             (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))]
+            (try
+              (xt/execute-tx node [[:put-docs :requests before] [:put-docs :memberships member]])
+              (doseq [[scenario kind] [[:missing-assignment :construction-contract-mismatch]
+                                       [:wrong-helper :construction-post-state-mismatch]]]
+                (reset! mode scenario)
+                (is (= kind (:error/kind (failure (name scenario)))))
+                (unchanged!)
+                (is (empty? (xt/q node ["SELECT _id FROM request_assignments"]))))
+              ;; A real database identity conflict must roll back all writes.
+              (reset! mode :right)
+              (xt/execute-tx node [[:put-docs :request_assignments (assoc assignment :helper "other")]])
+              (is (= :xtdb/assert-failed (:xtdb.error/code (failure "occupied"))))
+              (unchanged!)
+              (is (= [{:helper "other"}] (xt/q node ["SELECT helper FROM request_assignments"])))
+              (xt/execute-tx node [[:delete-docs :request_assignments "primary-r1"]])
+              (let [result (settlement! (send-command! client started "claim"))]
+                (is (= :confirmed (:resolution result)))
+                (is (= :request/claimed (:outcome result)))
+                (is (= {:status :claimed :helper "helper-1"} (get-in result [:authoritative :projection]))))
+              (is (= [{:status :claimed :revision 1}] (xt/q node ["SELECT status, revision FROM requests"])))
+              (is (= [{:xt/id "primary-r1" :request-id "r1" :helper "helper-1"}]
+                     (xt/q node ["SELECT _id, request_id, helper FROM request_assignments"])))
+              (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+              (is (= #{{:topic :request :subject "l1"} {:topic :request-assignment :subject "l1"}}
+                     (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$subject_id AS subject FROM gesso_live_outbox"]))))
+              (let [n @calls replay (settlement! (send-command! client started "claim-replay"))]
+                (is (= :already-incorporated (:resolution replay)))
+                (is (= :request/claimed (:outcome replay)))
+                (is (= n @calls))
+                (is (= 1 (count (xt/q node ["SELECT _id FROM request_assignments"]))))
+                (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+                (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))
+              (finally (host/stop! started)))))))))
