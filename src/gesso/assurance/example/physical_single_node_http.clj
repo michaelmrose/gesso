@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v2351: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2352: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -322,7 +322,9 @@
            (when-not (and (integer? port) (pos? port))
              (reject! :aleph-loopback-port-unavailable))
            (reset! state {:server server :port port :handler handler
-                          :transport-write-stats (:stats writes)})
+                          :transport-write-stats (:stats writes)
+                          :transport-channel-status (:channel-status writes)
+                          :retire-transport-channels! (:retire-channels! writes)})
            system)
          (catch Throwable t
            (.close ^java.io.Closeable server)
@@ -330,6 +332,11 @@
    :biff.core/stop
    (fn [_]
      (when-let [server (:server @state)]
+       ;; The Live callback has already retired its selected SSE producers.
+       ;; Seal the actual adapter, drain synchronous dispatch, and await the
+       ;; instrumented child channels before releasing the listener/XTDB scope.
+       ;; This does not certify arbitrary producer continuations or receipt.
+       ((:retire-transport-channels! @state))
        ;; Do not erase a failed-close handle and pretend shutdown succeeded.
        (.close ^java.io.Closeable server)
        (reset! state nil)))})
@@ -450,6 +457,7 @@
                           (str "http://127.0.0.1:" (:port @listener-state))
                           :loopback-listener-state listener-state)
                    (= :biff-aleph-http1 listener-selection)
-                   (assoc :transport-write-stats (:transport-write-stats @listener-state)))))
+                   (assoc :transport-write-stats (:transport-write-stats @listener-state)
+                          :transport-channel-status (:transport-channel-status @listener-state)))))
             (finally
               (biff/stop system)))))))))

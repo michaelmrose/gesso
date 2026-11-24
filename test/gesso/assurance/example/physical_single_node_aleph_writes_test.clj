@@ -56,3 +56,51 @@
     (is (identical? failure (try (handler {:uri "/error"})
                                  (catch Exception error error))))
     (is (= 2 (:unobserved ((:stats observer)))))))
+
+(deftest channel-retirement-drains-admitted-dispatch-and-closes-idle-channels
+  (let [entered (promise)
+        release (promise)
+        calls (atom 0)
+        observer (writes/prepare! (fn [_] (swap! calls inc)
+                                    (deliver entered true) @release
+                                    {:status 200 :headers {} :body "finite"}))
+        ch (EmbeddedChannel.)
+        idle (EmbeddedChannel.)
+        late (EmbeddedChannel.)
+        install! (fn [^EmbeddedChannel c]
+                   (.addLast (.pipeline c) "request-handler" (proxy [ChannelDuplexHandler] []))
+                   ((:http1-pipeline-transform observer) (.pipeline c)))
+        status (:channel-status observer)]
+    (try
+      (install! ch)
+      (install! idle)
+      (is (= {:accepting? true :active 0 :owned-channels 2} (status)))
+      (let [request (future ((:handler observer) {:aleph/channel ch}))
+            retire (future (deref entered 3000 false) ((:retire-channels! observer)))]
+        (try
+          (is (= true (deref entered 3000 false)))
+          (is (loop [n 0]
+                (cond (not (:accepting? (status))) true
+                      (= 100 n) false
+                      :else (do (Thread/sleep 10) (recur (inc n))))))
+          (is (= {:accepting? false :active 1 :owned-channels 2} (status)))
+          (is (= 503 (:status ((:handler observer) {:aleph/channel ch}))))
+          (is (= 1 @calls))
+          (install! late)
+          (is (.isDone (.closeFuture late)))
+          (is (not (.isActive late)))
+          (is (= ::blocked (deref retire 100 ::blocked)))
+          (is (.isActive ch))
+          (is (.isActive idle))
+          (finally (deliver release true)))
+        (is (= 200 (:status (deref request 3000 nil))))
+        (is (not= ::timeout (deref retire 3000 ::timeout)))
+        (is (.isDone (.closeFuture ch)))
+        (is (.isDone (.closeFuture idle)))
+        (is (= {:accepting? false :active 0 :owned-channels 0} (status)))
+        ;; Closing a channel is not a successful final write.
+        (is (zero? (:finite-succeeded ((:stats observer)))))
+        (is (= 1 (get-in ((:stats observer)) [:capture :orphaned]))))
+      (finally
+        (deliver release true)
+        (doseq [^EmbeddedChannel c [ch idle late]] (.finishAndReleaseAll c))))))

@@ -50,12 +50,14 @@
                               nil)]
                     (if who {:status :authenticated :principal-id who}
                         {:status :anonymous})))}
-        listener* (atom nil)]
+        listener* (atom nil)
+        channel-status* (atom nil)]
     (fixture/with-biff-aleph-granted-live-proving-application!
      source
      (fn [{:keys [system handler loopback-base-url loopback-listener-state
-                  read! http-report transport-write-stats]}]
+                  read! http-report transport-write-stats transport-channel-status]}]
        (reset! listener* loopback-listener-state)
+       (reset! channel-status* transport-channel-status)
        (is (identical? handler (:biff.ring/handler system)))
        (is (identical? handler (:handler @loopback-listener-state)))
        (is (= :aleph-http1-test-adapter (:biff-owned-loopback-listener http-report)))
@@ -138,4 +140,50 @@
                  (.disconnect c)
                  (future-cancel client))))))))
     (is (instance? clojure.lang.IAtom @listener*))
-    (is (nil? @@listener*) "Biff must release the selected listener handle")))
+    (is (nil? @@listener*) "Biff must release the selected listener handle")
+    (is (= {:accepting? false :active 0 :owned-channels 0}
+           (@channel-status*)))))
+
+(deftest original-biff-aleph-retires-owned-keepalive-channel-on-scope-exit
+  (let [source {:catalog-id :slot/reservation-lifecycle
+                :policy-id :proving/aleph-channel-retirement
+                :grants {:actor/writer #{:slot/reserve :slot/release}}
+                :read-principals #{:actor/writer}
+                :acquire-principal! (constantly {:status :anonymous})}
+        status* (atom nil)
+        reader* (atom nil)]
+    (with-open [socket (java.net.Socket.)]
+      (fixture/with-biff-aleph-granted-live-proving-application!
+       source
+       (fn [{:keys [loopback-base-url transport-channel-status transport-write-stats]}]
+         (reset! status* transport-channel-status)
+         (.connect socket (java.net.InetSocketAddress.
+                           "127.0.0.1" (.getPort (java.net.URI/create loopback-base-url))) 3000)
+         (.setSoTimeout socket 5000)
+         (.write (.getOutputStream socket)
+                 (.getBytes (str "GET " fixture/bootstrap-asset-uri " HTTP/1.1\r\n"
+                                 "Host: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
+                            StandardCharsets/US_ASCII))
+         (.flush (.getOutputStream socket))
+         (let [reader (BufferedReader. (InputStreamReader. (.getInputStream socket)
+                                                           StandardCharsets/US_ASCII))
+               status (.readLine reader)
+               headers (loop [lines []]
+                         (let [line (.readLine reader)]
+                           (cond (nil? line) (throw (ex-info "Unexpected EOF" {}))
+                                 (empty? line) lines
+                                 :else (recur (conj lines line)))))
+               length (some #(second (re-matches #"(?i)content-length:\s*(\d+)" %)) headers)
+               expected "gesso.live.browser.runtime.init_BANG_();\n"]
+           (reset! reader* reader)
+           (is (re-find #"^HTTP/1\.1 200 " status))
+           (is (= (str (count expected)) length))
+           (is (some #(= "connection: keep-alive" (str/lower-case %)) headers))
+           (is (= expected (apply str (repeatedly (count expected) #(char (.read reader))))))
+           (is (eventually #(= 1 (:finite-succeeded (transport-write-stats)))))
+           (is (= {:accepting? true :active 0 :owned-channels 1}
+                  (transport-channel-status))))))
+      ;; The client deliberately retains its socket until after Biff stops.
+      ;; The server must close the previously idle, owned physical channel.
+      (is (= {:accepting? false :active 0 :owned-channels 0} (@status*)))
+      (is (= -1 (.read ^BufferedReader @reader*))))))
