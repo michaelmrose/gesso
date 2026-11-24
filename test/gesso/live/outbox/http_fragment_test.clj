@@ -186,10 +186,11 @@
         execute! (fn [{:keys [ctx arguments] :as invocation}]
                    (swap! invocations conj invocation)
                    (let [id (:request-id arguments)
-                         receipt (publication/transact!
+                         receipt (publication/transact-resolved!
                                   ctx {:purpose :gesso.live/refresh}
                                   [{:topic :request :request/location-id id :change/kind :updated}]
-                                  [[:put-docs :requests {:xt/id id :status :claimed}]])
+                                  [[:put-docs :requests {:xt/id id :status :claimed}]]
+                                  {:outcome :request/claimed} "2026-11-24T00:00:00Z")
                          _ (reset! prepared-intents (:outbox/intents receipt))
                          tx (:tx-result receipt)]
                      {:resolution :confirmed :outcome :request/claimed
@@ -303,6 +304,10 @@
                   (let [intent-id (:xt/id (first @prepared-intents))]
                     (is (uuid? intent-id))
                     (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id]))))
+                  (is (= {:status :replay :outcome {:outcome :request/claimed}}
+                         (select-keys (publication/reconcile-command!
+                                       (:ctx (first @invocations)) (constantly true))
+                                      [:status :outcome])))
                   (is (= {:outcome :prior-intent-present
                           :intent-id (:xt/id (first @prepared-intents))
                           :publication-status :dispatch-accepted}
@@ -555,3 +560,59 @@
                                (assoc (first (:intents (publication/prepare! ctx spec [change])))
                                       :gesso.live.outbox/source-id "wrong-source")]])
           (is (= :inconsistent-intent-observation (reason #(publication/observe-command! retry)))))))))
+
+(deftest resolved-publication-recovers-exact-durable-command-outcome
+  (with-assembly
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile! assembly subject-mapping))
+              command {:operation :request/claim :principal (identity/principal "helper-1")
+                       :command-id (identity/command-id "command-2373")
+                       :execution-id (identity/execution-id "first")
+                       :arguments {:request-id "r1"}}
+              context (fn [command]
+                        {:xtdb/connectable node publication/preparation-key (bind "owned-source" command)})
+              ctx (context command)
+              retry (context (assoc command :execution-id (identity/execution-id "retry")))
+              spec {:purpose :gesso.live/refresh}
+              change {:topic :request :request/location-id "r1"}
+              outcome {:outcome :request/claimed :request-id "r1"}
+              now "2026-11-24T00:00:00Z"
+              write (fn [id] [:put-docs :requests {:xt/id id :status :claimed}])
+              disclose (fn [binding record]
+                         (= (:principal binding) (get-in record [:gesso.command/binding :principal])))
+              inspect #(select-keys (publication/reconcile-command! % disclose) [:status :outcome])
+              lost (ex-info "lost resolved receipt" {:commit/status :unknown})
+              execute xtdb/execute-tx-from!]
+          (is (= {:status :unresolved} (inspect retry)))
+          (is (= :invalid-resolved-intent-spec
+                 (reason #(publication/transact-resolved! ctx (assoc spec :intent-ids [(random-uuid)])
+                                                          [change] [(write "bad")] outcome now))))
+          (is (= :xtdb/assert-failed
+                 (try (publication/transact-resolved! ctx spec [change]
+                                                       [["ASSERT 1 = 0"] (write "bad")] outcome now)
+                      nil (catch Exception e (:xtdb.error/code (ex-data e))))))
+          (is (= {:status :unresolved} (inspect retry)))
+          (is (empty? (xt/q node ["SELECT _id FROM requests"])))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+          (with-redefs [xtdb/execute-tx-from! (fn [& args] (apply execute args) (throw lost))]
+            (is (identical? lost (try (publication/transact-resolved! ctx spec [change]
+                                                                     [(write "r1")] outcome now)
+                                     nil (catch Exception e e)))))
+          (is (= {:status :replay :outcome outcome} (inspect retry)))
+          (is (= {:status :incompatible}
+                 (inspect (context (assoc command :arguments {:request-id "r2"})))))
+          (is (= {:status :unavailable}
+                 (inspect (context (assoc command :principal (identity/principal "other"))))))
+          (is (= {:status :unavailable}
+                 (select-keys (publication/reconcile-command! retry (constantly :truthy)) [:status :outcome])))
+          (is (= :missing-command-disclosure (reason #(publication/reconcile-command! retry nil))))
+          (is (= :xtdb/assert-failed
+                 (try (publication/transact-resolved! (context (assoc command :principal (identity/principal "other")))
+                                                       spec [change] [(write "r2")] outcome now)
+                      nil (catch Exception e (:xtdb.error/code (ex-data e))))))
+          (is (= [{:xt/id "r1"}] (xt/q node ["SELECT _id FROM requests"])))
+          (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+          (is (= [{:xt/id "command-2373"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
+          (with-redefs [xtdb/q-from (fn [& _] (throw lost))]
+            (is (identical? lost (try (inspect retry) nil (catch Exception e e))))))))))

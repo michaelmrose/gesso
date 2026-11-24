@@ -7,7 +7,8 @@
             [gesso.choreo.identity :as identity]
             [gesso.live.outbox :as outbox]
             [gesso.live.consistency.xtdb :as xtdb]
-            [gesso.live.optimistic.server :as server])
+            [gesso.live.optimistic.server :as server]
+            [gesso.model.command-resolution :as resolution])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.nio ByteBuffer]
            [java.security MessageDigest]
@@ -142,6 +143,53 @@
         receipt (xtdb/execute-tx-from! ctx ops)]
     (assoc receipt :outbox/intents intents)))
 
+(defn- command-binding! [ctx]
+  (if-let [binding (::binding (meta (get ctx preparation-key)))]
+    (binding)
+    (reject! :missing-command-preparation {})))
+
+(defn transact-resolved!
+  "Commit the canonical model command-result record, domain operations and
+   derived publication intents together. Use the existing database-global
+   gesso_commands identity convention (string or UUID command ID). The
+   trusted executor supplies its portable business outcome and timestamp,
+   not a browser settlement. All absence guards precede all writes.
+   Do not mix this profile with other writers of the same command ID.
+   Domain operations and outcome truth remain trusted. Unknown commit
+   errors propagate; reconcile-command! is a separate read-only operation."
+  [ctx spec changes domain-ops outcome now]
+  (when-not (and (map? spec) (= #{:purpose} (set (keys spec))))
+    (reject! :invalid-resolved-intent-spec {}))
+  (when-not (and (vector? domain-ops) (seq domain-ops))
+    (reject! :invalid-domain-ops {}))
+  (let [record (resolution/command-record (command-binding! ctx) outcome now)
+        {:keys [intents guard-ops tx-op]} (prepare! ctx spec changes)
+        ops (into (into (conj guard-ops
+                              ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)"
+                               (:xt/id record)])
+                        domain-ops)
+                  [[:put-docs resolution/command-entity-type record] tx-op])
+        receipt (xtdb/execute-tx-from! ctx ops)]
+    (assoc receipt :outbox/intents intents :command/record record)))
+
+(defn reconcile-command!
+  "Authoritatively read the canonical command record for the current trusted
+   binding and use the existing disclosure and exact-binding decision.
+   may-disclose? receives binding and record; only literal true permits
+   disclosure. An unresolved observation is not permission to resubmit.
+   The recorded business outcome is not a current authoritative projection,
+   progression basis or transport settlement. The executor must obtain those
+   independently and apply its original settlement contract."
+  [ctx may-disclose?]
+  (when-not (fn? may-disclose?)
+    (reject! :missing-command-disclosure {}))
+  (let [binding (command-binding! ctx)
+        rows (xtdb/q-from ctx ["SELECT * FROM gesso_commands WHERE _id = ?"
+                               (resolution/record-id binding)])]
+    (when-not (and (vector? rows) (<= (count rows) 1) (every? map? rows))
+      (reject! :invalid-command-record-observation {}))
+    (resolution/reconcile binding (first rows) may-disclose?)))
+
 (defn profile!
   "Compile an explicit topic -> subject field declaration against the exact
    admitted Live graph. Every graph topic must have at least one unconditional
@@ -188,7 +236,7 @@
                     (reject! :conflicting-subject-field {:topic topic :field field}))
                   (model/expand-change compiled ctx (assoc change field id))))}]
      :bind-command
-     (fn [source-id {:keys [operation command-id principal]}]
+     (fn [source-id {:keys [operation command-id principal arguments]}]
        (let [entry (get operations operation)
              topics (when entry (server/operation-published-change-topics entry))]
          (with-meta
@@ -224,7 +272,13 @@
                             (reject! :conflicting-subject-field {:topic topic :field field}))
                           (assoc (select-keys change [:topic :change/kind]) :id id)))
                       changes))))
-           {::observe (fn [ctx]
+           {::binding (fn []
+                        (when-not entry
+                          (reject! :undeclared-operation-publication {:operation operation}))
+                        (resolution/require-binding
+                         {:operation operation :command-id command-id
+                          :principal principal :arguments arguments}))
+            ::observe (fn [ctx]
                         (when-not entry
                           (reject! :undeclared-operation-publication {:operation operation}))
                         (observe-intent! ctx source-id operation principal command-id))})))}))
