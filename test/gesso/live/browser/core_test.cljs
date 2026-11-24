@@ -1593,6 +1593,61 @@
         (is (nil? (core/active-request runtime root)))
         (is (empty? (:continuity (core/state runtime))))))))
 
+(deftest managed-response-header-effects-are-refused-before-htmx-processing-test
+  (doseq [[headers allowed?]
+          [["Content-Type: text/html\r\nX-Gesso-Progression: opaque" true]
+           ["" true]
+           ["HX-Trigger: update" false]
+           ["hx-trigger-after-swap: update" false]
+           ["Hx-Trigger-After-Settle: update" false]
+           ["HX-Location: /other" false]
+           ["HX-Redirect: /other" false]
+           ["HX-Refresh: true" false]
+           ["HX-Retarget: #foreign" false]
+           ["HX-Reswap: delete" false]
+           ["HX-Reselect: #foreign" false]
+           ["HX-Push: /other" false]
+           ["HX-Push-Url: /other" false]
+           ["HX-Replace-Url: /other" false]
+           ["HX-Refresh: false" false]
+           ["X-Other: HX-Trigger: update" false]
+           [nil false]
+           [:unreadable false]]]
+    (let [captures (atom 0)
+          {:keys [runtime root document-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          {unrelated :xhr} (make-xhr 200)
+          requirement (progression/requirement
+                       {:tx-id 804 :system-time "2026-08-26T08:10:04Z"})
+          load-event (fn [x] (make-event "htmx:beforeOnLoad" {:elt root :xhr x}))]
+      (aset xhr "getAllResponseHeaders"
+            (fn [] (if (= :unreadable headers) (throw (js/Error. "unavailable")) headers)))
+      (aset unrelated "getAllResponseHeaders" (constantly "HX-Redirect: /other"))
+      (core/start! runtime)
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (let [handler (:handler (installed-listener document-fixture "htmx:beforeOnLoad"))
+            other (load-event unrelated)
+            fixture (load-event xhr)]
+        (handler (:event other))
+        (is (false? @(:prevented? other)))
+        (handler (:event fixture))
+        (is (= (not allowed?) @(:prevented? fixture)) (pr-str headers))
+        (is (some? (core/active-request runtime root)))
+        (is (zero? @captures)))
+      ;; Even a subsequent swap callback cannot undo response refusal.
+      (let [swap-event (before-swap! runtime root xhr)]
+        (is (= (not allowed?) @(:prevented? swap-event)))
+        (is (= (if allowed? 1 0) @captures)))
+      (when allowed? (after-swap! runtime root xhr))
+      (after-request! runtime root xhr true)
+      (is (= (if allowed? #{} #{requirement})
+             (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+      (is (nil? (core/active-request runtime root)))
+      (core/stop! runtime))))
+
 (deftest managed-primary-target-must-be-the-exact-bound-inner-element-test
   (doseq [scenario [:normal :foreign :same-id :root :missing :replaced :duplicate :moved]]
     (let [captures (atom 0)

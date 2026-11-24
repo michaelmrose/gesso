@@ -120,6 +120,7 @@
   [["htmx:configRequest" :config-request]
    ["htmx:beforeRequest" :before-request]
    ["htmx:beforeSend" :before-send]
+   ["htmx:beforeOnLoad" :before-on-load]
    ["htmx:beforeSwap" :before-swap]
    ["htmx:afterSwap" :after-swap]
    ["htmx:afterRequest" :after-request]
@@ -486,14 +487,14 @@
   "Register one observer on an event already owned by Core's Document listener
    set.
 
-   Window-only lifecycle repair and trusted Refresh clicks are framework-owned
-   and intentionally not exposed through this generic raw-event observer seam."
+   Window-only lifecycle repair, trusted Refresh clicks and response admission
+   are framework-owned and not exposed through this raw-event observer seam."
   [runtime event-name observer-id handler]
   (let [runtime (require-core! runtime)
         event-name (require-nonblank-string!
                     "Browser core observed event name"
                     event-name)
-        supported (disj (set (map first listener-specs)) "click")]
+        supported (disj (set (map first listener-specs)) "click" "htmx:beforeOnLoad")]
     (when-not (contains? supported event-name)
       (throw
        (core-error
@@ -1411,7 +1412,8 @@
                               :request-id request-id
                               :xhr (xhr-from-event event)
                               :primary-target (primary-target root)
-                              :before-send-observed? (atom false))
+                              :before-send-observed? (atom false)
+                              :response-refused? (atom false))
                 physical
                 (physical-context runtime event root record disposition)
                 result
@@ -1442,6 +1444,36 @@
       (when-let [observed? (some-> (active-request-from-event runtime event)
                                   :record :before-send-observed?)]
         (reset! observed? true))))
+  true)
+
+(defn- passive-response-headers?
+  "Match the pinned HTMX 2.0.7 control-header inventory, including legacy
+   HX-Push. HTMX's hasHeader searches the entire raw header block, so use
+   the same conservative substring semantics, not merely parsed names.
+   Inaccessible metadata cannot establish admission."
+  [xhr]
+  (try
+    (let [headers (.getAllResponseHeaders xhr)]
+      (and (string? headers)
+           (not (re-find #"hx-(?:trigger(?:-after-swap|-after-settle)?|location|redirect|refresh|retarget|reswap|reselect|push(?:-url)?|replace-url):"
+                         (str/lower-case headers)))))
+    (catch :default _ false)))
+
+(defn on-before-on-load!
+  "Refuse ungranted response-header effects before HTMX handles them.
+   Cancellation leaves terminal request handling responsible for debt."
+  [runtime event]
+  (let [runtime (require-core! runtime)
+        xhr (xhr-from-event event)]
+    (when xhr
+      (if (.has (:retired-acquisition-xhrs runtime) xhr)
+        (prevent-event! event)
+        (when-let [{:keys [root record]} (active-request-from-event runtime event)]
+          (when (or @(:response-refused? record)
+                    (not (current-acquisition-owner? runtime root))
+                    (not (passive-response-headers? xhr)))
+            (reset! (:response-refused? record) true)
+            (prevent-event! event))))))
   true)
 
 (defn- synchronous-managed-swap?
@@ -1499,7 +1531,8 @@
             (physical-context runtime event root record disposition)]
         (try
           (cond
-            (not (current-acquisition-owner? runtime root))
+            (or @(:response-refused? record)
+                (not (current-acquisition-owner? runtime root)))
             (cancel-swap-event! event)
 
             (false? (detail-field event "shouldSwap"))
@@ -1654,6 +1687,7 @@
     :config-request #(on-config-request! runtime %)
     :before-request #(on-before-request! runtime %)
     :before-send #(on-before-send! runtime %)
+    :before-on-load #(on-before-on-load! runtime %)
     :before-swap #(on-before-swap! runtime %)
     :after-swap #(on-after-swap! runtime %)
     :after-request #(on-after-request! runtime %)
