@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v2353: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2355: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -363,20 +363,23 @@
       (finally
         (when @interrupted? (.interrupt (Thread/currentThread)))))))
 
-(defn- native-worker-module! [configuration started*]
+(defn- native-live-module! [configuration started*]
   ;; Biff 2 validates the returned system AFTER each start. Capture the
   ;; actual worker owner before that validation so a later startup failure
   ;; cannot discard its handle. This diagnostic wrapper is not the canonical
   ;; checked-application startup or its general resource journal.
-  (let [{:keys [close-admission! retire-sessions!]} configuration]
-    {:biff.core/id managed/module-id
+  (let [{:keys [close-admission! retire-sessions! worker-options]} configuration]
+    {:biff.core/id (if worker-options managed/module-id
+                       :gesso.assurance.example.physical-single-node-http/live-lifecycle)
      :biff.core/start (fn [system]
-                        (let [started (managed/start-module! system)]
-                          (reset! started* started)
-                          started))
+                        (if worker-options
+                          (let [started (managed/start-module! system)]
+                            (reset! started* started)
+                            started)
+                          system))
      :biff.core/stop (fn [system]
                        (close-admission!)
-                       (stop-native-worker! system)
+                       (when worker-options (stop-native-worker! system))
                        (retire-sessions!))}))
 
 (defn with-http-proving-application!
@@ -406,13 +409,15 @@
                                    publication-selection storage-selection nil f))
   ([slot-id handler-extension! listener-selection publication-selection storage-selection worker-configuration f]
    (when worker-configuration
-     (when-not (and (= :durable-outbox publication-selection)
+     (when-not (and (or (nil? (:worker-options worker-configuration))
+                         (= :durable-outbox publication-selection))
                     (= #{:live-system :worker-options :close-admission! :retire-sessions!}
                        (set (keys worker-configuration)))
                     (fn? (:close-admission! worker-configuration))
                     (fn? (:retire-sessions! worker-configuration)))
        (reject! :invalid-native-worker-configuration))
-     (lifecycle/validate-worker-options! (:worker-options worker-configuration)))
+     (when (some? (:worker-options worker-configuration))
+       (lifecycle/validate-worker-options! (:worker-options worker-configuration))))
    (when-not (and (fn? handler-extension!) (fn? f))
      (reject! :invalid-test-callback))
    (when-not (contains? #{:no-listener :biff-loopback :biff-jetty-http1 :biff-aleph-http1}
@@ -449,14 +454,15 @@
                                 :biff-aleph-http1
                                 (biff-aleph-module! handler listener-state))
               worker-started* (atom nil)
-              worker-module (when worker-configuration
-                              (native-worker-module! worker-configuration worker-started*))
+              live-module (when worker-configuration
+                            (native-live-module! worker-configuration worker-started*))
+              worker-selected? (some? (:worker-options worker-configuration))
               modules (cond-> [module]
                         listener-module (conj listener-module)
-                        worker-module (conj worker-module))
+                        live-module (conj live-module))
               order (mapv :biff.core/id modules)
               initial-system (cond-> (:biff-context app)
-                               worker-module
+                               worker-selected?
                                (assoc :gesso.live/system (:live-system worker-configuration)
                                       managed/source-id-key physical/outbox-source-id
                                       managed/options-key (:worker-options worker-configuration)
@@ -468,16 +474,16 @@
                        (binding [*biff-modules* modules]
                          (biff/start initial-system #'*biff-modules* order))
                        (catch Throwable startup-failure
-                         (when worker-module
-                           ;; Raw Biff has no rollback. The finite fixture
-                           ;; inventory is known here, including allocations
-                           ;; made before a post-start validation failure.
+                         ;; Raw Biff has no rollback. Seal every selected Live
+                         ;; mode, not only those with a managed worker. A plain
+                         ;; HTTP fixture also owns any listener already started.
+                         (when live-module
                            ((:close-admission! worker-configuration))
                            (if-let [started @worker-started*]
-                             ((:biff.core/stop worker-module) started)
-                             ((:retire-sessions! worker-configuration)))
-                           (when listener-module
-                             ((:biff.core/stop listener-module) initial-system)))
+                             ((:biff.core/stop live-module) started)
+                             ((:retire-sessions! worker-configuration))))
+                         (when listener-module
+                           ((:biff.core/stop listener-module) initial-system))
                          (throw startup-failure)))]
           (try
             (when-not (identical? handler (:biff.ring/handler system))
@@ -492,7 +498,8 @@
                    :physical-table physical/table
                    :module-start :one-observed-biff-start
                    :handler-in-returned-system :identical
-                   :native-worker-module (if worker-module :started-last :not-selected)
+                   :native-worker-module (if worker-selected? :started-last :not-selected)
+                   :native-live-retirement (if live-module :before-listener-stop :not-selected)
                    :handler-extension :test-only-not-checked-or-certified
                    :physical-transactions :delegated-to-v1494-once-per-post
                    :postcommit-rendering :independent-physical-readback-may-be-unknown

@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-durable-live-test
-  "v2354: Explicit atomic publication mode through the installed session handler."
+  "v2355: Explicit atomic publication mode through the installed session handler."
   (:require [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [gesso.assurance.example.physical-single-node-live :as fixture]
@@ -456,3 +456,100 @@
                   (is (= ::blocked (deref scope 100 ::blocked))))))
             (finally (deliver release-start true)))
           (is (= :ready (deref scope 15000 ::timeout))))))))
+
+(deftest unmanaged-live-modes-retire-sessions-through-native-biff-stop
+  (doseq [[mode run!] [[:direct
+                        (fn [source f]
+                          (fixture/with-biff-jetty-granted-live-proving-application!
+                           "native-direct-retirement" source f))]
+                       [:manual
+                        (fn [source f]
+                          (fixture/with-durable-granted-live-proving-application!
+                           "native-manual-retirement" source :biff-jetty-http1 f))]]]
+    (let [app* (atom nil)
+          writer* (atom nil)
+          stop-entered? (atom false)
+          cancellation* (atom nil)
+          real-stop @#'biff/stop
+          real-cancel @#'live/cancel-sse!
+          failure (ex-info "callback failure" {:mode mode})]
+      (with-redefs [biff/stop (fn [system]
+                                (when-let [app @app*]
+                                  (is (= 1 ((:outstanding-sse-count app))))
+                                  (is (= {:accepting? false :active 0}
+                                         ((:ring-admission-status app)))))
+                                (reset! stop-entered? true)
+                                (real-stop system))
+                    live/cancel-sse! (fn [started]
+                                       (let [{:keys [node loopback-base-url]} @app*]
+                                         (reset! cancellation*
+                                                 {:native-stop? @stop-entered?
+                                                  :outbox-empty? (empty? (rows node))
+                                                  :socket-status (:status (post! loopback-base-url reserve
+                                                                                 (headers @writer*)))}))
+                                       (real-cancel started))]
+        (is (identical?
+             failure
+             (try
+               (session/with-session-policy!
+                policy
+                (fn [{:keys [source issue!]}]
+                  (let [writer (issue! :actor/writer)]
+                    (reset! writer* writer)
+                    (run! source
+                          (fn [{:keys [handler http-report] :as app}]
+                            (reset! app* app)
+                            (is (= :before-listener-stop (:native-live-retirement http-report)))
+                            (is (= :not-selected (:native-worker-module http-report)))
+                            (is (= 200 (:status (handler {:request-method :get
+                                                         :uri fixture/events-uri
+                                                         :headers (headers writer)}))))
+                            (throw failure))))))
+               (catch Exception e e)))))
+      (is (= {:native-stop? true :outbox-empty? true :socket-status 503}
+             @cancellation*))
+      (let [{:keys [live-system outstanding-sse-count sse-retirement-status
+                    loopback-listener-state]} @app*]
+        (is (zero? (outstanding-sse-count)))
+        (is (= {:pending 0 :failed-attempts 0 :completed? true}
+               (sse-retirement-status)))
+        (is (nil? @loopback-listener-state))
+        (is (live/closed? live-system))))))
+
+(deftest unmanaged-live-startup-failure-rolls-back-actual-listener
+  (let [server* (atom nil)
+        handler* (atom nil)
+        writer* (atom nil)
+        jetty-var (requiring-resolve 'ring.adapter.jetty9/run-jetty)
+        real-jetty @jetty-var
+        real-start @#'biff/start
+        failure (ex-info "post-start failure without worker" {})]
+    (with-redefs-fn
+      {jetty-var (fn [& args]
+                   (let [server (apply real-jetty args)]
+                     (reset! server* server)
+                     server))
+       #'biff/start (fn [initial modules order]
+                      (let [system (real-start initial modules order)
+                            handler (:biff.ring/handler system)
+                            port (.getLocalPort (first (.getConnectors @server*)))
+                            base (str "http://127.0.0.1:" port)]
+                        (reset! handler* handler)
+                        (is (= 503 (:status (post! base reserve (headers @writer*)))))
+                        (is (empty? (rows (:biff.xtdb/node system))))
+                        (throw failure)))}
+      (fn []
+        (is (identical?
+             failure
+             (try
+               (session/with-session-policy!
+                policy
+                (fn [{:keys [source issue!]}]
+                  (reset! writer* (issue! :actor/writer))
+                  (fixture/with-biff-jetty-granted-live-proving-application!
+                   "native-direct-startup-failure" source
+                   (fn [_] (throw (ex-info "callback must not run" {}))))))
+               (catch Exception e e))))))
+    (is (.isStopped ^org.eclipse.jetty.server.Server @server*))
+    (is (= 503 (:status (@handler* {:request-method :post :uri reserve
+                                    :headers (headers @writer*)}))))))

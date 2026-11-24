@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2354: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2355: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -485,10 +485,9 @@
                  principal-source app read-uris live-handler)
                 live-handler))))
          listener-selection publication-selection storage-selection
-         (when worker-options
-           {:live-system live-system :worker-options worker-options
-            :close-admission! (:close-and-await! admission)
-            :retire-sessions! #(retire-scoped-sessions! registered-streams)})
+         {:live-system live-system :worker-options worker-options
+          :close-admission! (:close-and-await! admission)
+          :retire-sessions! #(retire-scoped-sessions! registered-streams)}
          (fn [app]
            (let [installed (:biff.ring/handler (:system app))
                  guarded @guarded*]
@@ -571,11 +570,9 @@
                   (assoc :principal-handler guarded
                          :principal-source principal-source)))
                (finally
-                 ((:close-and-await! admission))
-                 ;; Managed mode's native Biff stop owns worker retirement
-                 ;; followed by session retirement, before listener stop.
-                 (when-not worker-options
-                   (retire-scoped-sessions! registered-streams))))))))
+                 ;; Native Biff stop owns session retirement in every Live
+                 ;; mode, with optional worker retirement before it.
+                 ((:close-and-await! admission))))))))
       (finally
         ;; Startup failure fallback; ordinary callback exit has already
         ;; retired sessions while the enclosing providers were available.
