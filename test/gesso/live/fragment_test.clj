@@ -810,7 +810,7 @@
                   :swap :innerHTML
                   :attrs {:data-fragment "store-panel"}
                   :root-attrs {:data-root "root"
-                               :hx-ext "path-deps"}
+                               :hx-ext "sse"}
                   :target-attrs {:data-target "target"
                                  :hx-include "#store-board-state"
                                  :hx-indicator "#spinner"}
@@ -824,7 +824,7 @@
     (is (= {:data-fragment "store-panel"}
            (:attrs runtime)))
     (is (= {:data-root "root"
-            :hx-ext "path-deps"}
+            :hx-ext "sse"}
            (:root-attrs runtime)))
     (is (= {:data-target "target"
             :hx-include "#store-board-state"
@@ -836,6 +836,18 @@
     (is (not (contains? runtime :trigger)))
     (is (not (contains? runtime :jitter-ms)))
     (is (not (contains? runtime :jitter-delay-ms)))))
+
+(deftest model-runtime-fragment-rejects-unsupported-acquisition-config-test
+  (let [compiled (compiled-live-model)
+        opts {:fragment-url "/stores/store-1/fragment"
+              :stream-url "/stores/store-1/stream"}]
+    (doseq [[option value kind] [[:swap :delete :unsupported-swap]
+                                 [:root-attrs {:hx-ext "path-deps"} :unsupported-extension]]]
+      (is (= kind (try
+                    (fragment/fragment->runtime-fragment compiled :store-panel "store-1"
+                                                         (assoc opts option value))
+                    nil
+                    (catch clojure.lang.ExceptionInfo e (:error/kind (ex-data e)))))))))
 
 (deftest fragment-runtime-fragment-rejects-unmanaged-refresh-options-test
   (let [compiled (compiled-live-model)
@@ -871,7 +883,7 @@
                 ;; The stable root owns request-affecting attrs that do not
                 ;; create an alternate request path.
                 :root-attrs {:data-root "root"
-                             :hx-ext "path-deps"
+                             :hx-ext "sse"
                              :hx-include "#store-board-state"
                              :hx-indicator "#spinner"}
 
@@ -896,7 +908,7 @@
     (is (= "/stores/store-1/stream"
            (:sse-connect root-attrs)))
     (is (str/includes? (:hx-ext root-attrs) "sse"))
-    (is (str/includes? (:hx-ext root-attrs) "path-deps"))
+    (is (= "sse" (:hx-ext root-attrs)))
     (is (= "root" (:data-root root-attrs)))
 
     ;; The stable root is the only HTMX request owner, and the adapter-authorized

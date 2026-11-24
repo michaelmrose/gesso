@@ -26,6 +26,7 @@
   (:require
    [clojure.edn :as edn]
    [clojure.string :as str]
+   [gesso.live.acquisition :as acquisition]
    [gesso.live.continuity :as continuity]
    [gesso.live.htmx :as htmx]
    [gesso.live.optimistic.capability :as optimistic.capability]
@@ -755,6 +756,43 @@
                  {:acquisition-policy policy})))
     policy))
 
+(defn- acquisition-config-error!
+  [kind fragment path value]
+  (throw (ex-info "Unsupported managed fragment acquisition configuration."
+                  {:error/type ::invalid-acquisition-config
+                   :error/kind kind :fragment-id (:id fragment)
+                   :option-path path :value value})))
+
+(defn- validate-acquisition-config!
+  "Reject the statically visible subset of the browser acquisition contract.
+   Root attributes are checked conservatively even when another map would
+   override them. Ancestors, global HTMX defaults and response data still
+   require physical admission. Do not impose GET restrictions on POST helpers."
+  [fragment]
+  (let [swap (:swap fragment)
+        spec (if (or (keyword? swap) (symbol? swap)) (name swap) swap)]
+    (when-not (acquisition/replacement-spec? spec)
+      (acquisition-config-error! :unsupported-swap fragment [:swap] swap))
+    (doseq [slot [:attrs :root-attrs :target-attrs]
+            [k v] (get fragment slot)
+            :when (some? v)
+            :let [attribute (str/lower-case (name k))
+                  root? (not= slot :target-attrs)
+                  path [slot k]]]
+      (cond
+        (#{"hx-ext" "data-hx-ext"} attribute)
+        (when-not (acquisition/extension-declaration?
+                   (if (and root? (= k :hx-ext)) (htmx/hx-ext-value v) v))
+          (acquisition-config-error! :unsupported-extension fragment path v))
+
+        (and root? (#{"hx-select" "data-hx-select" "hx-select-oob" "data-hx-select-oob"} attribute))
+        (acquisition-config-error! :unsupported-selection fragment path v)
+
+        (and root? (#{"hx-push-url" "data-hx-push-url" "hx-replace-url" "data-hx-replace-url"} attribute)
+             (not (contains? #{false "false"} v)))
+        (acquisition-config-error! :unsupported-history fragment path v)))
+    fragment))
+
 (defn ->fragment
   "Create an adapter-managed live fragment descriptor.
 
@@ -779,6 +817,10 @@
      :id
      :src
      either :stream-url or :subscription / :subscription-token
+
+   Managed acquisition admits explicit innerHTML/outerHTML replacement with
+   restricted timing and no-scroll modifiers. Unsupported extensions, root
+   selection and history declarations fail during descriptor construction.
 
    Optional:
      :stream-base-url
@@ -834,8 +876,9 @@
       (throw
        (ex "gesso.live UI fragment requires :stream-url or :subscription."
            {:fragment fragment})))
-    (merge
-     {:gesso.live.ui/type :gesso.live.ui/fragment
+    (validate-acquisition-config!
+     (merge
+      {:gesso.live.ui/type :gesso.live.ui/fragment
       :id id'
       :src src'
       :stream-url stream-url'
@@ -852,7 +895,7 @@
        :client-continuity (:client-continuity fragment')
        :attrs (:attrs fragment')
        :root-attrs (:root-attrs fragment')
-       :target-attrs (:target-attrs fragment')}))))
+       :target-attrs (:target-attrs fragment')})))))
 
 (defn fragment?
   [x]
@@ -862,7 +905,7 @@
 (defn ensure-fragment
   [fragment]
   (if (fragment? fragment)
-    fragment
+    (validate-acquisition-config! fragment)
     (->fragment fragment)))
 
 ;; -----------------------------------------------------------------------------
@@ -883,8 +926,8 @@
    listener rendered by fragment-panel and normalized through
    gesso.live.browser.adapter first.
 
-   Caller :attrs / :root-attrs remain useful for ordinary decoration and extra
-   HTMX extensions, but they cannot replace the managed SSE connection, logical
+   Caller :attrs / :root-attrs remain useful for ordinary decoration and
+   permitted SSE extension declarations, but cannot replace the managed connection, logical
    fragment identity, or hx-get/hx-trigger/hx-target/hx-swap ownership."
   [fragment]
   (let [{:keys [stream-url
@@ -898,8 +941,8 @@
                 root-attrs]} (ensure-fragment fragment)]
     (htmx/merge-attrs
      ;; Compose raw caller attrs first, then restore framework-owned SSE
-     ;; connection identity. merge-sse-attrs preserves any additional hx-ext
-     ;; values while guaranteeing the sse extension remains installed.
+     ;; connection identity. The descriptor has already checked the supported
+     ;; extension declarations.
      (htmx/merge-sse-attrs
       (dissoc attrs "data-gesso-live-acquisition-policy")
       (dissoc root-attrs "data-gesso-live-acquisition-policy")
@@ -917,7 +960,7 @@
      (htmx/managed-fragment-refresh-attrs
       {:src src
        :target id
-       :swap swap}))))
+       :swap (if (or (keyword? swap) (symbol? swap)) (name swap) swap)}))))
 
 (defn fragment-invalidation-listener-attrs
   "Build attrs for the stable, non-swapping SSE invalidation listener.

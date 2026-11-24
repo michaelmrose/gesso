@@ -646,18 +646,39 @@
                    (ex-data (thrown #(ui/->fragment
                                       (assoc fragment-spec :acquisition-policy policy)))))))))
 
-(deftest fragment-root-composes-extra-hx-extension-test
-  (let [attrs
-        (ui/fragment-root-attrs
-         (assoc
-          fragment-spec
-          :attrs
-          {:hx-ext
-           "path-deps"}))]
-
-    (is (= "sse, path-deps"
-           (:hx-ext
-            attrs)))))
+(deftest fragment-descriptor-validates-static-acquisition-contract-test
+  (doseq [spec ["outerHTML" "innerHTML settle:20ms" :innerHTML
+                "outerHTML swap:0ms transition:false focus-scroll:false"]]
+    (let [descriptor (ui/->fragment (assoc fragment-spec :swap spec
+                                            :attrs {:hx-ext [:sse :sse]
+                                                    :hx-push-url false}
+                                            :target-attrs {:hx-ext "sse"}))]
+      (is (= spec (:swap descriptor)))
+      (is (= (if (keyword? spec) (name spec) spec)
+             (:hx-swap (ui/fragment-root-attrs descriptor))))
+      (is (= "sse" (:hx-ext (ui/fragment-root-attrs descriptor))))))
+  (doseq [[kind path value]
+          [[:unsupported-swap [:swap] "none"]
+           [:unsupported-swap [:swap] "outerHTML swap:1s"]
+           [:unsupported-swap [:swap] "innerHTML transition:true"]
+           [:unsupported-swap [:swap] "outerHTML show:window:top"]
+           [:unsupported-swap [:swap] "outerHTML focus-scroll:true"]
+           [:unsupported-swap [:swap] :delete]
+           [:unsupported-extension [:attrs :hx-ext] "path-deps"]
+           [:unsupported-extension [:root-attrs :hx-ext] [:sse :debug]]
+           [:unsupported-extension [:target-attrs "data-hx-ext"] "ignore:debug"]
+           [:unsupported-extension [:root-attrs "HX-EXT"] "debug"]
+           [:unsupported-selection [:attrs :hx-select] "#other"]
+           [:unsupported-selection [:root-attrs "data-hx-select-oob"] ""]
+           [:unsupported-history [:root-attrs :hx-push-url] true]
+           [:unsupported-history [:attrs "DATA-HX-REPLACE-URL"] "/other"]]]
+    (let [input (assoc-in fragment-spec path value)
+          expected {:error/type :gesso.live.ui/invalid-acquisition-config
+                    :error/kind kind :fragment-id "request-list"
+                    :option-path path :value value}]
+      (is (= expected (thrown-data #(ui/->fragment input))))
+      (is (= expected (thrown-data #(ui/fragment-panel
+                                      (assoc-in (ui/->fragment fragment-spec) path value))))))))
 
 (deftest fragment-custom-event-is-owned-by-invalidation-listener-test
   (let [fragment

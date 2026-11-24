@@ -56,6 +56,7 @@
   (:require
    [cljs.reader :as reader]
    [clojure.string :as str]
+   [gesso.live.acquisition :as acquisition]
    [gesso.live.browser.continuity :as continuity]
    [gesso.live.browser.shell :as shell]
    [gesso.live.progression :as progression]
@@ -626,9 +627,7 @@
    registered implementation: the host must retain the trusted SSE asset."
   [element]
   (every? (fn [attribute]
-            (every? #{"" "sse" "ignore:sse"}
-                    (str/split (str/replace (or (element-attr element attribute) "")
-                                           " " "") #",")))
+            (acquisition/extension-declaration? (element-attr element attribute)))
           ["hx-ext" "data-hx-ext"]))
 
 (defn- admitted-extension-subtree?
@@ -1539,18 +1538,6 @@
       (or (not-empty (element-attr root "hx-swap"))
           (element-attr root "data-hx-swap")))))
 
-(defn- passive-swap-modifiers?
-  "Only timing, title suppression and explicit no-scroll focus are admitted.
-   HTMX scroll/show modifiers can select arbitrary document nodes; unknown
-   modifiers are outside the pinned replacement contract."
-  [tokens config]
-  (and (every? #(or (contains? #{"swap:0" "swap:0ms" "swap:0s" "swap:0m"
-                                 "transition:false" "ignoreTitle:true" "focus-scroll:false"} %)
-                    (re-matches #"settle:[0-9]+(?:\.[0-9]+)?(?:ms|s|m)?" %))
-               (rest tokens))
-       (or (some #{"focus-scroll:false"} (rest tokens))
-           (not (some-> config (aget "defaultFocusScroll"))))))
-
 (defn- synchronous-managed-swap?
   "The managed fragment lifecycle currently requires installation before
    HTMX afterRequest. HTMX 2.0.7 may schedule a swap timer or View Transition
@@ -1570,8 +1557,9 @@
       (let [tokens (str/split (str/trim spec) #"\s+")
             delay (last (filter #(str/starts-with? % "swap:") tokens))
             transition (last (filter #(str/starts-with? % "transition:") tokens))]
-        (and (contains? #{"innerHTML" "outerHTML"} (first tokens))
-             (passive-swap-modifiers? tokens config)
+        (and (acquisition/replacement-tokens? tokens)
+             (or (some #{"focus-scroll:false"} (rest tokens))
+                 (not (some-> config (aget "defaultFocusScroll"))))
              (if delay
                (contains? #{"swap:0" "swap:0ms" "swap:0s" "swap:0m"} delay)
                (zero? (js/Number (or (some-> config (aget "defaultSwapDelay")) 0))))
