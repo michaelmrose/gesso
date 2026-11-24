@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2330: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2331: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -57,7 +57,7 @@
     :actual-network-consumption-of-biff-adopted-handler-not-established
     :http-listener-and-client-connection-not-observed
     :host-principal-authenticity-and-csrf-not-established
-    :read-scope-not-independent-of-mutation-principal-grants
+    :fine-grained-read-policy-and-subject-disclosure-not-established
     :existing-sse-stream-revocation-not-established
     :postcommit-publication-not-atomic-with-xtdb
     :authoritative-progression-basis-not-attached-to-invalidation
@@ -297,9 +297,10 @@
                                              live-system registered-streams assets)
                  ;; Original physical read route comes from the original
                  ;; HTTP owner; Live GET routes come from this Live owner.
-                 ;; In the granted fixture, NO panel, fragment, source view
-                 ;; or SSE subscription may be reached anonymously. Browser
-                 ;; JS assets remain public but cannot read protected data.
+                 ;; In the granted fixture, original-source declared read
+                 ;; principals, NOT mutation grants, govern the selected
+                 ;; panel/fragment/source-view/SSE acquisitions. Public JS
+                 ;; assets do not reveal the protected slot state.
                  physical-views (into #{}
                                       (for [[uri operation] (:http-routes app)
                                             :when (= operation :read-only)] uri))
@@ -348,7 +349,9 @@
                                   :live-read-authorization
                                   :request-time-check-of-selected-granted-principal
                                   :live-read-policy
-                                  :all-principals-named-in-mutation-grants
+                                  :independent-declared-read-principals
+                                  :live-declared-read-principal-count
+                                  (count (:read-principals principal-source))
                                   :ongoing-sse-authorization-and-revocation
                                   :not-established))
                          :live-fragment (live-fragment))
@@ -377,7 +380,9 @@
    The supplied :principal-handler is the installed Live handler's INNER
    mutation delegate, not an alternative serving handler. A separate outer
    GET guard admits the physical view, Live panel/fragment and SSE stream
-   only to principals present in :grants. Source checking and grants do not
+   only to principals in the independent :read-principals declaration.
+   Read permission does NOT follow from mutation permission, and a principal
+   can hold read-only permission. Source checking and grants do not
    authenticate the trusted callback, revoke existing SSE streams, provide
    general read-right declarations, or certify production. Test-only fixture."
   ([principal-source f]

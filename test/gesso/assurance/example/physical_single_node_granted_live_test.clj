@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-granted-live-test
-  "v2330: One actual Biff-installed diagnostic handler combines source-derived
+  "v2331: One actual Biff-installed diagnostic handler combines source-derived
    principal operation grants, authoritative XTDB writes and advisory Live.
    This fixture now also checks granted-principal membership at initial GET
    view/fragment/SSE acquisition, but does not authenticate its callback,
@@ -23,6 +23,7 @@
    :policy-id :proving/granted-live
    :grants {:actor/reserver #{:slot/reserve}
             :actor/releaser #{:slot/release}}
+   :read-principals #{:actor/reserver :actor/releaser}
    :acquire-principal! acquire!})
 
 (defn- authenticated [who]
@@ -61,8 +62,9 @@
                 (:live-subscription-authorization live-report)))
          (is (= :request-time-check-of-selected-granted-principal
                 (:live-read-authorization live-report)))
-         (is (= :all-principals-named-in-mutation-grants
+         (is (= :independent-declared-read-principals
                 (:live-read-policy live-report)))
+         (is (= 2 (:live-declared-read-principal-count live-report)))
          (is (= :not-established
                 (:ongoing-sse-authorization-and-revocation live-report)))
          (is (= :none (:authority live-report)))
@@ -105,8 +107,8 @@
            (is (= 2 (:revision (read!)))))))))))
 
 (deftest selected-read-and-sse-routes-reject-unauthorized-before-source-access
-  ;; In the combined fixture the selected test policy only authorizes
-  ;; principals present in the original mutation grants. Denied SSE requests
+  ;; In the combined fixture the selected read policy is independently
+  ;; declared; matching mutation grants here are only this test's choice. Denied SSE requests
   ;; must not allocate Live streams; denied reads must not reach XTDB.
   (let [who (atom :anonymous)
         acquisitions (atom 0)]
@@ -148,6 +150,76 @@
            (is (= 12 @acquisitions))
            (is (= :not-established
                   (:ongoing-sse-authorization-and-revocation live-report)))))))))
+
+(deftest independent-read-grants-admit-read-only-and-deny-writers-without-read-access
+  ;; This is the desired operational distinction: a principal may read but
+  ;; cannot mutate, and a principal may mutate but cannot read/subscribe.
+  ;; Never equate the declarations simply because older tests used the same
+  ;; two principal names for both permission classes.
+  (let [who (atom :actor/reader)
+        source (assoc (policy (fn [_] (authenticated @who)))
+                      :read-principals #{:actor/reader :actor/releaser})]
+    (fixture/with-granted-live-proving-application!
+     source
+     (fn [{:keys [handler system read! live-report]}]
+       (let [installed (:biff.ring/handler system)
+             emit-attempts (atom 0)
+             orig-start @#'live/start-sse!
+             stream-starts (atom 0)]
+         (is (identical? handler installed))
+         (is (= :independent-declared-read-principals
+                (:live-read-policy live-report)))
+         (is (= 2 (:live-declared-read-principal-count live-report)))
+         (with-redefs [live/emit! (fn [& _]
+                                    (swap! emit-attempts inc)
+                                    {:status :emitted})
+                       live/start-sse! (fn [& args]
+                                         (swap! stream-starts inc)
+                                         (apply orig-start args))]
+           ;; Reader can read protected data and open Live; cannot write.
+           (is (= 200 (:status (installed (request :get panel)))))
+           (is (= 200 (:status (installed (request :get fixture/events-uri)))))
+           (is (= 1 @stream-starts))
+           (is (= 403 (:status (installed (request :post reserve)))))
+           (is (= 0 @emit-attempts))
+           (is (= 0 (:revision (read!))))
+           ;; Writer has reserve grant but no read grant, so cannot read.
+           (reset! who :actor/reserver)
+           (is (= 403 (:status (installed (request :get panel)))))
+           (is (= 403 (:status (installed (request :get fixture/events-uri)))))
+           (is (= 1 @stream-starts) "Denied SSE may not allocate a stream")
+           (let [result (installed (request :post reserve))]
+             (is (= 200 (:status result)))
+             (is (= "write-only"
+                    (get-in result [:headers "x-gesso-proving-response-visibility"])))
+             (is (= "no-store" (get-in result [:headers "cache-control"])))
+             (is (nil? (get-in result [:headers "x-gesso-proving-readback"])))
+             (is (nil? (get-in result [:headers "HX-Refresh"])))
+             (is (not (re-find #"data-slot-status|data-slot-revision|reserved"
+                               (:body result)))
+                 "A write grant cannot disclose the restricted resource view"))
+           (is (= 1 @emit-attempts))
+           (is (= 1 (:revision (read!))))
+           ;; Releaser has both permission types and can observe status.
+           (reset! who :actor/releaser)
+           (is (= 200 (:status (installed (request :get panel)))))
+           (is (= 200 (:status (installed (request :post release)))))
+           (is (= 2 @emit-attempts))
+           (is (= 2 (:revision (read!))))))))))
+
+(deftest invalid-read-policy-rejects-before-physical-application-start
+  (let [source (assoc (policy (constantly {:status :anonymous}))
+                      :read-principals #{:unqualified})
+        starts (atom 0)
+        original @#'physical/with-proving-application!]
+    (with-redefs [physical/with-proving-application!
+                  (fn [& args]
+                    (swap! starts inc)
+                    (apply original args))]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (fixture/with-granted-live-proving-application!
+                    source (fn [_] (is false "bad read source admitted")))))
+      (is (zero? @starts)))))
 
 (deftest malformed-read-acquisition-rejects-before-sse-allocation
   (fixture/with-granted-live-proving-application!
@@ -214,6 +286,13 @@
                                   response (handler (request method uri))
                                   bytes (.getBytes ^String (str (:body response))
                                                    StandardCharsets/UTF_8)]
+                              ;; A transport test must preserve handler headers
+                              ;; or concealment/recovery claims cannot actually
+                              ;; be observed across the HTTP socket boundary.
+                              (doseq [[header value] (:headers response)
+                                      :when (some? value)]
+                                (.add (.getResponseHeaders exchange)
+                                      (str header) (str value)))
                               (.sendResponseHeaders exchange
                                                     (int (:status response))
                                                     (long (alength bytes)))
@@ -233,6 +312,54 @@
       (.setReadTimeout connection 3000)
       (.getResponseCode connection)
       (finally (.disconnect connection)))))
+
+(defn- socket-response [base method uri]
+  ;; Verify the actual HTTP serialization of the write-only response. The
+  ;; selected handler is Biff-adopted; this transport is a JDK test bridge.
+  (let [^HttpURLConnection connection
+        (.openConnection (URL. (str base uri)))]
+    (try
+      (.setRequestMethod connection (.toUpperCase (name method)))
+      (.setConnectTimeout connection 3000)
+      (.setReadTimeout connection 3000)
+      (let [status (.getResponseCode connection)
+            stream (if (< status 400)
+                     (.getInputStream connection)
+                     (.getErrorStream connection))]
+        {:status status
+         :visibility (.getHeaderField connection
+                                      "x-gesso-proving-response-visibility")
+         :readback (.getHeaderField connection
+                                    "x-gesso-proving-readback")
+         :body (if stream (with-open [input stream] (slurp input)) "")})
+      (finally (.disconnect connection)))))
+
+(deftest real-socket-distinguishes-read-only-and-write-only-principals
+  (let [who (atom :actor/reader)
+        src (assoc (policy (fn [_] (authenticated @who)))
+                   :read-principals #{:actor/reader :actor/releaser})]
+    (fixture/with-granted-live-proving-application!
+     src
+     (fn [{:keys [system read!]}]
+       (with-redefs [live/emit! (fn [_ _] {:status :emitted})]
+         (with-socket! (:biff.ring/handler system)
+           (fn [base]
+             (is (= 200 (socket-status base :get panel)))
+             (is (= 403 (socket-status base :post reserve)))
+             (reset! who :actor/reserver)
+             (is (= 403 (socket-status base :get panel)))
+             (let [response (socket-response base :post reserve)]
+               (is (= 200 (:status response)))
+               (is (= "write-only" (:visibility response)))
+               (is (nil? (:readback response)))
+               (is (not (re-find #"data-slot-status|data-slot-revision|reserved"
+                                 (:body response)))
+                   "Physical HTTP must not disclose a write-only resource view"))
+             (is (= 1 (:revision (read!))))
+             (reset! who :actor/releaser)
+             (is (= 200 (socket-status base :get panel)))
+             (is (= 200 (socket-status base :post release)))
+             (is (= 2 (:revision (read!)))))))))))
 
 (deftest real-socket-denies-selected-read-routes-before-sse-allocation
   ;; Exercise the actual Biff-selected handler over a real loopback socket.

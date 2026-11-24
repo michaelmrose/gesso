@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-principal
-  "v2330: Original-Biff-installed source-checked principal admission for v1495
+  "v2331: Original-Biff-installed source-checked principal admission for v1495
    single-node Biff/Ring -> XTDB proving fixture.
 
    An application-supplied declaration names the original reservation catalog,
@@ -20,11 +20,12 @@
    startup in this fixture, rather than a late wrapper; however it is NOT
    a verified network listener, and CSRF protection is NOT provided. Never expose this fixture publicly.
    In the combined Live proving fixture, a second read-boundary wrapper
-   conservatively permits view/fragment/SSE access only to principals present
-   in the selected mutation-grant source. This is an explicit TEST-ONLY
-   visibility choice, NOT a general operation-to-read policy; the host callback
-   is still trusted, and continuous SSE authorization after connection or
-   principal revocation is NOT established. No proof certificate, admission,
+   uses a separately declared closed :read-principals set for the selected
+   physical view, Live panel, fragment and SSE acquisition. Mutation grants
+   never imply read rights, and read-only principals need not hold mutation
+   rights. This remains a narrow TEST-ONLY read policy, not role-dependent
+   fine-grained disclosure or trusted principal authentication. Continuous
+   SSE authorization after connection/revocation is NOT established. No proof certificate, admission,
    authorization theorem, or physical refinement is issued."
   (:require [clojure.set :as set]
             [gesso.assurance.example.physical-single-node-http :as http]
@@ -38,7 +39,7 @@
 (def ^:private original-http-start http/with-http-proving-application!)
 (def ^:private original-catalog pilot/reservation-catalog)
 (def ^:private source-keys
-  #{:catalog-id :policy-id :grants :acquire-principal!})
+  #{:catalog-id :policy-id :grants :read-principals :acquire-principal!})
 (def ^:private maximum-principals 64)
 (def ^:private open-obligations
   #{:host-principal-acquisition-authenticity-not-established
@@ -74,7 +75,7 @@
     (reject! :substituted-source-or-http-constructor))
   (when-not (closed-map? source source-keys)
     (reject! :invalid-policy-source-shape))
-  (let [{:keys [catalog-id policy-id grants acquire-principal!]} source
+  (let [{:keys [catalog-id policy-id grants read-principals acquire-principal!]} source
         catalog (original-catalog)
         operations (:declared-operation-ids catalog)]
     (when-not (and (= catalog-id (:id catalog))
@@ -89,7 +90,15 @@
                                  (set/subset? % operations)) (vals grants)))
       (reject! :policy-not-bound-to-catalog-and-http-operations))
     (when-not (= operations (reduce set/union #{} (vals grants)))
-      (reject! :policy-not-bound-to-catalog-and-http-operations)))
+      (reject! :policy-not-bound-to-catalog-and-http-operations))
+    ;; Read rights are independent of mutation rights: a read-only principal
+    ;; may be named here, and a mutating principal may be absent. Never
+    ;; infer disclosure permission from the existence of a write grant.
+    (when-not (and (set? read-principals)
+                   (nil? (meta read-principals))
+                   (<= 1 (count read-principals) maximum-principals)
+                   (every? #(and (keyword? %) (namespace %)) read-principals))
+      (reject! :invalid-independent-read-principals)))
   source)
 
 (defn- admitted-policy! [source app]
@@ -155,18 +164,41 @@
   [source]
   (checked-static-source! source))
 
+(defn- conceal-write-only-result
+  "A write grant does not grant response-view disclosure. Preserve the
+   physical operation's definitive successful HTTP status, but remove the
+   rendered resource state, readback metadata and view-refresh directive
+   for a caller who has no independent read grant. An error still follows
+   the underlying typed rejection path; this is not a proof of generalized
+   HTTP response noninterference or trusted identity acquisition."
+  [response]
+  (if (= 200 (:status response))
+    (-> response
+        (assoc :body "Operation accepted; resource view is not authorized.")
+        (update :headers
+                (fn [headers]
+                  (-> headers
+                      (dissoc "HX-Refresh" "x-gesso-proving-readback")
+                      (assoc "content-type" "text/plain; charset=utf-8"
+                             "cache-control" "no-store"
+                             "x-gesso-proving-response-visibility" "write-only")))))
+    response))
+
 (defn guarded-test-handler!
   "Wrap the original operation handler with this source's selected request
    grants BEFORE original Biff installation. Use the owner-derived :http-routes
    inventory, not caller-maintained route strings. This only enforces grants
-   for known POST operations that reach this wrapper. It does not certify
-   the host's identity callback, SSE disclosure, CSRF or any alternate writer."
+   for known POST operations that reach this wrapper. Successful POST
+   responses for write-only principals do not disclose the rendered resource
+   state or instruct the browser to fetch a resource it cannot read. It does
+   not certify the host's identity callback, CSRF or any alternate writer."
   [source app original-handler]
   (when-not (fn? original-handler)
     (reject! :missing-original-physical-handler))
   (let [operation-routes (admitted-policy! source app)
         acquire! (:acquire-principal! source)
-        grants (:grants source)]
+        grants (:grants source)
+        readers (:read-principals source)]
     (fn [request]
       (if (and (map? request)
                (= :post (:request-method request))
@@ -179,13 +211,16 @@
             (nil? principal) (denied-response 401)
             (not (contains? (get grants principal #{}) operation))
             (denied-response 403)
-            :else (original-handler request)))
+            :else (let [response (original-handler request)]
+                    (if (contains? readers principal)
+                      response
+                      (conceal-write-only-result response)))))
         (original-handler request)))))
 
 (defn guarded-test-read-handler!
   "Guard a closed, selected set of GET routes in the combined Live fixture.
-   A principal listed in the verified mutation-grant source may READ the
-   diagnostic slot. Anonymous and unknown principals are denied BEFORE any
+   A principal in the explicitly declared :read-principals may READ the
+   diagnostic slot, independently of mutation operation grants. Anonymous and unknown principals are denied BEFORE any
    handler read or SSE stream allocation. The original HTTP owner supplies
    its read-only route; the Live owner supplies its panel/fragment/SSE routes.
    This is a narrow test policy: it cannot infer fine-grained read rights,
@@ -200,7 +235,7 @@
     (reject! :invalid-selected-read-boundary))
   (admitted-policy! source app)
   (let [acquire! (:acquire-principal! source)
-        readers (set (keys (:grants source)))]
+        readers (:read-principals source)]
     (fn [request]
       (if (and (map? request)
                (= :get (:request-method request))
@@ -222,6 +257,7 @@
    `source` is exactly {:catalog-id :slot/reservation-lifecycle
                         :policy-id <namespaced keyword>
                         :grants {<namespaced principal-id> #{operation-ids}}
+                        :read-principals #{<namespaced principal-id> ...}
                         :acquire-principal! (fn [ring-request]
                           {:status :authenticated :principal-id <id>}
                           ;; or {:status :anonymous}
@@ -271,6 +307,8 @@
                       :declared-operation-count (count operation-routes)
                       :declared-principal-count (count (:grants source))
                       :source-grant-coverage :checked-against-catalog-and-routes
+                      :read-principal-declaration :checked-but-not-enforced-here
+                      :write-only-success-response :rendered-state-concealed
                       :request-time-grant-enforcement :before-delegated-handler
                       :host-acquisition-callback :trusted-not-authenticated
                       :callback-invocations :one-per-known-mutating-request

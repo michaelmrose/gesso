@@ -39,6 +39,7 @@
    {:catalog-id :slot/reservation-lifecycle
     :policy-id :proving/limited-principal-grants
     :grants grants
+    :read-principals #{:actor/reserver :actor/releaser}
     :acquire-principal! acquire!}))
 
 (defn- authenticated [id]
@@ -70,6 +71,8 @@
   (is (= 2 (:declared-operation-count report)))
   (is (= 2 (:declared-principal-count report)))
   (is (= :checked-against-catalog-and-routes (:source-grant-coverage report)))
+  (is (= :checked-but-not-enforced-here (:read-principal-declaration report)))
+  (is (= :rendered-state-concealed (:write-only-success-response report)))
   (is (= :before-delegated-handler (:request-time-grant-enforcement report)))
   (is (= :one-per-known-mutating-request (:callback-invocations report)))
   (is (= :at-most-once (:handler-delegation report)))
@@ -456,6 +459,21 @@
                         #(subject/with-principal-proving-application!
                           candidate identity))))))
     (is (zero? @starts))))
+
+(deftest malformed-independent-read-principals-reject-before-xtdb-startup
+  (let [base (policy (constantly {:status :anonymous}))
+        invalid [nil #{} [] {:actor/read-only true} :actor/read-only
+                 #{:unqualified} #{"actor/reserver"} #{nil}
+                 (with-meta #{:actor/reserver} {:certified true})
+                 (set (map #(keyword "actor" (str "reader" %))
+                           (range 65)))]]
+    (doseq [invalid-readers invalid]
+      (is (= :invalid-independent-read-principals
+             (reject-reason
+              #(subject/with-principal-proving-application!
+                (assoc base :read-principals invalid-readers)
+                (fn [_] (is false "invalid read-policy callback")))))
+          (str "Invalid readers: " (pr-str invalid-readers))))))
 
 (deftest malformed-grants-reject-before-xtdb-startup
   (let [f (constantly {:status :anonymous})
