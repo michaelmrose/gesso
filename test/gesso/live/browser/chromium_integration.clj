@@ -4219,6 +4219,123 @@
         (is (empty? (fixture/pending-request-ids server)))
         (is (true? (chromium/assert-clean! context)))))))
 
+(deftest managed-response-refusals-preserve-physical-footprint-and-debt-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (let [a (progression/requirement {:tx-id 1601 :system-time "2026-08-29T04:00:01Z"})
+            b (progression/requirement {:tx-id 1602 :system-time "2026-08-29T04:00:02Z"})
+            canonical (fn [content]
+                        (str "<div id='fixture-fragment'>" content "</div>"))
+            cases [{:label :response-header
+                    :response (fixture/response 200 (assoc html-headers "HX-Trigger" "fixture-forbidden")
+                                                (canonical "forbidden"))}
+                   {:label :wrong-target
+                    :response (html-response "<div id='other'>forbidden</div>")}
+                   {:label :extra-sibling
+                    :response (html-response (str (canonical "forbidden") "<p>extra</p>"))}
+                   {:label :title
+                    :response (html-response (canonical "<title>forbidden</title>"))}
+                   {:label :preservation
+                    :response (html-response (canonical "<span id='fixture-foreign' hx-preserve></span>"))}
+                   {:label :extension
+                    :response (html-response (canonical "<span hx-ext='debug'>forbidden</span>"))}
+                   {:label :sse
+                    :response (html-response (canonical "<span sse-swap='live-update'>forbidden</span>"))}
+                   {:label :request-selection
+                    :attribute ["hx-select-oob" "#fixture-foreign"]
+                    :response (html-response (canonical "<span id='fixture-foreign'>forbidden</span>"))}
+                   {:label :swap-mode
+                    :attribute ["hx-swap" "delete"]
+                    :response (html-response (canonical "forbidden"))}]
+            request! (fn [] (fixture/await-pending! server #(= fragment-path (:path %)) 5000))
+            carried (fn [request]
+                      (some-> (request-header request progression.http/request-header-name)
+                              progression.http/decode-request-progression))
+            click! (fn [] (.click (.locator page "button[data-gesso-live-refresh='fixture-fragment']")))
+            inspect! (fn []
+                       (chromium/evaluate
+                        page
+                        "() => {
+                           const f = window.__gessoFixture;
+                           return document.getElementById('fixture-fragment') === f.originalTarget &&
+                             f.originalTarget.textContent === 'initial' &&
+                             document.getElementById('fixture-foreign') === f.originalForeign &&
+                             f.originalForeign.parentElement === document.body &&
+                             f.originalForeign.textContent === 'outside' &&
+                             document.title === f.originalTitle && location.href === f.originalUrl &&
+                             f.forbiddenEvents === 0 && f.continuityCaptured === 0 &&
+                             f.continuityRestored === 0;
+                         }"))]
+        (script-static-routes! server 1 (page-html server {:client-continuity true
+                                                          :acquisition-policy :explicit-refresh}))
+        (fixture/script! server :get fragment-path
+                         (conj (mapv #(fixture/hold (:response %)) cases)
+                               (fixture/hold (fragment-response "accepted"))))
+        (chromium/navigate! page (fixture/url server page-path))
+        (chromium/wait-for-js! page "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted && window.__gessoFixture.sseOpens >= 1")
+        (fixture/await-sse-client! server client-id 5000)
+        (chromium/evaluate
+         page
+         "() => {
+            const f = window.__gessoFixture;
+            f.originalTarget = document.getElementById('fixture-fragment');
+            f.originalForeign = document.createElement('span');
+            f.originalForeign.id = 'fixture-foreign';
+            f.originalForeign.textContent = 'outside';
+            document.body.appendChild(f.originalForeign);
+            f.originalTitle = document.title;
+            f.originalUrl = location.href;
+            f.forbiddenEvents = 0;
+            document.addEventListener('fixture-forbidden', () => f.forbiddenEvents++);
+          }")
+        (is (= 1 (emit-progression! server a)))
+        (chromium/wait-for-js! page "() => window.__gessoFixture.sseMessages === 1")
+        (doseq [[i {:keys [label attribute]}] (map-indexed vector cases)]
+          (testing (name label)
+            (click!)
+            (let [request (request!)]
+              (is (= (if (zero? i) a (progression/compose a b)) (carried request)))
+              (when (zero? i)
+                (is (= 1 (emit-progression! server b)))
+                (chromium/wait-for-js! page "() => window.__gessoFixture.sseMessages === 2"))
+              ;; Change request-side configuration only after physical binding.
+              ;; Restore it before the next user grant, not during HTMX swap.
+              (when attribute
+                (chromium/evaluate page
+                 (str "() => document.querySelector('[data-gesso-live-fragment]').setAttribute("
+                      (pr-str (first attribute)) "," (pr-str (second attribute)) ")")))
+              (fixture/release! server (:request-id request))
+              (chromium/wait-for-js! page (str "() => window.__gessoFixture.fragmentAfterRequests === " (inc i)))
+              (is (true? (inspect!)) "Refusal must preserve the actual DOM footprint and never capture continuity.")
+              (is (= (inc i) (count (fragment-requests server))))
+              (is (empty? (fixture/pending-request-ids server)))
+              (when attribute
+                (chromium/evaluate page
+                 (if (= "hx-swap" (first attribute))
+                   "() => document.querySelector('[data-gesso-live-fragment]').setAttribute('hx-swap','outerHTML')"
+                   "() => document.querySelector('[data-gesso-live-fragment]').removeAttribute('hx-select-oob')"))))))
+        (click!)
+        (let [request (request!)]
+          (is (= (progression/compose a b) (carried request))
+              "No rejected response discharges either requirement.")
+          (fixture/release! server (:request-id request)))
+        (chromium/wait-for-js! page
+         (str "() => window.__gessoFixture.fragmentAfterRequests === " (inc (count cases))
+              " && window.__gessoFixture.continuityRestored === 1"))
+        (is (true? (chromium/evaluate page
+                    "() => {
+                       const f = window.__gessoFixture;
+                       const target = document.getElementById('fixture-fragment');
+                       return target !== f.originalTarget && target.textContent === 'accepted' &&
+                         document.getElementById('fixture-foreign') === f.originalForeign &&
+                         f.originalForeign.textContent === 'outside' &&
+                         f.continuityCaptured === 1 && f.forbiddenEvents === 0 &&
+                         document.title === f.originalTitle && location.href === f.originalUrl;
+                     }")))
+        (is (= (inc (count cases)) (count (fragment-requests server))))
+        (is (empty? (fixture/pending-request-ids server)))
+        (is (true? (chromium/assert-clean! context)))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
