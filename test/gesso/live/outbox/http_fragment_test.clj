@@ -24,6 +24,7 @@
             [ring.util.codec :as codec]
             [gesso.live.source :as source]
             [xtdb.api :as xt]
+            [xtdb.basis :as basis]
             [xtdb.node :as xtn]
             [gesso.live.outbox.http-fragment :as fragment]
             [gesso.live.progression.http :as progression-http])
@@ -888,3 +889,55 @@
       (finally
         (doseq [entry (reverse (file-seq (.toFile root)))]
           (clojure.java.io/delete-file entry true))))))
+
+(deftest command-recovery-reads-await-the-submitted-frontier
+  (with-assembly
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile! assembly subject-mapping))
+              command {:operation :request/claim :principal (identity/principal "helper-1")
+                       :command-id (identity/command-id "command-2392")
+                       :arguments {:request-id "r1"}}
+              ctx {:xtdb/connectable node publication/preparation-key (bind "owned-source" command)}
+              outcome {:outcome :request/claimed}
+              receipt (publication/transact-resolved!
+                       ctx {:purpose :gesso.live/refresh}
+                       [{:topic :request :request/location-id "r1"}]
+                       [[:put-docs :requests {:xt/id "r1" :status :claimed}]] outcome "t0")
+              id (:xt/id (first (:outbox/intents receipt)))
+              record (first (xt/q node ["SELECT * FROM gesso_commands WHERE _id = ?" "command-2392"]))
+              intent {:xt/id id :intent-type outbox/intent-type :intent-version outbox/intent-version
+                      :source-id "owned-source" :operation-id :request/claim :command-id "command-2392"
+                      :intent-status :pending}
+              submitted {"xtdb" [42]}
+              opts {:await-token (basis/->tx-basis-str submitted)}
+              reads (atom [])
+              statuses (atom [])
+              inspect #(select-keys (publication/reconcile-command! ctx (constantly true)) [:status :outcome])
+              observe #(publication/observe-command! ctx)]
+          ;; Default reads are stale in this deterministic provider seam.
+          ;; Both actual read paths must receive the submitted await token,
+          ;; not merely a token applied to a separate readiness query.
+          (with-redefs [xt/status (fn [n] (swap! statuses conj n)
+                                    {:latest-submitted-msg-ids submitted :latest-processed-msg-ids {"xtdb" [3]}})
+                        xtdb/q-from (fn [n query & [actual]]
+                                      (swap! reads conj [n query actual])
+                                      (if (= opts actual)
+                                        (if (= "command-2392" (second query)) [record] [intent]) []))]
+            (is (= {:status :replay :outcome outcome} (inspect)))
+            (is (= {:outcome :prior-intent-present :intent-id id :publication-status :pending} (observe)))
+            (is (= 2 (count @reads) (count @statuses)))
+            (is (every? #(identical? node %) @statuses))
+            (is (every? #(and (identical? node (first %)) (= opts (nth % 2))) @reads)))
+          (reset! reads [])
+          (with-redefs [xt/status (constantly {:latest-submitted-msg-ids nil})
+                        xtdb/q-from (fn [& args] (swap! reads conj args) [])]
+            (is (= :invalid-submitted-log-frontier (reason inspect)))
+            (is (= :invalid-submitted-log-frontier (reason observe)))
+            (is (empty? @reads)))
+          (let [interrupted (InterruptedException. "frontier interrupted")]
+            (try
+              (with-redefs [xt/status (fn [_] (throw interrupted))]
+                (is (= [interrupted true]
+                       (try (inspect) nil (catch Exception e [e (.isInterrupted (Thread/currentThread))])))))
+              (finally (Thread/interrupted)))))))))

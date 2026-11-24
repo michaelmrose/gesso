@@ -3,8 +3,7 @@
    profile. This is not a migration tool or a fence against arbitrary writers."
   (:require [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.model :as model]
-            [xtdb.api :as xt]
-            [xtdb.basis :as basis]))
+            [gesso.live.outbox.read-frontier :as frontier]))
 
 (defn- keyword-parts [k]
   [(namespace k) (name k)])
@@ -31,17 +30,11 @@
                    :reason reason :source-id source-id})))
 
 (defn- startup-read-options! [node source-id]
-  ;; A reopened DataSource does not remember the preceding process's await
-  ;; token. Capture the submitted log frontier, not the completed snapshot:
-  ;; the latter can omit durable work still being indexed on startup.
-  (let [submitted (:latest-submitted-msg-ids (xt/status node))]
-    (when-not (and (map? submitted) (contains? submitted xtdb/default-database-name)
-                   (every? (fn [[db ids]]
-                             (and (string? db) (seq db)
-                                  (vector? ids) (seq ids) (every? integer? ids)))
-                           submitted))
-      (reject! :invalid-startup-log-frontier source-id))
-    {:await-token (basis/->tx-basis-str submitted)}))
+  (try (frontier/query-options! node)
+       (catch clojure.lang.ExceptionInfo e
+         (if (= ::frontier/invalid-frontier (:error/type (ex-data e)))
+           (reject! :invalid-startup-log-frontier source-id)
+           (throw e)))))
 
 (defn require-compatible!
   "Before starting Live or its worker, check the durable manifest for this

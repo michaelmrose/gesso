@@ -7,6 +7,7 @@
             [gesso.choreo.identity :as identity]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.publication-manifest :as manifest]
+            [gesso.live.outbox.read-frontier :as frontier]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.optimistic.server :as server]
             [gesso.live.optimistic.resolved-operation :as adapter]
@@ -77,10 +78,7 @@
   (require-derived-command! principal command-id)
   (let [raw-command (identity/raw-value command-id)
         id (derived-intent-id source operation (identity/raw-value principal) raw-command 0)
-        rows (try (xtdb/q-from ctx [observation-sql id])
-                  (catch InterruptedException e
-                    (.interrupt (Thread/currentThread))
-                    (throw e)))]
+        rows (frontier/q-from! ctx [observation-sql id])]
     (when-not (and (vector? rows) (<= (count rows) 1))
       (reject! :invalid-intent-observation {}))
     (if (empty? rows)
@@ -101,6 +99,7 @@
 
 (defn observe-command!
   "Read the current slot-zero intent for the installed derived-ID command.
+   Await the captured submitted log frontier before observing.
    Requires the same trusted source/operation/principal/command binding as
    preparation. No caller-supplied identity or lookup arguments. A present
    row is evidence of a durable intent under the selected trusted writer
@@ -299,7 +298,8 @@
 
 (defn reconcile-command!
   "Authoritatively read the canonical command record for the current trusted
-   binding and use the existing disclosure and exact-binding decision.
+   binding, awaiting the captured submitted log frontier, and use the
+   existing disclosure and exact-binding decision.
    may-disclose? receives binding and record; only literal true permits
    disclosure. An unresolved observation is not permission to resubmit.
    The recorded business outcome is not a current authoritative projection,
@@ -309,8 +309,8 @@
   (when-not (fn? may-disclose?)
     (reject! :missing-command-disclosure {}))
   (let [binding (command-binding! ctx)
-        rows (xtdb/q-from ctx ["SELECT * FROM gesso_commands WHERE _id = ?"
-                               (resolution/record-id binding)])]
+        rows (frontier/q-from! ctx ["SELECT * FROM gesso_commands WHERE _id = ?"
+                                    (resolution/record-id binding)])]
     (when-not (and (vector? rows) (<= (count rows) 1) (every? map? rows))
       (reject! :invalid-command-record-observation {}))
     (resolution/reconcile binding (first rows) may-disclose?)))
