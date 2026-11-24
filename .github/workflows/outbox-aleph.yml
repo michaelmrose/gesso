@@ -73,7 +73,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          clojure -P -M:aleph-integration
+          # Retry dependency preparation only: transient repository errors
+          # must not turn into skipped tests or retries of failing assertions.
+          for attempt in 1 2 3; do
+            if clojure -P -M:aleph-integration; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Aleph dependency preparation failed after 3 attempts"
+              exit 1
+            fi
+            sleep "$((attempt * 10))"
+          done
           # A test against a synthesized Netty-only listener is not enough.
           clojure -Spath -M:aleph-integration > "$RUNNER_TEMP/aleph-classpath.txt"
           tr ':' '\n' < "$RUNNER_TEMP/aleph-classpath.txt" | grep -E '/aleph-0\.9\.11\.jar$'

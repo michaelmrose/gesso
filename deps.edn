@@ -1,5 +1,10 @@
 {:paths ["src" "resources"]
 
+ ;; Use Maven's canonical HTTPS Central endpoint instead of the tools.deps
+ ;; default repo1 endpoint, which returned HTTP 429 in the v2335 CI run.
+ ;; Keep the repository id and every pinned artifact unchanged.
+ :mvn/repos {"central" {:url "https://repo.maven.apache.org/maven2/"}}
+
  :deps
  {org.clojure/clojure
   {:mvn/version "1.12.5"}
