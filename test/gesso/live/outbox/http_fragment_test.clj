@@ -1104,3 +1104,82 @@
                 (is (= [interrupted true]
                        (try (inspect) nil (catch Exception e [e (.isInterrupted (Thread/currentThread))])))))
               (finally (Thread/interrupted)))))))))
+
+(deftest abort-policy-is-bounded-by-physical-guards-and-journal-identity
+  (with-assembly
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile! assembly subject-mapping))
+              principal (identity/principal "helper-1")
+              command (protocol/command {:command-id (identity/command-id "v2414-command")
+                                         :execution-id (identity/execution-id "v2414-execution")
+                                         :operation :request/claim :arguments {:request-id "r1"}
+                                         :observed-basis fixture/rendered-basis})
+              ctx {:xtdb/connectable node publication/preparation-key
+                   (bind "owned-source" (assoc command :principal principal))}
+              invocation (assoc (select-keys command [:operation :command-id :execution-id :arguments])
+                                :command command :principal principal :ctx ctx)
+              version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at}
+              row {:xt/id "r1" :status :done :revision 2 :created-at "t0" :updated-at "t2"}
+              stale (assoc row :revision 1)
+              refusal {:outcome :request/not-claimable :reason :request-closed}
+              construction {:spec nil :model-plan {:guards [(model-command/guard :requests row version)]}
+                            :outcome refusal :now "2026-11-24T00:00:02Z"}
+              initial (assoc construction :model-plan {:guards [(model-command/guard :requests stale version)]})
+              calls (atom 0) policies (atom 0) projected (atom [])
+              execute xtdb/execute-tx-from!
+              options {:mode :submit :construct! (constantly initial) :may-disclose? (constantly true)
+                       :project! (fn [_ result]
+                                   (swap! projected conj (:status result))
+                                   {:resolution :rejected :outcome (get-in result [:outcome :outcome])
+                                    :authoritative (protocol/authoritative
+                                                    {:presence :present :basis fixture/rendered-basis
+                                                     :projection {:request/id "r1" :request/status :done}})})}
+              run! (fn [answer]
+                     (publication/execute-resolved!
+                      invocation (assoc options :construct-after-abort!
+                                        (fn [_] (swap! policies inc) answer))))
+              failure (fn [f] (try (f) nil (catch Exception e e)))]
+          (xt/execute-tx node [[:put-docs :requests row]])
+          (with-redefs [xtdb/execute-tx-from! (fn [ctx ops & [opts]]
+                                               (swap! calls inc)
+                                               (execute ctx ops opts))]
+            ;; Every case begins with a real failed XTDB version guard.
+            (doseq [answer [nil (assoc construction :model-plan {})
+                            (assoc construction :spec {:purpose :gesso.live/refresh})
+                            (assoc-in construction [:model-plan :commands]
+                              [(model-command/update-command :requests :claim row
+                                (assoc row :status :claimed :revision 3 :updated-at "t3") version)])]]
+              (let [n @calls p @policies e (failure #(run! answer))]
+                (is (instance? Exception e))
+                (is (= (if (nil? answer) :xtdb/assert-failed :gesso.live.outbox/invalid-model-publication)
+                       (or (:xtdb.error/code (ex-data e)) (:error/type (ex-data e)))))
+                (is (= (inc n) @calls))
+                (is (= (inc p) @policies))))
+            ;; A second physical guard abort must not start a third attempt.
+            (let [n @calls p @policies e (failure #(run! initial))]
+              (is (= :xtdb/assert-failed (:xtdb.error/code (ex-data e))))
+              (is (= (+ 2 n) @calls))
+              (is (= (inc p) @policies)))
+            (is (empty? @projected))
+            (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+            (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+          ;; Simulate another authorized writer winning after the unresolved
+          ;; read, before the guarded recovery transaction reaches XTDB.
+          (reset! calls 0)
+          (with-redefs [xtdb/execute-tx-from!
+                        (fn [ctx ops & [opts]]
+                          (when (= 2 (swap! calls inc))
+                            (with-redefs [xtdb/execute-tx-from! execute]
+                              (publication/transact-model-resolved!
+                               ctx nil (:model-plan construction) refusal (:now construction))))
+                          (execute ctx ops opts))]
+            (is (= :rejected (:resolution (run! construction))))
+            (is (= 2 @calls))
+            (is (= [:replay] @projected)))
+          (is (= {:status :replay :outcome refusal}
+                 (select-keys (publication/reconcile-command! ctx (constantly true)) [:status :outcome])))
+          (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+          (is (= [{:status :done :revision 2}]
+                 (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"]))))))))
