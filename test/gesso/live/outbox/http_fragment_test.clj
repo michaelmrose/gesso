@@ -439,9 +439,37 @@
                     (is (= :invalid-resolution
                            (error-kind #(publication/reconcile-settlement!
                                          invocation (constantly true) (constantly {:resolution :failed}))))))
+                  ;; Disconnect the list client while leaving the toolbar alive.
+                  ;; Keepalives make the physical socket loss observable by the
+                  ;; writer; wait for both source and admission slot retirement.
+                  (.close list-body)
+                  (let [retired? (fn [] (and (= 1 ((:occupied-count status)))
+                                            (= 1 (:subscription-count (source/stats (:source system))))))]
+                    (is (loop [remaining 250]
+                          (cond (retired?) true
+                                (zero? remaining) false
+                                :else (do (Thread/sleep 20) (recur (dec remaining)))))))
                   ;; A later domain mutation changes the authoritative state.
                   ;; Replay must report that state, not the original projection.
                   (xt/execute-tx node [[:put-docs :requests (assoc after :status :done :revision 2 :updated-at "t2")]])
+                  ;; A reconnect is a fresh authorized subscription, not a
+                  ;; restoration of the old permission or a replay cursor.
+                  (reset! read-allowed? false)
+                  (try
+                    (is (= 403 (.statusCode (send! list-path headers (HttpResponse$BodyHandlers/ofString)))))
+                    (is (= 1 ((:occupied-count status))))
+                    (is (= 1 (:subscription-count (source/stats (:source system)))))
+                    (finally (reset! read-allowed? true)))
+                  (let [reconnected (send! list-path headers (HttpResponse$BodyHandlers/ofInputStream))]
+                    (with-open [body (.body reconnected)]
+                      (is (= 200 (.statusCode reconnected)))
+                      (is (= 2 ((:occupied-count status))))
+                      (is (= 2 (:subscription-count (source/stats (:source system)))))
+                      ;; Reacquire current state without requiring a missed
+                      ;; notice, or pretending a reconnect adopted any DOM.
+                      (let [response (send! (first fragments) headers (HttpResponse$BodyHandlers/ofString))]
+                        (is (= 200 (.statusCode response)))
+                        (is (str/includes? (.body response) ">done<")))))
                   ;; Even an authorized :submit checks the durable record before planning.
                   (let [retry (assoc command :execution-id (identity/execution-id "v2374-retry"))
                         response (post-command! headers retry)
