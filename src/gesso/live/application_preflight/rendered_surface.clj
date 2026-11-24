@@ -40,7 +40,8 @@
                                   (mapv (fn [[k v]]
                                           [(str/lower-case (rum/normalize-attr-key k)) v]))))
                      shorthand-id (when element? (second (rum/parse-selector tag)))
-                     record {:path path :attrs (cond-> (vec attrs)
+                     record {:path path :tag (when element? (first (rum/parse-selector tag)))
+                             :attrs (cond-> (vec attrs)
                                                 shorthand-id (conj ["id" shorthand-id]))}
                      children (if element?
                                 (drop (if (map? (second node)) 2 1)
@@ -62,9 +63,16 @@
   (keep #(cond (false? %) nil (true? %) "" :else (rum/to-str %))
         (attribute-values element attribute)))
 
+(defn- managed-owner-candidate? [element]
+  ;; A damaged trigger must not make an explicitly declared owner disappear
+  ;; from preflight. Retain legacy roots without either managed marker.
+  (or (seq (attribute-values element "data-gesso-live-acquisition-policy"))
+      (some #(= "gesso:live-refresh" (str/trim %))
+            (concat (identity-values element "hx-trigger")
+                    (identity-values element "data-hx-trigger")))))
+
 (defn- managed-owner-id [element]
-  (when (some #(= "gesso:live-refresh" (str/trim (str %)))
-              (attribute-values element "hx-trigger"))
+  (when (managed-owner-candidate? element)
     (some #(when-not (str/blank? %) %)
           (identity-values element "data-gesso-live-fragment"))))
 
@@ -74,6 +82,79 @@
 (defn- htmx-values [element attribute]
   (vec (concat (attribute-values element attribute)
                (attribute-values element (str "data-" attribute)))))
+
+(def ^:private request-verbs
+  ["hx-get" "hx-post" "hx-put" "hx-patch" "hx-delete"])
+
+(defn- extension-tokens [element]
+  (mapcat #(str/split (str/replace (str %) " " "") #",")
+          (htmx-values element "hx-ext")))
+
+(defn- acquisition-correspondence-errors
+  "Check the declared owner against its stable request, connection and control.
+   The absent policy attribute retains the browser's automatic compatibility
+   default. This is rendered evidence, not proof of network endpoint identity."
+  [elements surface]
+  (vec
+   (mapcat
+    (fn [owner]
+      (when (managed-owner-candidate? owner)
+        (let [id (managed-owner-id owner)
+              policies (vec (identity-values owner "data-gesso-live-acquisition-policy"))
+              explicit? (= ["explicit-refresh"] policies)
+              direct-child? #(= (:path owner) (:path (peek (:ancestors %))))
+              associated? (fn [element]
+                            (or (= (:path owner) (:path element))
+                                (and id (some #{id} (identity-values element "data-gesso-live-refresh")))
+                                (= (:path owner)
+                                   (:path (last (filter #(seq (identity-values % "data-gesso-live-fragment"))
+                                                        (:ancestors element)))))))
+              controls (filterv #(and (seq (attribute-values % "data-gesso-live-refresh"))
+                                       (associated? %)) elements)
+              control (first controls)
+              listeners (filterv #(and (direct-child? %)
+                                        (seq (attribute-values % "data-gesso-live-invalidation"))) elements)
+              diagnostic (fn [reason related]
+                           (issue :rendered-managed-acquisition-identity
+                                  "Rendered managed acquisition has an invalid request, connection or Refresh control."
+                                  {:surface surface :fragment-id id
+                                   :render-path (:path owner) :owner-render-path (:path owner)
+                                   :reason reason :related-render-paths (mapv :path related)}))]
+          (cond-> []
+            (nil? id)
+            (conj (diagnostic :missing-owner-identity [owner]))
+
+            (not (contains? #{[] ["automatic"] ["explicit-refresh"]} policies))
+            (conj (diagnostic :invalid-acquisition-policy [owner]))
+
+            (not (and (= ["gesso:live-refresh"]
+                         (mapv str/trim (identity-values owner "hx-trigger")))
+                      (empty? (attribute-values owner "data-hx-trigger"))
+                      (= 1 (count (htmx-values owner "hx-get")))
+                      (nonblank-string? (first (htmx-values owner "hx-get")))
+                      (not-any? #(seq (htmx-values owner %)) (rest request-verbs))))
+            (conj (diagnostic :invalid-acquisition-request [owner]))
+
+            (not (and (= 1 (count (htmx-values owner "sse-connect")))
+                      (nonblank-string? (first (htmx-values owner "sse-connect")))
+                      (= 1 (count (htmx-values owner "hx-ext")))
+                      (some #{"sse"} (extension-tokens owner))
+                      (not-any? #{"ignore:sse"} (extension-tokens owner))
+                      (not-any? #(some #{"ignore:sse"} (extension-tokens %)) listeners)))
+            (conj (diagnostic :invalid-sse-connection (into [owner] listeners)))
+
+            (if explicit?
+              (not (and (= 1 (count controls))
+                        (direct-child? control)
+                        (= [id] (vec (identity-values control "data-gesso-live-refresh")))
+                        (= "button" (str/lower-case (:tag control)))
+                        (= ["button"] (vec (identity-values control "type")))
+                        (empty? (identity-values control "disabled"))
+                        (not-any? #(seq (htmx-values control %))
+                                  (conj request-verbs "hx-trigger"))))
+              (seq controls))
+            (conj (diagnostic :invalid-refresh-control controls))))))
+    elements)))
 
 (defn- identity-errors
   "Check the canonical owner's identity and stable sibling structure relative
@@ -132,7 +213,8 @@
    Legacy/unmanaged nodes outside an owner are not managed acquisitions."
   [rendered surface]
   (let [elements (rendered-elements rendered)]
-    (into (identity-errors elements surface)
+    (into (into (identity-errors elements surface)
+                (acquisition-correspondence-errors elements surface))
      (mapcat
       (fn [{:keys [ancestors path attrs] :as element}]
         (let [id (managed-owner-id element)

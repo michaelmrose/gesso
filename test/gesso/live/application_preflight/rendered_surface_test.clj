@@ -451,3 +451,51 @@
       (is (= "panel" (:fragment-id error)))
       (is (= [1] (:owner-render-path error)))
       (is (= [[1 3] [2]] (:related-render-paths error))))))
+
+(deftest managed-request-connection-and-control-correspondence-test
+  (let [panel (managed-panel)
+        button (get panel 4)
+        automatic (ui/fragment-panel {:id "panel" :src "/fragment" :stream-url "/stream"})
+        errors #(filter (fn [e] (= :rendered-managed-acquisition-identity (:kind e)))
+                        (:errors (analyze {:page %})))]
+    (doseq [valid [panel automatic (update-in automatic [1] dissoc :data-gesso-live-acquisition-policy)
+                   (assoc panel 4 [:<> (list button)])
+                   (assoc-in panel [4 1 :disabled] false)]]
+      (is (empty? (errors valid))))
+    (doseq [[reason rendered]
+            [[:missing-owner-identity (update-in panel [1] dissoc :data-gesso-live-fragment)]
+             [:invalid-acquisition-policy (assoc-in panel [1 :data-gesso-live-acquisition-policy] "unknown")]
+             [:invalid-acquisition-policy (assoc-in panel [1 "data-gesso-live-acquisition-policy"] "explicit-refresh")]
+             [:invalid-acquisition-request (update-in panel [1] dissoc :hx-trigger)]
+             [:invalid-acquisition-request (assoc-in panel [1 :hx-trigger] "click")]
+             [:invalid-acquisition-request (assoc-in panel [1 :hx-trigger] "gesso:live-refresh, click")]
+             [:invalid-acquisition-request (assoc-in panel [1 "data-hx-trigger"] "click")]
+             [:invalid-acquisition-request (update-in panel [1] dissoc :hx-get)]
+             [:invalid-acquisition-request (assoc-in panel [1 :hx-get] "")]
+             [:invalid-acquisition-request (assoc-in panel [1 :hx-post] "/write")]
+             [:invalid-acquisition-request (assoc-in panel [1 "data-hx-get"] "/other")]
+             [:invalid-sse-connection (update-in panel [1] dissoc :sse-connect)]
+             [:invalid-sse-connection (assoc-in panel [1 :sse-connect] "")]
+             [:invalid-sse-connection (assoc-in panel [1 "data-sse-connect"] "/other")]
+             [:invalid-sse-connection (update-in panel [1] dissoc :hx-ext)]
+             [:invalid-sse-connection (assoc-in panel [1 :hx-ext] "ignore:sse")]
+             [:invalid-sse-connection (assoc-in panel [1 :hx-ext] "sse, ignore:sse")]
+             [:invalid-sse-connection (assoc-in panel [2 1 :hx-ext] "ignore:sse")]
+             [:invalid-refresh-control (pop panel)]
+             [:invalid-refresh-control (conj panel button)]
+             [:invalid-refresh-control (assoc panel 4 [:section button])]
+             [:invalid-refresh-control (assoc-in panel [4 0] :a)]
+             [:invalid-refresh-control (assoc-in panel [4 1 :type] "submit")]
+             [:invalid-refresh-control (assoc-in panel [4 1 :disabled] true)]
+             [:invalid-refresh-control (assoc-in panel [4 1 :data-gesso-live-refresh] "foreign")]
+             [:invalid-refresh-control (assoc-in panel [4 1 :hx-get] "/other")]
+             [:invalid-refresh-control (assoc-in panel [4 1 "data-hx-trigger"] "click")]
+             [:invalid-refresh-control [:main panel button]]
+             [:invalid-refresh-control (conj automatic button)]]]
+      (testing (pr-str rendered)
+        (is (some #(= reason (:reason %)) (errors rendered)))))
+    (let [error (first (filter #(= :invalid-refresh-control (:reason %))
+                               (errors [:main panel button])))]
+      (is (= "panel" (:fragment-id error)))
+      (is (= [1] (:owner-render-path error)))
+      (is (= [[1 4] [2]] (:related-render-paths error))))))

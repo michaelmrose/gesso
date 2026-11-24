@@ -364,3 +364,27 @@
       (fn [{:keys [report]}]
         (is (false? (:valid? report)))
         (is (identity-error? report))))))
+
+(deftest damaged-managed-trigger-cannot-escape-static-or-dynamic-preflight
+  (let [panel (ui/fragment-panel {:id "panel" :src "/fragment" :stream-url "/stream"
+                                  :acquisition-policy :explicit-refresh})
+        rendered (assoc-in panel [1 :hx-trigger] "click")
+        calls (atom 0)
+        request-error? #(some (fn [error]
+                                (and (= :rendered-managed-acquisition-identity (:kind error))
+                                     (= :invalid-acquisition-request (:reason error))))
+                              (:errors %))]
+    (with-closed-application
+      (fn [{:keys [assembly]}]
+        (let [report (application/check-rendered-surface assembly :board rendered)
+              data (error-data #(application/checked-rendered-response!
+                                 assembly :board (fn [_] (swap! calls inc)) rendered))]
+          (is (not (application/rendered-surface-valid? report)))
+          (is (request-error? report))
+          (is (= :rendered-surface-preflight-failed (:error/kind data)))
+          (is (zero? @calls)))))
+    (with-surfaced-application
+      {:board rendered}
+      (fn [{:keys [report]}]
+        (is (false? (:valid? report)))
+        (is (request-error? report))))))
