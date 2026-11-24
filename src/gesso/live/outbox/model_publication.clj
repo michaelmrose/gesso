@@ -105,7 +105,8 @@
    convention, NOT a reconstructed settlement, domain projection, original
    transaction basis or proof of matching command arguments. Absence is an
    observation, not proof of noncommit or permission to bypass guards.
-   Explicit-ID batches, removed rows and arbitrary writers are outside the
+   Journal-only outcomes intentionally have no intent; use command record
+   reconciliation for those. Explicit-ID batches, removed rows and arbitrary writers are outside the
    guarantee. Never retries, mutates, publishes or acknowledges anything."
   [ctx]
   (if-let [observe (::observe (meta (get ctx preparation-key)))]
@@ -151,20 +152,38 @@
     (binding)
     (reject! :missing-command-preparation {})))
 
+(defn- assertion-op? [op]
+  ;; Selected raw XTDB SQL assertion vocabulary, not a general SQL parser.
+  ;; Bind values as parameters; do not accept DML or multiple statements.
+  (and (vector? op) (string? (first op))
+       (re-find #"(?i)^ASSERT\s+" (first op))
+       (not (str/includes? (first op) ";"))))
+
 (defn- resolved-plan!
   [ctx spec changes domain-ops outcome now]
-  (when-not (and (map? spec) (= #{:purpose} (set (keys spec))))
-    (reject! :invalid-resolved-intent-spec {}))
-  (when-not (and (vector? domain-ops) (seq domain-ops))
-    (reject! :invalid-domain-ops {}))
-  (let [record (resolution/command-record (command-binding! ctx) outcome now)
-        {:keys [intents guard-ops tx-op]} (prepare! ctx spec changes)
-        ops (into (into (conj guard-ops
-                              ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)"
-                               (:xt/id record)])
-                        domain-ops)
-                  [[:put-docs resolution/command-entity-type record] tx-op])]
-    {:ops ops :intents intents :record record}))
+  (let [journal-only? (nil? spec)]
+    (when-not (or journal-only? (and (map? spec) (= #{:purpose} (set (keys spec)))))
+      (reject! :invalid-resolved-intent-spec {}))
+    (when-not (and (vector? domain-ops)
+                   (if journal-only?
+                     (every? assertion-op? domain-ops)
+                     (seq domain-ops)))
+      (reject! :invalid-domain-ops {}))
+    (when journal-only?
+      (when-not (= [] changes)
+        (reject! :journal-only-requires-no-changes {}))
+      (when-not (set? (::topics (meta (get ctx preparation-key))))
+        (reject! :undeclared-operation-publication {})))
+    (let [record (resolution/command-record (command-binding! ctx) outcome now)
+          {:keys [intents guard-ops tx-op]}
+          (if journal-only? {:intents [] :guard-ops []} (prepare! ctx spec changes))
+          ops (cond-> (conj (into (conj guard-ops
+                                        ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)"
+                                         (:xt/id record)])
+                                  domain-ops)
+                            [:put-docs resolution/command-entity-type record])
+                tx-op (conj tx-op))]
+      {:ops ops :intents intents :record record})))
 
 (defn- execute-resolved-plan! [ctx {:keys [ops intents record]}]
   (assoc (xtdb/execute-tx-from! ctx ops)
@@ -176,6 +195,9 @@
    gesso_commands identity convention (string or UUID command ID). The
    trusted executor supplies its portable business outcome and timestamp,
    not a browser settlement. All absence guards precede all writes.
+   Explicit nil spec and [] changes select a journal-only outcome;
+   domain-ops must then contain only trusted single-statement SQL ASSERTs
+   (or be []). No domain writes or publication intents are constructed.
    Do not mix this profile with other writers of the same command ID.
    Domain operations and outcome truth remain trusted. Unknown commit
    errors propagate; reconcile-command! is a separate read-only operation."
@@ -238,6 +260,7 @@
    construction in either mode. Only an unresolved :submit may invoke the
    trusted, side-effect-free constructor, once, with the invocation. Its
    closed result contains :spec, :changes, :domain-ops, :outcome and :now.
+   A journal-only outcome uses nil spec, [] changes and optional ASSERTs.
    On an execution exception, perform at most one authoritative recovery
    read, never resubmit. Only an exact disclosed replay can settle that
    failure; otherwise preserve the original exception. Construction,
@@ -322,7 +345,7 @@
         (reject! :missing-publication-executor-profile {:operation operation}))
       (let [topics (server/operation-published-change-topics entry)
             subjects (get-in config [:assembled-publication :subject-keys])]
-        (when-not (and (map? subjects) (seq topics) (every? #(contains? subjects %) topics))
+        (when-not (and (map? subjects) (set? topics) (every? #(contains? subjects %) topics))
           (reject! :unsupported-publication-executor-topics {:operation operation :topics topics}))))))
 
 (defn profile!
@@ -408,7 +431,8 @@
                             (reject! :conflicting-subject-field {:topic topic :field field}))
                           (assoc (select-keys change [:topic :change/kind]) :id id)))
                       changes))))
-           {::binding (fn []
+           {::topics topics
+            ::binding (fn []
                         (when-not entry
                           (reject! :undeclared-operation-publication {:operation operation}))
                         (resolution/require-binding
