@@ -123,7 +123,8 @@
    zero fences retries even when their proposed changes differ. Do not mix
    explicit and derived modes for one command. Changes carry their model
    identity fields. The trusted executor still owns the domain transaction
-   and must prefix guard-ops before writes. Not a sandbox for arbitrary writers."
+   and must prefix guard-ops before writes. Strict derived-model profiles
+   reject this raw API. Not a sandbox for arbitrary writers."
   [ctx spec changes]
   (if-let [prepare (get ctx preparation-key)]
     (prepare spec changes)
@@ -149,6 +150,10 @@
         receipt (xtdb/execute-tx-from! ctx ops)]
     (assoc receipt :outbox/intents intents)))
 
+(defn- require-raw-admission! [ctx]
+  (when (::require-derived-model? (meta (get ctx preparation-key)))
+    (reject! :canonical-model-plan-required {})))
+
 (defn- command-binding! [ctx]
   (if-let [binding (::binding (meta (get ctx preparation-key)))]
     (binding)
@@ -163,6 +168,7 @@
 
 (defn- resolved-plan!
   [ctx spec changes domain-ops outcome now]
+  (require-raw-admission! ctx)
   (let [journal-only? (nil? spec)]
     (when-not (or journal-only? (and (map? spec) (= #{:purpose} (set (keys spec)))))
       (reject! :invalid-resolved-intent-spec {}))
@@ -255,7 +261,9 @@
                                                               record resolution/record-version))))
           {:keys [intents guard-ops tx-op]}
           (if journal-only? {:intents [] :guard-ops []}
-              (prepare! ctx spec (:changes plan)))]
+              (if-let [prepare-model (::prepare-model (meta (get ctx preparation-key)))]
+                (prepare-model spec (:changes plan))
+                (prepare! ctx spec (:changes plan))))]
       {:ops (cond-> (into guard-ops tx-ops) tx-op (conj tx-op))
        :intents intents :record record})))
 
@@ -350,7 +358,8 @@
    a canonical model plan through the same durable boundary (nil spec
    permits a guards/assertions-only model fragment). With the optional
    entity-to-topic mapping, canonical mutations derive changes and guard
-   old subject fields; explicit changes are refused in that mode.
+   old subject fields; explicit changes are refused in that mode. Strict
+   derived-model profiles require the canonical construction form.
    On an execution exception, perform at most one authoritative recovery
    read, never resubmit. Only an exact disclosed replay can settle that
    failure; otherwise preserve the original exception. Construction,
@@ -451,12 +460,16 @@
    Optional :model-entity-topics maps canonical entity keywords to nonempty
    sets of graph topics. Canonical mutations must then map every command
    and derive subjects from its before/after fields (:id means :xt/id).
-   Old subjects are asserted against current storage. Raw paths remain
-   trusted and are not subject to this opt-in derivation."
+   Old subjects are asserted against current storage. Select
+   :require-derived-model? true with that mapping to refuse raw preparation,
+   raw transactions and raw journal-only plans at this command boundary.
+   Canonical guarded journal-only plans remain available. Without that flag,
+   legacy raw paths remain trusted. This is not a sandbox for raw XTDB access."
   [assembly options]
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-assembly {}))
-  (when-not (and (map? options) (#{#{:subject-keys} #{:subject-keys :model-entity-topics}} (set (keys options)))
+  (when-not (and (map? options) (#{#{:subject-keys} #{:subject-keys :model-entity-topics}
+                     #{:subject-keys :model-entity-topics :require-derived-model?}} (set (keys options)))
                  (map? (:subject-keys options)))
     (reject! :invalid-subject-mapping {}))
   (let [compiled (get-in assembly [:operation-acquisition-assembly
@@ -464,6 +477,7 @@
         graph (:graph compiled)
         subjects (:subject-keys options)
         entity-topics (:model-entity-topics options)
+        strict? (:require-derived-model? options)
         operations (get-in assembly [:operation-acquisition-assembly
                                      :execution-assembly :server :operations])]
     (when-not (and (seq graph) (= (set (keys graph)) (set (keys subjects))))
@@ -483,6 +497,8 @@
                                (and (keyword? entity) (set? topics) (seq topics)
                                     (every? #(contains? subjects %) topics))) entity-topics))
         (reject! :invalid-model-entity-topics {})))
+    (when (and (contains? options :require-derived-model?) (not (true? strict?)))
+      (reject! :invalid-derived-model-requirement {}))
     ;; A catch-all prevents the Live runtime's unmatched :keep default from
     ;; silently publishing a raw outbox topic instead of a model invalidation.
     {:manifest (manifest/descriptor compiled subjects)
@@ -500,9 +516,8 @@
      :bind-command
      (fn [source-id {:keys [operation command-id principal arguments]}]
        (let [entry (get operations operation)
-             topics (when entry (server/operation-published-change-topics entry))]
-         (with-meta
-           (fn [spec changes]
+             topics (when entry (server/operation-published-change-topics entry))
+             prepare-model (fn [spec changes]
              (when-not (and (map? spec) (#{#{:intent-ids :purpose} #{:purpose}} (set (keys spec))))
                (reject! :invalid-command-intent-spec {}))
              (when-not (and (vector? changes) (seq changes))
@@ -533,8 +548,14 @@
                           (when (and (contains? change :id) (not= id (:id change)))
                             (reject! :conflicting-subject-field {:topic topic :field field}))
                           (assoc (select-keys change [:topic :change/kind]) :id id)))
-                      changes))))
+                      changes))))]
+         (with-meta
+           (if strict?
+             (fn [_ _] (reject! :canonical-model-plan-required {}))
+             prepare-model)
            {::topics topics
+            ::require-derived-model? strict?
+            ::prepare-model prepare-model
             ::derive-model-fragment (when entity-topics
                                       #(derive-model-fragment % subjects entity-topics))
             ::binding (fn []

@@ -111,7 +111,8 @@
                               :storage [:local {:path (str root "/storage")}]}
                 :source-id "v2379-race" :rules-context {}
                 :worker-options {:worker-id "v2379" :poll-ms 20}
-                :live-options {} :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request}})
+                :live-options {} :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request}}
+                                                        :require-derived-model? true)
                 :http-jdk {} :assembled-operations {:authorize-request? (constantly true)}}
         handler (fn [_] (g/html-response [:div "ready"]))]
     (try
@@ -231,3 +232,52 @@
             (is (= [:location/new] (mapv :gesso.live.outbox/subject-id (:outbox/intents receipt)))))
           (is (= [{:revision 2}] (xt/q node ["SELECT revision FROM requests"])))
           (is (= 3 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))))
+
+(deftest strict-derived-model-refuses-raw-command-paths
+  (with-assembly identity
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [selected (assoc mapping :model-entity-topics {:requests #{:request}}
+                                      :require-derived-model? true)
+              bind (:bind-command (publication/profile! assembly selected))
+              invocation (fn [id]
+                           (let [cmd (assoc (command "attempt") :command-id (identity/command-id id))]
+                             (assoc (select-keys cmd [:operation :command-id :execution-id :arguments])
+                                    :command cmd :principal fixture/trusted-principal
+                                    :ctx {:xtdb/connectable node publication/preparation-key
+                                          (bind "strict-2383" (assoc cmd :principal fixture/trusted-principal))})))
+              call (invocation "strict-command")
+              ctx (:ctx call)
+              spec {:purpose :gesso.live/refresh}
+              changes [{:topic :request :request/location-id "wrong"}]
+              doc {:xt/id "r1" :revision 0 :created-at "t0" :updated-at "t0"
+                   :request/location-id "actual"}
+              ops [[:put-docs :requests doc]]
+              outcome {:outcome :request/claimed}
+              reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+              options {:mode :submit :may-disclose? (constantly true)
+                       :construct! (constantly {:spec spec :changes changes :domain-ops ops
+                                                :outcome outcome :now "t0"})
+                       :project! (fn [& _] (throw (ex-info "unexpected projection" {})))}]
+          (is (= :invalid-subject-mapping
+                 (reason #(publication/profile! assembly (assoc mapping :require-derived-model? true)))))
+          (is (= :invalid-derived-model-requirement
+                 (reason #(publication/profile! assembly (assoc selected :require-derived-model? false)))))
+          (doseq [f [#(publication/prepare! ctx spec changes)
+                     #((get ctx publication/preparation-key) spec changes)
+                     #(publication/transact! ctx spec changes ops)
+                     #(publication/transact-resolved! ctx spec changes ops outcome "t0")
+                     #(publication/transact-resolved! ctx nil [] [] outcome "t0")
+                     #(publication/execute-resolved! call options)]]
+            (is (= :canonical-model-plan-required (reason f))))
+          (is (empty? (xt/q node ["SELECT _id FROM requests"])))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+          (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+          (let [receipt (publication/transact-model-resolved!
+                         ctx spec {:commands [(model-command/create :requests doc version)]} outcome "t0")]
+            (is (= ["actual"] (mapv :gesso.live.outbox/subject-id (:outbox/intents receipt)))))
+          (let [receipt (publication/transact-model-resolved!
+                         (:ctx (invocation "strict-noop")) nil {} {:reason :unavailable} "t0")]
+            (is (empty? (:outbox/intents receipt))))
+          (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+          (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))))
