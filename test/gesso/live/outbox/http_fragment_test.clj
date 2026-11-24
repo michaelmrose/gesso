@@ -415,6 +415,38 @@
                     (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
                     (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
                     (is (= [{:status :done}] (xt/q node ["SELECT status FROM requests WHERE _id = ?" "r1"]))))
+                  ;; A distinct command is not a replay. The constructor still
+                  ;; describes revision zero; the actual revision-two row must
+                  ;; defeat its physical guard, atomically excluding journal
+                  ;; and publication writes. Exercise the real listener too:
+                  ;; a failed transaction must not fabricate a settlement.
+                  (let [stale (assoc command
+                                     :command-id (identity/command-id "v2411-stale-command")
+                                     :execution-id (identity/execution-id "v2411-stale-execution"))
+                        failures (atom [])
+                        project-before @projections
+                        durable-before (xt/q node ["SELECT * FROM gesso_commands"])
+                        intents-before (xt/q node ["SELECT * FROM gesso_live_outbox"])
+                        result (with-redefs [xtdb/execute-tx-from!
+                                             (fn [ctx ops & [opts]]
+                                               ;; Call the terminal arity directly, avoiding
+                                               ;; re-entry through the redefined Var.
+                                               (try (execute ctx ops opts)
+                                                    (catch Exception e
+                                                      (swap! failures conj e)
+                                                      (throw e))))]
+                                 (try (post-command! headers stale)
+                                      (catch java.io.IOException e e)))]
+                    (is (instance? java.io.IOException result))
+                    (is (= [:xtdb/assert-failed]
+                           (mapv #(-> % ex-data :xtdb.error/code) @failures)))
+                    (is (= 3 (count @invocations)))
+                    (is (= 2 @constructions))
+                    (is (= project-before @projections))
+                    (is (= durable-before (xt/q node ["SELECT * FROM gesso_commands"])))
+                    (is (= intents-before (xt/q node ["SELECT * FROM gesso_live_outbox"])))
+                    (is (= [{:status :done :revision 2}]
+                           (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"]))))
                   (is (zero? @fallback))
                   (host/stop! started)
                   (is ((:drained? status)))
