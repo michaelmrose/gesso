@@ -10,6 +10,7 @@
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.core :as live]
             [gesso.live.model :as model]
+            [gesso.model.command :as model-command]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.lifecycle :as lifecycle]
@@ -56,10 +57,12 @@
                                           {:fragment fragment :path (if (= :request-list fragment) stream-path
                                                                       (str "/streams/" (name fragment)))})}))}
       (fn []
-        (let [ops (cond-> (fixture/standard-operations)
-                    execute! (assoc :request/claim
-                                    (fixture/trusted-operation :request/claim
-                                     {:published-change-topics #{:request} :execute! execute!})))]
+        (let [ops (if (map? execute!)
+                    execute!
+                    (cond-> (fixture/standard-operations)
+                      execute! (assoc :request/claim
+                                      (fixture/trusted-operation :request/claim
+                                       {:published-change-topics #{:request} :execute! execute!}))))]
           (fixture/with-surfaced-application
            {:operations ops :route-capabilities (fixture/route-capabilities ops)
             :rendered-surfaces {:board [:main (fixture/rendered-operation-button
@@ -183,6 +186,10 @@
         prepared-intents (atom nil)
         constructions (atom 0)
         projections (atom [])
+        version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at}
+        before {:xt/id "r1" :status :open :revision 0 :created-at "t0" :updated-at "t0"
+                :request/location-id "r1"}
+        after (assoc before :status :claimed :revision 1 :updated-at "t1")
         command (protocol/command {:command-id (identity/command-id "v2366-command")
                                    :execution-id (identity/execution-id "v2366-execution")
                                    :operation :request/claim :arguments {:request-id "r1"}
@@ -199,12 +206,13 @@
                                       (= (:principal binding) (get-in record [:gesso.command/binding :principal])))
                      :construct! (fn [{:keys [arguments]}]
                                    (swap! constructions inc)
-                                   (let [id (:request-id arguments)]
-                                     {:spec {:purpose :gesso.live/refresh}
-                                      :changes [{:topic :request :request/location-id id :change/kind :updated}]
-                                      :domain-ops [[:put-docs :requests {:xt/id id :status :claimed}]]
-                                      :outcome {:outcome :request/claimed}
-                                      :now "2026-11-24T00:00:00Z"}))
+                                   (when-not (= (:request-id arguments) (:xt/id before))
+                                     (throw (ex-info "Unexpected claim subject" {:arguments arguments})))
+                                   {:spec {:purpose :gesso.live/refresh}
+                                    :model-plan {:commands [(model-command/update-command
+                                                              :requests :claim before after version)]}
+                                    :outcome {:outcome :request/claimed}
+                                    :now "2026-11-24T00:00:00Z"})
                      :project! (fn [{:keys [ctx arguments]} result]
                                  (swap! projections conj (:status result))
                                  (when (= :incorporated (:status result))
@@ -230,13 +238,18 @@
                                            :status (:status (first (live/q ctx ["SELECT status FROM requests WHERE _id = ?" id])))})
                   fixture/generic-render (fn [{:keys [fragment/id status]}]
                                            [:section {:id id} (name (or status :open))])]
-      (with-assembly "/fragments/request-list/:id" "/streams/request-list/:id" execute!
+      (with-assembly "/fragments/request-list/:id" "/streams/request-list/:id"
+        {:request/claim (fixture/trusted-operation :request/claim
+                         {:published-change-topics #{:request} :execute! execute!})}
         (fn [assembly]
           (let [started (host/start! assembly
                                      (fn [_] (swap! fallback inc) (g/html-response [:div "fallback"]))
                                      (assoc (config) :http-jdk {}
                                             :live-options {}
-                                            :assembled-publication subject-mapping
+                                            :assembled-publication (assoc subject-mapping
+                                                                          :model-entity-topics {:requests #{:request}}
+                                                                          :require-derived-model? true
+                                                                          :operation-model-entities {:request/claim #{:requests}})
                                             :assembled-operations {:authorize-request? #(= "allowed" (get-in % [:headers "authorization"]))}
                                             :assembled-fragments {:resolve-id resolve-id}
                                             :assembled-sse {:resolve-id resolve-id :max-connections 2
@@ -276,6 +289,8 @@
               (is (empty? @invocations))
               (is (empty? (xt/q node ["SELECT _id FROM requests"])))
               (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+              ;; Explicit fixture initialization, not part of the admitted command.
+              (xt/execute-tx node [[:put-docs :requests before]])
               (doseq [path fragments]
                 (is (str/includes? (.body (send! path headers (HttpResponse$BodyHandlers/ofString))) ">open<")))
               (let [list-response (send! list-path headers (HttpResponse$BodyHandlers/ofInputStream))
@@ -321,7 +336,8 @@
                               (is (str/includes? (.body response) ">claimed<"))
                               (is (= ["r1" requirement] (peek @queries)))))))
                       (finally (future-cancel a) (future-cancel b))))
-                  (is (= [{:status :claimed}] (xt/q node ["SELECT status FROM requests WHERE _id = ?" "r1"])))
+                  (is (= [{:status :claimed :revision 1}]
+                         (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"])))
                   (let [intent-id (:xt/id (first @prepared-intents))]
                     (is (uuid? intent-id))
                     (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id]))))
@@ -356,7 +372,7 @@
                                          invocation (constantly true) (constantly {:resolution :failed}))))))
                   ;; A later domain mutation changes the authoritative state.
                   ;; Replay must report that state, not the original projection.
-                  (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :status :done}]])
+                  (xt/execute-tx node [[:put-docs :requests (assoc after :status :done :revision 2 :updated-at "t2")]])
                   ;; Even an authorized :submit checks the durable record before planning.
                   (let [retry (assoc command :execution-id (identity/execution-id "v2374-retry"))
                         response (post-command! headers retry)
