@@ -138,7 +138,7 @@
 (defn- fragment-panel-html
   ([server]
    (fragment-panel-html server nil))
-  ([server {:keys [client-continuity]}]
+  ([server {:keys [client-continuity acquisition-policy]}]
    (let [panel
          (live.ui/fragment-panel
           (cond-> {:id fragment-id
@@ -147,7 +147,9 @@
                    :event "live-update"
                    :swap "outerHTML"}
             (some? client-continuity)
-            (assoc :client-continuity client-continuity)))
+            (assoc :client-continuity client-continuity)
+            (some? acquisition-policy)
+            (assoc :acquisition-policy acquisition-policy)))
          ;; fragment-panel intentionally renders an empty canonical target.
          ;; Give this scenario a visible initial marker without changing any
          ;; behavior-owning markup.
@@ -4132,6 +4134,90 @@
 
               (is (true? (chromium/assert-clean! context))
                   "The recovered continuity scenario must finish browser-clean."))))))))
+
+(deftest explicit-refresh-preserves-debt-across-cancelled-physical-swap-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (let [a (progression/requirement {:tx-id 1501 :system-time "2026-08-29T03:00:01Z"})
+            b (progression/requirement {:tx-id 1502 :system-time "2026-08-29T03:00:02Z"})
+            c (progression/requirement {:tx-id 1503 :system-time "2026-08-29T03:00:03Z"})
+            request! (fn [] (fixture/await-pending! server #(= fragment-path (:path %)) 5000))
+            carried (fn [request]
+                      (some-> (request-header request progression.http/request-header-name)
+                              progression.http/decode-request-progression))
+            click! (fn [] (.click (.locator page "button[data-gesso-live-refresh='fixture-fragment']")))
+            text! (fn [] (chromium/evaluate page "() => document.getElementById('fixture-fragment').textContent"))]
+        (script-static-routes! server 1 (page-html server {:client-continuity true
+                                                          :acquisition-policy :explicit-refresh}))
+        (fixture/script! server :get fragment-path
+                         [(fixture/hold (fragment-response "cancelled-A"))
+                          (fixture/hold (fragment-response "adopted-A+B"))
+                          (fixture/hold (fragment-response "adopted-C"))
+                          (fixture/hold (fragment-response "UNEXPECTED-successor"))])
+        (chromium/navigate! page (fixture/url server page-path))
+        (chromium/wait-for-js! page "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted && window.__gessoFixture.sseOpens >= 1")
+        (fixture/await-sse-client! server client-id 5000)
+        (is (= 1 (emit-progression! server a)))
+        (chromium/wait-for-js! page "() => window.__gessoFixture.sseMessages === 1")
+        ;; The open, a canonical SSE notice and a native lifecycle wakeup
+        ;; must not acquire an explicit-policy fragment. Nor may a synthetic click.
+        (chromium/evaluate page "() => { window.dispatchEvent(new Event('online')); document.querySelector('button[data-gesso-live-refresh]').click(); }")
+        (is (zero? (chromium/evaluate page "() => window.__gessoFixture.fragmentBeforeRequests")))
+        (is (empty? (fragment-requests server)))
+        (is (= "initial" (text!)))
+        (click!)
+        (let [first-read (request!)]
+          (is (= a (carried first-read)))
+          (is (= 1 (emit-progression! server b)))
+          (chromium/wait-for-js! page "() => window.__gessoFixture.sseMessages === 2")
+          (click!)
+          (is (= 1 (count (fragment-requests server))))
+          ;; Install after production runtime startup, so this cooperative
+          ;; host listener cancels only after Gesso has captured continuity.
+          (chromium/evaluate
+           page
+           "() => {
+              const root = document.querySelector('[data-gesso-live-fragment]');
+              root.style.minHeight = '12px';
+              window.__gessoFixture.continuityReleased = 0;
+              document.addEventListener('gesso:live-continuity:released', () => window.__gessoFixture.continuityReleased++);
+              document.addEventListener('htmx:beforeSwap', function cancel(event) {
+                if (event.detail.target.id !== 'fixture-fragment') return;
+                document.removeEventListener('htmx:beforeSwap', cancel);
+                event.detail.shouldSwap = false;
+                event.preventDefault();
+              });
+            }")
+          (fixture/release! server (:request-id first-read)))
+        (chromium/wait-for-js! page "() => window.__gessoFixture.fragmentAfterRequests === 1 && window.__gessoFixture.continuityReleased === 1")
+        (is (= "initial" (text!)))
+        (is (= 1 (chromium/evaluate page "() => window.__gessoFixture.continuityCaptured")))
+        (is (zero? (chromium/evaluate page "() => window.__gessoFixture.continuityRestored")))
+        (is (= "12px" (chromium/evaluate page "() => document.querySelector('[data-gesso-live-fragment]').style.minHeight")))
+        (is (= 1 (chromium/evaluate page "() => window.__gessoFixture.fragmentBeforeRequests")))
+        (is (= 1 (count (fragment-requests server))))
+        (click!)
+        (let [second-read (request!)]
+          (is (= (progression/compose a b) (carried second-read))
+              "Cancelled A and newer B must both survive into the next user-granted GET.")
+          (is (= 1 (emit-progression! server c)))
+          (chromium/wait-for-js! page "() => window.__gessoFixture.sseMessages === 3")
+          (click!)
+          (fixture/release! server (:request-id second-read)))
+        (chromium/wait-for-js! page "() => window.__gessoFixture.fragmentAfterRequests === 2 && window.__gessoFixture.continuityRestored === 1")
+        (is (= "adopted-A+B" (text!)))
+        (is (= 2 (chromium/evaluate page "() => window.__gessoFixture.fragmentBeforeRequests")))
+        (is (= 2 (count (fragment-requests server))))
+        (click!)
+        (let [third-read (request!)]
+          (is (= c (carried third-read)) "Only the uncovered C survives actual adoption.")
+          (fixture/release! server (:request-id third-read)))
+        (chromium/wait-for-js! page "() => window.__gessoFixture.fragmentAfterRequests === 3 && window.__gessoFixture.continuityRestored === 2")
+        (is (= "adopted-C" (text!)))
+        (is (= 3 (chromium/evaluate page "() => window.__gessoFixture.fragmentBeforeRequests")))
+        (is (= 3 (count (fragment-requests server))))
+        (is (empty? (fixture/pending-request-ids server)))
+        (is (true? (chromium/assert-clean! context)))))))
 
 (defn -main
   [& _]
