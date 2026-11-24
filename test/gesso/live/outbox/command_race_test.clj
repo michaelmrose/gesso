@@ -922,7 +922,7 @@
                    :construct-after-abort!
                    (fn [{:keys [ctx command-id]}]
                      (swap! recovery-trace conj [:construct command-id])
-                     (reset! recovery-state (semantics/snapshot! #(frontier/q-from! ctx %)))
+                     (reset! recovery-state (semantics/snapshot-at-frontier! ctx))
                      (let [row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))]
                        (when (= :claimed (:status row))
                          {:spec nil
@@ -1040,7 +1040,7 @@
          (try
            (xt/execute-tx node [[:put-docs :requests before]
                                 [:put-docs :memberships (assoc member :xt/id "helper-1") (assoc member :xt/id "helper-2")]])
-           (reset! initial-state (semantics/snapshot! #(xt/q node %)))
+           (reset! initial-state (semantics/snapshot-at-frontier! node))
            (when (= :valid recovery-mode)
              ;; Actual network refusals must not reach either constructor.
              (doseq [headers [{"x-fixture-session" "a"}
@@ -1127,16 +1127,22 @@
                (is (= #{{:topic :request :command-id id} {:topic :request-assignment :command-id id}}
                       (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$command_id AS command_id FROM gesso_live_outbox"]))))
                (is (= (cond-> #{[id :incorporated]} valid? (conj [loser-id :incorporated])) (set @projected)))
-               (let [final-state (semantics/snapshot! #(xt/q node %))
-                     accepted (semantics/observe! helper :accept @initial-state @recovery-state)
-                     refused (semantics/observe! loser-helper :refuse @recovery-state final-state)]
+               (let [final-state (semantics/snapshot-at-frontier! node)
+                     initial (:state @initial-state)
+                     recovered (:state @recovery-state)
+                     final (:state final-state)
+                     accepted (semantics/observe! helper :accept initial recovered)
+                     refused (semantics/observe! loser-helper :refuse recovered final)]
                  (is (:matches? accepted))
+                 (is (neg? (xtdb/compare-bases (:basis @initial-state) (:basis @recovery-state))))
+                 (is (if valid? (neg? (xtdb/compare-bases (:basis @recovery-state) (:basis final-state)))
+                         (not (pos? (xtdb/compare-bases (:basis @recovery-state) (:basis final-state))))))
                  (is (= valid? (:matches? refused)))
                  (if valid?
-                   (do (is (not (:matches? (semantics/observe! loser-helper :refuse @recovery-state @recovery-state))))
-                       (is (not (:matches? (semantics/observe! loser-helper :refuse @recovery-state (assoc final-state :assignment/helper loser-helper)))))
-                       (is (not (:matches? (semantics/observe! helper :accept @recovery-state final-state)))))
-                   (is (= @recovery-state final-state))))
+                   (do (is (not (:matches? (semantics/observe! loser-helper :refuse recovered recovered))))
+                       (is (not (:matches? (semantics/observe! loser-helper :refuse recovered (assoc final :assignment/helper loser-helper)))))
+                       (is (not (:matches? (semantics/observe! helper :accept recovered final)))))
+                   (is (= recovered final))))
                (when valid? (browser/verify-no-claim-action! fragment! (headers-for session)))
                (when-let [opened @observer]
                  (browser/verify! opened helper)
@@ -1177,13 +1183,21 @@
                            (is (= {:uri path :id "l1" :row {:status :claimed :helper helper}}
                                   (select-keys read [:uri :id :row])))
                            (is (progression/covers? (:progression read) requirement))))))))
-               (let [replay (invoke session id "winner-replay")]
+               (let [before (:state (semantics/snapshot-at-frontier! node))
+                     replay (invoke session id "winner-replay")
+                     after (:state (semantics/snapshot-at-frontier! node))]
+                 (is (:matches? (semantics/observe! helper :replay-accepted before after)))
+                 (is (not (:matches? (semantics/observe! helper :replay-rejected before after))))
+                 (is (not (:matches? (semantics/observe! helper :replay-accepted before (assoc after :request/revision 2)))))
                  (is (= :already-incorporated (get-in replay [:settlement :resolution])))
                  (is (= {:status :claimed :helper helper} (get-in replay [:settlement :authoritative :projection])))
                  (is (= 2 (count @observed)))
                  (is (= [id :replay] (last @projected)))
                  (when valid?
-                   (let [replay (invoke loser-session loser-id "loser-replay")]
+                   (let [replay (invoke loser-session loser-id "loser-replay")
+                         refused-after (:state (semantics/snapshot-at-frontier! node))]
+                     (is (:matches? (semantics/observe! loser-helper :replay-rejected after refused-after)))
+                     (is (not (:matches? (semantics/observe! loser-helper :replay-accepted after refused-after))))
                      (is (= :rejected (get-in replay [:settlement :resolution])))
                      (is (= :request/not-claimable (get-in replay [:settlement :outcome])))
                      (is (= {:status :claimed :helper helper} (get-in replay [:settlement :authoritative :projection])))
@@ -1199,6 +1213,39 @@
              (when-let [opened @observer] (browser/close! opened))
              (doseq [input @streams] (.close input))
              (host/stop! started)))))))))))))
+
+(deftest claim-semantic-snapshot-does-not-mix-completed-bases
+  (with-open [node (xtn/start-node {})]
+    (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :status :open :revision 0}]
+                         [:put-docs :memberships {:xt/id "helper-1" :active true}
+                          {:xt/id "helper-2" :active true}]])
+    (let [q xtdb/q-from
+          pinned-opts (atom [])
+          observed (with-redefs [xtdb/q-from
+                                  (fn [n query opts]
+                                    (let [rows (q n query opts)]
+                                      (when-not (= query ["SELECT 1 AS ready"])
+                                        (swap! pinned-opts conj opts))
+                                      (when (= query ["SELECT _id, status, revision FROM requests"])
+                                        ;; Commit between projection queries, not before basis capture.
+                                        (xt/execute-tx node
+                                          [[:put-docs :requests {:xt/id "r1" :status :claimed :revision 1}]
+                                           [:put-docs :request_assignments {:xt/id "primary-r1" :request-id "r1" :helper "helper-1"}]
+                                           [:put-docs :memberships {:xt/id "helper-2" :active false}]]))
+                                      rows))]
+                     (semantics/snapshot-at-frontier! node))
+          latest (semantics/snapshot-at-frontier! node)]
+      (is (= 4 (count @pinned-opts)))
+      (is (= 1 (count (set @pinned-opts))))
+      (is (= (xtdb/basis-snapshot-token (:basis observed)) (:snapshot-token (first @pinned-opts))))
+      (is (instance? java.time.Instant (:current-time (first @pinned-opts))))
+      (is (= {:request/status :open :request/revision 0 :assignment/helper nil
+              :journal/one nil :journal/two nil :membership/one true :membership/two true}
+             (:state observed)))
+      (is (= {:request/status :claimed :request/revision 1 :assignment/helper "helper-1"
+              :journal/one nil :journal/two nil :membership/one true :membership/two false}
+             (:state latest)))
+      (is (neg? (xtdb/compare-bases (:basis observed) (:basis latest)))))))
 
 (defn -main [& args]
   (when (seq args) (throw (ex-info "Unexpected Claim browser gate arguments" {})))

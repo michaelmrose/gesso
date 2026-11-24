@@ -6,7 +6,10 @@
             [gesso.assurance.transition :as construction]
             [gesso.assurance.proof.transition :as abstract]
             [gesso.assurance.proof.independent-transition-semantics :as independent]
-            [gesso.choreo.identity :as identity]))
+            [gesso.choreo.identity :as identity]
+            [gesso.live.consistency.xtdb :as xtdb]
+            [gesso.live.outbox.read-frontier :as frontier])
+  (:import [java.time Instant]))
 
 (def helpers {"helper-1" [:journal/one :membership/one]
               "helper-2" [:journal/two :membership/two]})
@@ -23,24 +26,29 @@
 (defn source [helper alternative]
   (let [[slot membership] (or (helpers helper) (throw (ex-info "Unknown helper" {})))
         accept? (= :accept alternative)
-        _ (when-not (#{:accept :refuse} alternative) (throw (ex-info "Unknown alternative" {})))
-        conditions (if accept?
+        _ (when-not (#{:accept :refuse :replay-accepted :replay-rejected} alternative) (throw (ex-info "Unknown alternative" {})))
+        conditions (case alternative
+                     :accept
                      {:request/status :open :request/revision 0 :assignment/helper nil
                       slot nil membership true}
-                     {:request/status :claimed :request/revision 1 slot nil})
-        replacements (if accept?
+                     :refuse {:request/status :claimed :request/revision 1 slot nil}
+                     :replay-accepted {slot :accepted}
+                     :replay-rejected {slot :rejected})
+        replacements (cond
+                       accept?
                        {:request/status [:literal :claimed] :request/revision [:literal 1]
                         :assignment/helper [:literal helper] slot [:literal :accepted]}
-                       {slot [:literal :rejected]})
+                       (= :refuse alternative) {slot [:literal :rejected]}
+                       :else {})
         reads (set (keys conditions))
+        checks (mapv (fn [[k v]] [:= [:read k] [:literal v]]) (sort-by key conditions))
         writes (set (keys replacements))]
     {:subject {:kind :operation :id :fixture/multi-record-claim
                :interface {:version 1 :helper helper :alternative alternative
                            :request "r1" :assignment "primary-r1"}}
      :state-types state-types :input-types {}
      :guard {:readers reads
-             :expression (into [:and] (map (fn [[k v]] [:= [:read k] [:literal v]])
-                                           (sort-by key conditions)))}
+             :expression (if (= 1 (count checks)) (first checks) (into [:and] checks))}
      :reads reads :writes writes :replacements replacements
      :frame (set/difference (set (keys state-types)) writes)}))
 
@@ -56,9 +64,8 @@
   (when-not condition (throw (ex-info "Outside closed Claim observation" {}))))
 
 (defn snapshot!
-  "Project actual rows at fixture quiescence or inside its sole recovery
-   constructor, before the rejection submits. Separate reads are NOT a
-   general atomic snapshot; the fixture has no other domain/journal writers."
+  "Project actual rows supplied by a query function. Use snapshot-at-frontier!
+   for physical observations; this decoder does not itself pin any reads."
   [q]
   (let [requests (q ["SELECT _id, status, revision FROM requests"])
         assignments (q ["SELECT _id, request_id, helper FROM request_assignments"])
@@ -92,3 +99,15 @@
                                (= {:outcome :request/not-claimable :reason :already-claimed} outcome) :rejected
                                :else (throw (ex-info "Unknown Claim outcome" {}))))))
               state records))))
+
+(defn snapshot-at-frontier!
+  "Capture one completed basis on the selected node and use that exact
+   system-time snapshot and a single valid-time clock for every projection
+   query. This observes a completed frontier, not transaction-internal state
+   or evidence of complete writer coverage."
+  [ctx]
+  (let [node (xtdb/connectable-from ctx)
+        {:keys [basis]} (frontier/q-with-basis! node ["SELECT 1 AS ready"])
+        opts {:snapshot-token (xtdb/basis-snapshot-token basis)
+              :current-time (Instant/now)}]
+    {:basis basis :state (snapshot! #(xtdb/q-from node % opts))}))
