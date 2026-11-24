@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-proving
-  "v2347: A runnable, generic SINGLE-NODE reservation application built with
+  "v2348: A runnable, generic SINGLE-NODE reservation application built with
    Gesso's model transaction boundary and a real embedded XTDB2 node.
 
    The existing single-node-proving catalog owns abstract business intent:
@@ -20,6 +20,7 @@
             [gesso.model.command :as command]
             [gesso.model.tx :as tx]
             [xtdb.api :as xt]
+            [xtdb.basis :as basis]
             [xtdb.node :as xtn])
   (:import [java.nio.file Path]))
 
@@ -305,6 +306,21 @@
         {:log [:local {:path (str log)}]
          :storage [:local {:path (str storage)}]}))))
 
+(defn- await-reopened-log! [node]
+  ;; A newly opened DataSource has no remembered transaction await-token.
+  ;; Capture the physical log frontier before any application writer starts,
+  ;; then wait using XTDB's pinned 2.2 basis encoder and query option. Do not
+  ;; mistake a not-yet-indexed row for absent data or silently seed again.
+  (let [submitted (:latest-submitted-msg-ids (xt/status node))]
+    (when-not (and (map? submitted) (seq submitted)
+                   (every? (fn [[db ids]]
+                             (and (string? db) (vector? ids) (seq ids)
+                                  (every? integer? ids)))
+                           submitted))
+      (reject! :invalid-reopened-log-frontier))
+    (xt/q node ["SELECT 1 AS ready"]
+          {:await-token (basis/->tx-basis-str submitted)})))
+
 (defn with-proving-application!
   "Run `f` with a small real embedded-XTDB application and close its node.
 
@@ -344,7 +360,8 @@
      (with-open [node (xtn/start-node config)]
        (let [ctx {:biff.xtdb/node node}
              _ (if (= :reopen (:mode storage-selection))
-                 (checked-current! node slot-id)
+                 (do (await-reopened-log! node)
+                     (checked-current! node slot-id))
                  (tx/transact! ctx
                                {:commands [(command/create table (initial-document slot-id) version-keys)]
                                 :emit false}))

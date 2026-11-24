@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2347: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2348: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -561,23 +561,27 @@
    The callback receives read-only :outbox-worker-status, not a second manual
    dispatcher or restart handle. Retire before leaving the Biff callback,
    including exceptional exit, so an in-flight cycle cannot outlive XTDB or
-   Live. Shutdown can wait indefinitely for a blocked provider. This is NOT
-   native checked Biff worker-module adoption, ingress drain, process restart
-   persistence, or release qualification."
-  [slot-id source listener-selection worker-options f]
-  (when-not (fn? f) (reject! :invalid-application-callback))
-  (lifecycle/validate-worker-options! worker-options)
-  (with-durable-granted-live-proving-application!
-   slot-id source listener-selection
-   (fn [app]
-     (let [handle (lifecycle/start! (:node app) (:live-system app)
-                                    (:biff-context app) physical/outbox-source-id
-                                    worker-options)]
-       (try
-         (f (-> app
-                (dissoc :process-outbox!)
-                (assoc :outbox-worker-status #(lifecycle/status handle))
-                (update :live-report assoc
-                        :notification-timing :atomic-intent-then-scoped-managed-worker
-                        :outbox-worker-lifecycle :retired-before-provider-scope-exit)))
-         (finally (retire-scoped-worker! handle)))))))
+   Live. An optional trusted storage selection is passed to the same durable
+   fixture; the existing arity stays ephemeral. Shutdown can wait indefinitely
+   for a blocked provider. This is NOT native checked Biff worker-module
+   adoption, ingress drain, arbitrary crash tolerance, or release qualification."
+  ([slot-id source listener-selection worker-options f]
+   (with-managed-durable-granted-live-proving-application!
+    slot-id source listener-selection :ephemeral worker-options f))
+  ([slot-id source listener-selection storage-selection worker-options f]
+   (when-not (fn? f) (reject! :invalid-application-callback))
+   (lifecycle/validate-worker-options! worker-options)
+   (with-durable-granted-live-proving-application!
+    slot-id source listener-selection storage-selection
+    (fn [app]
+      (let [handle (lifecycle/start! (:node app) (:live-system app)
+                                     (:biff-context app) physical/outbox-source-id
+                                     worker-options)]
+        (try
+          (f (-> app
+                 (dissoc :process-outbox!)
+                 (assoc :outbox-worker-status #(lifecycle/status handle))
+                 (update :live-report assoc
+                         :notification-timing :atomic-intent-then-scoped-managed-worker
+                         :outbox-worker-lifecycle :retired-before-provider-scope-exit)))
+          (finally (retire-scoped-worker! handle))))))))
