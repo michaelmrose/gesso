@@ -185,6 +185,7 @@
   (let [seen (atom []) queries (atom []) invocations (atom []) fallback (atom 0)
         prepared-intents (atom nil)
         read-allowed? (atom true)
+        disclosure-allowed? (atom true)
         submitted (atom 0)
         execute xtdb/execute-tx-from!
         lost (ex-info "submitted command reply lost" {:test/lost-reply true})
@@ -210,7 +211,8 @@
                                          (swap! invocations conj invocation)
                                          :submit)
                      :may-disclose? (fn [binding record]
-                                      (= (:principal binding) (get-in record [:gesso.command/binding :principal])))
+                                      (and @disclosure-allowed?
+                                           (= (:principal binding) (get-in record [:gesso.command/binding :principal]))))
                      :construct! (fn [{:keys [ctx arguments]}]
                                    (swap! constructions inc)
                                    (when-not (= (:request-id arguments) (:xt/id before))
@@ -571,6 +573,39 @@
                     (is (= 4 @constructions))
                     (is (= 3 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
                     (is (= intents-before (xt/q node ["SELECT * FROM gesso_live_outbox"])))
+                    (is (= [{:status :done :revision 2}]
+                           (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"]))))
+                  ;; A known command ID is not a credential or permission to
+                  ;; disclose its durable outcome. Exercise the original route,
+                  ;; with the actual journal lookup and unchanged command identity.
+                  (let [retry (assoc command :execution-id (identity/execution-id "v2419-replay"))
+                        counts (fn [] [(count @invocations) @constructions @abort-constructions @projections])
+                        before (counts)
+                        records (xt/q node ["SELECT * FROM gesso_commands"])
+                        intents (xt/q node ["SELECT * FROM gesso_live_outbox"])
+                        observed (atom [])
+                        reconcile publication/reconcile-command!
+                        attempt! (fn [cmd]
+                                   (try (post-command! headers cmd)
+                                        (catch java.io.IOException e e)))]
+                    (is (= 403 (.statusCode (post-command! (dissoc headers "authorization") retry))))
+                    (is (= before (counts)))
+                    (with-redefs [publication/reconcile-command!
+                                  (fn [ctx disclosure?]
+                                    (let [result (reconcile ctx disclosure?)]
+                                      (swap! observed conj (select-keys result [:status :outcome]))
+                                      result))]
+                      (reset! disclosure-allowed? false)
+                      (try
+                        (is (instance? java.io.IOException (attempt! retry)))
+                        (finally (reset! disclosure-allowed? true)))
+                      (is (instance? java.io.IOException
+                                     (attempt! (assoc retry :arguments {:request-id "r2"}))))
+                      (is (= [{:status :unavailable} {:status :incompatible}] @observed)))
+                    (is (= (+ 2 (first before)) (count @invocations)))
+                    (is (= (subvec before 1) (subvec (counts) 1)))
+                    (is (= records (xt/q node ["SELECT * FROM gesso_commands"])))
+                    (is (= intents (xt/q node ["SELECT * FROM gesso_live_outbox"])))
                     (is (= [{:status :done :revision 2}]
                            (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"]))))
                   (is (zero? @fallback))
