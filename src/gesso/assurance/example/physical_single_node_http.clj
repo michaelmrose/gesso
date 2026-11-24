@@ -55,8 +55,11 @@
   app)
 
 (defn- safe-render [app]
+  ;; A response must describe one coherent XTDB observation. Calling
+  ;; :abstract! separately would issue a second physical read, and a
+  ;; concurrent writer could change the slot between those two snapshots.
   (let [row ((:read! app))
-        state ((:abstract! app))]
+        state (physical/physical->abstract row)]
     (when-not (and (= (:slot/active-claims state) (:claims row))
                    (#{:available :reserved} (:slot/status state)))
       (reject! :physical-readback-mismatch))

@@ -87,6 +87,43 @@
        (is (= 0 (:slot/active-claims (abstract!))))
        (is (= "preserved" (:audit-tag (read!))))))))
 
+(deftest rendered-response-uses-one-checked-xtdb-snapshot
+  ;; The old renderer independently called :read! and :abstract!, which
+  ;; each queried XTDB. A concurrent reservation could land between those
+  ;; reads and make a valid GET falsely reject a mixed-revision response.
+  ;; Reject any second query rather than trusting a nondeterministic race.
+  (subject/with-http-proving-application!
+   (fn [{:keys [handler read!]}]
+     (let [original-q @#'xt/q]
+       (doseq [[status revision]
+               [["available" 0] ["reserved" 1] ["available" 2]]]
+         (let [queries (atom 0)
+               result (with-redefs [xt/q (fn [& args]
+                                          ;; xt/q arity-2 delegates to arity-3.
+                                          ;; Count only the external arity-2
+                                          ;; query, not that internal call.
+                                          (when (= 2 (count args))
+                                            (let [count* (swap! queries inc)]
+                                              (when (> count* 1)
+                                                (throw (ex-info
+                                                        "Second physical read during HTTP render"
+                                                        {:read-count count*})))))
+                                          (apply original-q args))]
+                        (handler (request :get view)))]
+           (is (= 1 @queries)
+               "The response must derive its status and revision from one read")
+           (is (= 200 (:status result)))
+           (is (re-find (re-pattern (str "data-slot-status=\"" status "\""))
+                        (:body result)))
+           (is (re-find (re-pattern (str "data-slot-revision=\"" revision "\""))
+                        (:body result)))
+           (is (= revision (:revision (read!)))
+               "Rendering must not modify authoritative XTDB state"))
+         (case revision
+           0 (is (= 200 (:status (handler (request :post reserve)))))
+           1 (is (= 200 (:status (handler (request :post release)))))
+           nil))))))
+
 (deftest unsupported-methods-and-unknown-routes-do-not-mutate
   (subject/with-http-proving-application!
    (fn [{:keys [handler read!]}]
