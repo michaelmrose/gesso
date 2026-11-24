@@ -30,6 +30,7 @@
             [gesso.live.outbox.http-sse :as assembled-sse]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.publication-manifest :as manifest]
             [xtdb.node :as xtn]))
 
 (def xtdb-module-id :gesso.live.outbox.host/xtdb)
@@ -145,6 +146,8 @@
               :gesso.live.outbox.host/node
               #(xtn/start-node (get-in system [config-key :xtdb-config]))
               #(.close ^java.lang.AutoCloseable %))]
+    (manifest/require-compatible! node (get-in system [config-key :source-id])
+                                  (::publication-manifest system))
     (assoc system :xtdb/connectable node)))
 
 (defn- stop-xtdb! [system]
@@ -316,7 +319,9 @@
    unless :assembled-publication is selected. That profile requires an
    explicit :subject-keys mapping for the admitted graph and replaces
    :live-options :rules (which must be absent). Only unconditional graphs
-   reconstructible from one durable subject per topic are admitted. When
+   reconstructible from one durable subject per topic are admitted. A durable
+   source manifest fences changes to that expansion vocabulary and refuses
+   automatic adoption of preexisting unclassified intents. When
    assembled operations are also selected, their trusted executors receive
    a command-bound publication preparer using that same subject mapping.
    Recognized publication/build-executor callbacks require both profiles
@@ -364,6 +369,7 @@
                      ((or (:handler @route*) handler) request))
                    timeout-ms)
         initial (cond-> {config-key config
+                         ::publication-manifest (:manifest profile)
                          :biff.ring/handler (:handler admission)
                          managed/source-id-key (:source-id config)
                          managed/options-key (:worker-options config)

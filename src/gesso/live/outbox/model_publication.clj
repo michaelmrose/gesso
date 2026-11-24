@@ -6,6 +6,7 @@
             [gesso.live.model :as model]
             [gesso.choreo.identity :as identity]
             [gesso.live.outbox :as outbox]
+            [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.optimistic.server :as server]
             [gesso.live.optimistic.resolved-operation :as adapter]
@@ -358,7 +359,8 @@
                                                :target-fields (set (map :id-key targets))}))))
     ;; A catch-all prevents the Live runtime's unmatched :keep default from
     ;; silently publishing a raw outbox topic instead of a model invalidation.
-    {:rules
+    {:manifest (manifest/descriptor compiled subjects)
+     :rules
      [{:when (fn [_ _] true)
       :expand (fn [ctx {:keys [topic id] :as change}]
                 (let [field (get subjects topic)]

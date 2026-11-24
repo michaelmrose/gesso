@@ -11,8 +11,10 @@
             [gesso.live.core :as live]
             [gesso.live.model :as model]
             [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox :as outbox]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.invalidation :as invalidation]
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http-sse :as sse]
@@ -811,3 +813,78 @@
         (is (= :publication-executor-operation-mismatch
                (reason #(host/start! assembly identity selected))))))
     (is (zero? @called))))
+
+(deftest assembled-publication-manifest-fences-persistent-host-restart
+  (let [root (java.nio.file.Files/createTempDirectory
+              "gesso-v2377-manifest-" (make-array java.nio.file.attribute.FileAttribute 0))
+        compiled-var (ns-resolve 'gesso.live.application-preflight.fixture 'compiled-live)
+        original @compiled-var
+        selected (assoc (config) :xtdb-config {:log [:local {:path (str root "/log")}]
+                                               :storage [:local {:path (str root "/storage")}]}
+                        :live-options {} :assembled-publication subject-mapping)
+        handler (fn [_] (g/html-response [:div "ready"]))
+        start-error (fn [assembly cfg]
+                      (try (let [started (host/start! assembly handler cfg)]
+                             (host/stop! started) nil)
+                           (catch clojure.lang.ExceptionInfo e e)))]
+    (try
+      (with-assembly
+        (fn [assembly]
+          (let [profile (publication/profile! assembly subject-mapping)
+                compiled (get-in assembly [:operation-acquisition-assembly :acquisition-assembly :live-app])]
+            (is (= (:manifest profile)
+                   (binding [*print-length* 0 *print-level* 0 *print-meta* true]
+                     (manifest/descriptor compiled (:subject-keys subject-mapping)))))
+            (dotimes [_ 2]
+              (let [started (host/start! assembly handler selected)]
+                (try
+                  (is (= [{:xt/id (:source-id selected) :profile-version 1
+                           :descriptor (:manifest profile)}]
+                         (xt/q (:xtdb/connectable started)
+                               ["SELECT _id, profile_version, descriptor FROM gesso_publication_manifests"])))
+                  (finally (host/stop! started)))))
+            (let [starts (atom 0)]
+              (with-redefs [live/create (fn [& _] (swap! starts inc)
+                                          (throw (ex-info "unexpected Live startup" {})))]
+                (let [error (start-error assembly (-> selected (dissoc :assembled-publication)
+                                                       (assoc :live-options {:rules []})))]
+                  (is (= :drained (:rollback/status (ex-data error))))
+                  (is (= :publication-manifest-mismatch (:reason (ex-data (ex-cause error))))))
+                (is (zero? @starts)))))))
+      (with-redefs-fn
+        {compiled-var #(model/compile-live-app
+                        (assoc-in (original) [:scopes :request-list :topic] :fixture/revised-list))}
+        (fn []
+          (with-assembly
+            (fn [assembly]
+              (let [error (start-error assembly selected)]
+                (is (= :drained (:rollback/status (ex-data error))))
+                (is (= :publication-manifest-mismatch (:reason (ex-data (ex-cause error))))))))))
+      ;; Failed incompatible startup did not overwrite the original manifest.
+      (with-assembly
+        (fn [assembly]
+          (let [legacy "legacy-unclassified"
+                id (random-uuid)
+                started (host/start! assembly handler selected)]
+            (try
+              (let [node (:xtdb/connectable started)
+                    plan (outbox/prepare! {:intent-ids [id] :source-id legacy
+                                           :operation :request/claim :purpose :gesso.live/refresh}
+                                          [{:topic :request :id "old-subject"}])]
+                (xt/execute-tx node (conj (:guard-ops plan) (:tx-op plan))))
+              (finally (host/stop! started)))
+            ;; Another source's unclassified intent cannot be reinterpreted
+            ;; merely by enabling the selected publication profile.
+            (let [error (start-error assembly (assoc selected :source-id legacy))]
+              (is (= :drained (:rollback/status (ex-data error))))
+              (is (= :xtdb/assert-failed (:xtdb.error/code (ex-data (ex-cause error))))))
+            (let [started (host/start! assembly handler selected)]
+              (try
+                (is (= [{:xt/id (:source-id selected)}]
+                       (xt/q (:xtdb/connectable started) ["SELECT _id FROM gesso_publication_manifests"])))
+                (is (= [{:xt/id id}]
+                       (xt/q (:xtdb/connectable started) ["SELECT _id FROM gesso_live_outbox"])))
+                (finally (host/stop! started)))))))
+      (finally
+        (doseq [entry (reverse (file-seq (.toFile root)))]
+          (clojure.java.io/delete-file entry true))))))
