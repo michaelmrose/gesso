@@ -348,7 +348,10 @@
         handler (if (contains? config :assembled-operations)
                   (operation-http/wrap-handler
                    assembly handler (:assembled-operations config)
-                   (when profile #((:bind-command profile) (:source-id config) %)))
+                   (when profile
+                     (fn [{:keys [command principal]}]
+                       ((:bind-command profile) (:source-id config)
+                        (assoc command :principal principal)))))
                   handler)
         route* (atom nil)
         recovery* (atom nil)

@@ -176,7 +176,6 @@
 
 (deftest assembled-streams-share-capacity-and-use-original-model-policy
   (let [seen (atom []) queries (atom []) invocations (atom []) fallback (atom 0)
-        intent-id (random-uuid)
         prepared-intents (atom nil)
         command (protocol/command {:command-id (identity/command-id "v2366-command")
                                    :execution-id (identity/execution-id "v2366-execution")
@@ -188,7 +187,7 @@
                    (swap! invocations conj invocation)
                    (let [id (:request-id arguments)
                          receipt (publication/transact!
-                                  ctx {:intent-ids [intent-id] :purpose :gesso.live/refresh}
+                                  ctx {:purpose :gesso.live/refresh}
                                   [{:topic :request :request/location-id id :change/kind :updated}]
                                   [[:put-docs :requests {:xt/id id :status :claimed}]])
                          _ (reset! prepared-intents (:outbox/intents receipt))
@@ -301,7 +300,9 @@
                               (is (= ["r1" requirement] (peek @queries)))))))
                       (finally (future-cancel a) (future-cancel b))))
                   (is (= [{:status :claimed}] (xt/q node ["SELECT status FROM requests WHERE _id = ?" "r1"])))
-                  (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id])))
+                  (let [intent-id (:xt/id (first @prepared-intents))]
+                    (is (uuid? intent-id))
+                    (is (= [{:xt/id intent-id}] (xt/q node ["SELECT _id FROM gesso_live_outbox WHERE _id = ?" intent-id]))))
                   (is (= {:gesso.live.outbox/source-id (:source-id (config))
                           :gesso.live.outbox/operation :request/claim
                           :gesso.live.outbox/command-id "v2366-command"
@@ -445,3 +446,54 @@
               (is (identical? failure
                               (try (publication/transact! ctx spec [change] [(write "r2")])
                                    nil (catch Exception e e)))))))))))
+
+(deftest derived-publication-identities-fence-replacement-executions
+  (with-assembly
+    (fn [assembly]
+      (with-open [node (xtn/start-node {})]
+        (let [bind (:bind-command (publication/profile! assembly subject-mapping))
+              command {:operation :request/claim
+                       :principal (identity/principal "helper-1")
+                       :command-id (identity/command-id "command-2371")
+                       :execution-id (identity/execution-id "first")}
+              context (fn [source command]
+                        {:xtdb/connectable node publication/preparation-key (bind source command)})
+              ctx (context "owned-source" command)
+              retry (context "owned-source" (assoc command :execution-id (identity/execution-id "retry")))
+              spec {:purpose :gesso.live/refresh}
+              change {:topic :request :request/location-id "r1"}
+              ids (fn [ctx spec changes]
+                    (mapv :xt/id (:intents (publication/prepare! ctx spec changes))))
+              expected (ids ctx spec [change change])
+              write (fn [id] [:put-docs :requests {:xt/id id :status :claimed}])]
+          ;; Frozen independent v1 identity vectors protect durable retries
+          ;; across deployment changes, not merely within one process.
+          (is (= [(java.util.UUID/fromString "2f5346bd-0e1e-85b4-a1d1-2c86817a06e6")
+                  (java.util.UUID/fromString "c29521ea-cef4-8c5a-95c5-917462f40ca1")] expected))
+          (is (= 2 (count (distinct expected))))
+          (is (every? #(and (= 8 (.version ^java.util.UUID %))
+                            (= 2 (.variant ^java.util.UUID %))) expected))
+          (is (= expected (ids retry spec [change change])))
+          (is (= expected (binding [*print-length* 0 *print-level* 0 *print-meta* true]
+                            (ids retry spec [change change]))))
+          (is (= [(first expected)] (ids retry {:purpose :other/refresh}
+                                         [(assoc change :request/location-id "r2")])))
+          (doseq [[source other] [["other-source" command]
+                                  ["owned-source" (assoc command :principal (identity/principal "helper-2"))]
+                                  ["owned-source" (assoc command :command-id (identity/command-id "different"))]
+                                  ["owned-source" (assoc command :command-id (identity/command-id :command-2371))]]]
+            (is (not= (first expected) (first (ids (context source other) spec [change])))))
+          (doseq [bad [(dissoc command :principal)
+                       (assoc command :principal (identity/actor "helper-1"))
+                       (assoc command :principal (identity/principal {:id "helper-1"}))]]
+            (is (= :invalid-derived-command-identity
+                   (reason #(ids (context "owned-source" bad) spec [change])))))
+          (let [receipt (publication/transact! ctx spec [change] [(write "r1")])]
+            (is (= [(first expected)] (mapv :xt/id (:outbox/intents receipt)))))
+          (is (= :xtdb/assert-failed
+                 (try (publication/transact! retry {:purpose :other/refresh}
+                                             [(assoc change :request/location-id "r2") change]
+                                             [(write "r2")])
+                      nil (catch Exception e (:xtdb.error/code (ex-data e))))))
+          (is (= [{:xt/id "r1"}] (xt/q node ["SELECT _id FROM requests"])))
+          (is (= [{:xt/id (first expected)}] (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))))

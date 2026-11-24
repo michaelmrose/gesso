@@ -121,10 +121,13 @@
                                   (assoc :form-params form :path-params captured))]
                   (if-not (true? (authorize? context))
                     (response 403)
-                    (let [context (cond-> context
-                                    bind-publication
-                                    (assoc publication/preparation-key (bind-publication command)))
-                          send (server/run-command prepared context command)
+                    (let [send (if bind-publication
+                                 (server/run-command
+                                  prepared context command
+                                  (fn [boundary]
+                                    (assoc (:ctx boundary) publication/preparation-key
+                                           (bind-publication boundary))))
+                                 (server/run-command prepared context command))
                           result (http/html-response (ui/optimistic-settlement-marker (:settlement send)))]
                       ;; Serialize before recording handoff. No exception from
                       ;; execution or serialization becomes a fabricated rejection.

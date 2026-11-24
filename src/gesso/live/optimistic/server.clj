@@ -1134,14 +1134,19 @@
    settlement, because the exception may represent work that failed *after* an
    authoritative commit. The model/Live layer must distinguish pre-commit
    failure from post-commit delivery failure at its own boundary."
-  [prepared-server ctx command]
-  (let [boundary
-        (begin-command prepared-server ctx command)
-        execute!
-        (get-in boundary [:operation-entry :execute!])
-        result
-        (execute! (operation-context boundary))]
-    (prepare-settlement-send boundary result)))
+  ([prepared-server ctx command]
+   (run-command prepared-server ctx command nil))
+  ([prepared-server ctx command bind-context]
+   (let [boundary (begin-command prepared-server ctx command)
+         ;; Optional trusted transport enrichment runs only after principal
+         ;; resolution and the original authority projection. It may supply
+         ;; executor context, not substitute principal, command or executor.
+         boundary (if bind-context
+                    (assoc boundary :ctx (bind-context boundary))
+                    boundary)
+         execute! (get-in boundary [:operation-entry :execute!])
+         result (execute! (operation-context boundary))]
+     (prepare-settlement-send boundary result))))
 
 (defn run-wire-command
   "Decode one browser wire command and execute it through run-command."
