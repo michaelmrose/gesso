@@ -119,7 +119,7 @@
    registered separately and are not part of the shared HTMX observer seam."
   [["htmx:configRequest" :config-request]
    ["htmx:beforeRequest" :before-request]
-   ["htmx:beforeSend" :observe-only]
+   ["htmx:beforeSend" :before-send]
    ["htmx:beforeSwap" :before-swap]
    ["htmx:afterSwap" :after-swap]
    ["htmx:afterRequest" :after-request]
@@ -1265,6 +1265,20 @@
           (throw error)))))
   true)
 
+(defn- expire-unsent-explicit-request!
+  [runtime root record event]
+  (when (and (identical? record (weak-get (:active-requests runtime) root))
+             (not @(:before-send-observed? record)))
+    ;; HTMX 2.0.7 returns synchronously when beforeRequest is cancelled.
+    ;; No terminal callback follows. Only the exact unsent bound request
+    ;; can be retired here; this is not a timeout for an in-flight read.
+    (unregister-active-request! runtime root record)
+    (shell/dispatch!
+     (:shell runtime)
+     (assoc (normalized-request-event :http/failed record)
+            :reason :http/before-send-cancelled)
+     (physical-context runtime event root record (atom :observed)))))
+
 (defn on-before-request!
   "Bind the adapter-issued request generation to one physical HTMX request."
   [runtime event]
@@ -1288,9 +1302,10 @@
                 _ (require-nonblank-string!
                    "Physical HTMX request id"
                    request-id)
-                record (assoc pending
-                              :request-id request-id
-                              :xhr (xhr-from-event event))
+                record (cond-> (assoc pending
+                                      :request-id request-id
+                                      :xhr (xhr-from-event event))
+                         (:grant pending) (assoc :before-send-observed? (atom false)))
                 physical
                 (physical-context runtime event root record disposition)
                 result
@@ -1301,11 +1316,27 @@
             (delete-if-same! (:pending-refreshes runtime) root pending)
             (if (= :cancelled @disposition)
               (unregister-active-request! runtime root record)
-              (register-active-request! runtime root record))
+              (do
+                (register-active-request! runtime root record)
+                (when (:grant record)
+                  (.then (js/Promise.resolve nil)
+                         (fn [_] (expire-unsent-explicit-request!
+                                  runtime root record event))))))
             result)
           (catch :default error
             (prevent-event! event)
             (throw error))))))
+  true)
+
+(defn on-before-send!
+  "Observe the synchronous HTMX send boundary for the exact bound XHR.
+   This is not evidence that transmission succeeded or content was adopted."
+  [runtime event]
+  (let [runtime (require-core! runtime)]
+    (when (xhr-from-event event)
+      (when-let [observed? (some-> (active-request-from-event runtime event)
+                                  :record :before-send-observed?)]
+        (reset! observed? true))))
   true)
 
 (defn- synchronous-managed-swap?
@@ -1473,6 +1504,7 @@
     :observe-only nil
     :config-request #(on-config-request! runtime %)
     :before-request #(on-before-request! runtime %)
+    :before-send #(on-before-send! runtime %)
     :before-swap #(on-before-swap! runtime %)
     :after-swap #(on-after-swap! runtime %)
     :after-request #(on-after-request! runtime %)
