@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v2352: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2353: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -27,6 +27,8 @@
   (:require [com.biffweb.core :as biff]
             [gesso.assurance.example.physical-single-node-proving :as physical]
             [gesso.http :as http]
+            [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox.lifecycle :as lifecycle]
             [manifold.stream :as stream])
   (:import (com.sun.net.httpserver HttpHandler HttpServer)
            (java.net InetSocketAddress)
@@ -341,6 +343,42 @@
        (.close ^java.io.Closeable server)
        (reset! state nil)))})
 
+(defn- stop-native-worker! [system]
+  ;; The selected providers are lexically owned. The canonical Biff stop
+  ;; refuses a timed-out drain; retry ONLY that refusal or interruption on
+  ;; the same returned system before allowing the enclosing scope to exit.
+  (let [interrupted? (volatile! (Thread/interrupted))]
+    (try
+      (loop []
+        (when-not (try (managed/stop-module! system) true
+                       (catch InterruptedException _
+                         (vreset! interrupted? true)
+                         (Thread/interrupted)
+                         false)
+                       (catch clojure.lang.ExceptionInfo e
+                         (if (= :drain-timed-out (:reason (ex-data e)))
+                           false
+                           (throw e))))
+          (recur)))
+      (finally
+        (when @interrupted? (.interrupt (Thread/currentThread)))))))
+
+(defn- native-worker-module! [configuration started*]
+  ;; Biff 2 validates the returned system AFTER each start. Capture the
+  ;; actual worker owner before that validation so a later startup failure
+  ;; cannot discard its handle. This diagnostic wrapper is not the canonical
+  ;; checked-application startup or its general resource journal.
+  (let [{:keys [close-admission! retire-sessions!]} configuration]
+    {:biff.core/id managed/module-id
+     :biff.core/start (fn [system]
+                        (let [started (managed/start-module! system)]
+                          (reset! started* started)
+                          started))
+     :biff.core/stop (fn [system]
+                       (close-admission!)
+                       (stop-native-worker! system)
+                       (retire-sessions!))}))
+
 (defn with-http-proving-application!
   "Execute a local embedded-XTDB proving application under one Biff start.
    The default three-arg form installs NO listener. The test-only four-arg
@@ -364,6 +402,17 @@
    (with-http-proving-application! slot-id handler-extension! listener-selection
                                    publication-selection :ephemeral f))
   ([slot-id handler-extension! listener-selection publication-selection storage-selection f]
+   (with-http-proving-application! slot-id handler-extension! listener-selection
+                                   publication-selection storage-selection nil f))
+  ([slot-id handler-extension! listener-selection publication-selection storage-selection worker-configuration f]
+   (when worker-configuration
+     (when-not (and (= :durable-outbox publication-selection)
+                    (= #{:live-system :worker-options :close-admission! :retire-sessions!}
+                       (set (keys worker-configuration)))
+                    (fn? (:close-admission! worker-configuration))
+                    (fn? (:retire-sessions! worker-configuration)))
+       (reject! :invalid-native-worker-configuration))
+     (lifecycle/validate-worker-options! (:worker-options worker-configuration)))
    (when-not (and (fn? handler-extension!) (fn? f))
      (reject! :invalid-test-callback))
    (when-not (contains? #{:no-listener :biff-loopback :biff-jetty-http1 :biff-aleph-http1}
@@ -399,13 +448,37 @@
                                 (biff-jetty-module! handler listener-state)
                                 :biff-aleph-http1
                                 (biff-aleph-module! handler listener-state))
-              modules (cond-> [module] listener-module (conj listener-module))
-              order (cond-> [module-id]
-                      listener-module (conj (:biff.core/id listener-module)))
-              ;; Listener startup happens AFTER Biff installs its immutable
-              ;; chosen Ring function, and Biff stop owns socket teardown.
-              system (binding [*biff-modules* modules]
-                       (biff/start (:biff-context app) #'*biff-modules* order))]
+              worker-started* (atom nil)
+              worker-module (when worker-configuration
+                              (native-worker-module! worker-configuration worker-started*))
+              modules (cond-> [module]
+                        listener-module (conj listener-module)
+                        worker-module (conj worker-module))
+              order (mapv :biff.core/id modules)
+              initial-system (cond-> (:biff-context app)
+                               worker-module
+                               (assoc :gesso.live/system (:live-system worker-configuration)
+                                      managed/source-id-key physical/outbox-source-id
+                                      managed/options-key (:worker-options worker-configuration)
+                                      managed/context-key (:biff-context app)
+                                      managed/stop-timeout-key 1000))
+              ;; Biff starts the actual worker last; reverse stop retires
+              ;; it before the listener and the lexical provider owners.
+              system (try
+                       (binding [*biff-modules* modules]
+                         (biff/start initial-system #'*biff-modules* order))
+                       (catch Throwable startup-failure
+                         (when worker-module
+                           ;; Raw Biff has no rollback. The finite fixture
+                           ;; inventory is known here, including allocations
+                           ;; made before a post-start validation failure.
+                           ((:close-admission! worker-configuration))
+                           (if-let [started @worker-started*]
+                             ((:biff.core/stop worker-module) started)
+                             ((:retire-sessions! worker-configuration)))
+                           (when listener-module
+                             ((:biff.core/stop listener-module) initial-system)))
+                         (throw startup-failure)))]
           (try
             (when-not (identical? handler (:biff.ring/handler system))
               (reject! :adopted-handler-not-identical))
@@ -419,6 +492,7 @@
                    :physical-table physical/table
                    :module-start :one-observed-biff-start
                    :handler-in-returned-system :identical
+                   :native-worker-module (if worker-module :started-last :not-selected)
                    :handler-extension :test-only-not-checked-or-certified
                    :physical-transactions :delegated-to-v1494-once-per-post
                    :postcommit-rendering :independent-physical-readback-may-be-unknown

@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-session-chromium
-  "v2346: Strict real Chromium/Aleph/session/CSRF/XTDB/Live gate.
+  "v2353: Strict real Chromium/Aleph/session/CSRF/XTDB/Live gate.
    Both direct publication and automatic durable publication must converge.
    Credentials are provisioned out of band, not via a production login."
   (:require [clojure.test :as t :refer [deftest is]]
@@ -7,6 +7,7 @@
             [gesso.assurance.example.physical-single-node-live :as fixture]
             [gesso.live.browser.chromium :as chromium]
             [gesso.assurance.example.physical-single-node-proving :as physical]
+            [gesso.live.outbox.biff :as managed]
             [xtdb.api :as xt])
   (:import (com.microsoft.playwright BrowserContext Page Response)
            (com.microsoft.playwright.options Cookie SameSiteAttribute)
@@ -71,9 +72,17 @@
 (defn- outbox-observed? [app operations]
   ;; The durable gate requires both authoritative persisted intent outcomes
   ;; and worker accounting. A browser refresh alone is not evidence of either.
-  (let [rows (xt/q (:node app) ["SELECT * FROM gesso_live_outbox"])
+  (let [rows (try (xt/q (:node app) ["SELECT * FROM gesso_live_outbox"])
+                  (catch Exception e
+                    ;; Lease/ack fields can change the prepared result type.
+                    ;; The enclosing Playwright wait remains bounded. Never
+                    ;; treat an unavailable observation as a successful check.
+                    (if (= :prepared-query-out-of-date (:xtdb.error/code (ex-data e)))
+                      ::replan
+                      (throw e))))
         status ((:outbox-worker-status app))]
-    (and (not= :failed (:status status))
+    (and (not= ::replan rows)
+         (not= :failed (:status status))
          (= (count operations) (:total-dispatch-accepted status) (count rows))
          (= (frequencies operations) (frequencies (map :gesso.live.outbox/operation rows)))
          (every? #(and (= :dispatch-accepted (:gesso.live.outbox/status %))
@@ -105,6 +114,9 @@
              (get-in app [:live-report :notification-timing])))
       (is (not (contains? app :process-outbox!)))
       (is (= durable? (fn? (:outbox-worker-status app))))
+      (is (= (if durable? :started-last :not-selected)
+             (:native-worker-module http-report)))
+      (is (= durable? (contains? system managed/handle-key)))
       (let [pa (open-session-page! harness contexts base a)
             pb (open-session-page! harness contexts base b)
             pr (open-session-page! harness contexts base reader)]

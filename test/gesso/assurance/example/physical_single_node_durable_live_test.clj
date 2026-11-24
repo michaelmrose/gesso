@@ -1,11 +1,14 @@
 (ns gesso.assurance.example.physical-single-node-durable-live-test
-  "v2350: Explicit atomic publication mode through the installed session handler."
+  "v2353: Explicit atomic publication mode through the installed session handler."
   (:require [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [gesso.assurance.example.physical-single-node-live :as fixture]
             [gesso.assurance.example.physical-single-node-proving :as physical]
             [gesso.assurance.example.physical-single-node-session :as session]
             [gesso.live.core :as live]
+            [com.biffweb.core :as biff]
+            [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.cycle :as cycle]
             [gesso.model.tx :as tx]
             [manifold.stream :as stream]
@@ -111,6 +114,9 @@
             (reset! status* outbox-worker-status)
             (is (identical? handler (:biff.ring/handler system)))
             (is (not (contains? app :process-outbox!)))
+            (is (= :started-last (get-in app [:http-report :native-worker-module])))
+            (is (= :native-biff-start-stop (:worker-adoption live-report)))
+            (is (= "managed-reservation-test" (:worker-id (lifecycle/status (get system managed/handle-key)))))
             (is (= :atomic-intent-then-scoped-managed-worker
                    (:notification-timing live-report)))
             (let [response (handler {:request-method :get :uri fixture/events-uri
@@ -358,3 +364,28 @@
           (is (= {:pending 0 :failed-attempts 1 :completed? true}
                  (sse-retirement-status)))
           (is (live/closed? live-system)))))))
+
+(deftest native-worker-startup-failure-retires-returned-worker-before-providers-close
+  (let [started* (atom nil)
+        real-start @#'biff/start
+        failure (ex-info "post-start validation failure" {})]
+    (with-redefs [biff/start (fn [initial modules order]
+                              (let [started (real-start initial modules order)]
+                                (reset! started* started)
+                                (throw failure)))]
+      (is (identical? failure
+                      (try
+                        (session/with-session-policy!
+                         policy
+                         (fn [{:keys [source]}]
+                           (fixture/with-managed-durable-granted-live-proving-application!
+                            "native-startup-failure" source :biff-jetty-http1
+                            {:worker-id "native-startup-failure" :poll-ms 20}
+                            (fn [_] (throw (ex-info "callback must not run" {}))))))
+                        (catch Exception e e)))))
+    (let [system @started*
+          handle (get system managed/handle-key)]
+      (is (some? handle))
+      (is (= :stopped (:status (lifecycle/status handle))))
+      (is (true? (:stop-requested? (lifecycle/status handle))))
+      (is (live/closed? (:gesso.live/system system))))))

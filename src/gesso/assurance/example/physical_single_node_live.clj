@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2350: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2353: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -28,6 +28,7 @@
             [gesso.assurance.example.physical-single-node-principal :as principal]
             [gesso.http :as http]
             [gesso.live.core :as live]
+            [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.cycle :as cycle]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.ui :as live.ui]
@@ -425,7 +426,7 @@
                                (when @interrupted?
                                  (.interrupt (Thread/currentThread)))))))}))
 
-(defn- with-live-application* [slot-id principal-source listener-selection publication-selection storage-selection f]
+(defn- with-live-application* [slot-id principal-source listener-selection publication-selection storage-selection worker-options f]
   (when-not (fn? f)
     (reject! :invalid-application-callback))
   ;; A source with invalid operation/grant coverage must fail BEFORE
@@ -474,6 +475,10 @@
                  principal-source app read-uris live-handler)
                 live-handler))))
          listener-selection publication-selection storage-selection
+         (when worker-options
+           {:live-system live-system :worker-options worker-options
+            :close-admission! (:close-and-await! admission)
+            :retire-sessions! #(retire-scoped-sessions! registered-streams)})
          (fn [app]
            (let [installed (:biff.ring/handler (:system app))
                  guarded @guarded*]
@@ -530,20 +535,29 @@
                                   :ongoing-sse-authorization-and-revocation
                                   :event-triggered-only-not-idle-or-in-flight))
                          :live-fragment (live-fragment))
-                  (= :durable-outbox publication-selection)
+                  (and (= :durable-outbox publication-selection) (nil? worker-options))
                   (assoc :process-outbox! (fn [opts]
                                             (cycle/process-cycle!
                                              (:node app) live-system
                                              (:biff-context app) physical/outbox-source-id opts)))
+                  worker-options
+                  (assoc :outbox-worker-status
+                         #(lifecycle/status (get (:system app) managed/handle-key)))
+                  worker-options
+                  (update :live-report assoc
+                          :notification-timing :atomic-intent-then-scoped-managed-worker
+                          :outbox-worker-lifecycle :retired-before-provider-scope-exit
+                          :ring-admission-drain :synchronous-before-worker-retirement
+                          :worker-adoption :native-biff-start-stop)
                   principal-source
                   (assoc :principal-handler guarded
                          :principal-source principal-source)))
                (finally
                  ((:close-and-await! admission))
-                 ;; Retire the response producers before returning to the
-                 ;; enclosing Biff listener/XTDB owner. In managed mode the
-                 ;; callback has already drained and retired its worker.
-                 (retire-scoped-sessions! registered-streams)))))))
+                 ;; Managed mode's native Biff stop owns worker retirement
+                 ;; followed by session retirement, before listener stop.
+                 (when-not worker-options
+                   (retire-scoped-sessions! registered-streams))))))))
       (finally
         ;; Startup failure fallback; ordinary callback exit has already
         ;; retired sessions while the enclosing providers were available.
@@ -561,7 +575,7 @@
    subscriber disclosure, durable outbox or a release credential."
   ([f] (with-live-proving-application! (str "v2323-" (random-uuid)) f))
   ([slot-id f]
-   (with-live-application* slot-id nil :no-listener :direct :ephemeral f)))
+   (with-live-application* slot-id nil :no-listener :direct :ephemeral nil f)))
 
 (defn with-granted-live-proving-application!
   "Run one Biff-installed handler whose Live POSTs delegate through the
@@ -582,7 +596,7 @@
   ([slot-id principal-source f]
    ;; nil/invalid source must not silently select the unguarded fixture.
    (principal/checked-test-policy! principal-source)
-   (with-live-application* slot-id principal-source :no-listener :direct :ephemeral f)))
+   (with-live-application* slot-id principal-source :no-listener :direct :ephemeral nil f)))
 
 (defn with-biff-loopback-granted-live-proving-application!
   "Run the SAME guarded Live/principal/XTDB proving fixture with an opt-in
@@ -594,7 +608,7 @@
     (str "v2333-" (random-uuid)) source f))
   ([slot-id source f]
    (principal/checked-test-policy! source)
-   (with-live-application* slot-id source :biff-loopback :direct :ephemeral f)))
+   (with-live-application* slot-id source :biff-loopback :direct :ephemeral nil f)))
 
 (defn with-biff-jetty-granted-live-proving-application!
   "Use a REAL Ring Jetty HTTP/1 server attached to the original Biff-started
@@ -608,7 +622,7 @@
     (str "v2334-" (random-uuid)) source f))
   ([slot-id source f]
    (principal/checked-test-policy! source)
-   (with-live-application* slot-id source :biff-jetty-http1 :direct :ephemeral f)))
+   (with-live-application* slot-id source :biff-jetty-http1 :direct :ephemeral nil f)))
 
 (defn with-biff-aleph-granted-live-proving-application!
   "Select actual Aleph HTTP/1 on loopback with the original Biff-installed
@@ -621,7 +635,7 @@
     (str "v2335-" (random-uuid)) source f))
   ([slot-id source f]
    (principal/checked-test-policy! source)
-   (with-live-application* slot-id source :biff-aleph-http1 :direct :ephemeral f)))
+   (with-live-application* slot-id source :biff-aleph-http1 :direct :ephemeral nil f)))
 
 (defn with-durable-granted-live-proving-application!
   "Select atomic intent recording on the same principal-guarded Biff handler.
@@ -633,59 +647,24 @@
     slot-id source listener-selection :ephemeral f))
   ([slot-id source listener-selection storage-selection f]
    (principal/checked-test-policy! source)
-   (with-live-application* slot-id source listener-selection :durable-outbox storage-selection f)))
-
-(defn- retire-scoped-worker! [handle]
-  ;; Unlike a long-lived host with a retryable stop handle, the enclosing
-  ;; fixture has lexical XTDB/Live ownership. Do not unwind that ownership
-  ;; while a cycle is running, even after a drain timeout or interruption.
-  ;; There is deliberately no bounded total shutdown guarantee here.
-  (let [interrupted? (volatile! (Thread/interrupted))]
-    (try
-      (loop []
-        (let [outcome (try (:outcome (lifecycle/retire! handle 1000))
-                           (catch InterruptedException _
-                             (vreset! interrupted? true)
-                             (Thread/interrupted)
-                             :interrupted))]
-          (when (#{:timed-out :interrupted} outcome)
-            (recur))))
-      (finally
-        (when @interrupted? (.interrupt (Thread/currentThread)))))))
+   (with-live-application* slot-id source listener-selection :durable-outbox storage-selection nil f)))
 
 (defn with-managed-durable-granted-live-proving-application!
-  "Use the existing polling outbox lifecycle inside the Biff application's
-   callback scope. Trusted worker options are checked before opening providers.
-   The callback receives read-only :outbox-worker-status, not a second manual
-   dispatcher or restart handle. Retire before leaving the Biff callback,
-   including exceptional exit, so an in-flight cycle cannot outlive XTDB or
-   Live. Close and drain synchronous Ring admission BEFORE worker retirement.
-   This does not drain SSE writers or guarantee all pending work is delivered.
-   An optional trusted storage selection is passed to the same durable
-   fixture; the existing arity stays ephemeral. Shutdown can wait indefinitely
-   for a blocked provider. This is NOT native checked Biff worker-module
-   adoption, physical listener drain, arbitrary crash tolerance, or release
-   qualification."
+  "Install the existing managed outbox worker through the original Biff
+   lifecycle. Native worker start occurs last; native reverse stop drains
+   synchronous admission, retires the worker and retires SSE sessions before
+   the listener/lexical provider scope exits. An optional trusted storage
+   selection preserves the previous ephemeral arity. The wrapper retries
+   timed-out worker drains and owns rollback for this finite fixture inventory.
+   This is NOT canonical checked-application startup, bounded shutdown,
+   arbitrary crash tolerance, or release qualification."
   ([slot-id source listener-selection worker-options f]
    (with-managed-durable-granted-live-proving-application!
     slot-id source listener-selection :ephemeral worker-options f))
   ([slot-id source listener-selection storage-selection worker-options f]
    (when-not (fn? f) (reject! :invalid-application-callback))
+   (principal/checked-test-policy! source)
    (lifecycle/validate-worker-options! worker-options)
-   (with-durable-granted-live-proving-application!
-    slot-id source listener-selection storage-selection
-    (fn [app]
-      (let [handle (lifecycle/start! (:node app) (:live-system app)
-                                     (:biff-context app) physical/outbox-source-id
-                                     worker-options)]
-        (try
-          (f (-> app
-                 (dissoc :process-outbox! :close-ring-admission!)
-                 (assoc :outbox-worker-status #(lifecycle/status handle))
-                 (update :live-report assoc
-                         :notification-timing :atomic-intent-then-scoped-managed-worker
-                         :outbox-worker-lifecycle :retired-before-provider-scope-exit
-                         :ring-admission-drain :synchronous-before-worker-retirement)))
-          (finally
-            ((:close-ring-admission! app))
-            (retire-scoped-worker! handle))))))))
+   (with-live-application* slot-id source listener-selection :durable-outbox
+                           storage-selection worker-options
+                           #(f (dissoc % :close-ring-admission!)))))
