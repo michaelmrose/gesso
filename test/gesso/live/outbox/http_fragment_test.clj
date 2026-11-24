@@ -188,6 +188,7 @@
         execute xtdb/execute-tx-from!
         lost (ex-info "submitted command reply lost" {:test/lost-reply true})
         constructions (atom 0)
+        current-policy? (atom false)
         projections (atom [])
         version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at}
         before {:xt/id "r1" :status :open :revision 0 :created-at "t0" :updated-at "t0"
@@ -207,15 +208,27 @@
                                          :submit)
                      :may-disclose? (fn [binding record]
                                       (= (:principal binding) (get-in record [:gesso.command/binding :principal])))
-                     :construct! (fn [{:keys [arguments]}]
+                     :construct! (fn [{:keys [ctx arguments]}]
                                    (swap! constructions inc)
                                    (when-not (= (:request-id arguments) (:xt/id before))
                                      (throw (ex-info "Unexpected claim subject" {:arguments arguments})))
-                                   {:spec {:purpose :gesso.live/refresh}
-                                    :model-plan {:commands [(model-command/update-command
-                                                              :requests :claim before after version)]}
-                                    :outcome {:outcome :request/claimed}
-                                    :now "2026-11-24T00:00:00Z"})
+                                   (if @current-policy?
+                                     ;; Explicit trusted fixture policy after a known abort.
+                                     ;; A fresh dependency guard prevents a stale refusal.
+                                     (let [row (first (frontier/q-from! ctx
+                                                        ["SELECT * FROM requests WHERE _id = ?"
+                                                         (:request-id arguments)]))]
+                                       (when-not (= :done (:status row))
+                                         (throw (ex-info "Unexpected rejection state" {})))
+                                       {:spec nil
+                                        :model-plan {:guards [(model-command/guard :requests row version)]}
+                                        :outcome {:outcome :request/not-claimable :reason :request-closed}
+                                        :now "2026-11-24T00:00:01Z"})
+                                     {:spec {:purpose :gesso.live/refresh}
+                                      :model-plan {:commands [(model-command/update-command
+                                                                :requests :claim before after version)]}
+                                      :outcome {:outcome :request/claimed}
+                                      :now "2026-11-24T00:00:00Z"}))
                      :project! (fn [{:keys [ctx arguments]} result]
                                  (swap! projections conj (:status result))
                                  (when (= :incorporated (:status result))
@@ -224,7 +237,11 @@
                                        {:keys [basis rows]} (frontier/q-with-basis!
                                                              ctx ["SELECT status FROM requests WHERE _id = ?" id])
                                        row (first rows)]
-                                   {:resolution (if (= :incorporated (:status result)) :confirmed :already-incorporated)
+                                   {:resolution (cond
+                                                  (= :request/not-claimable (get-in result [:outcome :outcome])) :rejected
+                                                  (= :incorporated (:status result)) :confirmed
+                                                  :else :already-incorporated)
+                                    :reason (get-in result [:outcome :reason])
                                     :outcome (get-in result [:outcome :outcome])
                                     :authoritative (protocol/authoritative
                                                     {:presence :present :basis basis
@@ -446,7 +463,37 @@
                     (is (= durable-before (xt/q node ["SELECT * FROM gesso_commands"])))
                     (is (= intents-before (xt/q node ["SELECT * FROM gesso_live_outbox"])))
                     (is (= [{:status :done :revision 2}]
-                           (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"]))))
+                           (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"])))
+                    ;; The trusted fixture has observed the definitive abort.
+                    ;; A new authorized execution re-evaluates current policy,
+                    ;; recording a guarded refusal, not retrying the old write.
+                    (reset! current-policy? true)
+                    (doseq [[index execution] (map-indexed vector ["v2412-refusal" "v2412-refusal-replay"])]
+                      (let [cmd (assoc stale :execution-id (identity/execution-id execution))
+                            response (post-command! headers cmd)
+                            marker (xml/parse (ByteArrayInputStream. (.getBytes ^String (.body response) StandardCharsets/UTF_8)))
+                            settlement (protocol/wire->settlement
+                                        (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))]
+                        (is (= 200 (.statusCode response)))
+                        (is (= :rejected (:resolution settlement)))
+                        (is (= :request/not-claimable (:outcome settlement)))
+                        (is (= "request-closed" (:reason settlement)))
+                        (is (= (select-keys cmd [:command-id :execution-id])
+                               (select-keys settlement [:command-id :execution-id])))
+                        (is (= :done (get-in settlement [:authoritative :projection :request/status])))
+                        (is (= 3 @constructions))
+                        (is (= (conj project-before :incorporated)
+                               (if (zero? index) @projections (pop @projections))))
+                        (is (= (if (zero? index) :incorporated :replay) (peek @projections)))
+                        (is (= intents-before (xt/q node ["SELECT * FROM gesso_live_outbox"])))
+                        (is (= [{:status :done :revision 2}]
+                               (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"])))
+                        (is (= #{"v2366-command" "v2411-stale-command"}
+                               (set (map :xt/id (xt/q node ["SELECT _id FROM gesso_commands"])))))))
+                    (is (= 5 (count @invocations)))
+                    (is (= {:status :replay :outcome {:outcome :request/not-claimable :reason :request-closed}}
+                           (select-keys (publication/reconcile-command! (:ctx (peek @invocations)) (constantly true))
+                                        [:status :outcome]))))
                   (is (zero? @fallback))
                   (host/stop! started)
                   (is ((:drained? status)))
