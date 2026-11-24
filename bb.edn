@@ -146,6 +146,11 @@
   {:doc "Strict real Chromium EventSource/HTMX/DOM gate. Fails closed on browser policy or runtime errors; no fallback."
    :task (shell "clojure" "-M:outbox-browser" "-m" "gesso.live.outbox.browser-gate")}
 
+  test:session:browser
+  {:doc "Strict real session/CSRF Chromium + Aleph + XTDB gate. Requires both opt-in aliases; no fallback."
+   :task (shell "clojure" "-M:aleph-integration:outbox-browser" "-m"
+                "gesso.assurance.example.physical-single-node-session-chromium")}
+
   test:browser:integration
   {:doc "Run production gesso-live.js against real Chromium + HTMX/SSE + deterministic HTTP fixtures. Included by `bb test:cljs`."
    :task

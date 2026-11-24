@@ -15,6 +15,8 @@ on:
       - 'test/gesso/live/outbox/**'
       - 'test/gesso/live/browser/**'
       - 'resources/public/js/gesso-live.js'
+      - 'src/gesso/assurance/example/physical_single_node_*.clj'
+      - 'integration/gesso/assurance/example/physical_single_node_session_chromium.clj'
   workflow_dispatch:
 
 permissions:
@@ -100,6 +102,13 @@ jobs:
           set -euo pipefail
           bb test:outbox:browser:preflight \
             2>&1 | tee target/outbox-browser/preflight.log
+
+      - name: Require session-protected Chromium HTMX/SSE over real Aleph
+        shell: bash
+        run: |
+          set -euo pipefail
+          bb test:session:browser \
+            2>&1 | tee target/outbox-browser/session-convergence.log
 
       - name: Verify physical HTTP/SSE/XTDB readiness (not browser convergence)
         shell: bash
