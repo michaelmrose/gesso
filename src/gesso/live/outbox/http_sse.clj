@@ -49,8 +49,12 @@
 (defn prepare!
   "Validate stream inventory before provider startup. :resolve-id selects
    an instance, never a subscription topic or authority. The original model
-   policy is evaluated once under the shared pending-authorization budget.
+   policy is evaluated at admission under the shared pending-authorization
+   budget, and rechecked against the same admitted scope before each frame
+   under that budget. Exhausted authorization capacity refuses the frame.
    Denied or malformed owned GETs return 403 without allocating interests.
+   Established stream checks reuse the original authenticated request; they
+   do not independently renew authentication or recall handed-off frames.
    All admitted routes share capacity, cancellation and recovery. No claim
    of general router coverage or independently certified policy is made."
   [assembly options]

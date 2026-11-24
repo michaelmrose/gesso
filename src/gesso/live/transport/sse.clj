@@ -210,6 +210,7 @@
     (require-fn-option! options' :debug-fn)
     (require-fn-option! options' :on-error)
     (require-fn-option! options' :on-close)
+    (require-fn-option! options' :frame-authorized?)
     (require-boolean-option! options' :close-on-complete?)
     ;; response* merges response headers after starting producers; validate
     ;; them before source registration at the public SSE entry points.
@@ -471,6 +472,14 @@
        {:frame-size (count frame)
         :at (now-ms)})
 
+      ;; A selected host can recheck its admitted scope at the last
+      ;; transport boundary before handing a frame to the response stream.
+      ;; Policy may perform blocking provider work; do not run on the source
+      ;; delivery executor. Failure terminates the existing stream lifecycle.
+      (when-let [authorize? (:frame-authorized? options)]
+        (when-not (true? (m/? (m/via-call m/blk authorize?)))
+          (throw (ex "gesso.live SSE frame authority refused."
+                     {:error/type :gesso.live.sse/frame-authority-refused}))))
       (let [timed-out (Object.)
             pending (s/put! out frame)
             ;; Timeout the actual deferred, including an unbuffered put that
@@ -593,6 +602,10 @@
      :close-on-complete?
      :keepalive-ms
      :keepalive-comment
+     :frame-authorized?
+       Optional zero-argument policy, evaluated before each frame handoff
+       (including keepalives). Only true admits; denial terminates the stream.
+       This cannot retract a previously handed-off frame.
      :frame-write-timeout-ms
        Positive integer 1..300000 (default 60000); if a frame or keepalive
        cannot be written before the deadline, the SSE transport fails closed.

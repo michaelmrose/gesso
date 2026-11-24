@@ -730,6 +730,22 @@
       (finally
         (sse/cancel! started)))))
 
+(deftest keepalive-refuses-frame-after-authority-denial-test
+  (let [error (promise)
+        checks (atom 0)
+        started (sse/start!
+                 (never-flow)
+                 {:keepalive-ms 25
+                  :frame-authorized? #(do (swap! checks inc) false)
+                  :on-error (fn [e _] (deliver error e))})]
+    (try
+      (is (nil? (take-value (:stream started))))
+      (is (= :gesso.live.sse/frame-authority-refused
+             (:error/type (ex-data (deref error timeout-ms nil)))))
+      (is (= 1 @checks))
+      (is (eventually #(sse/closed? started)))
+      (finally (sse/cancel! started)))))
+
 (deftest keepalive-emits-debug-event-test
   (let [events (atom [])
         started (sse/start!

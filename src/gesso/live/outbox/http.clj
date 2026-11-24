@@ -598,8 +598,25 @@
                             ;; provider work: never hold the shutdown monitor.
                             (let [[start-outcome session-or-error]
                                   (try
-                                    [:started (live/start-sse! live-system value
-                                                               {:sse-options validated-sse})]
+                                    [:started (live/start-sse!
+                                               live-system value
+                                               {:sse-options
+                                                (cond-> validated-sse
+                                                  selected-routes
+                                                  (assoc :frame-authorized?
+                                                         (fn []
+                                                           ;; Reauthorization uses the same bounded
+                                                           ;; ledger as initial admission. Keep its
+                                                           ;; reservation until the actual callback
+                                                           ;; returns, even if cancellation races it.
+                                                           (when-not (reserve-pending-authorization!
+                                                                      state live-system max-pending-authorizations)
+                                                             (try
+                                                               (and (= value (authorize-subscription request))
+                                                                    (not (:closed? @state))
+                                                                    (not (live/closed? live-system)))
+                                                               (finally
+                                                                 (swap! state update :pending-authorizations dec)))))))})]
                                     (catch InterruptedException e
                                       (restore-interrupt! e)
                                       (throw e))

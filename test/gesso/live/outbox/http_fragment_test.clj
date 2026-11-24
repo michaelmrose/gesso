@@ -154,6 +154,88 @@
               (is (= 1 @fallback))
               (finally (host/stop! started) (.close client)))))))))
 
+(deftest established-selected-subscription-rechecks-authority-before-frame-handoff
+  (let [decision (atom true)
+        resolved (atom "r1")
+        calls (atom [])
+        entered (promise)
+        release (java.util.concurrent.CountDownLatch. 1)
+        resolve-id (fn [_ _] @resolved)]
+    (with-redefs [fixture/allow? (fn [_ id]
+                                   (swap! calls conj id)
+                                   (case @decision
+                                     :exception (throw (ex-info "policy unavailable" {}))
+                                     :blocked (do
+                                                (deliver entered true)
+                                                ;; Simulate provider work that does not
+                                                ;; honor interruption immediately.
+                                                (loop []
+                                                  (when-not (try (.await release) true
+                                                                 (catch InterruptedException _ false))
+                                                    (recur)))
+                                                true)
+                                     @decision))]
+      (with-assembly
+        (fn [assembly]
+          (let [started (host/start! assembly (constantly {:status 418})
+                                     (assoc (config)
+                                            :assembled-sse {:resolve-id resolve-id
+                                                            :max-connections 1
+                                                            :sse-options {:keepalive-ms nil}}))
+                handler (:biff.ring/handler started)
+                status (get started host/sse-status-key)
+                src (:source (:gesso.live/system started))
+                request! #(handler {:request-method :get :uri "/streams/request-list/r1"})
+                emit! #(source/emit! src {:topic :fixture/request-list :id "r1" :change/kind :updated})
+                retired? (fn [] (loop [remaining 250]
+                                  (cond (and (zero? ((:occupied-count status)))
+                                             (zero? (:subscription-count (source/stats src)))) true
+                                        (zero? remaining) false
+                                        :else (do (Thread/sleep 20) (recur (dec remaining))))))]
+            (try
+              (doseq [failure [false {:allowed? false} :changed-scope :exception]]
+                (reset! resolved "r1")
+                (reset! decision true)
+                (let [response (request!) body (:body response)]
+                  (is (= 200 (:status response)))
+                  (try
+                    (let [pending (stream/take! body)]
+                      (emit!)
+                      (let [frame (deref pending 3000 ::timeout)]
+                        (is (and (string? frame) (str/includes? frame "event: live-update")))))
+                    (is (= 1 ((:occupied-count status))))
+                    (if (= :changed-scope failure)
+                      (reset! resolved "r2")
+                      (reset! decision failure))
+                    (let [pending (stream/take! body)]
+                      (emit!)
+                      (is (nil? (deref pending 3000 ::timeout)) (pr-str failure)))
+                    (is (retired?) (pr-str failure))
+                    (is (stream/closed? body))
+                    (finally (stream/close! body)))))
+              (is (some #{"r2"} @calls))
+              ;; A closed stream is not proof that a blocking policy call
+              ;; has returned. Its reservation must survive cancellation.
+              (reset! decision true)
+              (reset! resolved "r1")
+              (let [response (request!) body (:body response)]
+                (is (= 200 (:status response)))
+                (try
+                  (reset! decision :blocked)
+                  (emit!)
+                  (is (true? (deref entered 3000 false)))
+                  (is (= 1 ((:pending-authorization-count status))))
+                  (stream/close! body)
+                  (is (retired?))
+                  (is (= 1 ((:pending-authorization-count status))))
+                  (.countDown release)
+                  (is (loop [remaining 250]
+                        (cond (zero? ((:pending-authorization-count status))) true
+                              (zero? remaining) false
+                              :else (do (Thread/sleep 20) (recur (dec remaining))))))
+                  (finally (stream/close! body) (.countDown release))))
+              (finally (.countDown release) (host/stop! started)))))))))
+
 (deftest selected-read-and-subscription-share-prepared-authority-context
   (let [resolutions (atom [])
         authorizations (atom [])
@@ -354,7 +436,7 @@
 (defn- exercise-installed-claim! [lose-reply?]
   (let [seen (atom []) queries (atom []) invocations (atom []) fallback (atom 0)
         prepared-intents (atom nil)
-        read-allowed? (atom true)
+        denied-read-paths (atom #{})
         disclosure-allowed? (atom true)
         submitted (atom 0)
         execute xtdb/execute-tx-from!
@@ -436,7 +518,7 @@
                      (or (get-in ctx [:path-params :id]) (get-in ctx [:headers "fragment-id"])))]
     (with-redefs [fixture/allow? (fn [ctx id]
                                    (swap! seen conj [id ctx])
-                                   (and @read-allowed?
+                                   (and (not (contains? @denied-read-paths (:uri ctx)))
                                         (= "allowed" (get-in ctx [:headers "authorization"]))
                                         (= "r1" id)))
                   fixture/generic-query (fn [ctx id]
@@ -507,8 +589,8 @@
                   (is (= 2 ((:occupied-count status))))
                   (is (= 2 (:subscription-count (source/stats (:source system)))))
                   (is (= 503 (.statusCode (send! list-path headers (HttpResponse$BodyHandlers/ofString)))))
-                  (is (identical? node (:xtdb/connectable (second (peek @seen)))))
-                  (is (= {:id "r1"} (:path-params (second (peek @seen)))))
+                  (is (every? #(identical? node (:xtdb/connectable (second %))) @seen))
+                  (is (some #(= {:id "r1"} (:path-params (second %))) @seen))
                   ;; Start both readers before mutation. One bounded observation
                   ;; per stream; timeout is a failed assertion, not a retry.
                   (let [a (future (read-invalidation list-body))
@@ -556,12 +638,12 @@
                                   before-queries @queries]
                               ;; An actual delivered progression is not a read capability.
                               ;; Revoke authorization after SSE delivery, before the GET.
-                              (reset! read-allowed? false)
+                              (reset! denied-read-paths #{path})
                               (try
                                 (is (= 403 (.statusCode (send! path refresh-headers
                                                                (HttpResponse$BodyHandlers/ofString)))))
                                 (is (= before-queries @queries))
-                                (finally (reset! read-allowed? true)))
+                                (finally (reset! denied-read-paths #{})))
                               (is (= 403 (.statusCode (send! path (dissoc refresh-headers "authorization")
                                                              (HttpResponse$BodyHandlers/ofString)))))
                               (is (= 403 (.statusCode (send! "/fragments/request-list/r2" refresh-headers
@@ -626,12 +708,12 @@
                   (xt/execute-tx node [[:put-docs :requests (assoc after :status :done :revision 2 :updated-at "t2")]])
                   ;; A reconnect is a fresh authorized subscription, not a
                   ;; restoration of the old permission or a replay cursor.
-                  (reset! read-allowed? false)
+                  (reset! denied-read-paths #{list-path})
                   (try
                     (is (= 403 (.statusCode (send! list-path headers (HttpResponse$BodyHandlers/ofString)))))
                     (is (= 1 ((:occupied-count status))))
                     (is (= 1 (:subscription-count (source/stats (:source system)))))
-                    (finally (reset! read-allowed? true)))
+                    (finally (reset! denied-read-paths #{})))
                   (let [reconnected (send! list-path headers (HttpResponse$BodyHandlers/ofInputStream))]
                     (with-open [body (.body reconnected)]
                       (is (= 200 (.statusCode reconnected)))
