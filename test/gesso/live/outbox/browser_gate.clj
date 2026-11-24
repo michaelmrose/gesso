@@ -151,7 +151,9 @@
     #'installed/installed-model-command-recovers-submitted-transaction-without-replay-write
     #'frontier/submitted-receipt-survives-cycle-interruption-and-rescan-test
     #'session/actual-jetty-requests-require-server-issued-session-and-csrf
-    #'durable/managed-worker-delivers-protected-http-writes-without-manual-processing]))
+    #'durable/managed-worker-delivers-protected-http-writes-without-manual-processing
+    #'durable/managed-worker-scope-retirement-precedes-provider-close-on-exception
+    #'durable/closed-application-reopens-persisted-reservation-and-recovers-pending-intent]))
 
 (defn run-browser!
   "The STRICT real-browser scenario, not the HTTP-only readiness selection."
