@@ -9,6 +9,7 @@
             [gesso.live.application-preflight.fixture :as fixture]
             [gesso.live.optimistic.protocol :as protocol]
             [gesso.live.outbox.host :as host]
+            [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.model.command :as model-command]
@@ -30,18 +31,22 @@
 (def ^:private version
   {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at})
 
+(defn- with-operations [ops f]
+  (fixture/with-surfaced-application
+   {:operations ops :route-capabilities (fixture/route-capabilities ops)
+    :rendered-surfaces {:board [:main (fixture/rendered-operation-button
+                                      (fixture/render-context ops) :request/claim
+                                      "/operations/request/claim")]}}
+   (fn [{:keys [assembly report]}]
+     (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
+     (f assembly))))
+
+(defn- claim-operation [executor]
+  (fixture/trusted-operation :request/claim
+                             {:published-change-topics #{:request} :execute! executor}))
+
 (defn- with-assembly [executor f]
-  (let [ops (assoc (fixture/standard-operations) :request/claim
-                   (fixture/trusted-operation :request/claim
-                    {:published-change-topics #{:request} :execute! executor}))]
-    (fixture/with-surfaced-application
-     {:operations ops :route-capabilities (fixture/route-capabilities ops)
-      :rendered-surfaces {:board [:main (fixture/rendered-operation-button
-                                        (fixture/render-context ops) :request/claim
-                                        "/operations/request/claim")]}}
-     (fn [{:keys [assembly report]}]
-       (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
-       (f assembly)))))
+  (with-operations (assoc (fixture/standard-operations) :request/claim (claim-operation executor)) f))
 
 (defn- command [execution]
   (protocol/command {:command-id (identity/command-id "race-2379")
@@ -116,7 +121,7 @@
                 :http-jdk {} :assembled-operations {:authorize-request? (constantly true)}}
         handler (fn [_] (g/html-response [:div "ready"]))]
     (try
-      (with-assembly executor
+      (with-operations {:request/claim (claim-operation executor)}
         (fn [assembly]
           (with-open [client (HttpClient/newHttpClient)]
             (let [started (host/start! assembly handler config)
@@ -281,3 +286,40 @@
             (is (empty? (:outbox/intents receipt))))
           (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
           (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))))
+
+(deftest strict-host-requires-complete-recognized-executor-inventory
+  (let [calls (atom 0)
+        build (fn [operation]
+                (publication/build-executor
+                 {:operation operation :submission-mode! (constantly :submit)
+                  :may-disclose? (constantly false)
+                  :construct! (fn [_] (throw (ex-info "unexpected construction" {})))
+                  :project! (fn [& _] (throw (ex-info "unexpected projection" {})))}))
+        claim (claim-operation (build :request/claim))
+        cancel (fn [executor topics]
+                 (fixture/trusted-operation :request/cancel
+                                            {:published-change-topics topics :execute! executor}))
+        selected {:xtdb-config {} :source-id "strict-2384" :rules-context {}
+                  :worker-options {:worker-id "strict-2384" :poll-ms 20}
+                  :live-options {} :assembled-publication
+                  (assoc mapping :model-entity-topics {:requests #{:request}}
+                                 :require-derived-model? true)
+                  :assembled-operations {:authorize-request? (constantly true)}}
+        error (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))]
+    (doseq [[entry expected]
+            [[(cancel identity #{}) :unrecognized-strict-publication-executor]
+             [(cancel (build :request/cancel) #{:audit}) :unmapped-publication-executor-topics]
+             [(cancel (build :request/claim) #{}) :publication-executor-operation-mismatch]]]
+      (with-operations {:request/claim claim :request/cancel entry}
+        (fn [assembly]
+          (with-redefs [managed/start-biff-application! (fn [& _] (swap! calls inc))]
+            (let [failure (error #(host/start! assembly identity selected))]
+              (is (= expected (:reason failure)))
+              (is (= :request/cancel (:operation failure))))))))
+    (with-operations {:request/claim claim :request/cancel (cancel (build :request/cancel) #{})}
+      (fn [assembly]
+        (is (nil? (publication/require-host-wiring! assembly selected)))
+        (with-redefs [managed/start-biff-application! (fn [& _] (swap! calls inc))]
+          (is (= :missing-publication-executor-profile
+                 (:reason (error #(host/start! assembly identity (dissoc selected :assembled-operations)))))))))
+    (is (zero? @calls))))

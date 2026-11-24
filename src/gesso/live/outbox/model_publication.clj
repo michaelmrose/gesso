@@ -431,22 +431,35 @@
 (defn require-host-wiring!
   "Check the exact selected executor objects against their registered
    operation and the host's selected publication and operation profiles.
-   Unrecognized arbitrary callbacks are not classified or certified."
+   Strict derived-model hosts require every assembled operation to use the
+   recognized executor (including explicitly nonpublishing operations).
+   Every declared publication topic must have a derivation mapping. This
+   is closed inventory admission, not a sandbox for application callbacks."
   [assembly config]
   (let [operations (get-in assembly [:operation-acquisition-assembly
-                                     :execution-assembly :server :operations])]
-    (doseq [[operation entry] operations
-            :let [built-for (executor-operation (:execute! entry))]
-            :when built-for]
-      (when-not (= operation built-for)
-        (reject! :publication-executor-operation-mismatch {:operation operation :built-for built-for}))
-      (when-not (and (contains? config :assembled-publication)
-                     (contains? config :assembled-operations))
-        (reject! :missing-publication-executor-profile {:operation operation}))
-      (let [topics (server/operation-published-change-topics entry)
-            subjects (get-in config [:assembled-publication :subject-keys])]
-        (when-not (and (map? subjects) (set? topics) (every? #(contains? subjects %) topics))
-          (reject! :unsupported-publication-executor-topics {:operation operation :topics topics}))))))
+                                     :execution-assembly :server :operations])
+        selected (:assembled-publication config)
+        strict? (true? (:require-derived-model? selected))
+        entity-topics (:model-entity-topics selected)
+        derived-topics (when (and (map? entity-topics) (every? set? (vals entity-topics)))
+                         (into #{} cat (vals entity-topics)))]
+    (doseq [[operation entry] (sort-by key operations)
+            :let [built-for (executor-operation (:execute! entry))]]
+      (when (and strict? (nil? built-for))
+        (reject! :unrecognized-strict-publication-executor {:operation operation}))
+      (when built-for
+        (when-not (= operation built-for)
+          (reject! :publication-executor-operation-mismatch {:operation operation :built-for built-for}))
+        (when-not (and (contains? config :assembled-publication)
+                       (contains? config :assembled-operations))
+          (reject! :missing-publication-executor-profile {:operation operation}))
+        (let [topics (server/operation-published-change-topics entry)
+              subjects (:subject-keys selected)]
+          (when-not (and (map? subjects) (set? topics) (every? #(contains? subjects %) topics))
+            (reject! :unsupported-publication-executor-topics {:operation operation :topics topics}))
+          (when (and strict? derived-topics (not (every? derived-topics topics)))
+            (reject! :unmapped-publication-executor-topics
+                     {:operation operation :topics (into #{} (remove derived-topics) topics)})))))))
 
 (defn profile!
   "Compile an explicit topic -> subject field declaration against the exact
@@ -463,6 +476,8 @@
    Old subjects are asserted against current storage. Select
    :require-derived-model? true with that mapping to refuse raw preparation,
    raw transactions and raw journal-only plans at this command boundary.
+   The canonical host requires all assembled operations to use recognized
+   executors and declared topics to have derivation mappings in strict mode.
    Canonical guarded journal-only plans remain available. Without that flag,
    legacy raw paths remain trusted. This is not a sandbox for raw XTDB access."
   [assembly options]
