@@ -1215,10 +1215,21 @@
       (repair-managed-fragments! runtime)))
   true)
 
+(defn- managed-sse-owner
+  [element]
+  (loop [root (fragment-root-from-element element)]
+    (when root
+      (if (managed-fragment-root? root)
+        root
+        (recur (fragment-root-from-element (.-parentElement root)))))))
+
 (defn on-sse-before-message!
-  "Normalize one managed HTMX SSE message into a fragment invalidation."
+  "Cancel every direct SSE swap issued inside a managed owner. Only its
+   stable, marked listener may normalize a message into invalidation debt."
   [runtime event]
-  (let [listener (detail-field event "elt")]
+  (let [listener (detail-field event "elt")
+        owner (managed-sse-owner listener)]
+    (when owner (prevent-event! event))
     (when (invalidation-listener? listener)
       (prevent-event! event)
       (let [root (fragment-root-from-element listener)
@@ -1229,6 +1240,7 @@
             fragment-id (fragment-id-from-root root)]
         (when-not (and (managed-fragment-root? root)
                        fragment-id
+                       (identical? root (.-parentElement listener))
                        (= fragment-id listener-id))
           (throw
            (core-error
@@ -1330,6 +1342,13 @@
                    (= (:fragment-id pending) (some-> detail (aget "fragmentId")))
                    (= (:request-generation pending) (some-> detail (aget "requestGeneration"))))))))
 
+(defn- direct-managed-sse-request?
+  [event]
+  (let [config (or (detail-field event "requestConfig") (event-detail event))
+        trigger (some-> config (aget "triggeringEvent"))]
+    (and (managed-sse-owner (detail-field event "elt"))
+         (acquisition/direct-sse-trigger? (some-> trigger .-type)))))
+
 (defn on-config-request!
   "Attach the adapter-approved authoritative progression requirement to one
    managed HTMX fragment refresh."
@@ -1339,6 +1358,9 @@
         pending (and root
                      (weak-get (:pending-refreshes runtime) root))]
     (cond
+      (direct-managed-sse-request? event)
+      (prevent-event! event)
+
       (and root (root-issued-request? root event)
            (get @(:acquisition-owners runtime) (fragment-id-from-root root))
            (not (current-acquisition-owner? runtime root)))
@@ -1408,6 +1430,9 @@
         pending (and root
                      (weak-get (:pending-refreshes runtime) root))]
     (cond
+      (direct-managed-sse-request? event)
+      (prevent-event! event)
+
       (and root (root-issued-request? root event)
            (get @(:acquisition-owners runtime) (fragment-id-from-root root))
            (not (current-acquisition-owner? runtime root)))
@@ -1603,6 +1628,17 @@
                         content
                         "[hx-preserve], [data-hx-preserve], [id='--htmx-preserve-pantry--']")))))
 
+(defn- passive-sse-content?
+  [nodes]
+  (not-any? (fn [element]
+              (some (fn [attribute]
+                      (acquisition/unadmitted-sse-affordance?
+                       attribute (element-attr element attribute)))
+                    acquisition/sse-affordance-attributes))
+            (filter node-element?
+                    (mapcat #(tree-seq node-element? (fn [n] (array-seq (.-children n))) %)
+                            nodes))))
+
 (defn- replacement-response-shape?
   "Inspect inert parsed partial HTML, never insert it into the live document.
    Outer replacement must leave one canonical direct-child target; inner
@@ -1630,6 +1666,7 @@
           (and (every? admitted-extension-declarations?
                        (array-seq (.querySelectorAll content "[hx-ext], [data-hx-ext]")))
                (passive-preservation? runtime content)
+               (passive-sse-content? nodes)
                (if outer?
                  (let [candidate (first significant)]
                    (and (= 1 (count significant))

@@ -780,6 +780,12 @@
                   root? (not= slot :target-attrs)
                   path [slot k]]]
       (cond
+        ;; The keyword root :sse-connect is overwritten by the framework.
+        ;; No other SSE affordance can be supplied by caller attributes.
+        (and (not (and root? (= k :sse-connect)))
+             (acquisition/unadmitted-sse-affordance? attribute v))
+        (acquisition-config-error! :unsupported-sse-affordance fragment path v)
+
         (#{"hx-ext" "data-hx-ext"} attribute)
         (when-not (acquisition/extension-declaration?
                    (if (and root? (= k :hx-ext)) (htmx/hx-ext-value v) v))

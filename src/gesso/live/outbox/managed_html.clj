@@ -3,6 +3,7 @@
    This is not a general HTML sanitizer or a browser effect/target validator."
   (:require [clojure.string :as str]
             [gesso.http :as http]
+            [gesso.live.acquisition :as acquisition]
             [rum.server-render :as rum]))
 
 (defn- reject! [kind path data]
@@ -46,6 +47,9 @@
         ;; An OOB marker creates a separate mutation, even inside a template.
         (#{"hx-swap-oob" "data-hx-swap-oob"} attribute)
         (reject! :undeclared-oob-effect path {:attribute attribute})
+
+        (acquisition/unadmitted-sse-affordance? attribute v)
+        (reject! :undeclared-sse-affordance path {:attribute attribute})
 
         (str/starts-with? attribute "on")
         (reject! :inline-event-handler path {:attribute attribute})

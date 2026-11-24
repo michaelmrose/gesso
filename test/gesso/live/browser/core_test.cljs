@@ -143,8 +143,10 @@
 
 (defn- make-invalidation-listener
   [root fragment-id]
-  (make-element {:closest-root root
-                 :attrs {core/invalidation-listener-attribute fragment-id}}))
+  (let [listener (make-element {:closest-root root
+                                :attrs {core/invalidation-listener-attribute fragment-id}})]
+    (aset listener "parentElement" root)
+    listener))
 
 (defn- make-child
   [root]
@@ -1327,6 +1329,40 @@
     (is (empty? @(:calls htmx-fixture)))
     (is (nil? (core/pending-refresh runtime root)))))
 
+(deftest managed-sse-bypass-events-cannot-grant-acquisition-test
+  (doseq [policy ["automatic" "explicit-refresh"]]
+    (let [root (make-element {:fragment-id "panel"
+                              :attrs {"hx-trigger" core/refresh-event-name
+                                      "hx-swap" "outerHTML"
+                                      core/acquisition-policy-attribute policy}})
+          child (make-child root)
+          misplaced (make-invalidation-listener root "panel")
+          document-fixture (make-document [root])
+          htmx (make-htmx)
+          runtime (core/create {:document (:document document-fixture) :htmx (:htmx htmx)})
+          state-before (core/state runtime)]
+      (doseq [source [root child]]
+        (let [swap (make-event core/sse-before-message-event-name {:elt source})
+              trigger #js {:type "sse:live-update" :target source}
+              config (make-event "htmx:configRequest"
+                                 {:elt source :extra-detail {:triggeringEvent trigger}})
+              before (make-event "htmx:beforeRequest"
+                                 {:elt source :xhr (:xhr (make-xhr 200))
+                                  :extra-detail {:requestConfig #js {:triggeringEvent trigger}}})]
+          (core/on-sse-before-message! runtime (:event swap))
+          (core/on-config-request! runtime (:event config))
+          (core/on-before-request! runtime (:event before))
+          (is @(:prevented? swap))
+          (is @(:prevented? config))
+          (is @(:prevented? before))))
+      (aset misplaced "parentElement" child)
+      (let [event (make-event core/sse-before-message-event-name {:elt misplaced})]
+        (is (= :invalid-sse-invalidation-listener
+               (error-kind #(core/on-sse-before-message! runtime (:event event)))))
+        (is @(:prevented? event)))
+      (is (= state-before (core/state runtime)))
+      (is (empty? @(:calls htmx))))))
+
 (deftest unmarked-legacy-sse-message-remains-outside-managed-path-test
   (let [root (make-legacy-sse-root "fragment-1" "live-update")
         child (make-child root)
@@ -1658,6 +1694,43 @@
       (is (= (if allowed? #{} #{requirement})
              (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
       (is (nil? (core/active-request runtime root))))))
+
+(deftest managed-replacement-refuses-new-sse-affordances-test
+  (doseq [[attrs allowed?]
+          [[{"hx-trigger" "click"} true]
+           [{"sse-swap" "live-update"} false]
+           [{"data-sse-swap" ""} false]
+           [{"sse-connect" "/stream"} false]
+           [{"data-sse-connect" "/stream"} false]
+           [{"sse-close" "close"} false]
+           [{"data-sse-close" "close"} false]
+           [{"hx-trigger" "click, sse:live-update"} false]
+           [{"data-hx-trigger" "sse:live-update"} false]
+           [{core/invalidation-listener-attribute "fragment-1"} false]]]
+    (let [captures (atom 0)
+          {:keys [runtime root document-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          candidate (.-testPrimaryTarget (make-root "fragment-1"))
+          child (make-element {:attrs attrs})
+          html "controlled SSE shape"
+          requirement (progression/requirement
+                       {:tx-id 809 :system-time "2026-08-26T08:10:09Z"})]
+      (aset candidate "children" #js [child])
+      (swap! (:parsed-responses document-fixture) assoc html [candidate])
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (let [fixture (make-event "htmx:beforeSwap"
+                                {:elt root :xhr xhr :should-swap true
+                                 :extra-detail {:serverResponse html}})]
+        (core/on-before-swap! runtime (:event fixture))
+        (is (= (not allowed?) @(:prevented? fixture)) (pr-str attrs))
+        (is (= (if allowed? 1 0) @captures)))
+      (when allowed? (after-swap! runtime root xhr))
+      (after-request! runtime root xhr true)
+      (is (= (if allowed? #{} #{requirement})
+             (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements]))))))
 
 (deftest managed-replacement-refuses-global-preservation-effects-test
   (doseq [mode ["innerHTML" "outerHTML"]

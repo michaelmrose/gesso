@@ -67,3 +67,14 @@
   ;; this restriction and retain their existing serialization behavior.
   (is (str/includes? (:body (http/html-response [:div {:hx-swap-oob "innerHTML"}]))
                     "hx-swap-oob")))
+
+(deftest selected-content-refuses-new-sse-affordances-test
+  (doseq [[k v] [[:sse-swap "update"] ["data-sse-swap" ""]
+                 [:sse-connect "/other"] ["data-sse-connect" "/other"]
+                 [:sse-close "close"] ["data-sse-close" "close"]
+                 [:hx-trigger "click, sse:update"] ["data-hx-trigger" "sse:update"]
+                 [:data-gesso-live-invalidation "panel"]]]
+    (let [result (failure [:div [:span {k v}]])]
+      (is (= :undeclared-sse-affordance (:error/kind result)))
+      (is (= [1] (:render-path result)))))
+  (is (= 200 (:status (managed-html/html-response [:button {:hx-trigger "click"} "Save"])))))

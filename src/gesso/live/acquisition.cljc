@@ -22,3 +22,23 @@
   (and (or (nil? value) (string? value))
        (every? #{"" "sse" "ignore:sse"}
                (str/split (str/replace (or value "") " " "") #","))))
+
+(def sse-affordance-attributes
+  ["sse-connect" "data-sse-connect" "sse-swap" "data-sse-swap"
+   "sse-close" "data-sse-close" "data-gesso-live-invalidation"
+   "hx-trigger" "data-hx-trigger"])
+
+(defn direct-sse-trigger?
+  [value]
+  (and (string? value) (str/includes? value "sse:")))
+
+(defn unadmitted-sse-affordance?
+  "Replacement content cannot declare its own SSE connection, subscription,
+   close behavior or invalidation-listener identity. Conservatively reject
+   sse: anywhere in either trigger spelling, rather than reimplement HTMX's
+   trigger parser. Stable framework-owned root/listener markup is separate."
+  [attribute value]
+  (and (some? value)
+       (if (contains? #{"hx-trigger" "data-hx-trigger"} attribute)
+         (direct-sse-trigger? (str value))
+         (boolean (some #{attribute} sse-affordance-attributes)))))

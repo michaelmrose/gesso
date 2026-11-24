@@ -671,7 +671,14 @@
            [:unsupported-selection [:attrs :hx-select] "#other"]
            [:unsupported-selection [:root-attrs "data-hx-select-oob"] ""]
            [:unsupported-history [:root-attrs :hx-push-url] true]
-           [:unsupported-history [:attrs "DATA-HX-REPLACE-URL"] "/other"]]]
+           [:unsupported-history [:attrs "DATA-HX-REPLACE-URL"] "/other"]
+           [:unsupported-sse-affordance [:attrs :sse-swap] "update"]
+           [:unsupported-sse-affordance [:root-attrs "data-sse-connect"] "/other"]
+           [:unsupported-sse-affordance [:root-attrs :sse-close] "close"]
+           [:unsupported-sse-affordance [:target-attrs :sse-connect] "/other"]
+           [:unsupported-sse-affordance [:target-attrs :hx-trigger] "click, sse:update"]
+           [:unsupported-sse-affordance [:target-attrs "data-hx-trigger"] "sse:update"]
+           [:unsupported-sse-affordance [:target-attrs :data-gesso-live-invalidation] "request-list"]]]
     (let [input (assoc-in fragment-spec path value)
           expected {:error/type :gesso.live.ui/invalid-acquisition-config
                     :error/kind kind :fragment-id "request-list"
