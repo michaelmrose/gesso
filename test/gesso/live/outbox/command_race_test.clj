@@ -16,6 +16,7 @@
             [gesso.live.optimistic.protocol :as protocol]
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.claim-browser-fixture :as browser]
+            [gesso.live.outbox.claim-semantic-fixture :as semantics]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
@@ -832,6 +833,8 @@
     (fn [{:keys [source issue! revoke!]}]
      (let [ready (CountDownLatch. 2)
         recovery-trace (atom [])
+        initial-state (atom nil)
+        recovery-state (atom nil)
         observed (atom [])
         projected (atom [])
         streams (atom [])
@@ -919,6 +922,7 @@
                    :construct-after-abort!
                    (fn [{:keys [ctx command-id]}]
                      (swap! recovery-trace conj [:construct command-id])
+                     (reset! recovery-state (semantics/snapshot! #(frontier/q-from! ctx %)))
                      (let [row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))]
                        (when (= :claimed (:status row))
                          {:spec nil
@@ -1036,6 +1040,7 @@
          (try
            (xt/execute-tx node [[:put-docs :requests before]
                                 [:put-docs :memberships (assoc member :xt/id "helper-1") (assoc member :xt/id "helper-2")]])
+           (reset! initial-state (semantics/snapshot! #(xt/q node %)))
            (when (= :valid recovery-mode)
              ;; Actual network refusals must not reach either constructor.
              (doseq [headers [{"x-fixture-session" "a"}
@@ -1122,6 +1127,16 @@
                (is (= #{{:topic :request :command-id id} {:topic :request-assignment :command-id id}}
                       (set (xt/q node ["SELECT gesso$live$outbox$topic AS topic, gesso$live$outbox$command_id AS command_id FROM gesso_live_outbox"]))))
                (is (= (cond-> #{[id :incorporated]} valid? (conj [loser-id :incorporated])) (set @projected)))
+               (let [final-state (semantics/snapshot! #(xt/q node %))
+                     accepted (semantics/observe! helper :accept @initial-state @recovery-state)
+                     refused (semantics/observe! loser-helper :refuse @recovery-state final-state)]
+                 (is (:matches? accepted))
+                 (is (= valid? (:matches? refused)))
+                 (if valid?
+                   (do (is (not (:matches? (semantics/observe! loser-helper :refuse @recovery-state @recovery-state))))
+                       (is (not (:matches? (semantics/observe! loser-helper :refuse @recovery-state (assoc final-state :assignment/helper loser-helper)))))
+                       (is (not (:matches? (semantics/observe! helper :accept @recovery-state final-state)))))
+                   (is (= @recovery-state final-state))))
                (when valid? (browser/verify-no-claim-action! fragment! (headers-for session)))
                (when-let [opened @observer]
                  (browser/verify! opened helper)
