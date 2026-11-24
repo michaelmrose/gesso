@@ -12,6 +12,8 @@ on:
       - deps.edn
       - bb.edn
       - 'integration/gesso/live/outbox/http_aleph*'
+      - 'integration/gesso/assurance/example/physical_single_node_aleph_integration_test.clj'
+      - 'src/gesso/assurance/example/physical_single_node_*.clj'
       - 'src/gesso/live/outbox/http_aleph_pipeline.clj'
       - 'src/gesso/live/outbox/http_aleph_live.clj'
       - 'test/gesso/live/outbox/http_aleph_live_test.clj'

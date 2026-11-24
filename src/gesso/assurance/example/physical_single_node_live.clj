@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2334: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2335: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -429,3 +429,16 @@
   ([slot-id source f]
    (principal/checked-test-policy! source)
    (with-live-application* slot-id source :biff-jetty-http1 f)))
+
+(defn with-biff-aleph-granted-live-proving-application!
+  "Select actual Aleph HTTP/1 on loopback with the original Biff-installed
+   protected Live handler. Requires the explicit :aleph-integration alias.
+   Actual SSE delivery and closure must be observed in the integration gate;
+   selection does not establish a release listener, drain, authenticated
+   ingress, CSRF, durable publication or browser adoption."
+  ([source f]
+   (with-biff-aleph-granted-live-proving-application!
+    (str "v2335-" (random-uuid)) source f))
+  ([slot-id source f]
+   (principal/checked-test-policy! source)
+   (with-live-application* slot-id source :biff-aleph-http1 f)))

@@ -58,6 +58,24 @@
                :complete-physical-writer-coverage-not-established
                :universal-refinement-not-established])))
 
+(deftest explicitly-unavailable-aleph-adapter-rejects-before-physical-start
+  ;; This checks absence, not a simulated successful Aleph server. The real
+  ;; server and streaming body are mandatory in the separate integration lane.
+  (let [starts (atom 0)
+        resolve-original @#'clojure.core/requiring-resolve]
+    (with-redefs [clojure.core/requiring-resolve
+                  (fn [sym]
+                    (if (= 'aleph.http/start-server sym)
+                      (throw (java.io.FileNotFoundException. "Aleph unavailable"))
+                      (resolve-original sym)))
+                  physical/with-proving-application!
+                  (fn [& _] (swap! starts inc))]
+      (is (= :aleph-test-adapter-unavailable
+             (reason #(subject/with-http-proving-application!
+                       "missing-aleph" (fn [_ h] h) :biff-aleph-http1
+                       (fn [_] (is false "Unexpected application startup"))))))
+      (is (zero? @starts)))))
+
 (deftest real-embedded-xtdb-get-reserve-release-and-readback
   (subject/with-http-proving-application!
    (fn [{:keys [handler system read! abstract! http-report report]}]

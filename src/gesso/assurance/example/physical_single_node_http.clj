@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-http
-  "v2334: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
+  "v2335: Real Ring/Biff entry points for the v1494 embedded-XTDB reservation
    pilot. This is an *uncertified* physical application fixture, not an issued
    certified-plan executor, a v1478 checked host adoption, or a deployable
    authenticated service.
@@ -15,8 +15,9 @@
    By default no HTTP listener is opened. An opt-in, JDK-only loopback
    listener is installed AS A SEPARATE Biff module and managed by the same
    original start/stop lifecycle. An additional opt-in REAL Jetty HTTP/1
-   adapter is now available; both bind 127.0.0.1 on an ephemeral port. These
-   are test-only transport selections, NOT the production Biff/Aleph release. Callbacks remain
+   adapter and an opt-in Aleph HTTP/1 adapter are available; all bind
+   127.0.0.1 on an ephemeral port. These are diagnostic transport selections,
+   NOT a production release or drain qualification. Callbacks remain
    valid only during the managed application lifetime. There is no intrinsic
    principal or CSRF verification: NEVER expose the unguarded diagnostic
    handler on a public network. This namespace
@@ -270,14 +271,56 @@
          (finally
            (reset! state nil)))))})
 
+(def ^:private aleph-module-id
+  :gesso.assurance.example.physical-single-node-http/aleph-http1)
+
+(defn- aleph-test-provider! []
+  ;; Resolve only when selected. Never substitute a different transport.
+  (try
+    {:start! (requiring-resolve 'aleph.http/start-server)
+     :port! (requiring-resolve 'aleph.netty/port)}
+    (catch Exception cause
+      (throw (ex-info "Selected Aleph test adapter is unavailable."
+                      {:physical-single-node-http/rejection true
+                       :reason :aleph-test-adapter-unavailable}
+                      cause)))))
+
+(defn- biff-aleph-module! [handler state]
+  ;; Loopback diagnostic hosting, NOT the release traffic fence or drain.
+  {:biff.core/id aleph-module-id
+   :biff.core/start
+   (fn [system]
+     (when-not (identical? handler (:biff.ring/handler system))
+       (reject! :aleph-not-serving-original-biff-handler))
+     (let [{:keys [start! port!]} (aleph-test-provider!)
+           server (start! handler {:socket-address (InetSocketAddress. "127.0.0.1" 0)
+                                   :http-versions [:http1]
+                                   :transport :nio
+                                   :shutdown-timeout 0})]
+       (try
+         (let [port (port! server)]
+           (when-not (and (integer? port) (pos? port))
+             (reject! :aleph-loopback-port-unavailable))
+           (reset! state {:server server :port port :handler handler})
+           system)
+         (catch Throwable t
+           (.close ^java.io.Closeable server)
+           (throw t)))))
+   :biff.core/stop
+   (fn [_]
+     (when-let [server (:server @state)]
+       ;; Do not erase a failed-close handle and pretend shutdown succeeded.
+       (.close ^java.io.Closeable server)
+       (reset! state nil)))})
+
 (defn with-http-proving-application!
   "Execute a local embedded-XTDB proving application under one Biff start.
    The default three-arg form installs NO listener. The test-only four-arg
-   form opts in with literal :biff-loopback or :biff-jetty-http1 (not
-   caller-supplied server functions). Each starts and stops an explicit test
-   HTTP module on 127.0.0.1, port 0. The latter uses a REAL Ring Jetty
-   server to verify actual adapter/HTTP behavior. Neither selection proves
-   production deployment, Aleph streaming SSE, authenticated principal,
+   form selects :biff-loopback, :biff-jetty-http1 or :biff-aleph-http1 (not
+   caller-supplied server functions). Each starts and stops a test HTTP
+   module on 127.0.0.1, port 0. Aleph requires :aleph-integration; no
+   fallback is allowed. A selected listener does not itself establish
+   actual streaming delivery, production deployment, authenticated principal,
    CSRF protection, source-completeness or release eligibility. The system
    is stopped on both normal and exceptional callback exit."
   ([f] (with-http-proving-application! (str "v1495-" (random-uuid)) f))
@@ -289,7 +332,7 @@
   ([slot-id handler-extension! listener-selection f]
    (when-not (and (fn? handler-extension!) (fn? f))
      (reject! :invalid-test-callback))
-   (when-not (contains? #{:no-listener :biff-loopback :biff-jetty-http1}
+   (when-not (contains? #{:no-listener :biff-loopback :biff-jetty-http1 :biff-aleph-http1}
                         listener-selection)
      (reject! :invalid-test-listener-selection))
    ;; Fail before opening embedded XTDB or starting Biff if the explicitly
@@ -299,6 +342,8 @@
        (requiring-resolve 'ring.adapter.jetty9/run-jetty)
        (catch Exception _
          (reject! :jetty-test-adapter-unavailable))))
+   (when (= :biff-aleph-http1 listener-selection)
+     (aleph-test-provider!))
    (physical/with-proving-application!
     slot-id
     (fn [app]
@@ -317,7 +362,9 @@
                                 :biff-loopback
                                 (biff-loopback-module! handler listener-state)
                                 :biff-jetty-http1
-                                (biff-jetty-module! handler listener-state))
+                                (biff-jetty-module! handler listener-state)
+                                :biff-aleph-http1
+                                (biff-aleph-module! handler listener-state))
               modules (cond-> [module] listener-module (conj listener-module))
               order (cond-> [module-id]
                       listener-module (conj (:biff.core/id listener-module)))
@@ -346,7 +393,8 @@
                    (case listener-selection
                      :no-listener :not-selected
                      :biff-loopback :jdk-short-http-only
-                     :biff-jetty-http1 :ring-jetty-http1-test-adapter)
+                     :biff-jetty-http1 :ring-jetty-http1-test-adapter
+                     :biff-aleph-http1 :aleph-http1-test-adapter)
                    :issued-certified-plan-executors :not-established
                    :certified-plan-compatibility
                    {:persisted-fields :unqualified-v1494-fields

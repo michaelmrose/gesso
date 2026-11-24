@@ -64,7 +64,10 @@
   :aleph-integration
   {:extra-paths ["integration" "test"]
    :extra-deps
-   {aleph/aleph {:mvn/version "0.9.11"}}}
+   {aleph/aleph {:mvn/version "0.9.11"}
+    ;; The actual Biff/Live panel uses the same pinned assets as :test.
+    org.webjars.npm/htmx.org {:mvn/version "2.0.7"}
+    org.webjars.npm/htmx-ext-sse {:mvn/version "2.2.4"}}}
 
   ;; Opt-in Typed Clojure feasibility checks. Keep the checker, analyzer,
   ;; and runtime dependencies off ordinary Gesso JVM/CLJS classpaths.
