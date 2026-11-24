@@ -15,6 +15,7 @@
    certificate or transaction permission is issued."
   (:require [clojure.set :as set]
             [gesso.assurance.application-induction :as application]
+            [gesso.assurance.inductive-report :as inductive]
             [gesso.model.transition-conformance :as conformance]
             [gesso.assurance.proof.induction-ledger :as ledger]
             [gesso.assurance.transition :as construction]
@@ -272,3 +273,40 @@
      :transaction-internal-prestate :not-established
      :universal-xtdb-refinement :not-established
      :certificate :not-issued :transaction-authority :none :authority :none}))
+
+(def ^:private original-inductive-report inductive/build-inductive-report!)
+(def ^:private original-declared-observations check-declared-observations!)
+
+(defn check-bound-declared-observations!
+  "Join supplied observations to the SAME original catalog and both live
+   conditional abstract evidence handles. This does not issue or check an
+   installed executor, nor authenticate the supplied physical observations.
+   Source-only analysis is not sufficient for this entry point."
+  [{:keys [inductive-source observations] :as source}]
+  (exact! source #{:inductive-source :observations} [])
+  (when-not (and (identical? original-inductive-report inductive/build-inductive-report!)
+                 (identical? original-declared-observations check-declared-observations!))
+    (reject! :substituted-upstream-checker []))
+  (let [bound (original-inductive-report inductive-source)]
+    (when-not (and (= :source-bound-conditional-abstract-safety (:verdict bound))
+                   (= :original-sources-and-both-live-handles-rechecked (:checking bound))
+                   (= :in-process-conditional-abstract-certificate
+                      (get-in bound [:classification :certificate :status]))
+                   (= :checked-exact-source-relative (:source-dependency-closure bound))
+                   (true? (:all-declared-invariants-conditionally-inductive? bound))
+                   (false? (:full-success? bound))
+                   (= :none (:authority bound) (:transaction-authority bound)))
+      (reject! :live-conditional-induction-required [:inductive-source]))
+    (let [report (original-declared-observations
+                  {:catalog (:catalog inductive-source) :observations observations})
+          ledger (:induction-ledger report)]
+      (when-not (and (= (:fingerprint ledger) (get-in bound [:identity :ledger-fingerprint]))
+                     (= (:catalog-fingerprint ledger) (get-in bound [:identity :catalog-fingerprint]))
+                     (= (:induction-fingerprint ledger) (get-in bound [:identity :induction-fingerprint]))
+                     (= (:declared-operation-ids ledger) (:declared-operation-ids bound))
+                     (= (:original-open-obligation-ids-by-operation ledger)
+                        (get-in bound [:classification :original-obligations :by-operation])))
+        (reject! :bound-observation-ledger-mismatch []))
+      (assoc report :type ::bound-declared-observation-report
+                    :checking :both-live-abstract-handles-and-exact-observations-rechecked
+                    :bound-inductive-report bound))))

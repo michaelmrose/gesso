@@ -8,6 +8,10 @@
             [xtdb.util :as xt-util]
             [gesso.model.tx :as model-tx]
             [gesso.assurance.transition :as construction]
+            [gesso.assurance.dependency :as dependency]
+            [gesso.assurance.proof.induction :as induction]
+            [gesso.assurance.proof.induction-dependency :as closure]
+            [gesso.assurance.proof.certificate :as certificate]
             [gesso.assurance.proof.transition :as abstract]
             [gesso.assurance.proof.independent-transition-semantics :as independent]
             [gesso.choreo.identity :as identity]
@@ -365,3 +369,23 @@
           :submission (if replay? :no-new-submission :committed-in-window)
           :observation {:construction (source helper alternative)
                         :before (:state before) :inputs {} :after (:state after)}})) steps)))
+
+(defn bound-inductive-source!
+  "Issue the existing local abstract handles for the actual full Claim catalog.
+   Acknowledges, rather than discharges, every required open obligation."
+  []
+  (let [catalog (catalog)
+        graph (closure/build-induction-dependency-graph! catalog)
+        proof (induction/check-induction! catalog)
+        dependency-handle (closure/check-induction-dependencies! catalog graph)
+        certificate-handle
+        (certificate/admit-certificate!
+         {:proof-kind :conditional-induction :proof-source catalog
+          :graph-handle (dependency/check-graph! graph) :current-graph graph
+          :expected-open-premises #{:gesso.assurance.proof.induction/matching-declared-abstract-machine}
+          :expected-open-obligations
+          (set/union #{:production-transition-correspondence :current-runtime-authorization
+                       :atomic-transaction-enforcement :checker-meta-soundness}
+                     (disj (:open-meta-obligations proof) :certificate-admission))})]
+    {:catalog catalog :certificate-handle certificate-handle
+     :dependency-handle dependency-handle :current-graph graph}))

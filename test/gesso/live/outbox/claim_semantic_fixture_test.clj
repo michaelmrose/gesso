@@ -187,3 +187,28 @@
                                                           [:literal "helper-2"])]))))
     (is (= :invalid-source-shape (reason (assoc source :certificate :issued))))
     (is (= :invalid-observation-selection (reason (assoc source :observations []))))))
+
+(deftest bound-declared-observations-require-live-same-catalog-handles
+  (let [bound (claim/bound-inductive-source!)
+        before (assoc claim/open-state :membership/one true :membership/two true)
+        after (assoc before :request/status :claimed :request/revision 1
+                     :assignment/helper "helper-1" :journal/one :accepted)
+        step {:construction (claim/source "helper-1" :accept) :before before :inputs {} :after after}
+        source {:inductive-source bound :observations [step]}
+        check correspondence/check-bound-declared-observations!
+        rejected? (fn [s] (try (check s) false (catch clojure.lang.ExceptionInfo _ true)))
+        result (check source)]
+    (is (:all-supplied-observations-match? result))
+    (is (= :source-bound-conditional-abstract-safety (get-in result [:bound-inductive-report :verdict])))
+    (is (= :not-issued (:certificate result)))
+    (is (= :none (:authority result)))
+    (is (= :not-established (:installed-executor-correspondence result)))
+    (is (= 7 (count (:unobserved-operation-ids result))))
+    (is (rejected? (assoc source :inductive-source {:catalog (claim/catalog)
+                                                    :certificate-handle nil :dependency-handle nil :current-graph nil})))
+    (is (rejected? (assoc-in source [:inductive-source :certificate-handle] {})))
+    (is (rejected? (assoc-in source [:inductive-source :catalog :id] :fixture/other-epoch)))
+    (is (rejected? (assoc-in source [:observations 0 :construction :replacements :assignment/helper]
+                            [:literal "helper-2"])))
+    (is (false? (:all-supplied-observations-match?
+                 (check (assoc-in source [:observations 0 :after :membership/two] false)))))))

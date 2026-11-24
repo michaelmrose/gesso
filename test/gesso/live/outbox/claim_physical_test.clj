@@ -554,8 +554,9 @@
                      (is (= before (semantics/snapshot-at-frontier! node)))))
                  (when valid?
                    (let [correlated (semantics/correlate-history! @comparisons @submissions)
-                         report (correspondence/check-declared-observations!
-                                 {:catalog (semantics/catalog) :observations (mapv :observation correlated)})
+                         report (correspondence/check-bound-declared-observations!
+                                 {:inductive-source (semantics/bound-inductive-source!)
+                                  :observations (mapv :observation correlated)})
                          rejected? (fn [steps attempts]
                                      (try (semantics/correlate-history! steps attempts) false
                                           (catch clojure.lang.ExceptionInfo _ true)))
@@ -572,6 +573,11 @@
                      (is (rejected? (assoc-in @comparisons [2 :replay-counts] [0 1]) @submissions))
                      (is (rejected? (update-in @comparisons [2 :after :records] dissoc id) @submissions))
                      (is (rejected? @comparisons (pop @submissions)))
+                     (is (= :both-live-abstract-handles-and-exact-observations-rechecked (:checking report)))
+                     (is (= :source-bound-conditional-abstract-safety (get-in report [:bound-inductive-report :verdict])))
+                     (is (= 8 (count (get-in report [:bound-inductive-report :declared-operation-ids]))))
+                     (is (false? (get-in report [:bound-inductive-report :full-success?])))
+                     (is (= :not-issued (:certificate report)))
                      (is (:all-supplied-observations-match? report))
                      (is (empty? (:divergent-operation-ids report)))
                      (is (= (into committed replay-ids) (:observed-operation-ids report)))
