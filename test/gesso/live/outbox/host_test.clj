@@ -10,6 +10,7 @@
              :refer [with-surfaced-application standard-operations render-context
                      rendered-operation-button]]
             [gesso.live.core :as live]
+            [gesso.live.flow :as flow]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.host :as host]
@@ -483,6 +484,151 @@
                                                     :authorized-sse {:path "/bad/../path"
                                                                      :authorize-subscription (constantly nil)}))))]
        (is (= :invalid-path (:reason failure)))
+       (is (some? @system*))
+       (is ((:drained? (get @system* host/listener-key))))
+       (is (live/closed? (:gesso.live/system @system*)))
+       (is (thrown? Exception (xt/q (:xtdb/connectable @system*) ["SELECT 1 AS x"])))))))
+
+(deftest canonical-host-recovery-requires-owned-route-and-numeric-options
+  (doseq [[change reason]
+          [[{:sse-recovery {}} :recovery-requires-authorized-sse]
+           [{:authorized-sse {} :sse-recovery nil} :invalid-sse-recovery-options]
+           [{:authorized-sse {} :sse-recovery {:after-step! identity}}
+            :invalid-sse-recovery-options]]]
+    (is (= reason (:reason (problem #(host/start! nil identity
+                                                  (merge (config) change))))))))
+
+(deftest canonical-host-recovers-orphan-capacity-and-preserves-healthy-peer
+  (setup
+   (fn [assembly render]
+     (let [opened (atom 0)
+           allowed? (atom false)
+           original-open flow/open-source-flow!
+           failure (ex-info "source release unavailable" {})]
+       (with-redefs-fn
+         {#'flow/open-source-flow!
+          (fn [src opts]
+            (let [result (original-open src opts)
+                  close! (:close! result)]
+              (if (= 1 (swap! opened inc))
+                (assoc result :close! #(if @allowed? (close!) (throw failure)))
+                result)))
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [started (host/start! assembly render
+                                      (assoc (config)
+                                             :authorized-sse
+                                             {:path "/events" :max-connections 2
+                                              :authorize-subscription (constantly {:topic :request :id "owned"})}
+                                             :sse-recovery {:poll-ms 10 :min-interval-ms 40
+                                                            :max-failure-interval-ms 80 :max-attempts 1}))
+                 route (get started host/sse-status-key)
+                 scheduler (get started host/recovery-status-key)
+                 src (:source (:gesso.live/system started))
+                 handler (:biff.ring/handler started)
+                 request {:uri "/events" :request-method :get}]
+             (try
+               (is (= :running ((:status scheduler))))
+               (is (= #{:status :stats :drained?} (set (keys scheduler))))
+               (let [orphan (handler request) healthy (handler request)]
+                 (is (= [200 200] [(:status orphan) (:status healthy)]))
+                 (stream/close! (:body orphan))
+                 (is (eventually #(pos? (:failure-count ((:stats scheduler))))))
+                 (is (identical? failure (:last-error ((:stats scheduler)))))
+                 (is (= 2 ((:occupied-count route))))
+                 (is (= 2 (:subscription-count (source/stats src))))
+                 (is (= 503 (:status (handler request))))
+                 (reset! allowed? true)
+                 (is (eventually #(and (zero? ((:disconnected-count route)))
+                                       (= 1 (:subscription-count (source/stats src))))))
+                 (is (= 1 ((:occupied-count route))))
+                 (is (not (stream/closed? (:body healthy))))
+                 (let [replacement (handler request)]
+                   (is (= 200 (:status replacement)))
+                   (stream/close! (:body replacement))))
+               (finally
+                 (reset! allowed? true)
+                 (host/stop! started)))
+             (is ((:drained? scheduler)))
+             (is ((:drained? route)))
+             (is (live/closed? (:gesso.live/system started))))))))))
+
+(deftest canonical-host-recovery-drain-timeout-retains-actual-providers
+  (setup
+   (fn [assembly render]
+     (let [first? (atom true)
+           entered (promise)
+           release (promise)
+           original-open flow/open-source-flow!]
+       (with-redefs-fn
+         {#'flow/open-source-flow!
+          (fn [src opts]
+            (let [result (original-open src opts)
+                  close! (:close! result)]
+              (assoc result :close!
+                     (fn []
+                       (if (compare-and-set! first? true false)
+                         (throw (ex-info "initial release failed" {}))
+                         (do (deliver entered true)
+                             (when-not (true? (deref release 10000 false))
+                               (throw (ex-info "test release timed out" {})))
+                             (close!)))))))
+          #'gesso.live.transport.sse/write-events-task
+          (fn [_ _ _] (fn [_ _] (fn [] nil)))}
+         (fn []
+           (let [started (host/start! assembly render
+                                      (assoc (config) :stop-timeout-ms 50
+                                             :http-jdk {}
+                                             :authorized-sse
+                                             {:path "/events"
+                                              :authorize-subscription (constantly {:topic :request :id "owned"})}
+                                             :sse-recovery {:poll-ms 10 :min-interval-ms 20}))
+                 route (get started host/sse-status-key)
+                 scheduler (get started host/recovery-status-key)
+                 listener (get started host/listener-key)
+                 node (:xtdb/connectable started)
+                 handler (:biff.ring/handler started)
+                 request {:uri "/events" :request-method :get}]
+             (try
+               (let [response (handler request)]
+                 (is (= 200 (:status response)))
+                 (stream/close! (:body response)))
+               (is (= true (deref entered 5000 false)))
+               (is (= :sse-recovery-not-drained (:reason (problem #(biff/stop started)))))
+               (is (= :stopping ((:status scheduler))))
+               (is (false? ((:closed? route))))
+               (is (false? ((:drained? listener))))
+               (is (false? (live/closed? (:gesso.live/system started))))
+               (is (= [{:x 1}] (xt/q node ["SELECT 1 AS x"])))
+               (is (= 503 (:status (handler request))))
+               (finally
+                 (deliver release true)
+                 (is (eventually #((:drained? scheduler))))
+                 (loop [attempt 0]
+                   (when-let [failure (problem #(host/stop! started))]
+                     (if (and (< attempt 100) (= :drain-timed-out (:reason failure)))
+                       (do (Thread/sleep 20) (recur (inc attempt)))
+                       (throw (ex-info "Teardown failed" failure)))))))
+             (is ((:drained? route)))
+             (is ((:drained? listener)))
+             (is (live/closed? (:gesso.live/system started))))))))))
+
+(deftest canonical-host-recovery-startup-failure-rolls-back-owned-resources
+  (setup
+   (fn [assembly render]
+     (let [system* (atom nil)
+           original-start managed/start-biff-application!
+           failure (with-redefs [managed/start-biff-application!
+                                 (fn [& args]
+                                   (let [system (apply original-start args)]
+                                     (reset! system* system) system))]
+                     (problem #(host/start! assembly render
+                                             (assoc (config) :http-jdk {}
+                                                    :authorized-sse {:path "/events"
+                                                                     :authorize-subscription (constantly nil)}
+                                                    :sse-recovery {:poll-ms 0}))))]
+       (is (= :invalid-poll-ms (:reason failure)))
        (is (some? @system*))
        (is ((:drained? (get @system* host/listener-key))))
        (is (live/closed? (:gesso.live/system @system*)))
