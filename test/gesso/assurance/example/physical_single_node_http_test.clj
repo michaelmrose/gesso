@@ -87,6 +87,80 @@
        (is (= 0 (:slot/active-claims (abstract!))))
        (is (= "preserved" (:audit-tag (read!))))))))
 
+(deftest postcommit-readback-failure-preserves-reported-commit
+  ;; The physical transaction commits before the HTTP handler reads XTDB to
+  ;; render its response. A transient SQL/read failure after the commit must
+  ;; not masquerade as a failed command and invite another mutation attempt.
+  (subject/with-http-proving-application!
+   (fn [{:keys [handler system read! http-report]}]
+     (is (identical? handler (:biff.ring/handler system)))
+     (let [original-tx @#'tx/transact!
+           original-q @#'xt/q
+           committed? (atom false)
+           tx-calls (atom 0)
+           failed-reads (atom 0)
+           result (with-redefs
+                    [tx/transact!
+                     (fn [& args]
+                       (swap! tx-calls inc)
+                       (let [outcome (apply original-tx args)]
+                         (when (= :committed (:commit/status outcome))
+                           (reset! committed? true))
+                         outcome))
+                     xt/q
+                     (fn [& args]
+                       ;; xt/q delegates two-argument calls to a three-arg
+                       ;; implementation. Only reject one top-level read
+                       ;; after the actual XTDB mutation returned committed.
+                       (when (and @committed? (= 2 (count args)))
+                         (swap! failed-reads inc)
+                         (throw (ex-info "Synthetic postcommit XTDB outage"
+                                         {:synthetic :postcommit-readback})))
+                       (apply original-q args))]
+                    (handler (request :post reserve)))]
+       (is @committed?)
+       (is (= 1 @tx-calls) "Do not replay a protected submission")
+       (is (= 1 @failed-reads) "Exactly one physical readback was attempted")
+       (is (= 200 (:status result))
+           "A postcommit view failure must not make the write look failed")
+       (is (= "unknown" (get-in result [:headers "x-gesso-proving-readback"])))
+       (is (= "true" (get-in result [:headers "HX-Refresh"])))
+       (is (= "no-store" (get-in result [:headers "cache-control"])))
+       (is (not (re-find #"data-slot-status" (:body result)))
+           "Never fabricate a rendered authoritative state")
+       (is (= :preserve-reported-commit-and-request-refresh
+              (:postcommit-render-failure http-report)))
+       (is (= 1 (:revision (read!)))
+           "The real committed operation still appears exactly once in XTDB")
+       (is (= "reserved" (:status (read!))))
+       (is (= :operation-precondition-not-met
+              (reason #(handler (request :post reserve))))
+           "Second reserve is rejected by actual authoritative state")
+       (is (= 1 (:revision (read!))))))))
+
+(deftest get-failure-is-never-promoted-to-a-successful-read
+  ;; The postcommit fallback must never apply to an ordinary GET, which has
+  ;; no definitive reported write result to preserve.
+  (subject/with-http-proving-application!
+   (fn [{:keys [handler read!]}]
+     (let [original-q @#'xt/q
+           queries (atom 0)
+           observation (with-redefs
+                         [xt/q (fn [& args]
+                                 (when (= 2 (count args))
+                                   (swap! queries inc)
+                                   (throw (ex-info "Synthetic GET read outage"
+                                                   {:synthetic :get-read})))
+                                 (apply original-q args))]
+                         (try
+                           (handler (request :get view))
+                           :unexpected-success
+                           (catch clojure.lang.ExceptionInfo e
+                             (:synthetic (ex-data e)))))]
+       (is (= :get-read observation))
+       (is (= 1 @queries))
+       (is (= 0 (:revision (read!))))))))
+
 (deftest rendered-response-uses-one-checked-xtdb-snapshot
   ;; The old renderer independently called :read! and :abstract!, which
   ;; each queried XTDB. A concurrent reservation could land between those

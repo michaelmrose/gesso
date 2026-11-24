@@ -72,6 +72,33 @@
       [:p {:data-slot-revision (:revision row)}
        "Revision: " (str (:revision row))]])))
 
+(def ^:private readback-header "x-gesso-proving-readback")
+
+(defn- postcommit-readback-unknown []
+  ;; The delegated source reported :committed, but an independently performed
+  ;; read/interpretation/HTML rendering failed. Do not turn that into a failed
+  ;; HTTP command: a client might submit the same mutation a second time.
+  ;; Equally, do not fabricate a state or an authenticated commit receipt.
+  ;; HTMX 2.0.7 can request a fresh authoritative page GET from HX-Refresh.
+  {:status 200
+   :headers {"content-type" "text/plain; charset=utf-8"
+             "cache-control" "no-store"
+             "HX-Refresh" "true"
+             readback-header "unknown"}
+   :body (str "The delegated operation reported a commit, but authoritative "
+              "presentation is unavailable. Refresh before further actions.")})
+
+(defn- render-after-reported-commit [app]
+  (try
+    (assoc-in (safe-render app) [:headers readback-header] "current")
+    (catch Exception _
+      ;; This only catches failures AFTER the delegated :committed outcome.
+      ;; An XTDB submission failure or :commit-unknown must still propagate;
+      ;; it cannot be promoted to commit success by a subsequent GET.
+      ;; A failed readback may also signal bad source or corrupted data,
+      ;; so :unknown is diagnostic, not a silently accepted model fact.
+      (postcommit-readback-unknown))))
+
 (defn- unsupported [status]
   {:status status
    :headers {"content-type" "text/plain; charset=utf-8"
@@ -110,7 +137,7 @@
               (when-not (and (map? outcome)
                              (= :committed (:commit/status outcome)))
                 (reject! :nondefinitive-physical-outcome))
-              (safe-render app))
+              (render-after-reported-commit app))
             (unsupported 405))
 
           :else
@@ -182,6 +209,8 @@
                  :handler-in-returned-system :identical
                  :handler-extension :test-only-not-checked-or-certified
                  :physical-transactions :delegated-to-v1494-once-per-post
+                 :postcommit-rendering :independent-physical-readback-may-be-unknown
+                 :postcommit-render-failure :preserve-reported-commit-and-request-refresh
                  :issued-certified-plan-executors :not-established
                  :certified-plan-compatibility
                  {:persisted-fields :unqualified-v1494-fields

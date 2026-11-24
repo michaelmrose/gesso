@@ -4,7 +4,9 @@
    certify authenticated commit evidence, durable publication, or a browser."
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.example.physical-single-node-live :as subject]
-            [gesso.live.core :as live]))
+            [gesso.live.core :as live]
+            [gesso.model.tx :as tx]
+            [xtdb.api :as xt]))
 
 (def ^:private reserve "/__gesso_proving/slot/reserve")
 (def ^:private release "/__gesso_proving/slot/release")
@@ -18,6 +20,51 @@
        :not-rejected
        (catch clojure.lang.ExceptionInfo e
          (:reason (ex-data e)))))
+
+(deftest readback-unknown-survives-composed-biff-live-publication
+  ;; This exercises the actual Biff-adopted composed handler. Live source
+  ;; acceptance must never erase the readback layer's HX-Refresh when the
+  ;; physical read following a reported commit failed. It may wake other
+  ;; readers, but that does not certify this client's current presentation.
+  (subject/with-live-proving-application!
+   (fn [{:keys [handler system delegate-handler read!]}]
+     (is (identical? handler (:biff.ring/handler system)))
+     (is (not (identical? handler delegate-handler)))
+     (let [real-tx @#'tx/transact!
+           real-q @#'xt/q
+           postcommit? (atom false)
+           publication-attempts (atom 0)
+           committed-transactions (atom 0)
+           response (with-redefs
+                     [tx/transact!
+                      (fn [& args]
+                        (let [result (apply real-tx args)]
+                          (when (= :committed (:commit/status result))
+                            (swap! committed-transactions inc)
+                            (reset! postcommit? true))
+                          result))
+                      xt/q
+                      (fn [& args]
+                        (when (and @postcommit? (= 2 (count args)))
+                          (throw (ex-info "Physical read unavailable"
+                                          {:synthetic :postcommit})))
+                        (apply real-q args))
+                      live/emit!
+                      (fn [_ _]
+                        (swap! publication-attempts inc)
+                        {:status :emitted})]
+                     (handler (request reserve)))]
+       (is (= 200 (:status response)))
+       (is (= "unknown"
+              (get-in response [:headers "x-gesso-proving-readback"])))
+       (is (= "source-accepted"
+              (get-in response [:headers publication-header])))
+       (is (= "true" (get-in response [:headers "HX-Refresh"]))
+           "Successful advisory publication must not erase readback recovery")
+       (is (= 1 @publication-attempts))
+       (is (= 1 @committed-transactions))
+       (is (= 1 (:revision (read!))))
+       (is (= "reserved" (:status (read!))))))))
 
 (deftest postcommit-publication-exception-preserves-committed-http-outcome
   (subject/with-live-proving-application!
