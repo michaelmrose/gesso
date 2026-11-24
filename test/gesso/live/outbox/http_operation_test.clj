@@ -324,3 +324,37 @@
           (is (= 403 (:status (handler (request (body (str wire " \n; trailing comment\n")))))))
           (is (= 1 (count @gates)))
           (is (empty? @calls)))))))
+
+(deftest command-form-requires-the-declared-utf8-transport
+  (let [gates (atom []) calls (atom [])]
+    (with-assembly (fn [ctx] (swap! calls conj ctx) {:resolution :rejected :reason :test-only})
+      (fn [assembly]
+        (let [handler (transport/wrap-handler assembly (constantly {:status 404})
+                                             {:authorize-request? (fn [ctx] (swap! gates conj ctx) false)})
+              valid (form :request/claim "valid")
+              media "application/x-www-form-urlencoded"
+              unread (proxy [InputStream] []
+                       (read ([] (throw (AssertionError. "Unsupported body read")))
+                             ([_] (throw (AssertionError. "Unsupported body read")))
+                             ([_ _ _] (throw (AssertionError. "Unsupported body read")))))]
+          (doseq [headers [{"content-type" (str media "; charset=ISO-8859-1")}
+                           {"content-type" (str media "; charset=UTF-16")}
+                           {"content-type" (str media "; charset=UTF-8; charset=UTF-8")}
+                           {"content-type" (str media "; charset=UTF-8, text/plain")}
+                           {"content-type" (str media "; charset=")}
+                           {"content-type" (str media ";")}
+                           {"content-type" (str media "; unknown=value")}
+                           {"content-type" media "content-encoding" "gzip"}
+                           {"content-type" media "content-encoding" "identity, gzip"}
+                           {"content-type" media "content-encoding" ""}]]
+            (is (= 400 (:status (handler (assoc (request valid) :headers headers)))) headers))
+          (is (empty? @gates))
+          (is (= 400 (:status (handler (assoc (request unread) :headers
+                                             {"content-type" media "content-encoding" "gzip"})))))
+          (doseq [headers [{"content-type" media}
+                           {"content-type" (str media "; charset=UTF-8")}
+                           {"content-type" "Application/X-WWW-Form-Urlencoded ; CHARSET = \"utf-8\""}
+                           {"content-type" media "content-encoding" "Identity"}]]
+            (is (= 403 (:status (handler (assoc (request valid) :headers headers)))) headers))
+          (is (= 4 (count @gates)))
+          (is (empty? @calls)))))))

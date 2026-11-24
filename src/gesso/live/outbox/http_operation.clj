@@ -133,12 +133,22 @@
       (throw cause))
     (catch Exception _ nil)))
 
+(defn- utf8-form-request? [request]
+  ;; This is a selected raw UTF-8 transport, not a generic MIME decoder.
+  ;; Do not silently ignore contradictory or ambiguous representation headers.
+  (let [headers (:headers request)
+        content-type (get headers "content-type")
+        encoding (get headers "content-encoding")]
+    (and (string? content-type)
+         (re-matches #"(?i)[ \t]*application/x-www-form-urlencoded[ \t]*(?:;[ \t]*charset[ \t]*=[ \t]*(?:utf-8|\"utf-8\")[ \t]*)?"
+                     content-type)
+         (or (not (contains? headers "content-encoding"))
+             (and (string? encoding)
+                  (re-matches #"(?i)[ \t]*identity[ \t]*" encoding))))))
+
 (defn- read-form [request]
-  (let [content-type (get-in request [:headers "content-type"] "")
-        body (:body request)]
-    (when (and (string? content-type)
-               (= "application/x-www-form-urlencoded"
-                  (str/lower-case (str/trim (first (str/split content-type #";" 2)))))
+  (let [body (:body request)]
+    (when (and (utf8-form-request? request)
                (not (seq (:query-string request))))
       ;; Only the parser classifies malformed input. Physical reads happen
       ;; outside its exception boundary, before admission or authorization.
@@ -151,7 +161,8 @@
    No application-specific coercion or alternative parameter mapping.
    Require an explicit trusted request gate (including CSRF/authentication
    policy as appropriate). Parse only the bounded raw UTF-8 form body, not
-   caller-supplied Ring params. Execute the admitted operation only when the
+   caller-supplied Ring params. Admit only absent or UTF-8 charset and
+   absent or identity content encoding. Execute the admitted operation only when the
    wire operation agrees with the selected physical route. No alternate
    executor or response builder is accepted. Other paths remain trusted
    fallback code; complete writer coverage is not established. The returned
