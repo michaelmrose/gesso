@@ -80,6 +80,9 @@
 (def refresh-event-name
   "gesso:live-refresh")
 
+(def acquisition-policy-attribute
+  "data-gesso-live-acquisition-policy")
+
 (def invalidated-event-name
   "gesso:live-invalidated")
 
@@ -983,8 +986,21 @@
         {:requirement requirement}
         error)))))
 
+(defn- invalidation-event-kind
+  [runtime fragment-id]
+  (let [root (fragment-root-by-id runtime fragment-id)
+        policy (element-attr root acquisition-policy-attribute)]
+    (case policy
+      (nil "automatic") :live/invalidated
+      "explicit-refresh" :live/advisory-observed
+      (throw (core-error :invalid-acquisition-policy
+                         "Unknown managed fragment acquisition policy."
+                         {:fragment-id fragment-id :policy policy})))))
+
 (defn notify-fragment!
-  "Notify the pure adapter that a logical Live fragment must refresh.
+  "Observe an invalidation under the stable root's declared acquisition policy.
+   Missing policy metadata retains the legacy automatic behavior. Explicit
+   Refresh policy records debt only; this entry point never grants user intent.
 
    The two-argument runtime/fragment form is advisory and carries no
    authoritative minimum-read requirement."
@@ -999,7 +1015,7 @@
          (when requirement-present?
            (require-refresh-requirement! requirement))
          event
-         (cond-> {:event :live/invalidated
+         (cond-> {:event (invalidation-event-kind runtime fragment-id)
                   :fragment-id fragment-id}
            requirement-present?
            (assoc :requirement requirement))]

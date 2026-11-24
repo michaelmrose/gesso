@@ -228,6 +228,7 @@
      :trigger (:trigger m)
      :include (:include m)
      :client-continuity (:client-continuity m)
+     :acquisition-policy (:acquisition-policy m)
      :jitter-ms (:jitter-ms m)
      :jitter-delay-ms (:jitter-delay-ms m)
      :attrs (:attrs m)
@@ -746,6 +747,14 @@
 ;; Fragment descriptor
 ;; -----------------------------------------------------------------------------
 
+(defn- normalize-acquisition-policy
+  [policy]
+  (let [policy (if (nil? policy) :automatic policy)]
+    (when-not (contains? #{:automatic :explicit-refresh} policy)
+      (throw (ex "gesso.live UI fragment has an unsupported acquisition policy."
+                 {:acquisition-policy policy})))
+    policy))
+
 (defn ->fragment
   "Create an adapter-managed live fragment descriptor.
 
@@ -777,6 +786,7 @@
      :swap
      :include
      :client-continuity
+     :acquisition-policy (:automatic or :explicit-refresh; default :automatic)
      :attrs / :root-attrs
      :target-attrs / :inner-attrs
 
@@ -833,6 +843,7 @@
       :subscription/token token
       :event (or (:event fragment') htmx/default-event)
       :swap (or (:swap fragment') default-fragment-swap)
+      :acquisition-policy (normalize-acquisition-policy (:acquisition-policy fragment'))
       :attrs {}
       :root-attrs {}
       :target-attrs {}}
@@ -881,6 +892,7 @@
                 swap
                 include
                 client-continuity
+                acquisition-policy
                 id
                 attrs
                 root-attrs]} (ensure-fragment fragment)]
@@ -889,8 +901,8 @@
      ;; connection identity. merge-sse-attrs preserves any additional hx-ext
      ;; values while guaranteeing the sse extension remains installed.
      (htmx/merge-sse-attrs
-      attrs
-      root-attrs
+      (dissoc attrs "data-gesso-live-acquisition-policy")
+      (dissoc root-attrs "data-gesso-live-acquisition-policy")
       {:sse-connect stream-url})
      (when include
        {:hx-include include})
@@ -898,7 +910,8 @@
        (continuity/client-continuity-attrs
         {:fragment-id id
          :client-continuity client-continuity}))
-     {:data-gesso-live-fragment id}
+     {:data-gesso-live-fragment id
+      :data-gesso-live-acquisition-policy (name (normalize-acquisition-policy acquisition-policy))}
      ;; Request ownership comes last so raw attrs cannot recreate an alternate
      ;; trigger, target, swap, or source around the adapter.
      (htmx/managed-fragment-refresh-attrs

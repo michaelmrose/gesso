@@ -629,6 +629,23 @@
     (is (= ui/default-fragment-swap (:hx-swap attrs)))
     (is (= "/app/requests/stream" (:sse-connect attrs)))))
 
+(deftest fragment-acquisition-policy-is-owned-by-the-descriptor-test
+  (is (= "automatic" (:data-gesso-live-acquisition-policy
+                      (ui/fragment-root-attrs fragment-spec))))
+  (let [fragment (ui/->fragment
+                  (assoc fragment-spec
+                         :acquisition-policy :explicit-refresh
+                         :attrs {"data-gesso-live-acquisition-policy" "automatic"}
+                         :root-attrs {:data-gesso-live-acquisition-policy "automatic"}))
+        attrs (ui/fragment-root-attrs fragment)]
+    (is (= :explicit-refresh (:acquisition-policy fragment)))
+    (is (= "explicit-refresh" (:data-gesso-live-acquisition-policy attrs)))
+    (is (not (contains? attrs "data-gesso-live-acquisition-policy"))))
+  (doseq [policy [:unknown false "explicit-refresh"]]
+    (is (= policy (:acquisition-policy
+                   (ex-data (thrown #(ui/->fragment
+                                      (assoc fragment-spec :acquisition-policy policy)))))))))
+
 (deftest fragment-root-composes-extra-hx-extension-test
   (let [attrs
         (ui/fragment-root-attrs

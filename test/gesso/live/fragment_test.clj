@@ -815,6 +815,7 @@
                                  :hx-include "#store-board-state"
                                  :hx-indicator "#spinner"}
                   :event :store-updated
+                  :acquisition-policy :explicit-refresh
                   :client-continuity continuity-config})]
     (is (= "store-panel-store-1" (:id runtime)))
     (is (= "/stores/store-1/fragment" (:src runtime)))
@@ -830,6 +831,7 @@
             :hx-indicator "#spinner"}
            (:target-attrs runtime)))
     (is (= :store-updated (:event runtime)))
+    (is (= :explicit-refresh (:acquisition-policy runtime)))
     (is (= continuity-config (:client-continuity runtime)))
     (is (not (contains? runtime :trigger)))
     (is (not (contains? runtime :jitter-ms)))

@@ -965,6 +965,7 @@
                 :root-attrs
                 :target-attrs
                 :event
+                :acquisition-policy
                 :client-continuity]))
 
 (defn- normalize-fragment-swap
@@ -990,6 +991,7 @@
      :root-attrs
      :target-attrs
      :event
+     :acquisition-policy
      :client-continuity
 
    :swap may be supplied by opts to override the compiled fragment descriptor's

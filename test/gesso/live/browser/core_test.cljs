@@ -589,6 +589,59 @@
                         [:fragments "missing"])))
       (is (empty? @(:calls htmx-fixture))))))
 
+(deftest explicit-acquisition-policy-observes-all-wakeups-without-a-get-test
+  (let [root (make-element {:fragment-id "explicit"
+                            :attrs {"hx-trigger" core/refresh-event-name
+                                    "hx-swap" "outerHTML"
+                                    "data-gesso-live-acquisition-policy" "explicit-refresh"}})
+        automatic (make-managed-root "automatic")
+        listener (make-invalidation-listener root "explicit")
+        document-fixture (make-document [root automatic])
+        htmx-fixture (make-htmx)
+        runtime (core/create {:document (:document document-fixture)
+                              :htmx (:htmx htmx-fixture)})
+        requirement (progression/requirement {:tx-id 42 :system-time "2026-08-25T20:00:42Z"})
+        wire (progression/requirement->wire requirement)
+        event (fn [name detail] (:event (make-event name detail)))
+        debt (fn [] (get-in (core/state runtime) [:fragments "explicit"]))]
+    (core/on-sse-before-message!
+     runtime (event core/sse-before-message-event-name
+                    {:elt listener :target listener
+                     :extra-detail {:data (pr-str {:progression wire
+                                                    :invalidation {:progression wire}})}}))
+    (is (= #{requirement} (:queued-requirements (debt))))
+    (is (empty? @(:calls htmx-fixture)))
+    (core/on-sse-open! runtime (event core/sse-open-event-name {:elt root :target root}))
+    (is (true? (:queued-advisory? (debt))))
+    (core/on-invalidated! runtime (event core/invalidated-event-name
+                                        {:extra-detail {:fragmentId "explicit"}}))
+    (core/notify-fragment! runtime "explicit" requirement)
+    (is (empty? @(:calls htmx-fixture)))
+    (core/on-online! runtime nil)
+    (core/on-pageshow! runtime #js {:persisted true})
+    (aset (:document document-fixture) "visibilityState" "visible")
+    (core/on-visibility-change! runtime nil)
+    (is (= [automatic] (mapv :root @(:calls htmx-fixture))))
+    (is (nil? (core/pending-refresh runtime root)))
+    (is (nil? (:inflight (debt))))
+    (is (false? (:queued-refresh? (debt))))
+    (is (true? (:queued-advisory? (debt))))
+    (is (= #{requirement} (:queued-requirements (debt))))))
+
+(deftest unknown-acquisition-policy-fails-before-admission-test
+  (let [root (make-element {:fragment-id "bad"
+                            :attrs {"hx-trigger" core/refresh-event-name
+                                    "data-gesso-live-acquisition-policy" "unknown"}})
+        document-fixture (make-document [root])
+        htmx-fixture (make-htmx)
+        runtime (core/create {:document (:document document-fixture)
+                              :htmx (:htmx htmx-fixture)})
+        before (core/state runtime)]
+    (is (= :invalid-acquisition-policy
+           (error-kind #(core/notify-fragment! runtime "bad"))))
+    (is (= before (core/state runtime)))
+    (is (empty? @(:calls htmx-fixture)))))
+
 (deftest explicit-dom-invalidation-without-requirement-remains-advisory-test
   (let [{:keys [runtime root]}
         (runtime-fixture "fragment-1")
