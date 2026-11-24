@@ -7,16 +7,21 @@
    changed grants, source substitution, and bypasses that remain possible.
 
    IMPORTANT: An application-supplied callback is not authenticated merely
-   because its answer has a valid shape. The original v1495 handler remains
-   installed in Biff and separately callable. Neither this fixture nor these
-   tests establish trusted-session verification, CSRF enforcement, installed
-   authorization mediation, certified executors, or physical refinement."
+   because its answer has a valid shape. The guarded wrapper is now the
+   original Biff-installed handler; the unguarded delegate is still exposed
+   to these diagnostic callbacks and could be deliberately called directly.
+   Neither this fixture nor these tests establish trusted-session verification,
+   CSRF enforcement, external listener mediation, certified executors, or
+   physical refinement."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.assurance.example.physical-single-node-principal :as subject]
             [gesso.assurance.example.physical-single-node-http :as http]
             [gesso.assurance.example.physical-single-node-proving :as physical]
             [gesso.assurance.example.single-node-proving :as pilot]
-            [gesso.model.tx :as tx]))
+            [gesso.model.tx :as tx])
+  (:import (com.sun.net.httpserver HttpHandler HttpServer)
+           (java.net HttpURLConnection InetSocketAddress URL)
+           (java.nio.charset StandardCharsets)))
 
 (def ^:private view "/__gesso_proving/slot")
 (def ^:private reserve "/__gesso_proving/slot/reserve")
@@ -69,7 +74,9 @@
   (is (= :one-per-known-mutating-request (:callback-invocations report)))
   (is (= :at-most-once (:handler-delegation report)))
   (is (= :trusted-not-authenticated (:host-acquisition-callback report)))
-  (is (= :not-established (:biff-installed-principal-handler report)))
+  (is (= :original-biff-start-selected-wrapper
+         (:biff-installed-principal-handler report)))
+  (is (= :not-established (:physical-network-listener report)))
   (is (= :not-established (:abstract-policy-equivalence report)))
   (is (= :not-authenticated (:physical-commit-provenance report)))
   (is (= :not-issued (:certificate report)))
@@ -82,19 +89,91 @@
                :csrf-defense-not-installed
                :principal-identities-not-persisted-in-physical-domain
                :abstract-guard-authorization-equivalence-not-established
-               :principal-wrapped-handler-not-adopted-by-biff
+               :physical-listener-and-principal-provenance-not-established
                :certified-plan-executor-not-issued
                :complete-writer-coverage-not-established
                :physical-refinement-not-established])))
 
-(deftest admitted-source-still-produces-an-uncertified-uninstalled-wrapper
+(defn- with-loopback-biff-selected-handler!
+  "Use an actual JDK socket to exercise ONLY Biff's installed Ring handler.
+   This is a test transport, not a Biff-owned or authenticated deployment."
+  [installed f]
+  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (try
+      (.createContext server "/"
+                      (reify HttpHandler
+                        (handle [_ exchange]
+                          (try
+                            (let [method (keyword (.toLowerCase
+                                                   (.getRequestMethod exchange)))
+                                  uri (.getPath (.getRequestURI exchange))
+                                  response (installed {:request-method method
+                                                       :uri uri})
+                                  payload (.getBytes ^String (str (:body response))
+                                                     StandardCharsets/UTF_8)]
+                              (.sendResponseHeaders exchange
+                                                    (int (:status response))
+                                                    (long (alength payload)))
+                              (with-open [output (.getResponseBody exchange)]
+                                (.write output payload)))
+                            (finally (.close exchange))))))
+      (.start server)
+      (f (str "http://127.0.0.1:" (.getPort (.getAddress server))))
+      (finally
+        (.stop server 0)))))
+
+(defn- socket-status! [base method path]
+  (let [^HttpURLConnection connection
+        (.openConnection (URL. (str base path)))]
+    (try
+      (.setRequestMethod connection (.toUpperCase (name method)))
+      (.setConnectTimeout connection 3000)
+      (.setReadTimeout connection 3000)
+      (.getResponseCode connection)
+      (finally (.disconnect connection)))))
+
+(deftest real-socket-consumes-original-biff-principal-handler
+  ;; A real HTTP bridge serves the handler selected by Biff startup.
+  ;; The principal callback is intentionally trusted application code;
+  ;; this does not certify its credential checks or the bridge as Biff Netty.
+  (let [who (atom :actor/releaser)
+        calls (atom 0)]
+    (subject/with-principal-proving-application!
+     (policy (fn [_]
+               (swap! calls inc)
+               (authenticated @who)))
+     (fn [{:keys [system principal-handler delegate-handler read!]}]
+       (let [installed (:biff.ring/handler system)]
+         (is (identical? principal-handler installed))
+         (is (not (identical? delegate-handler installed)))
+         (with-loopback-biff-selected-handler!
+           installed
+           (fn [base]
+             (is (= 200 (socket-status! base :get view)))
+             (is (= 403 (socket-status! base :post reserve)))
+             (is (= 0 (:revision (read!))))
+             (reset! who :actor/reserver)
+             (is (= 200 (socket-status! base :post reserve)))
+             (is (= 1 (:revision (read!))))
+             (is (= 403 (socket-status! base :post release)))
+             (is (= 1 (:revision (read!))))
+             (reset! who :actor/releaser)
+             (is (= 200 (socket-status! base :post release)))
+             (is (= 2 (:revision (read!))))))
+         (is (= 4 @calls)
+             "The selected Biff handler rechecks trusted grants per mutation"))))))
+
+(deftest admitted-source-installs-principal-wrapper-in-original-biff-start
   (subject/with-principal-proving-application!
    (policy (constantly (authenticated :actor/reserver)))
-   (fn [{:keys [handler principal-handler system read! principal-report]}]
+   (fn [{:keys [handler principal-handler delegate-handler system
+                 read! principal-report http-routes http-report]}]
      (assert-conditional-report! principal-report)
      (is (fn? principal-handler))
-     (is (not (identical? handler principal-handler)))
+     (is (identical? handler principal-handler))
+     (is (not (identical? handler delegate-handler)))
      (is (identical? handler (:biff.ring/handler system)))
+     (is (= http-routes (:routes http-report)))
      (is (= 200 (:status (principal-handler (request :get view)))))
      (is (= 0 (:revision (read!)))))))
 
@@ -296,18 +375,44 @@
          (is (zero? @calls))
          (unchanged! read! before))))))
 
-(deftest the-original-installed-handler-is-an-uncertified-bypass
-  ;; This is an intentional negative demonstration. The v1507 wrapper is not
-  ;; installed in Biff. Calling the original v1495 handler bypasses grants.
+(deftest the-original-biff-handler-enforces-grants-before-xtdb
+  ;; The original Biff-installed handler is NOW the protected wrapper.
+  ;; The unguarded delegate remains reachable by a deliberately trusted
+  ;; test callback, so this does not establish universal writer coverage.
   (subject/with-principal-proving-application!
    (policy (constantly (authenticated :actor/releaser)))
-   (fn [{:keys [principal-handler handler system principal-report read!]}]
-     (is (= 403 (:status (principal-handler (request :post reserve)))))
-     (is (identical? handler (:biff.ring/handler system)))
-     (is (= 200 (:status (handler (request :post reserve)))))
+   (fn [{:keys [principal-handler handler delegate-handler system
+                principal-report read!]}]
+     (let [installed (:biff.ring/handler system)
+           original @#'tx/transact!
+           submissions (atom 0)]
+       (is (identical? principal-handler installed))
+       (is (identical? handler installed))
+       (is (not (identical? delegate-handler installed)))
+       (with-redefs [tx/transact! (fn [& args]
+                                   (swap! submissions inc)
+                                   (apply original args))]
+         (is (= 403 (:status (installed (request :post reserve)))))
+         (is (zero? @submissions)
+             "Denied Biff-installed request must not reach physical writer")
+         (is (= 0 (:revision (read!)))))
+       (is (= :original-biff-start-selected-wrapper
+              (:biff-installed-principal-handler principal-report)))
+       (is (= :not-established
+              (:physical-network-listener principal-report)))))))
+
+(deftest deliberate-delegate-bypass-remains-an-open-trust-boundary
+  ;; Test code holds the unguarded delegate. The selected Biff path cannot
+  ;; accidentally bypass the grant check, but this is not a theorem about
+  ;; other handlers, model callers, or lower-level XTDB writers.
+  (subject/with-principal-proving-application!
+   (policy (constantly (authenticated :actor/releaser)))
+   (fn [{:keys [principal-handler delegate-handler system read!]}]
+     (is (= 403 (:status ((:biff.ring/handler system)
+                          (request :post reserve)))))
+     (is (= 200 (:status (delegate-handler (request :post reserve)))))
      (is (= 1 (:revision (read!))))
-     (is (= :not-established
-            (:biff-installed-principal-handler principal-report))))))
+     (is (= 403 (:status (principal-handler (request :post reserve))))))))
 
 (deftest authorization-does-not-bypass-the-original-business-guard
   (subject/with-principal-proving-application!

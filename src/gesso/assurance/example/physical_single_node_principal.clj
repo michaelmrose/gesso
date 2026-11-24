@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-principal
-  "v1507: Source-checked request-principal admission for the UNISSUED v1495
+  "v2328: Original-Biff-installed source-checked principal admission for v1495
    single-node Biff/Ring -> XTDB proving fixture.
 
    An application-supplied declaration names the original reservation catalog,
@@ -16,8 +16,9 @@
    this boundary. Its purity, session validation and deployment provenance
    remain open. Principal IDs are not persisted in the reservation document;
    catalog guards do not mention them, so equivalence with abstract policy is
-   NOT established. The wrapped handler is NOT the handler installed by Biff,
-   and CSRF protection is NOT provided. Never expose this fixture publicly.
+   NOT established. The wrapped handler IS the exact handler installed at original Biff
+   startup in this fixture, rather than a late wrapper; however it is NOT
+   a verified network listener, and CSRF protection is NOT provided. Never expose this fixture publicly.
    No proof certificate, admission, authorization theorem, or physical
    refinement is issued."
   (:require [clojure.set :as set]
@@ -41,7 +42,7 @@
     :csrf-defense-not-installed
     :principal-identities-not-persisted-in-physical-domain
     :abstract-guard-authorization-equivalence-not-established
-    :principal-wrapped-handler-not-adopted-by-biff
+    :physical-listener-and-principal-provenance-not-established
     :certified-plan-executor-not-issued
     :complete-writer-coverage-not-established
     :physical-refinement-not-established})
@@ -91,17 +92,30 @@
   ;; operation routes. A policy-compatible source does not certify deployment.
   (checked-static-source! source)
   (let [catalog (:catalog app)
-        routes (get-in app [:http-report :routes])
+        routes (:http-routes app)
+        poststart-routes (get-in app [:http-report :routes])
         operations (:declared-operation-ids catalog)
         routed-operations (into #{}
                                 (filter #(contains? operations %))
                                 (vals routes))]
-    (when-not (and (= catalog (original-catalog))
+    (when-not (and (map? routes)
+                   ;; Once Biff has started, its report must attest the same
+                   ;; original route inventory presented to the prestart
+                   ;; extension. Absence of that report is only permitted
+                   ;; before initial Biff startup.
+                   (or (nil? (:http-report app))
+                       (= routes poststart-routes))
+                   (= catalog (original-catalog))
                    (= (:catalog-id source) (:id catalog))
                    (= physical/operation-ids operations routed-operations)
                    (= (set (vals routes)) (conj operations :read-only))
                    (= (count routes) (inc (count operations)))
-                   (= :not-issued (get-in app [:http-report :certificate])))
+                   ;; The original producer's certificate report exists
+                   ;; only once Biff has started; prestart source still
+                   ;; checks the already-unissued original catalog.
+                   (or (nil? (:http-report app))
+                       (= :not-issued
+                          (get-in app [:http-report :certificate]))))
       (reject! :policy-not-bound-to-catalog-and-http-operations))
     (into {} (filter (fn [[_ op]] (contains? operations op)) routes))))
 
@@ -150,8 +164,8 @@
 
    The caller MUST supply a genuine host-owned authenticator, not a request
    parameter, forged Ring principal, or client-supplied header masquerading as
-   proof of identity. This diagnostic does not certify the callback, install
-   the resulting wrapper in Biff, prove CSRF protection, or bind application
+   proof of identity. This diagnostic installs the wrapper during original Biff startup, but
+   does not authenticate the callback, prove CSRF protection, or bind application
    authorization to the abstract catalog's guards."
   ([source f]
    (with-principal-proving-application!
@@ -162,43 +176,56 @@
    (checked-static-source! source)
    (original-http-start
     slot-id
-    (fn [app]
+    ;; This factory executes BEFORE the original Biff init/start, not after.
+    ;; The supplied route inventory is derived by the original HTTP owner,
+    ;; so this principal policy does not duplicate the protected routes.
+    (fn [app original-handler]
       (let [operation-routes (admitted-policy! source app)
             acquire! (:acquire-principal! source)
-            grants (:grants source)
-            original-handler (:handler app)
-            handler (fn [request]
-                      (if (and (map? request)
-                               (= :post (:request-method request))
-                               (contains? operation-routes (:uri request))
-                               (not (contains? request :path-params))
-                               (not (contains? request :route-params)))
-                        (let [principal (acquired-principal! acquire! request)
-                              operation (get operation-routes (:uri request))]
-                          (cond
-                            (nil? principal) (denied-response 401)
-                            (not (contains? (get grants principal #{}) operation))
-                            (denied-response 403)
-                            :else (original-handler request)))
-                        (original-handler request)))
-            report {:type report-type
-                    :version report-version
-                    :catalog-id (get-in app [:catalog :id])
-                    :policy-id (:policy-id source)
-                    :declared-operation-count (count operation-routes)
-                    :declared-principal-count (count grants)
-                    :source-grant-coverage :checked-against-catalog-and-routes
-                    :request-time-grant-enforcement :before-delegated-handler
-                    :host-acquisition-callback :trusted-not-authenticated
-                    :callback-invocations :one-per-known-mutating-request
-                    :handler-delegation :at-most-once
-                    :biff-installed-principal-handler :not-established
-                    :abstract-policy-equivalence :not-established
-                    :physical-commit-provenance :not-authenticated
-                    :certificate :not-issued
-                    :admission :not-admitted
-                    :authority :none
-                    :open-obligations open-obligations}]
-        (f (assoc app
-                  :principal-handler handler
-                  :principal-report report)))))))
+            grants (:grants source)]
+        (fn [request]
+          (if (and (map? request)
+                   (= :post (:request-method request))
+                   (contains? operation-routes (:uri request))
+                   (not (contains? request :path-params))
+                   (not (contains? request :route-params)))
+            (let [principal (acquired-principal! acquire! request)
+                  operation (get operation-routes (:uri request))]
+              (cond
+                (nil? principal) (denied-response 401)
+                (not (contains? (get grants principal #{}) operation))
+                (denied-response 403)
+                :else (original-handler request)))
+            (original-handler request)))))
+    (fn [app]
+      (let [operation-routes (admitted-policy! source app)
+            handler (:handler app)
+            original-handler (:delegate-handler app)
+            system (:system app)]
+        (when-not (and (fn? handler)
+                       (fn? original-handler)
+                       (not (identical? handler original-handler))
+                       (identical? handler (:biff.ring/handler system)))
+          (reject! :principal-handler-not-installed-at-original-biff-start))
+        (let [report {:type report-type
+                      :version report-version
+                      :catalog-id (get-in app [:catalog :id])
+                      :policy-id (:policy-id source)
+                      :declared-operation-count (count operation-routes)
+                      :declared-principal-count (count (:grants source))
+                      :source-grant-coverage :checked-against-catalog-and-routes
+                      :request-time-grant-enforcement :before-delegated-handler
+                      :host-acquisition-callback :trusted-not-authenticated
+                      :callback-invocations :one-per-known-mutating-request
+                      :handler-delegation :at-most-once
+                      :biff-installed-principal-handler :original-biff-start-selected-wrapper
+                      :physical-network-listener :not-established
+                      :abstract-policy-equivalence :not-established
+                      :physical-commit-provenance :not-authenticated
+                      :certificate :not-issued
+                      :admission :not-admitted
+                      :authority :none
+                      :open-obligations open-obligations}]
+          (f (assoc app
+                    :principal-handler handler
+                    :principal-report report))))))))

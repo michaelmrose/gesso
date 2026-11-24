@@ -168,8 +168,9 @@
    The three-argument, TEST-ONLY form accepts a handler-extension! factory
    BEFORE Biff init/start, so a composed HTTP/Live handler can be the exact
    Ring function Biff initially adopts. The extension receives the checked
-   physical app with its original :handler and that original handler as its
-   second argument. It must return one callable Ring function. This cannot
+   physical app with its original :handler, :http-routes derived from the
+   same private Ring route inventory used by :http-report, and the original
+   handler as its second argument. It must return one callable Ring function. This cannot
    certify the new routes, principal, original-source completeness, browser
    asset, or actual network listener. The returned :handler is the installed
    handler; :delegate-handler retains the original one.
@@ -189,7 +190,13 @@
     (fn [app]
       (checked-application! app)
       (let [original-handler (ring-handler! app)
-            handler (handler-extension! (assoc app :handler original-handler)
+            ;; Expose the ORIGINAL handler's routes before Biff startup so
+            ;; prestart extensions may check the same source-owned route
+            ;; inventory used in the post-start fixture report. Never ask an
+            ;; extension to maintain an independent operation-route catalog.
+            routes (into {view-route :read-only} operation-routes)
+            handler (handler-extension! (assoc app :handler original-handler
+                                                :http-routes routes)
                                         original-handler)]
         (when-not (fn? handler)
           (reject! :invalid-prestart-handler-extension))
@@ -202,8 +209,7 @@
           (let [report
                 {:type :gesso.assurance.example.physical-single-node-http/local-biff-fixture
                  :version 1
-                 :routes (into {view-route :read-only}
-                               operation-routes)
+                 :routes routes
                  :physical-table physical/table
                  :module-start :one-observed-biff-start
                  :handler-in-returned-system :identical
@@ -228,5 +234,6 @@
                  :authority :none}]
             (f (assoc app :handler handler
                           :delegate-handler original-handler
+                          :http-routes routes
                           :system system :module module
                           :http-report report)))))))))
