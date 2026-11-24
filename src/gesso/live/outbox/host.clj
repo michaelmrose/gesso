@@ -27,6 +27,7 @@
             [gesso.live.outbox.http-fragment :as fragment-http]
             [gesso.live.outbox.http-operation :as operation-http]
             [gesso.live.outbox.http-recovery :as recovery]
+            [gesso.live.outbox.http-sse :as assembled-sse]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [xtdb.node :as xtn]))
 
@@ -51,7 +52,7 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments})
+    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
 
@@ -65,8 +66,10 @@
   (when (and (contains? config :authorized-sse)
              (not (map? (:authorized-sse config))))
     (reject! :invalid-authorized-sse-options {}))
+  (when (and (contains? config :authorized-sse) (contains? config :assembled-sse))
+    (reject! :conflicting-sse-profiles {}))
   (when (contains? config :sse-recovery)
-    (when-not (contains? config :authorized-sse)
+    (when-not (or (contains? config :authorized-sse) (contains? config :assembled-sse))
       (reject! :recovery-requires-authorized-sse {}))
     (let [options (:sse-recovery config)]
       (when-not (and (map? options)
@@ -304,6 +307,11 @@
    operation transport with an explicit trusted :authorize-request? callback.
    Optional :assembled-fragments mounts the compiled model fragment GETs
    using a trusted :resolve-id callback and mandatory model authorization.
+   Optional :assembled-sse mounts the compiled acquisition stream inventory,
+   using the model scope authorization. Publication rules remain explicit
+   because durable change subjects need not equal model scope IDs. All
+   streams share one connection budget and recovery controller. Do not
+   combine :assembled-sse with the legacy :authorized-sse profile.
    Other routes retain their existing trusted delegate.
    No SSE route means no scheduler. On shutdown, drain Ring requests, stop and
    drain recovery, retire route-owned SSE sessions, then run native stop
@@ -318,7 +326,9 @@
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
   (require-unshadowed-sse-path! assembly config)
-  (let [handler (if (contains? config :assembled-fragments)
+  (let [sse-plan (when (contains? config :assembled-sse)
+                   (assembled-sse/prepare! assembly (:assembled-sse config)))
+        handler (if (contains? config :assembled-fragments)
                   (fragment-http/wrap-handler assembly handler (:assembled-fragments config))
                   handler)
         handler (if (contains? config :assembled-operations)
@@ -354,13 +364,14 @@
       ;; Wrap the actual native stop chain, not just host/stop!: a caller of
       ;; biff/stop on this returned system must encounter the same fence.
       (try
-        (when (contains? config :authorized-sse)
+        (when (or sse-plan (contains? config :authorized-sse))
           ;; The route's fallback must be the original delegate, not the
           ;; admission wrapper (which would recurse). Its invocation remains
           ;; inside the canonical HTML guard and owned request context.
-          (reset! route* (http/wrap-authorized-sse
-                          (assoc started :biff.ring/handler handler)
-                          (:authorized-sse config)))
+          (let [owned (assoc started :biff.ring/handler handler)]
+            (reset! route* (if sse-plan
+                            ((:wrap! sse-plan) owned)
+                            (http/wrap-authorized-sse owned (:authorized-sse config)))))
           (reset! recovery* (recovery/start-scheduled!
                              @route* (get config :sse-recovery {}))))
         ((:open! admission) started)

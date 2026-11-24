@@ -17,6 +17,7 @@
   (:require [clojure.string :as str]
             [gesso.live.core :as live]
             [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox.http-route :as route]
             [gesso.live.transport.sse :as sse]
             [manifold.stream :as stream]))
 
@@ -364,8 +365,16 @@
    silently ignoring a misspelled operational setting. Duplicate HTTP header
    names that differ only by case also fail preflight; Ring maps distinguish
    them, but HTTP does not."
-  [started {:keys [path authorize-subscription sse-options
-                   on-session-admitted!] :as options}]
+  ([started options] (wrap-authorized-sse started options nil))
+  ([started {:keys [path authorize-subscription sse-options
+                    on-session-admitted!] :as options} selected-routes]
+   ;; Internal assembled transport supplies an independently checked route
+   ;; inventory instead of a literal path. One ledger serves every route.
+   (when (and (some? selected-routes)
+              (not (and (not (contains? options :path))
+                        (vector? selected-routes) (seq selected-routes)
+                        (every? #(route/route-segments (:path %)) selected-routes))))
+     (reject! :invalid-selected-routes {}))
   (when-not (and (map? options)
                  (= (set (keys options))
                     (set (filter #(contains? options %)
@@ -374,14 +383,15 @@
                                   :max-pending-authorizations
                                   :on-session-admitted!]))))
     (reject! :unknown-options {}))
-  (when-not (and (string? path)
+  (when-not (or selected-routes
+                (and (string? path)
                  (re-matches #"/[A-Za-z0-9._~/-]+" path)
                  (not= "/" path)
                  ;; Proxies and HTTP servers may normalize repeated separators
                  ;; or dot segments before Ring receives :uri. A managed SSE
                  ;; route must have one unambiguous literal path at both ends.
                  (not (str/includes? path "//"))
-                 (not-any? #{"." ".."} (rest (str/split path #"/" -1))))
+                 (not-any? #{"." ".."} (rest (str/split path #"/" -1)))))
     (reject! :invalid-path {:path path}))
   (when-not (fn? authorize-subscription)
     (reject! :missing-authorization-callback {}))
@@ -514,7 +524,9 @@
                      :closed)))
         handler
         (fn [request]
-          (if (not= path (:uri request))
+          (if-not (if selected-routes
+                    (route/matching-route selected-routes (:uri request))
+                    (= path (:uri request)))
             (base-handler request)
             (cond
               (not= :get (:request-method request))
@@ -808,7 +820,7 @@
        ;; A zero timeout is a nonblocking snapshot of terminal state.
        {:outcome (if (or (drained-state? @state)
                          (true? (deref drained-signal timeout-ms false)))
-                   :drained :timed-out)})}))
+                   :drained :timed-out)})})))
 
 (defn- validate-managed-http-shutdown-plan!
   [{:keys [route stop-listener! stop-host! drain-timeout-ms] :as options}]
