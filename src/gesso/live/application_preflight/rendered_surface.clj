@@ -39,7 +39,9 @@
                                   (sort-by (comp pr-str key))
                                   (mapv (fn [[k v]]
                                           [(str/lower-case (rum/normalize-attr-key k)) v]))))
-                     record {:path path :attrs attrs}
+                     shorthand-id (when element? (second (rum/parse-selector tag)))
+                     record {:path path :attrs (cond-> (vec attrs)
+                                                shorthand-id (conj ["id" shorthand-id]))}
                      children (if element?
                                 (drop (if (map? (second node)) 2 1)
                                       (map-indexed vector node))
@@ -54,11 +56,75 @@
 (defn- attribute-values [element attribute]
   (map second (filter #(= attribute (first %)) (:attrs element))))
 
+(defn- identity-values [element attribute]
+  ;; Match Rum's attribute emission for identity values. False is omitted,
+  ;; true is an empty attribute, and keywords render without their colon.
+  (keep #(cond (false? %) nil (true? %) "" :else (rum/to-str %))
+        (attribute-values element attribute)))
+
 (defn- managed-owner-id [element]
   (when (some #(= "gesso:live-refresh" (str/trim (str %)))
               (attribute-values element "hx-trigger"))
-    (some #(when-not (str/blank? (str %)) (str %))
-          (attribute-values element "data-gesso-live-fragment"))))
+    (some #(when-not (str/blank? %) %)
+          (identity-values element "data-gesso-live-fragment"))))
+
+(defn- nonblank-string? [value]
+  (and (string? value) (not (str/blank? value))))
+
+(defn- htmx-values [element attribute]
+  (vec (concat (attribute-values element attribute)
+               (attribute-values element (str "data-" attribute)))))
+
+(defn- identity-errors
+  "Check the canonical owner's identity and stable sibling structure relative
+   to one supplied surface. Count legacy roots too: the browser's logical
+   root lookup is not restricted to managed roots. Count shorthand DOM ids
+   and explicit ids without pretending to resolve ambiguous HTML attributes."
+  [elements surface]
+  (let [matching (fn [attribute value]
+                   (filterv #(some #{value} (identity-values % attribute)) elements))
+        direct-child? (fn [owner child]
+                        (= (:path owner) (:path (peek (:ancestors child)))))]
+    (vec
+     (mapcat
+      (fn [owner]
+        (when-let [id (managed-owner-id owner)]
+          (let [roots (matching "data-gesso-live-fragment" id)
+                targets (matching "id" id)
+                listeners (matching "data-gesso-live-invalidation" id)
+                target (first targets)
+                listener (first listeners)
+                diagnostic (fn [reason paths]
+                             (issue :rendered-managed-acquisition-identity
+                                    "Rendered managed acquisition has an invalid owner or target identity."
+                                    {:surface surface :fragment-id id
+                                     :render-path (:path owner)
+                                     :owner-render-path (:path owner)
+                                     :reason reason :related-render-paths (mapv :path paths)}))]
+            (cond-> []
+              (not (and (= [id] (vec (identity-values owner "data-gesso-live-fragment")))
+                        (= 1 (count roots))))
+              (conj (diagnostic :ambiguous-owner roots))
+
+              (not= [(str "#" id)] (htmx-values owner "hx-target"))
+              (conj (diagnostic :noncanonical-target-selector [owner]))
+
+              (not (and (= 1 (count targets))
+                        (= [id] (vec (identity-values target "id")))
+                        (direct-child? owner target)))
+              (conj (diagnostic :invalid-primary-target targets))
+
+              (not (and (= 1 (count listeners))
+                        (= [id] (vec (identity-values listener "data-gesso-live-invalidation")))
+                        (direct-child? owner listener)
+                        (not= (:path target) (:path listener))
+                        (= ["none"] (htmx-values listener "hx-swap"))
+                        (= 1 (count (htmx-values listener "sse-swap")))
+                        (nonblank-string? (first (htmx-values listener "sse-swap")))
+                        (not-any? #(seq (htmx-values listener %))
+                                  ["hx-get" "hx-post" "hx-put" "hx-patch" "hx-delete"])))
+              (conj (diagnostic :invalid-invalidation-listener listeners))))))
+      elements))))
 
 (defn- acquisition-errors
   "Apply the portable acquisition vocabulary to actual managed markup,
@@ -66,7 +132,7 @@
    Legacy/unmanaged nodes outside an owner are not managed acquisitions."
   [rendered surface]
   (let [elements (rendered-elements rendered)]
-    (vec
+    (into (identity-errors elements surface)
      (mapcat
       (fn [{:keys [ancestors path attrs] :as element}]
         (let [id (managed-owner-id element)
@@ -74,7 +140,7 @@
               owner-id (managed-owner-id owner)
               direct-listener? (and owner (not id)
                                     (= (:path owner) (:path (peek ancestors)))
-                                    (= [owner-id] (vec (attribute-values element "data-gesso-live-invalidation"))))
+                                    (= [owner-id] (vec (identity-values element "data-gesso-live-invalidation"))))
               diagnostic (fn [reason at attribute value]
                            (issue :rendered-managed-acquisition-config
                                   "Rendered managed acquisition violates the restricted acquisition contract."

@@ -341,3 +341,26 @@
       (fn [{:keys [report]}]
         (is (false? (:valid? report)))
         (is (some #(= :rendered-managed-acquisition-config (:kind %)) (:errors report)))))))
+
+(deftest duplicate-managed-target-prevents-static-and-dynamic-response-admission
+  (let [panel (ui/fragment-panel {:id "panel" :src "/fragment" :stream-url "/stream"})
+        rendered [:main panel [:div#panel]]
+        calls (atom 0)
+        identity-error? #(some (fn [error]
+                                 (and (= :rendered-managed-acquisition-identity (:kind error))
+                                      (= :invalid-primary-target (:reason error))))
+                               (:errors %))]
+    (with-closed-application
+      (fn [{:keys [assembly]}]
+        (let [report (application/check-rendered-surface assembly :board rendered)
+              data (error-data #(application/checked-rendered-response!
+                                 assembly :board (fn [_] (swap! calls inc)) rendered))]
+          (is (not (application/rendered-surface-valid? report)))
+          (is (identity-error? report))
+          (is (= :rendered-surface-preflight-failed (:error/kind data)))
+          (is (zero? @calls)))))
+    (with-surfaced-application
+      {:board rendered}
+      (fn [{:keys [report]}]
+        (is (false? (:valid? report)))
+        (is (identity-error? report))))))

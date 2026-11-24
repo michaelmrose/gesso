@@ -411,3 +411,43 @@
     (is (empty? (:errors (analyze {:page [:div {:data-gesso-live-fragment "legacy"
                                                :hx-trigger "sse:update"
                                                :hx-swap "none"}]}))))))
+
+(deftest managed-owner-identity-corresponds-to-one-surface-local-target-and-listener
+  (let [panel (managed-panel)
+        target (get panel 3)
+        listener (get panel 2)
+        reasons (fn [rendered]
+                  (->> (:errors (analyze {:page rendered}))
+                       (filter #(= :rendered-managed-acquisition-identity (:kind %)))
+                       (mapv :reason)))]
+    (is (empty? (reasons panel)))
+    (is (empty? (:errors (analyze {:a panel :b panel}))))
+    (is (empty? (reasons (assoc panel 3 [:<> (list [:div#panel])]))))
+    (doseq [[reason rendered]
+            [[:ambiguous-owner [:main panel panel]]
+             [:ambiguous-owner [:main panel [:div {:data-gesso-live-fragment "panel"}]]]
+             [:ambiguous-owner [:main panel [:div {:data-gesso-live-fragment :panel}]]]
+             [:ambiguous-owner (assoc-in panel [1 "data-gesso-live-fragment"] "panel")]
+             [:noncanonical-target-selector (assoc-in panel [1 :hx-target] "#foreign")]
+             [:noncanonical-target-selector (assoc-in panel [1 "data-hx-target"] "#panel")]
+             [:noncanonical-target-selector (update-in panel [1] dissoc :hx-target)]
+             [:invalid-primary-target (assoc panel 3 [:div])]
+             [:invalid-primary-target (assoc panel 3 [:section target])]
+             [:invalid-primary-target [:main panel [:div#panel]]]
+             [:invalid-primary-target [:main panel [:div {"ID" :panel}]]]
+             [:invalid-primary-target (conj panel target)]
+             [:invalid-primary-target (assoc panel 3 [:div#panel {:id "panel"}])]
+             [:invalid-invalidation-listener (assoc panel 2 [:div])]
+             [:invalid-invalidation-listener (assoc panel 2 [:section listener])]
+             [:invalid-invalidation-listener (conj panel listener)]
+             [:invalid-invalidation-listener (assoc-in panel [2 1 :hx-swap] "innerHTML")]
+             [:invalid-invalidation-listener (update-in panel [2 1] dissoc :sse-swap)]
+             [:invalid-invalidation-listener (assoc-in panel [2 1 :data-hx-get] "/foreign")]]]
+      (testing (pr-str rendered)
+        (is (some #{reason} (reasons rendered)))))
+    (let [error (first (filter #(= :invalid-primary-target (:reason %))
+                               (:errors (analyze {:page [:main panel [:div#panel]]}))))]
+      (is (= :page (:surface error)))
+      (is (= "panel" (:fragment-id error)))
+      (is (= [1] (:owner-render-path error)))
+      (is (= [[1 3] [2]] (:related-render-paths error))))))
