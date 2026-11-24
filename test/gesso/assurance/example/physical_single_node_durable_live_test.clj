@@ -1,6 +1,7 @@
 (ns gesso.assurance.example.physical-single-node-durable-live-test
-  "v2345: Explicit atomic publication mode through the installed session handler."
+  "v2347: Explicit atomic publication mode through the installed session handler."
   (:require [clojure.test :refer [deftest is]]
+            [clojure.java.io :as io]
             [gesso.assurance.example.physical-single-node-live :as fixture]
             [gesso.assurance.example.physical-single-node-proving :as physical]
             [gesso.assurance.example.physical-single-node-session :as session]
@@ -8,7 +9,8 @@
             [gesso.live.outbox.cycle :as cycle]
             [manifold.stream :as stream]
             [xtdb.api :as xt])
-  (:import (java.net HttpURLConnection URL)))
+  (:import (java.net HttpURLConnection URL)
+           (java.nio.file Files)))
 
 (def ^:private policy
   {:catalog-id :slot/reservation-lifecycle
@@ -176,3 +178,67 @@
         (is (identical? expected (deref task 10000 ::timeout)))
         (is (= :stopped (:status (@status*))))
         (is (live/closed? (second @provider*)))))))
+
+(deftest closed-application-reopens-persisted-reservation-and-recovers-pending-intent
+  ;; Three complete application scopes, with fresh session authorities, Biff,
+  ;; Live and XTDB nodes. This is orderly close/reopen, NOT abrupt JVM death.
+  (let [root (Files/createTempDirectory "gesso-reservation-restart-"
+                                        (make-array java.nio.file.attribute.FileAttribute 0))
+        slot-id "persistent-reservation"
+        old-cookie (atom nil)
+        original-id (atom nil)
+        run! (fn [mode f]
+               (session/with-session-policy!
+                policy
+                (fn [{:keys [source issue!]}]
+                  (fixture/with-durable-granted-live-proving-application!
+                   slot-id source :biff-jetty-http1 {:mode mode :root root}
+                   #(f % (issue! :actor/writer))))))]
+    (try
+      (run! :create
+            (fn [{:keys [node read! loopback-base-url storage-mode]} writer]
+              (reset! old-cookie (headers writer))
+              (is (= :create storage-mode))
+              (is (= {:status 200 :publication "intent-recorded"}
+                     (post! loopback-base-url reserve (headers writer))))
+              (is (= 1 (:revision (read!))))
+              (let [[intent :as pending] (rows node)]
+                (is (= 1 (count pending)))
+                (is (= :pending (:gesso.live.outbox/status intent)))
+                (reset! original-id (:xt/id intent)))))
+      (is (= :local-storage-already-exists
+             (try (run! :create (fn [& _] (is false "must not reseed"))) nil
+                  (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))
+      (run! :reopen
+            (fn [{:keys [node handler read! loopback-base-url process-outbox! storage-mode]} writer]
+              (is (= :reopen storage-mode))
+              (is (= 1 (:revision (read!))))
+              (is (= "reserved" (:status (read!))))
+              (is (= 401 (:status (post! loopback-base-url release @old-cookie))))
+              (is (= [@original-id] (mapv :xt/id (rows node))))
+              (is (= :pending (:gesso.live.outbox/status (first (rows node)))))
+              (let [response (handler {:request-method :get :uri fixture/events-uri
+                                       :headers (headers writer)})
+                    body (:body response)
+                    opts {:worker-id "reopened-reservation" :max-items 8}]
+                (try
+                  (is (= 200 (:status response)))
+                  (is (= 1 (:dispatch-accepted (process-outbox! opts))))
+                  (is (string? @(stream/try-take! body ::closed 3000 ::timeout)))
+                  (is (= :dispatch-accepted (:gesso.live.outbox/status (first (rows node)))))
+                  (is (= {:status 200 :publication "intent-recorded"}
+                         (post! loopback-base-url release (headers writer))))
+                  (is (= 2 (:revision (read!))))
+                  (is (= 1 (:dispatch-accepted (process-outbox! opts))))
+                  (is (string? @(stream/try-take! body ::closed 3000 ::timeout)))
+                  (finally (stream/close! body))))))
+      (run! :reopen
+            (fn [{:keys [node read! process-outbox!]} _]
+              (is (= 2 (:revision (read!))))
+              (is (= "available" (:status (read!))))
+              (is (= 2 (count (rows node))))
+              (is (every? #(= :dispatch-accepted (:gesso.live.outbox/status %)) (rows node)))
+              (is (= 0 (:processed (process-outbox! {:worker-id "verify-reopened"}))))))
+      (finally
+        (doseq [file (reverse (file-seq (.toFile root)))]
+          (io/delete-file file true))))))

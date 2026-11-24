@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-live
-  "v2345: Biff-instantiated server-rendered Live panel on the real v1494/v1495
+  "v2347: Biff-instantiated server-rendered Live panel on the real v1494/v1495
    single-node XTDB reservation fixture.
 
    A stable adapter-managed fragment root owns the SSE subscription and GET
@@ -341,7 +341,7 @@
           :else
           (original request))))))
 
-(defn- with-live-application* [slot-id principal-source listener-selection publication-selection f]
+(defn- with-live-application* [slot-id principal-source listener-selection publication-selection storage-selection f]
   (when-not (fn? f)
     (reject! :invalid-application-callback))
   ;; A source with invalid operation/grant coverage must fail BEFORE
@@ -385,7 +385,7 @@
                (principal/guarded-test-read-handler!
                 principal-source app read-uris live-handler)
                live-handler)))
-         listener-selection publication-selection
+         listener-selection publication-selection storage-selection
          (fn [app]
            (let [installed (:biff.ring/handler (:system app))
                  guarded @guarded*]
@@ -463,7 +463,7 @@
    subscriber disclosure, durable outbox or a release credential."
   ([f] (with-live-proving-application! (str "v2323-" (random-uuid)) f))
   ([slot-id f]
-   (with-live-application* slot-id nil :no-listener :direct f)))
+   (with-live-application* slot-id nil :no-listener :direct :ephemeral f)))
 
 (defn with-granted-live-proving-application!
   "Run one Biff-installed handler whose Live POSTs delegate through the
@@ -484,7 +484,7 @@
   ([slot-id principal-source f]
    ;; nil/invalid source must not silently select the unguarded fixture.
    (principal/checked-test-policy! principal-source)
-   (with-live-application* slot-id principal-source :no-listener :direct f)))
+   (with-live-application* slot-id principal-source :no-listener :direct :ephemeral f)))
 
 (defn with-biff-loopback-granted-live-proving-application!
   "Run the SAME guarded Live/principal/XTDB proving fixture with an opt-in
@@ -496,7 +496,7 @@
     (str "v2333-" (random-uuid)) source f))
   ([slot-id source f]
    (principal/checked-test-policy! source)
-   (with-live-application* slot-id source :biff-loopback :direct f)))
+   (with-live-application* slot-id source :biff-loopback :direct :ephemeral f)))
 
 (defn with-biff-jetty-granted-live-proving-application!
   "Use a REAL Ring Jetty HTTP/1 server attached to the original Biff-started
@@ -510,7 +510,7 @@
     (str "v2334-" (random-uuid)) source f))
   ([slot-id source f]
    (principal/checked-test-policy! source)
-   (with-live-application* slot-id source :biff-jetty-http1 :direct f)))
+   (with-live-application* slot-id source :biff-jetty-http1 :direct :ephemeral f)))
 
 (defn with-biff-aleph-granted-live-proving-application!
   "Select actual Aleph HTTP/1 on loopback with the original Biff-installed
@@ -523,16 +523,19 @@
     (str "v2335-" (random-uuid)) source f))
   ([slot-id source f]
    (principal/checked-test-policy! source)
-   (with-live-application* slot-id source :biff-aleph-http1 :direct f)))
+   (with-live-application* slot-id source :biff-aleph-http1 :direct :ephemeral f)))
 
 (defn with-durable-granted-live-proving-application!
   "Select atomic intent recording on the same principal-guarded Biff handler.
    The trusted host explicitly invokes :process-outbox! with bounded cycle
    options. This is not a background worker, restart-persistence, browser
    delivery, command deduplication or production release guarantee."
-  [slot-id source listener-selection f]
-  (principal/checked-test-policy! source)
-  (with-live-application* slot-id source listener-selection :durable-outbox f))
+  ([slot-id source listener-selection f]
+   (with-durable-granted-live-proving-application!
+    slot-id source listener-selection :ephemeral f))
+  ([slot-id source listener-selection storage-selection f]
+   (principal/checked-test-policy! source)
+   (with-live-application* slot-id source listener-selection :durable-outbox storage-selection f)))
 
 (defn- retire-scoped-worker! [handle]
   ;; Unlike a long-lived host with a retryable stop handle, the enclosing

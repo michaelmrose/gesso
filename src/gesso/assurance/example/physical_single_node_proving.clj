@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.physical-single-node-proving
-  "v2344: A runnable, generic SINGLE-NODE reservation application built with
+  "v2347: A runnable, generic SINGLE-NODE reservation application built with
    Gesso's model transaction boundary and a real embedded XTDB2 node.
 
    The existing single-node-proving catalog owns abstract business intent:
@@ -20,7 +20,8 @@
             [gesso.model.command :as command]
             [gesso.model.tx :as tx]
             [xtdb.api :as xt]
-            [xtdb.node :as xtn]))
+            [xtdb.node :as xtn])
+  (:import [java.nio.file Path]))
 
 (def table :gesso_v1494_reservation_slots)
 (def operation-ids #{:slot/reserve :slot/release})
@@ -283,6 +284,27 @@
    :admission :not-admitted
    :authority :none})
 
+(defn- storage-config! [selection]
+  ;; A trusted fixture host chooses an existing local directory. The request
+  ;; cannot select the database, and create/reopen cannot silently substitute
+  ;; an in-memory node or truncate an existing local database.
+  (if (= :ephemeral selection)
+    {}
+    (let [{:keys [mode root]} selection]
+      (when-not (and (map? selection) (= #{:mode :root} (set (keys selection)))
+                     (#{:create :reopen} mode) (instance? Path root)
+                     (.isAbsolute ^Path root) (.isDirectory (.toFile ^Path root)))
+        (reject! :invalid-local-storage-selection))
+      (let [log (.toFile (.resolve ^Path root "log"))
+            storage (.toFile (.resolve ^Path root "storage"))]
+        (case mode
+          :create (when (or (.exists log) (.exists storage))
+                    (reject! :local-storage-already-exists))
+          :reopen (when-not (and (.isDirectory log) (.isDirectory storage))
+                    (reject! :local-storage-missing)))
+        {:log [:local {:path (str log)}]
+         :storage [:local {:path (str storage)}]}))))
+
 (defn with-proving-application!
   "Run `f` with a small real embedded-XTDB application and close its node.
 
@@ -297,6 +319,10 @@
    selection records a pending publication intent atomically with each admitted
    operation, without direct emission. No worker or HTTP route is installed here.
    Intent IDs belong to one attempted operation, not an HTTP retry protocol.
+   Optional trusted storage selection is :ephemeral or {:mode :create/:reopen
+   :root absolute-existing-Path}. Reopen validates the existing row without
+   seeding. The caller owns exclusive directory access; this is not crash or
+   multi-process deployment qualification.
 
    Do not retain the callbacks or node after the supplied function returns.
    This fixture is for a single test/application invocation, not production
@@ -304,20 +330,24 @@
   ([f] (with-proving-application! (str "v1494-" (random-uuid)) f))
   ([slot-id f] (with-proving-application! slot-id :direct f))
   ([slot-id publication-selection f]
+   (with-proving-application! slot-id publication-selection :ephemeral f))
+  ([slot-id publication-selection storage-selection f]
    (require-slot-id! slot-id)
    (when-not (contains? #{:direct :durable-outbox} publication-selection)
      (reject! :invalid-publication-selection))
    (when-not (fn? f)
      (reject! :invalid-application-callback))
-   (let [catalog (pilot/reservation-catalog)]
+   (let [catalog (pilot/reservation-catalog)
+         config (storage-config! storage-selection)]
      (when-not (= operation-ids (:declared-operation-ids catalog))
        (reject! :changed-abstract-catalog))
-     (with-open [node (xtn/start-node {})]
+     (with-open [node (xtn/start-node config)]
        (let [ctx {:biff.xtdb/node node}
-             seed (initial-document slot-id)
-             _ (tx/transact! ctx
-                             {:commands [(command/create table seed version-keys)]
-                              :emit false})
+             _ (if (= :reopen (:mode storage-selection))
+                 (checked-current! node slot-id)
+                 (tx/transact! ctx
+                               {:commands [(command/create table (initial-document slot-id) version-keys)]
+                                :emit false}))
              read! (fn [] (checked-current! node slot-id))
              abstract! (fn [] (physical->abstract (read!)))
              execute! (fn [op]
@@ -358,8 +388,10 @@
                   :biff-model-module (tx/module)
                   :catalog catalog
                   :publication-selection publication-selection
+                  :storage-mode (or (:mode storage-selection) :ephemeral)
                   :report (assoc (application-report slot-id)
-                                 :publication-selection publication-selection)
+                                 :publication-selection publication-selection
+                                 :storage-mode (or (:mode storage-selection) :ephemeral))
                   :read! read!
                   :abstract! abstract!
                   :guard-preflight! guard-preflight!
