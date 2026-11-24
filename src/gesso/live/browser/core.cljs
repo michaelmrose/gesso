@@ -1186,6 +1186,33 @@
             (throw error))))))
   true)
 
+(defn- synchronous-managed-swap?
+  "The managed fragment lifecycle currently requires installation before
+   HTMX afterRequest. HTMX 2.0.7 may schedule a swap timer or View Transition
+   after that event. Refuse those schedules at beforeSwap, before admitting
+   a semantic swap. Require the issuing root's explicit swap specification
+   (or the response override); do not guess inherited HTMX configuration."
+  [runtime root event]
+  (let [override (detail-field event "swapOverride")
+        spec (if (and (some? override) (not= "" override))
+               override
+               (or (not-empty (element-attr root "hx-swap"))
+                   (element-attr root "data-hx-swap")))
+        config (some-> (:htmx runtime) (aget "config"))
+        source (some-> (detail-field event "requestConfig") (aget "elt"))]
+    (when (and (or (nil? source) (identical? root source))
+               (string? spec) (not (str/blank? spec))
+               (not= "unset" spec))
+      (let [tokens (str/split (str/trim spec) #"\s+")
+            delay (last (filter #(str/starts-with? % "swap:") tokens))
+            transition (last (filter #(str/starts-with? % "transition:") tokens))]
+        (and (if delay
+               (contains? #{"swap:0" "swap:0ms" "swap:0s" "swap:0m"} delay)
+               (zero? (js/Number (or (some-> config (aget "defaultSwapDelay")) 0))))
+             (if transition
+               (= "transition:false" transition)
+               (not (some-> config (aget "globalViewTransitions")))))))))
+
 (defn on-before-swap!
   "Normalize HTMX beforeSwap for the exact currently correlated managed request."
   [runtime event]
@@ -1196,15 +1223,26 @@
             physical
             (physical-context runtime event root record disposition)]
         (try
-          (let [candidate (event-authoritative-candidate runtime event)
-                normalized
-                (cond-> (normalized-request-event :htmx/before-swap record)
-                  candidate
-                  (assoc :authoritative candidate))]
-            (shell/dispatch!
-             (:shell runtime)
-             normalized
-             physical))
+          (cond
+            (false? (detail-field event "shouldSwap"))
+            nil
+
+            (not (synchronous-managed-swap? runtime root event))
+            (do
+              (cancel-swap-event! event)
+              (.warn js/console
+                     "Gesso managed fragment swap refused: synchronous swap configuration required."))
+
+            :else
+            (let [candidate (event-authoritative-candidate runtime event)
+                  normalized
+                  (cond-> (normalized-request-event :htmx/before-swap record)
+                    candidate
+                    (assoc :authoritative candidate))]
+              (shell/dispatch!
+               (:shell runtime)
+               normalized
+               physical)))
           (catch :default error
             (cancel-swap-event! event)
             (throw error))))))

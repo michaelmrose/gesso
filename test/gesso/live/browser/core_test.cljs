@@ -114,7 +114,8 @@
    (make-root fragment-id []))
   ([fragment-id nested]
    (make-element {:fragment-id fragment-id
-                  :nested nested})))
+                  :nested nested
+                  :attrs {"hx-swap" "outerHTML"}})))
 
 (defn- make-managed-root
   ([fragment-id]
@@ -122,7 +123,8 @@
   ([fragment-id nested]
    (make-element {:fragment-id fragment-id
                   :nested nested
-                  :attrs {"hx-trigger" core/refresh-event-name}})))
+                  :attrs {"hx-trigger" core/refresh-event-name
+                          "hx-swap" "outerHTML"}})))
 
 (defn- make-legacy-sse-root
   [fragment-id event-name]
@@ -1144,6 +1146,51 @@
 ;; Swap / authoritative carrier behavior
 ;; =============================================================================
 
+(deftest managed-swap-refuses-deferred-installation-before-admission-test
+  (doseq [{:keys [spec override delay transition child-source? allowed?]}
+          [{:spec "outerHTML" :allowed? true}
+           {:spec "outerHTML swap:30ms" :allowed? false}
+           {:spec "outerHTML transition:true" :allowed? false}
+           {:spec "outerHTML" :override "innerHTML swap:1s" :allowed? false}
+           {:spec "outerHTML" :override "innerHTML transition:true" :allowed? false}
+           {:spec "outerHTML" :delay 25 :allowed? false}
+           {:spec "outerHTML" :transition true :allowed? false}
+           {:spec "outerHTML swap:0ms transition:false settle:50ms"
+            :delay 25 :transition true :allowed? true}
+           {:spec "outerHTML swap:30ms" :override "outerHTML swap:0s"
+            :allowed? true}
+           {:spec nil :allowed? false}
+           {:spec "outerHTML" :child-source? true :allowed? false}]]
+    (let [captures (atom 0)
+          {:keys [runtime root htmx-fixture]}
+          (runtime-fixture "fragment-1"
+                           {:continuity-capture! (fn [_] (swap! captures inc) #js {})})
+          {xhr :xhr} (make-xhr 200)
+          old-attr (.-getAttribute root)
+          requirement (progression/requirement
+                       {:tx-id 801 :system-time "2026-08-26T08:10:01Z"})]
+      (aset root "getAttribute" (fn [name] (if (= name "hx-swap") spec (old-attr name))))
+      (aset (:htmx htmx-fixture) "config"
+            #js {:defaultSwapDelay (or delay 0) :globalViewTransitions (boolean transition)})
+      (begin-refresh! runtime "fragment-1" requirement)
+      (bind-request! runtime root xhr)
+      (let [fixture (make-event "htmx:beforeSwap"
+                                {:elt root :target root :xhr xhr :should-swap true
+                                 :extra-detail {:swapOverride override
+                                                :requestConfig #js {:elt (if child-source?
+                                                                           (make-child root)
+                                                                           root)}}})]
+        (core/on-before-swap! runtime (:event fixture))
+        (is (= (not allowed?) @(:prevented? fixture)) (pr-str [spec override delay transition]))
+        (is (= allowed? (aget (:detail fixture) "shouldSwap")))
+        (is (= (if allowed? 1 0) @captures)))
+      (when-not allowed?
+        (after-request! runtime root xhr true)
+        (is (= #{requirement}
+               (get-in (core/state runtime) [:fragments "fragment-1" :queued-requirements])))
+        (is (nil? (core/active-request runtime root)))
+        (is (empty? (:continuity (core/state runtime))))))))
+
 (deftest ordinary-managed-swap-captures-and-restores-continuity-without-owning-semantics-test
   (let [captures (atom [])
         restores (atom [])
@@ -1302,7 +1349,7 @@
     (after-request! runtime root xhr-a true)
     (let [pending-b (core/pending-refresh runtime root)]
       (is (some? pending-b))
-      (is (= #{requirement-b} (:requirements pending-b))))
+      (is (= #{requirement-a requirement-b} (:requirements pending-b))))
 
     (bind-request! runtime root xhr-b)
     (is (= "request-2"
@@ -1352,12 +1399,12 @@
             (aget headers-a progression.http/request-header-name))))
 
     ;; Completing A promotes the complete queued set into one new generation.
-    ;; The next configRequest must therefore carry exactly B+C, preserving
-    ;; incomparability rather than weakening the requirement or reusing A.
+    ;; With no observed swap, the next configRequest must carry A+B+C,
+    ;; preserving the uncovered active requirement as well as queued debt.
     (after-request! runtime root xhr-a true)
     (let [pending-b (core/pending-refresh runtime root)
-          expected (progression/compose requirement-b requirement-c)]
-      (is (= #{requirement-b requirement-c}
+          expected (progression/compose requirement-a requirement-b requirement-c)]
+      (is (= #{requirement-a requirement-b requirement-c}
              (:requirements pending-b)))
       (is (true?
            (core/on-config-request!
@@ -1371,7 +1418,7 @@
       (is (= expected
              (progression.http/decode-request-progression
               (aget headers-b progression.http/request-header-name))))
-      (is (= #{basis-b basis-c}
+      (is (= #{basis-a basis-b basis-c}
              (:bases
               (progression.http/decode-request-progression
                (aget headers-b progression.http/request-header-name)))))
