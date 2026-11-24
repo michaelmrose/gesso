@@ -83,6 +83,9 @@
 (def acquisition-policy-attribute
   "data-gesso-live-acquisition-policy")
 
+(def refresh-control-attribute
+  "data-gesso-live-refresh")
+
 (def invalidated-event-name
   "gesso:live-invalidated")
 
@@ -128,6 +131,7 @@
    [sse-before-message-event-name :sse-before-message]
    [sse-open-event-name :sse-open]
    [invalidated-event-name :invalidated]
+   ["click" :refresh-click]
    ["visibilitychange" :visibility-change]])
 
 (def window-lifecycle-listener-specs
@@ -482,14 +486,14 @@
   "Register one observer on an event already owned by Core's Document listener
    set.
 
-   Window-only lifecycle repair is framework-owned and intentionally not exposed
-   through this generic raw-event observer seam."
+   Window-only lifecycle repair and trusted Refresh clicks are framework-owned
+   and intentionally not exposed through this generic raw-event observer seam."
   [runtime event-name observer-id handler]
   (let [runtime (require-core! runtime)
         event-name (require-nonblank-string!
                     "Browser core observed event name"
                     event-name)
-        supported (set (map first listener-specs))]
+        supported (disj (set (map first listener-specs)) "click")]
     (when-not (contains? supported event-name)
       (throw
        (core-error
@@ -589,6 +593,17 @@
        root))
    (fragment-roots runtime)))
 
+(defn- explicit-refresh-root?
+  [root]
+  (and (managed-fragment-root? root)
+       (= "explicit-refresh" (element-attr root acquisition-policy-attribute))))
+
+(defn- unique-current-root?
+  [runtime root]
+  (let [id (fragment-id-from-root root)
+        matches (filterv #(= id (fragment-id-from-root %)) (fragment-roots runtime))]
+    (and (= 1 (count matches)) (identical? root (first matches)))))
+
 (defn- weak-get
   [^js weak-map key]
   (when (and weak-map key)
@@ -687,7 +702,7 @@
         release! (or (:continuity-release! options)
                      (:continuity-release! continuity-handlers))]
     {:fragment/refresh
-     (fn [{:keys [effect]}]
+     (fn [{:keys [effect physical]}]
        (let [fragment-id (:fragment-id effect)
              root (or (fragment-root-by-id runtime fragment-id)
                       (throw
@@ -696,19 +711,28 @@
                         "Adapter requested refresh for a fragment root that is not present."
                         {:fragment-id fragment-id
                          :effect effect})))
-             pending
-             {:fragment-id fragment-id
-              :request-generation (:request-generation effect)
-              :requirements (set (:requirements effect))}]
+             explicit? (explicit-refresh-root? root)
+             grant (when explicit? (js-obj))
+             _ (when (and explicit?
+                          (not (and (identical? root (physical-root physical))
+                                    (unique-current-root? runtime root))))
+                 (throw (core-error :missing-refresh-owner
+                                    "Explicit refresh requires its admitted physical owner."
+                                    {:fragment-id fragment-id})))
+             pending (cond-> {:fragment-id fragment-id
+                              :request-generation (:request-generation effect)
+                              :requirements (set (:requirements effect))}
+                       grant (assoc :grant grant))
+             detail (clj->js {:fragmentId fragment-id
+                              :requestGeneration (:request-generation effect)})]
+         (when grant (aset detail "gessoRefreshGrant" grant))
          (weak-set! (:pending-refreshes runtime) root pending)
          (try
            (htmx-trigger!
             runtime
             root
             refresh-event-name
-            (clj->js
-             {:fragmentId fragment-id
-              :requestGeneration (:request-generation effect)}))
+            detail)
            :triggered
            (catch :default error
              (delete-if-same!
@@ -817,6 +841,7 @@
           :authoritative-from-event authoritative-from-event
           :continuity continuity-runtime
           :pending-refreshes (js/WeakMap.)
+          :consumed-refresh-clicks (js/WeakSet.)
           :active-requests (js/WeakMap.)
           :requests-by-xhr (js/WeakMap.)
           :listeners (atom [])
@@ -1021,6 +1046,31 @@
            (assoc :requirement requirement))]
      (shell/dispatch! (:shell runtime) event))))
 
+(defn on-refresh-click!
+  "Admit one trusted button activation for its unique current explicit owner.
+   A busy click is consumed without authorizing a successor. Synthetic or
+   replayed activations cannot authorize another generation."
+  [runtime event]
+  (let [runtime (require-core! runtime)
+        target (some-> event .-target)
+        control (when (node-element? target)
+                  (some-> target (.closest (str "button[" refresh-control-attribute "]"))))
+        root (fragment-root-from-element control)
+        id (fragment-id-from-root root)]
+    (when control
+      (prevent-event! event)
+      (when (and (true? (.-isTrusted event))
+                 (not (.-disabled control))
+                 (not (.has (:consumed-refresh-clicks runtime) event)))
+        (.add (:consumed-refresh-clicks runtime) event)
+        (when (and (explicit-refresh-root? root)
+                   (= id (element-attr control refresh-control-attribute))
+                   (unique-current-root? runtime root))
+          (shell/dispatch! (:shell runtime)
+                           {:event :fragment/refresh-requested :fragment-id id}
+                           {:event event :fragment-root root})))))
+  true)
+
 (defn- repair-managed-fragments!
   "Advisory convergence repair for every currently managed stable root.
 
@@ -1140,6 +1190,26 @@
   (some-> (event-detail event)
           (aget "headers")))
 
+(defn- root-issued-request?
+  [root event]
+  (identical? root (detail-field event "elt")))
+
+(defn- explicit-request-authorized?
+  [runtime root event pending]
+  (let [config (or (detail-field event "requestConfig") (event-detail event))
+        trigger (some-> config (aget "triggeringEvent"))
+        grant (:grant pending)]
+    (and grant
+         (explicit-refresh-root? root)
+         (unique-current-root? runtime root)
+         (= refresh-event-name (some-> trigger .-type))
+         (identical? root (some-> trigger .-target))
+         (identical? grant (some-> trigger .-detail (aget "gessoRefreshGrant"))))))
+
+(defn- explicit-boundary?
+  [root pending]
+  (or (:grant pending) (explicit-refresh-root? root)))
+
 (defn on-config-request!
   "Attach the adapter-approved authoritative progression requirement to one
    managed HTMX fragment refresh."
@@ -1148,7 +1218,16 @@
         root (fragment-root-from-event event)
         pending (and root
                      (weak-get (:pending-refreshes runtime) root))]
-    (when pending
+    (cond
+      (and (explicit-boundary? root pending)
+           (not (root-issued-request? root event)))
+      nil
+
+      (and (explicit-boundary? root pending)
+           (not (explicit-request-authorized? runtime root event pending)))
+      (prevent-event! event)
+
+      pending
       (try
         (when-some [requirement
                     (compose-refresh-requirements (:requirements pending))]
@@ -1175,7 +1254,16 @@
         root (fragment-root-from-event event)
         pending (and root
                      (weak-get (:pending-refreshes runtime) root))]
-    (when pending
+    (cond
+      (and (explicit-boundary? root pending)
+           (not (root-issued-request? root event)))
+      nil
+
+      (and (explicit-boundary? root pending)
+           (not (explicit-request-authorized? runtime root event pending)))
+      (prevent-event! event)
+
+      pending
       (let [disposition (atom :undecided)]
         (try
           (let [request-id ((:request-id-fn runtime))
@@ -1375,6 +1463,7 @@
     :sse-before-message #(on-sse-before-message! runtime %)
     :sse-open #(on-sse-open! runtime %)
     :invalidated #(on-invalidated! runtime %)
+    :refresh-click #(on-refresh-click! runtime %)
     :visibility-change #(on-visibility-change! runtime %)
     :online #(on-online! runtime %)
     :pageshow #(on-pageshow! runtime %)))

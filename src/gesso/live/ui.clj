@@ -970,14 +970,21 @@
    Replaceable inner target:
      - owns only the canonical fragment DOM id plus target attrs.
 
+   Explicit Refresh panels also render a stable button bound to the root id.
+   It has no HTMX request attributes; browser core admits its activation.
+
    This shape makes the browser adapter the only path from advisory wakeup to
    fragment GET while keeping both the EventSource and invalidation listener
    stable across outerHTML replacement of the inner target."
   [fragment]
   (let [fragment' (ensure-fragment fragment)]
-    [:div (fragment-root-attrs fragment')
-     [:div (fragment-invalidation-listener-attrs fragment')]
-     [:div (fragment-target-attrs fragment')]]))
+    (cond-> [:div (fragment-root-attrs fragment')
+             [:div (fragment-invalidation-listener-attrs fragment')]
+             [:div (fragment-target-attrs fragment')]]
+      (= :explicit-refresh (:acquisition-policy fragment'))
+      (conj [:button {:type "button"
+                      :data-gesso-live-refresh (:id fragment')}
+             "Refresh"]))))
 
 ;; -----------------------------------------------------------------------------
 ;; Browser runtime script helper

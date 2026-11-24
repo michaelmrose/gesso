@@ -810,6 +810,13 @@
     (is (= "request-list"
            (get-in panel [3 1 :id])))))
 
+(deftest explicit-fragment-panel-renders-stable-refresh-button-test
+  (let [panel (ui/fragment-panel (assoc fragment-spec :acquisition-policy :explicit-refresh))]
+    (is (= [:button {:type "button" :data-gesso-live-refresh "request-list"} "Refresh"]
+           (get panel 4)))
+    (is (= "request-list" (get-in panel [3 1 :id])))
+    (is (= 4 (count (ui/fragment-panel fragment-spec))))))
+
 (deftest fragment-panel-stable-root-owns-behavior-test
   (let [panel
         (ui/fragment-panel

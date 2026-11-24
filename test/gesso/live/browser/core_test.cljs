@@ -628,6 +628,90 @@
     (is (true? (:queued-advisory? (debt))))
     (is (= #{requirement} (:queued-requirements (debt))))))
 
+(deftest explicit-refresh-click-grants-one-owner-bound-physical-request-test
+  (let [root (make-element {:fragment-id "explicit"
+                            :attrs {"hx-trigger" core/refresh-event-name
+                                    "hx-swap" "outerHTML"
+                                    core/acquisition-policy-attribute "explicit-refresh"}})
+        control (make-element {:closest-root root
+                               :attrs {core/refresh-control-attribute "explicit"}})
+        closest (.-closest control)
+        _ (aset control "closest" (fn [selector]
+                                    (if (= selector "button[data-gesso-live-refresh]")
+                                      control (closest selector))))
+        document-fixture (make-document [root])
+        htmx-fixture (make-htmx)
+        runtime (core/create {:document (:document document-fixture)
+                              :htmx (:htmx htmx-fixture)})
+        click (fn [trusted?]
+                (let [event (:event (make-event "click" {:target control}))]
+                  (aset event "isTrusted" trusted?)
+                  event))
+        request (fn [trigger]
+                  (let [config #js {:elt root :triggeringEvent trigger :headers #js {}}
+                        xhr (:xhr (make-xhr 200))]
+                    {:config (make-event "htmx:configRequest"
+                                         {:elt root :extra-detail {:triggeringEvent trigger
+                                                                    :headers (.-headers config)}})
+                     :before (make-event "htmx:beforeRequest"
+                                         {:elt root :xhr xhr :extra-detail {:requestConfig config}})
+                     :xhr xhr}))
+        first-click (click true)
+        busy-click (click true)
+        requirement (progression/requirement {:tx-id 42 :system-time "2026-08-25T20:00:42Z"})]
+    (core/notify-fragment! runtime "explicit" requirement)
+    (core/on-refresh-click! runtime (click false))
+    (is (empty? @(:calls htmx-fixture)))
+    (let [direct (request nil)]
+      (core/on-config-request! runtime (get-in direct [:config :event]))
+      (core/on-before-request! runtime (get-in direct [:before :event]))
+      (is @(get-in direct [:config :prevented?]))
+      (is @(get-in direct [:before :prevented?])))
+    (reset! (:roots document-fixture) [root (make-managed-root "explicit")])
+    (core/on-refresh-click! runtime (click true))
+    (is (empty? @(:calls htmx-fixture)))
+    (reset! (:roots document-fixture) [])
+    (core/on-refresh-click! runtime (click true))
+    (is (empty? @(:calls htmx-fixture)))
+    (reset! (:roots document-fixture) [root])
+    (core/on-refresh-click! runtime first-click)
+    (is (= 1 (count @(:calls htmx-fixture))))
+    (is (= #{requirement} (:requirements (core/pending-refresh runtime root))))
+    (let [trigger #js {:type core/refresh-event-name :target root
+                       :detail (:detail (first @(:calls htmx-fixture)))}
+          forged (request #js {:type core/refresh-event-name :target root
+                              :detail #js {:gessoRefreshGrant #js {}}})
+          valid (request trigger)
+          child (make-child root)
+          unrelated (make-event "htmx:beforeRequest" {:elt child :xhr (:xhr (make-xhr 200))})]
+      (core/on-before-request! runtime (:event unrelated))
+      (is (false? @(:prevented? unrelated)))
+      (is (some? (core/pending-refresh runtime root)))
+      (core/on-before-request! runtime (get-in forged [:before :event]))
+      (is @(get-in forged [:before :prevented?]))
+      (is (some? (core/pending-refresh runtime root)))
+      (core/on-config-request! runtime (get-in valid [:config :event]))
+      (is (not @(get-in valid [:config :prevented?])))
+      (is (some? (aget (aget (get-in valid [:config :detail]) "headers")
+                       progression.http/request-header-name)))
+      (core/on-before-request! runtime (get-in valid [:before :event]))
+      (is (not @(get-in valid [:before :prevented?])))
+      (is (nil? (core/pending-refresh runtime root)))
+      (let [replay (request trigger)]
+        (core/on-before-request! runtime (get-in replay [:before :event]))
+        (is @(get-in replay [:before :prevented?])))
+      (core/on-refresh-click! runtime busy-click)
+      (core/notify-fragment! runtime "explicit")
+      (before-swap! runtime root (:xhr valid))
+      (after-swap! runtime root (:xhr valid))
+      (after-request! runtime root (:xhr valid) true)
+      (is (= 1 (count @(:calls htmx-fixture))))
+      (core/on-refresh-click! runtime first-click)
+      (core/on-refresh-click! runtime busy-click)
+      (is (= 1 (count @(:calls htmx-fixture))))
+      (core/on-refresh-click! runtime (click true))
+      (is (= 2 (count @(:calls htmx-fixture)))))))
+
 (deftest unknown-acquisition-policy-fails-before-admission-test
   (let [root (make-element {:fragment-id "bad"
                             :attrs {"hx-trigger" core/refresh-event-name
