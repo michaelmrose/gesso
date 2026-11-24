@@ -1198,6 +1198,21 @@
             (is (empty? @projected))
             (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
             (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+          ;; The second attempt can itself have an uncertain result. An
+          ;; absent recovery record is not permission for a third attempt.
+          (let [lost (ex-info "recovery response lost" {:commit/status :unknown})
+                p @policies]
+            (reset! calls 0)
+            (with-redefs [xtdb/execute-tx-from!
+                          (fn [ctx ops & [opts]]
+                            (if (= 2 (swap! calls inc))
+                              (throw lost)
+                              (execute ctx ops opts)))]
+              (is (identical? lost (failure #(run! construction)))))
+            (is (= 2 @calls))
+            (is (= (inc p) @policies))
+            (is (empty? @projected))
+            (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"]))))
           ;; Simulate another authorized writer winning after the unresolved
           ;; read, before the guarded recovery transaction reaches XTDB.
           (reset! calls 0)
@@ -1214,6 +1229,37 @@
           (is (= {:status :replay :outcome refusal}
                  (select-keys (publication/reconcile-command! ctx (constantly true)) [:status :outcome])))
           (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+          ;; A separate command loses the reply to an actual submitted
+          ;; guarded recovery transaction. Await its frontier and recover
+          ;; the journaled refusal, never constructing a third submission.
+          (let [cmd (assoc command :command-id (identity/command-id "v2416-recovery-reply")
+                                   :execution-id (identity/execution-id "v2416-original"))
+                ctx' (assoc ctx publication/preparation-key
+                            (bind "owned-source" (assoc cmd :principal principal)))
+                invocation' (assoc invocation :command cmd :command-id (:command-id cmd)
+                                    :execution-id (:execution-id cmd) :ctx ctx')
+                lost (ex-info "submitted recovery reply lost" {:commit/status :unknown})
+                p @policies
+                opts (assoc options :construct-after-abort!
+                            (fn [_] (swap! policies inc) construction))]
+            (reset! calls 0)
+            (with-redefs [xtdb/execute-tx-from!
+                          (fn [ctx ops & [opts]]
+                            (if (= 2 (swap! calls inc))
+                              (do (xt/submit-tx (:xtdb/connectable ctx) ops)
+                                  (throw lost))
+                              (execute ctx ops opts)))]
+              (is (= :rejected (:resolution (publication/execute-resolved! invocation' opts))))
+              (is (= 2 @calls))
+              (is (= (inc p) @policies))
+              (is (= [:replay :replay] @projected))
+              (is (= :rejected (:resolution (publication/execute-resolved! invocation' opts))))
+              (is (= 2 @calls))
+              (is (= (inc p) @policies)))
+            (is (= {:status :replay :outcome refusal}
+                   (select-keys (publication/reconcile-command! ctx' (constantly true)) [:status :outcome]))))
+          (is (= #{"v2414-command" "v2416-recovery-reply"}
+                 (set (map :xt/id (xt/q node ["SELECT _id FROM gesso_commands"])))))
           (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
           (is (= [{:status :done :revision 2}]
                  (xt/q node ["SELECT status, revision FROM requests WHERE _id = ?" "r1"]))))))))
