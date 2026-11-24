@@ -712,6 +712,49 @@
       (core/on-refresh-click! runtime (click true))
       (is (= 2 (count @(:calls htmx-fixture)))))))
 
+(deftest unbound-explicit-refresh-expires-with-debt-intact-test
+  (async done
+    (let [root (make-element {:fragment-id "explicit"
+                              :attrs {"hx-trigger" core/refresh-event-name
+                                      core/acquisition-policy-attribute "explicit-refresh"}})
+          control (make-element {:closest-root root
+                                 :attrs {core/refresh-control-attribute "explicit"}})
+          closest (.-closest control)
+          _ (aset control "closest" (fn [selector]
+                                      (if (= selector "button[data-gesso-live-refresh]")
+                                        control (closest selector))))
+          htmx-fixture (make-htmx)
+          runtime (core/create {:document (:document (make-document [root]))
+                                :htmx (:htmx htmx-fixture)})
+          click (fn [] (let [event (:event (make-event "click" {:target control}))]
+                         (aset event "isTrusted" true)
+                         (core/on-refresh-click! runtime event)))
+          requirement (progression/requirement {:tx-id 42 :system-time "2026-08-25T20:00:42Z"})]
+      (core/notify-fragment! runtime "explicit" requirement)
+      (core/notify-fragment! runtime "explicit")
+      (click)
+      (let [old-detail (:detail (first @(:calls htmx-fixture)))]
+        (.then (js/Promise.resolve nil)
+               (fn [_]
+                 (try
+                   (is (nil? (core/pending-refresh runtime root)))
+                   (is (nil? (get-in (core/state runtime) [:fragments "explicit" :inflight])))
+                   (is (= #{requirement} (get-in (core/state runtime) [:fragments "explicit" :queued-requirements])))
+                   (is (true? (get-in (core/state runtime) [:fragments "explicit" :queued-advisory?])))
+                   (is (= 1 (count @(:calls htmx-fixture))))
+                   (click)
+                   (is (= 2 (count @(:calls htmx-fixture))))
+                   (is (= #{requirement} (:requirements (core/pending-refresh runtime root))))
+                   (let [trigger #js {:type core/refresh-event-name :target root :detail old-detail}
+                         stale (make-event "htmx:beforeRequest"
+                                           {:elt root :xhr (:xhr (make-xhr 200))
+                                            :extra-detail {:requestConfig #js {:triggeringEvent trigger}}})]
+                     (core/on-before-request! runtime (:event stale))
+                     (is @(:prevented? stale))
+                     (is (some? (core/pending-refresh runtime root))))
+                   (catch :default error (is false (str error)))
+                   (finally (done)))))))))
+
 (deftest unknown-acquisition-policy-fails-before-admission-test
   (let [root (make-element {:fragment-id "bad"
                             :attrs {"hx-trigger" core/refresh-event-name

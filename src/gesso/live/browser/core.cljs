@@ -692,8 +692,17 @@
   [physical]
   (:fragment-root physical))
 
+(defn- abandon-pending-refresh!
+  [runtime shell-runtime root pending]
+  (when (identical? pending (weak-get (:pending-refreshes runtime) root))
+    (delete-if-same! (:pending-refreshes runtime) root pending)
+    (shell/dispatch! shell-runtime
+                     {:event :fragment/refresh-unbound
+                      :fragment-id (:fragment-id pending)
+                      :request-generation (:request-generation pending)})))
+
 (defn- built-in-handlers
-  [runtime options]
+  [runtime options shell-ref]
   (let [continuity-handlers (continuity/handlers (:continuity runtime))
         capture! (or (:continuity-capture! options)
                      (:continuity-capture! continuity-handlers))
@@ -733,13 +742,20 @@
             root
             refresh-event-name
             detail)
+           ;; Explicit grants are for the immediate HTMX trigger turn. A
+           ;; cancelled configRequest, missing listener or deferred trigger
+           ;; must not strand the generation or leave a reusable grant.
+           (when grant
+             (.then (js/Promise.resolve nil)
+                    (fn [_] (abandon-pending-refresh! runtime @shell-ref root pending))))
            :triggered
            (catch :default error
-             (delete-if-same!
-              (:pending-refreshes runtime)
-              root
-              pending)
-             (throw error)))))
+             (if (and grant (identical? pending (weak-get (:pending-refreshes runtime) root)))
+               (do (abandon-pending-refresh! runtime @shell-ref root pending)
+                   (.warn js/console "Gesso explicit Refresh trigger failed." error)
+                   :failed)
+               (do (delete-if-same! (:pending-refreshes runtime) root pending)
+                   (throw error)))))))
 
      :htmx/allow-request
      (fn [{:keys [physical]}]
@@ -848,11 +864,13 @@
           :window-listeners (atom [])
           :event-observers (atom {})
           :started? (atom false)}
-         built-ins (built-in-handlers runtime-base options)
+         shell-ref (atom nil)
+         built-ins (built-in-handlers runtime-base options shell-ref)
          handlers (merge built-ins custom-handlers)
          shell-runtime
          (shell/create
           (assoc shell-options :handlers handlers))]
+     (reset! shell-ref shell-runtime)
      (assoc runtime-base
             :shell shell-runtime))))
 

@@ -94,6 +94,7 @@
     :live/invalidated
     :live/advisory-observed
     :fragment/refresh-requested
+    :fragment/refresh-unbound
     :fragment/retire
     :htmx/before-request
     :htmx/before-swap
@@ -285,6 +286,9 @@
 
    :fragment/refresh-requested
    #{:event :fragment-id}
+
+   :fragment/refresh-unbound
+   #{:event :fragment-id :request-generation}
 
    :fragment/retire
    #{:event :fragment-id :reason}
@@ -1710,6 +1714,24 @@
     (and inflight
          (= request-generation (:generation inflight)))))
 
+(defn- abandon-unbound-refresh
+  [state event]
+  (let [id (require-non-nil! "Fragment id" (:fragment-id event))
+        generation (require-positive-integer! "Fragment request generation"
+                                              (:request-generation event))
+        fragment (get-in state [:fragments id])
+        inflight (:inflight fragment)]
+    (if (and (current-fragment-generation? state id generation)
+             (nil? (:request-id inflight)))
+      [(assoc-in state [:fragments id]
+                 (-> fragment
+                     (assoc :inflight nil :queued-refresh? false)
+                     (update :queued-requirements into (:requirements inflight))
+                     (update :queued-advisory? #(or % (:advisory? inflight)))))
+       []]
+      [state [(ignored-effect event :stale-unbound-refresh
+                              {:fragment-id id :request-generation generation})]])))
+
 (defn- current-fragment-request?
   [state fragment-id request-generation request-id]
   (let [inflight (get-in state [:fragments fragment-id :inflight])]
@@ -2398,6 +2420,9 @@
 
           :fragment/refresh-requested
           (request-explicit-refresh state' event')
+
+          :fragment/refresh-unbound
+          (abandon-unbound-refresh state' event')
 
           :fragment/retire
           (retire-fragment state' event')
