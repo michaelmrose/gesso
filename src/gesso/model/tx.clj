@@ -1047,16 +1047,7 @@
       (catch Throwable _
         nil))))
 
-(defn transact!
-  "Executes one atomic model plan through Biff validation and Gesso Live.
-
-   Gesso Live owns transaction execution, consistency attachment, change
-   expansion, coalescing, dispatch, and publication.
-
-   The consistency-aware :ctx returned by Gesso Live is intentionally
-   preserved. Callers that perform a dependent read can therefore carry
-   read-your-writes consistency forward rather than reconstructing it."
-  [ctx plan]
+(defn- transact-prepared! [ctx plan publication-options]
   (let [{:keys
          [plan
           tx-ops]}
@@ -1080,23 +1071,14 @@
 
          ctx
 
-         {:tx-ops
-          tx-ops
-
-          :tx-options
-          tx-options
-
-          :changes
-          changes
-
-          :emit
-          emit
-
-          :entry
-          entry
-
-          :entry-fn
-          entry-fn})]
+         (merge
+          {:tx-ops tx-ops
+           :tx-options tx-options
+           :changes changes
+           :emit emit
+           :entry entry
+           :entry-fn entry-fn}
+          publication-options))]
 
     (request-biff-listener-poll!
      ctx)
@@ -1105,6 +1087,34 @@
      result
      :commit/status
      :committed)))
+
+(defn transact!
+  "Executes one atomic model plan through Biff validation and Gesso Live.
+
+   Gesso Live owns transaction execution, consistency attachment, change
+   expansion, coalescing, dispatch, and publication.
+
+   The consistency-aware :ctx returned by Gesso Live is intentionally
+   preserved. Callers that perform a dependent read can therefore carry
+   read-your-writes consistency forward rather than reconstructing it."
+  [ctx plan]
+  (transact-prepared! ctx plan {}))
+
+(defn transact-with-outbox!
+  "Execute a normal model plan with a trusted Live publication declaration.
+
+   The declaration is a separate argument, NOT a model plan key. Ordinary
+   tx/prepare continues to describe only domain operations; this explicit
+   execution entry point adds the Live-owned absence guards and pending
+   intent documents to the SAME physical transaction. Live validates the
+   declaration and change batch before XTDB submission. In particular,
+   :emit false suppresses immediate dispatch, not durable intent recording.
+
+   The caller owns stable intent identity, source admission, and recovery
+   policy. A committed intent is not an acknowledgement of delivery, and
+   the domain-only preparation is not a complete outbox write footprint."
+  [ctx plan declaration]
+  (transact-prepared! ctx plan {:outbox declaration}))
 
 ;; =============================================================================
 ;; Gesso FX/Biff module contribution
