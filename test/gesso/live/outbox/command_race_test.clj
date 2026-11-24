@@ -117,7 +117,8 @@
                 :source-id "v2379-race" :rules-context {}
                 :worker-options {:worker-id "v2379" :poll-ms 20}
                 :live-options {} :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request}}
-                                                        :require-derived-model? true)
+                                                        :require-derived-model? true
+                                                        :operation-model-entities {:request/claim #{:requests}})
                 :http-jdk {} :assembled-operations {:authorize-request? (constantly true)}}
         handler (fn [_] (g/html-response [:div "ready"]))]
     (try
@@ -323,3 +324,66 @@
           (is (= :missing-publication-executor-profile
                  (:reason (error #(host/start! assembly identity (dissoc selected :assembled-operations)))))))))
     (is (zero? @calls))))
+
+(deftest strict-operation-entity-inventory-distinguishes-shared-topics
+  (let [build (fn [operation]
+                (publication/build-executor
+                 {:operation operation :submission-mode! (constantly :submit)
+                  :may-disclose? (constantly true)
+                  :construct! (fn [_] (throw (ex-info "unexpected construction" {})))
+                  :project! (fn [& _] (throw (ex-info "unexpected projection" {})))}))
+        ops {:request/claim (claim-operation (build :request/claim))
+             :request/cancel (fixture/trusted-operation :request/cancel
+                              {:published-change-topics #{} :execute! (build :request/cancel)})}
+        selected (assoc mapping :model-entity-topics {:requests #{:request}
+                                                      :other-requests #{:request}
+                                                      :audits #{:audit}}
+                                :require-derived-model? true
+                                :operation-model-entities {:request/claim #{:requests}
+                                                           :request/cancel #{}})
+        config {:xtdb-config {} :source-id "strict-2385" :rules-context {}
+                :worker-options {:worker-id "strict-2385" :poll-ms 20}
+                :live-options {} :assembled-publication selected
+                :assembled-operations {:authorize-request? (constantly true)}}
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (with-operations ops
+      (fn [assembly]
+        (let [starts (atom 0)]
+          (with-redefs [managed/start-biff-application! (fn [& _] (swap! starts inc))]
+            (doseq [[inventory expected]
+                    [[nil :incomplete-operation-model-entities]
+                     [{:request/claim #{:requests}} :incomplete-operation-model-entities]
+                     [(assoc (:operation-model-entities selected) :request/unknown #{}) :incomplete-operation-model-entities]
+                     [{:request/claim [:requests] :request/cancel #{}} :invalid-operation-model-entities]
+                     [{:request/claim #{:unknown} :request/cancel #{}} :invalid-operation-model-entities]
+                     [{:request/claim #{:audits} :request/cancel #{}} :operation-model-topic-mismatch]
+                     [{:request/claim #{:requests} :request/cancel #{:other-requests}} :operation-model-topic-mismatch]]]
+              (is (= expected (reason #(host/start! assembly identity
+                                       (assoc-in config [:assembled-publication :operation-model-entities] inventory))))))
+            (is (zero? @starts))))
+        (with-open [node (xtn/start-node {})]
+          (let [bind (:bind-command (publication/profile! assembly selected))
+                ctx (fn [operation id]
+                      {:xtdb/connectable node publication/preparation-key
+                       (bind "strict-2385" (assoc (command "attempt") :operation operation
+                                             :command-id (identity/command-id id)
+                                             :principal fixture/trusted-principal))})
+                doc {:xt/id "r1" :revision 0 :created-at "t0" :updated-at "t0"
+                     :request/location-id "actual"}
+                run! (fn [operation id entity]
+                       (publication/transact-model-resolved! (ctx operation id)
+                         {:purpose :gesso.live/refresh}
+                         {:commands [(model-command/create entity doc version)]}
+                         {:outcome :request/claimed} "t0"))]
+            (is (= :unmapped-model-entity (reason #(run! :request/claim "wrong" :other-requests))))
+            (is (= :unmapped-model-entity (reason #(run! :request/cancel "wrong-cancel" :requests))))
+            (is (empty? (xt/q node ["SELECT _id FROM requests"])))
+            (is (empty? (xt/q node ["SELECT _id FROM other_requests"])))
+            (is (empty? (xt/q node ["SELECT _id FROM gesso_commands"])))
+            (is (empty? (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
+            (is (= ["actual"] (mapv :gesso.live.outbox/subject-id
+                                    (:outbox/intents (run! :request/claim "right" :requests)))))
+            (is (empty? (:outbox/intents (publication/transact-model-resolved!
+                                         (ctx :request/cancel "noop") nil {} {:reason :unavailable} "t0"))))
+            (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+            (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))))))

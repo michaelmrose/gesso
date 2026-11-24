@@ -461,6 +461,18 @@
             (reject! :unmapped-publication-executor-topics
                      {:operation operation :topics (into #{} (remove derived-topics) topics)})))))))
 
+(defn- require-operation-entities! [operations entity-topics inventory]
+  (when-not (and (map? inventory) (= (set (keys operations)) (set (keys inventory))))
+    (reject! :incomplete-operation-model-entities {}))
+  (doseq [[operation entities] (sort-by key inventory)]
+    (when-not (and (set? entities) (every? #(contains? entity-topics %) entities))
+      (reject! :invalid-operation-model-entities {:operation operation}))
+    (let [derived (into #{} (mapcat entity-topics) entities)
+          declared (server/operation-published-change-topics (get operations operation))]
+      (when-not (= derived declared)
+        (reject! :operation-model-topic-mismatch
+                 {:operation operation :derived derived :declared declared})))))
+
 (defn profile!
   "Compile an explicit topic -> subject field declaration against the exact
    admitted Live graph. Every graph topic must have at least one unconditional
@@ -478,13 +490,18 @@
    raw transactions and raw journal-only plans at this command boundary.
    The canonical host requires all assembled operations to use recognized
    executors and declared topics to have derivation mappings in strict mode.
-   Canonical guarded journal-only plans remain available. Without that flag,
+   Optionally supply :operation-model-entities in strict mode: a closed
+   operation -> allowed entity set inventory whose derived topic unions
+   exactly match the registered topic declarations. Empty sets admit only
+   journal-only outcomes. Canonical guarded journal-only plans remain
+   available for every operation. Without the strict flag,
    legacy raw paths remain trusted. This is not a sandbox for raw XTDB access."
   [assembly options]
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-assembly {}))
   (when-not (and (map? options) (#{#{:subject-keys} #{:subject-keys :model-entity-topics}
-                     #{:subject-keys :model-entity-topics :require-derived-model?}} (set (keys options)))
+                     #{:subject-keys :model-entity-topics :require-derived-model?}
+                     #{:subject-keys :model-entity-topics :require-derived-model? :operation-model-entities}} (set (keys options)))
                  (map? (:subject-keys options)))
     (reject! :invalid-subject-mapping {}))
   (let [compiled (get-in assembly [:operation-acquisition-assembly
@@ -514,6 +531,8 @@
         (reject! :invalid-model-entity-topics {})))
     (when (and (contains? options :require-derived-model?) (not (true? strict?)))
       (reject! :invalid-derived-model-requirement {}))
+    (when (contains? options :operation-model-entities)
+      (require-operation-entities! operations entity-topics (:operation-model-entities options)))
     ;; A catch-all prevents the Live runtime's unmatched :keep default from
     ;; silently publishing a raw outbox topic instead of a model invalidation.
     {:manifest (manifest/descriptor compiled subjects)
@@ -572,7 +591,11 @@
             ::require-derived-model? strict?
             ::prepare-model prepare-model
             ::derive-model-fragment (when entity-topics
-                                      #(derive-model-fragment % subjects entity-topics))
+                                      #(derive-model-fragment
+                                        % subjects
+                                        (if (contains? options :operation-model-entities)
+                                          (select-keys entity-topics (get-in options [:operation-model-entities operation]))
+                                          entity-topics)))
             ::binding (fn []
                         (when-not entry
                           (reject! :undeclared-operation-publication {:operation operation}))
