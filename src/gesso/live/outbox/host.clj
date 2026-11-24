@@ -24,6 +24,7 @@
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http :as http]
             [gesso.live.outbox.http-jdk :as jdk]
+            [gesso.live.outbox.http-operation :as operation-http]
             [gesso.live.outbox.http-recovery :as recovery]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [xtdb.node :as xtn]))
@@ -49,7 +50,7 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery})
+    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
 
@@ -298,7 +299,10 @@
    Install after managed startup but before opening admission. Every owned
    SSE route also gets a bounded scheduled orphan-recovery controller;
    :sse-recovery optionally supplies its numeric pacing and batch options.
-   No route means no scheduler. On shutdown, drain Ring requests, stop and
+   Optional :assembled-operations selects the admitted literal HTMX POST
+   operation transport with an explicit trusted :authorize-request? callback.
+   Other routes retain their existing trusted delegate.
+   No SSE route means no scheduler. On shutdown, drain Ring requests, stop and
    drain recovery, retire route-owned SSE sessions, then run native stop
    (worker, listener writers, Live, XTDB). Failed recovery drain or SSE
    retirement retains providers for retry. Arbitrary application streams
@@ -311,7 +315,10 @@
   (when-not (application/application-assembly? assembly)
     (reject! :invalid-application-assembly {}))
   (require-unshadowed-sse-path! assembly config)
-  (let [route* (atom nil)
+  (let [handler (if (contains? config :assembled-operations)
+                  (operation-http/wrap-handler assembly handler (:assembled-operations config))
+                  handler)
+        route* (atom nil)
         recovery* (atom nil)
         timeout-ms (get config :stop-timeout-ms 10000)
         admission (request-admission
