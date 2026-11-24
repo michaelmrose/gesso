@@ -309,7 +309,14 @@
      :source-open-meta-obligations (:open-meta-obligations initial)
      :source-open-obligations (:open-obligation-ids-by-operation initial)
      :source-selection :host-supplied-original-catalog-not-installed-authenticated
-     :candidate-status (get-in selected-report [:decisions :candidate :status])
+     ;; The phase row records historical checks. The summary additionally
+     ;; requires the final inventory and subject observations to match.
+     :candidate-status (let [status (get-in selected-report [:decisions :candidate :status])]
+                         (if (and (= :checks-passed-only status)
+                                  (not (and (= :matched (get-in selected-report [:final-inventory :status]))
+                                            (= :matched (get-in selected-report [:final-subjects :candidate])))))
+                           :blocked
+                           status))
      :installation-status (get-in selected-report [:decisions :installation :status])
      :activation-status (get-in selected-report [:decisions :activation :status])
      :completion-status (get-in selected-report [:decisions :completion :status])

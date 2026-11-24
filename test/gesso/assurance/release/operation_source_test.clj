@@ -269,3 +269,27 @@
     (is (= :none (:release-authority r)))
     (is (= :none (:runtime-effect-permission r)))
     (assert-no-credential! r)))
+
+(deftest candidate-summary-requires-final-source-observations
+  (let [c (catalog)
+        calls (atom 0)
+        baseline (source/assess-original-catalog! (fn [] (swap! calls inc) c))
+        last-call @calls]
+    (is (= :checks-passed-only (:candidate-status baseline)))
+    (is (= {:candidate :matched} (get-in baseline [:selected-release-diagnostic :final-subjects])))
+    (doseq [[offset replacement inventory-status subject-status]
+            [[1 (single-catalog) :inventory-diverged nil]
+             [0 (assoc c :id :request/changed-catalog) :matched :subject-diverged]
+             [0 nil :matched :subject-unavailable]]]
+      (reset! calls 0)
+      (let [r (source/assess-original-catalog!
+               (fn []
+                 (if (= (- last-call offset) (swap! calls inc))
+                   (or replacement (throw (ex-info "Final source unavailable" {})))
+                   c)))
+            diag (:selected-release-diagnostic r)]
+        (is (= :checks-passed-only (report-status r :candidate)))
+        (is (= inventory-status (get-in diag [:final-inventory :status])))
+        (is (= subject-status (get-in diag [:final-subjects :candidate])))
+        (is (= :blocked (:candidate-status r)))
+        (assert-no-credential! r)))))
