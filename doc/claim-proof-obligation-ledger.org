@@ -1161,3 +1161,33 @@ checkpoint refusal also pass. No CLM-R2 premise is retired.
 The complete opt-in physical Claim source-log suite also passed: 3 tests /
 1052 assertions, zero failures or errors. Full project, Chromium and separate
 proof gates were not rerun.
+
+* v2585 — check canonical publication records and derived identities
+
+Move the existing frozen v1 UUIDv8 encoding to the outbox namespace so
+publication and historical checking share its pure derivation. The auditor
+uses the pinned incorporated command binding and initialized source id,
+not an identity claimed by the publisher. For nonempty appended records,
+require the full canonical pending document shape, the command's operation,
+source and command id, a single qualified purpose and portable nonblank
+subjects. Require the set of intent ids to equal the derived slots from
+zero through observed cardinality minus one. No row or subject values
+appear in mismatch reports. Retained writes and absence guards must still
+match the pinned append as before.
+
+Advance history, checkpoints and conditional operational arguments to v10.
+Authenticated v9 checkpoints require rescanning. This stronger selected
+history profile refuses explicit arbitrary UUIDs even though other
+publication APIs can accept them. It does not infer expected cardinality,
+slot-to-subject association, topics, purposes or whether publication is
+required; an omitted publication or a canonically shaped wrong subject
+can still pass this particular check. The shared encoder is not an
+independent implementation proof of its algorithm.
+
+Focused JVM validation: 9 tests / 677 assertions, zero failures or errors.
+The mapped-history negative controls refuse arbitrary UUIDs, noncontiguous
+slots, mismatched operation and unexpected record fields. The existing
+frozen production UUID vectors and retry/fencing regression passed.
+The full opt-in physical Claim source-log suite also passed: 3 tests /
+1052 assertions, zero failures or errors. Full project, Chromium and separate
+proof gates were not rerun. No CLM-R2 premise is retired.

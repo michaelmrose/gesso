@@ -12,7 +12,11 @@
    No post-commit callback, recipient list, private domain snapshot, or
    speculative progression token is persisted here. The XTDB transaction
    establishes its provider basis only when it executes."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str])
+  (:import [java.io ByteArrayOutputStream DataOutputStream]
+           [java.nio ByteBuffer]
+           [java.security MessageDigest]
+           [java.util UUID]))
 
 (def intent-table :gesso_live_outbox)
 (def intent-version 1)
@@ -30,6 +34,35 @@
 (defn- portable-id?
   [x]
   (or (string? x) (keyword? x) (uuid? x) (integer? x)))
+
+(defn- identity-parts [value]
+  (cond
+    (string? value) ["string" value]
+    (keyword? value) ["keyword" (if (namespace value) "qualified" "unqualified")
+                      (or (namespace value) "") (name value)]
+    (integer? value) ["integer" (str value)]
+    (uuid? value) ["uuid" (str value)]
+    :else (reject! :unsupported-derived-identity {})))
+
+(defn derived-intent-id
+  "Frozen v1 retry-stable publication identity over raw command coordinates."
+  [source operation principal command-id slot]
+  ;; Frozen v1 encoding: count each typed component's UTF-16 code units,
+  ;; followed by those units in network order. No printer or locale settings
+  ;; can affect the identity. SHA-256 truncated into an RFC 9562 UUIDv8.
+  (let [buffer (ByteArrayOutputStream.)
+        fields (into ["gesso.live.outbox/command-intent-v1"]
+                     (mapcat identity-parts)
+                     [source operation principal command-id slot])]
+    (with-open [out (DataOutputStream. buffer)]
+      (doseq [^String field fields]
+        (.writeInt out (.length field))
+        (.writeChars out field)))
+    (let [digest (ByteBuffer/wrap (.digest (MessageDigest/getInstance "SHA-256")
+                                          (.toByteArray buffer)))
+          high (bit-or (bit-and (.getLong digest) -61441) 32768)
+          low (bit-or (bit-and (.getLong digest) 4611686018427387903) Long/MIN_VALUE)]
+      (UUID. high low))))
 
 (defn prepare!
   "Validate a caller-supplied publication declaration and primary changes,

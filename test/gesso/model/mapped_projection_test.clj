@@ -1230,6 +1230,10 @@
                                                     mapping (assoc-in docs [:requests 0 :hidden] "other") [])))]
     (doseq [[mode reason] [[:valid nil]
                            [:valid-outbox nil]
+                           [:wrong-outbox-identity :historical-publication-identity-mismatch]
+                           [:wrong-outbox-slot :historical-publication-identity-mismatch]
+                           [:wrong-outbox-operation :historical-publication-record-mismatch]
+                           [:extra-outbox-field :historical-publication-record-mismatch]
                            [:duplicate-outbox :historical-publication-outbox-write-mismatch]
                            [:missing-outbox-guard :historical-publication-outbox-guard-mismatch]
                            [:wrong-outbox-guard :historical-publication-outbox-guard-mismatch]
@@ -1265,15 +1269,22 @@
                   bound-witness (peek (peek bound))
                   unguarded? (#{:unguarded :self-bound-unguarded} mode)
                   unguarded-ops (into [] (filter #(= :put-docs (first %))) (:tx-ops base))
-                  publication (outbox/prepare! {:intent-ids [(random-uuid)] :source-id "guard-history"
-                                                :operation :example/command :purpose :example/test :command-id "c1"}
+                  intent-id (case mode
+                              :wrong-outbox-identity (random-uuid)
+                              :wrong-outbox-slot (outbox/derived-intent-id "guard-history" :example/command "p1" "c1" 1)
+                              (outbox/derived-intent-id "guard-history" :example/command "p1" "c1" 0))
+                  publication (outbox/prepare! {:intent-ids [intent-id] :source-id "guard-history"
+                                                :operation (if (= :wrong-outbox-operation mode) :example/other :example/command)
+                                                :purpose :example/test :command-id "c1"}
                                                [{:topic :example/request :id "r1"}])
                   outbox-guard (first (:guard-ops publication))
-                  outbox-put (:tx-op publication)
+                  outbox-put (cond-> (:tx-op publication)
+                               (= :extra-outbox-field mode) (assoc-in [2 :unexpected] true))
                   [guards puts] (split-with #(string? (first %)) framed-ops)
                   published (into (conj (vec guards) outbox-guard) (conj (vec puts) outbox-put))
                   actual-base (case mode
-                                :valid-outbox published
+                                (:valid-outbox :wrong-outbox-identity :wrong-outbox-slot
+                                 :wrong-outbox-operation :extra-outbox-field) published
                                 :duplicate-outbox (conj published outbox-put)
                                 :missing-outbox-guard (conj framed-ops outbox-put)
                                 :wrong-outbox-guard (into (conj (vec guards) (assoc outbox-guard 1 (random-uuid)))
@@ -1289,7 +1300,8 @@
                                 :self-bound-duplicate-evidence (conj framed-ops [:put-docs :gesso_transition_evidence witness])
                                 (if unguarded? unguarded-ops framed-ops))
                   corrupted (case mode
-                              (:valid-outbox :duplicate-outbox :missing-outbox-guard :wrong-outbox-guard
+                              (:valid-outbox :wrong-outbox-identity :wrong-outbox-slot :wrong-outbox-operation :extra-outbox-field
+                               :duplicate-outbox :missing-outbox-guard :wrong-outbox-guard
                                :late-outbox-guard :extra-outbox-guard)
                               (peek (peek (envelope/bind-transition-envelope!
                                           (conj actual-base [:put-docs :gesso_transition_evidence witness]))))
