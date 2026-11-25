@@ -223,11 +223,69 @@
         (is (empty? (:unresolved dependencies)))
         (is (empty? (:non-safe dependencies)))))))
 
+(defn- constructor-obligation []
+  {:obligation-kind :encoded-child-cons-congruence
+   :parameters '[x :- Int y :- Int xs :- (List Int) ys :- (List Int)
+                 hx :- (= Int x y) ht :- (= (List Int) xs ys)]
+   :goal-form '(= (List Int) (List.cons Int x xs) (List.cons Int y ys))
+   :proof-script '[(rw hx) (rw ht)]})
+
+(defn- transitivity-obligation []
+  {:obligation-kind :encoded-parent-equality-composition
+   :parameters '[a :- (List Int) k :- (List Int) e :- (List Int)
+                 h1 :- (= (List Int) a k) h2 :- (= (List Int) k e)]
+   :goal-form '(= (List Int) a e)
+   :proof-script '[(rw h1) (exact h2)]})
+
+(defn- checked-application! [goal proof]
+  (let [env (ansatz/env)]
+    (when-not (kernel/verifies? env goal proof)
+      (throw (ex-info "Kernel rejected encoded composition." {})))
+    {:goal goal :proof proof
+     :dependencies (proof-pilot! 'qualify-proof-dependencies!
+                                 (proof-pilot! 'inspect-proof-dependencies env goal proof))}))
+
+(defn- closed-goal [form]
+  (proof-pilot! 'elaborate-source-proposition! {:parameters [] :goal-form form}))
+
+(defn- reflexivity! [form]
+  (proof-pilot! 'check-obligation!
+                {:parameters [] :goal-form form :proof-script '[(rfl)]}))
+
+(defn- compose-child-list! [constructor known expected]
+  ;; Work from the empty suffix toward the complete list, composing each
+  ;; entry equality with the preceding checked suffix proof. This does
+  ;; not prove that a decoded child can faithfully be represented by Int.
+  (when-not (= (count known) (count expected))
+    (throw (ex-info "Unequal encoded child arities." {})))
+  (reduce (fn [{tail-proof :proof :as tail} [k e]]
+            (let [head (reflexivity! (list '= 'Int k e))
+                  [_ kt et] (expr/get-app-args (:goal head))
+                  [_ ks es] (expr/get-app-args (:goal tail))
+                  goal (closed-goal (list '= '(List Int)
+                                         (list-form (into [k] (:known tail)))
+                                         (list-form (into [e] (:expected tail)))))
+                  proof (expr/app* (:proof constructor) kt et ks es (:proof head) tail-proof)]
+              (assoc (checked-application! goal proof)
+                     :known (into [k] (:known tail)) :expected (into [e] (:expected tail)))))
+          (assoc (reflexivity! '(= (List Int) (List.nil Int) (List.nil Int)))
+                 :known [] :expected [])
+          (reverse (map vector known expected))))
+
+(defn- compose-parent! [composition cardinality known expected actual]
+  (let [child-list (compose-child-list! (:constructor composition) known expected)
+        [_ a k] (expr/get-app-args (:goal cardinality))
+        [_ _ e] (expr/get-app-args (:goal child-list))
+        goal (closed-goal (list '= '(List Int) (list-form actual) (list-form expected)))
+        proof (expr/app* (get-in composition [:transitivity :proof]) a k e
+                         (:proof cardinality) (:proof child-list))]
+    {:child-list child-list :parent (checked-application! goal proof)}))
+
 (defn- established? [node]
   (#{:decoded-leaf-equality-checked :composed-map-equality-checked
      :empty-bag-checked} (:status node)))
 
-(defn- compose-value! [lemmas target path expected actual present?]
+(defn- compose-value! [lemmas composition target path expected actual present?]
   (let [site {:target target :path path}]
     (cond
       (not present?) (assoc site :status :premises-open :reason :missing-field)
@@ -235,7 +293,7 @@
       (if-not (and (map? actual) (every? keyword? (keys actual)))
         (assoc site :status :premises-open :reason :unsupported-map-shape)
         (let [ks (sort-by str (keys expected))
-              children (mapv (fn [k] (compose-value! lemmas target (conj path k)
+              children (mapv (fn [k] (compose-value! lemmas composition target (conj path k)
                                                      (get expected k) (get actual k)
                                                      (contains? actual k))) ks)
               parent (assoc site :children children :cardinality (count expected))]
@@ -245,7 +303,8 @@
             ;; by the already established child results, not map equality.
             (let [dictionary (mapv (fn [[k v]] [k v]) (sort-by (comp str key) actual))
                   codes (into {} (map-indexed (fn [i [k _]] [k i]) dictionary))
-                  known (mapv codes ks)
+                  expected-codes (mapv codes ks)
+                  known (mapv #(codes (peek (:path %))) children)
                   residual (into [] (keep-indexed (fn [i [k _]]
                                                     (when-not (contains? expected k) i))) dictionary)
                   ordered (into known residual)
@@ -257,19 +316,25 @@
                 (throw (ex-info "Invalid recursive entry encoding." site)))
               (if-not (= (count expected) (count actual))
                 (assoc parent :status :premises-open :reason :cardinality-mismatch)
-                (assoc parent :status :composed-map-equality-checked
-                       :application (check-instance! (get lemmas (count expected)) parent)))))))
+                (let [application (check-instance! (get lemmas (count expected)) parent)]
+                  (assoc parent :status :composed-map-equality-checked
+                         :application application
+                         :encoded-composition (compose-parent! composition application
+                                                               known expected-codes ordered))))))))
       (= expected actual) (assoc site :status :decoded-leaf-equality-checked)
       :else (assoc site :status :premises-open :reason :leaf-equality-open))))
 
 (defn check-structure!
   "Compose concrete decoded child equalities bottom-up with the checked
    cardinality lemma. Leaf comparisons and the map encoding bridge are
-   executable premises; the kernel proves the encoded parent equality.
+   executable premises; the kernel composes encoded child-list equality
+   and cardinality equality into the encoded parent equality.
    No parent comparison against the expected map is used as a premise."
   [original targets docs journal prefix actual]
   (let [abstract (check! original targets docs journal prefix)
         groups (get-in abstract [:rule-description :groups])
+        composition {:constructor (proof-pilot! 'check-obligation! (constructor-obligation))
+                     :transitivity (proof-pilot! 'check-obligation! (transitivity-obligation))}
         lemmas (into {} (map (juxt #(get-in % [:description :expected-cardinality]) identity))
                      (:checked abstract))]
     (when-not (and (map? actual) (= (set (keys actual)) (set (map :target groups)))
@@ -282,10 +347,10 @@
                                       {:target target :status :empty-bag-checked}
                                       {:target target :status :premises-open :reason :unexpected-row})
                             :exact-row (if (= 1 (count bag))
-                                         (compose-value! lemmas target [] expected (first bag) true)
+                                         (compose-value! lemmas composition target [] expected (first bag) true)
                                          {:target target :status :premises-open :reason :row-cardinality-mismatch}))))
                       groups)]
-      {:type ::recursive-cardinality-pilot :roots roots
+      {:type ::recursive-cardinality-pilot :roots roots :composition-lemmas composition
        :status (if (and (seq roots) (every? established? roots))
                  :all-concrete-structures-composed :structural-premises-open)
        :scope :source-derived-concrete-decoded-structure-composition
@@ -313,9 +378,13 @@
     (is (= :not-issued (:certificate report)))
     (is (= :not-established (:sql-refinement report)))
     (is (contains? (:open-obligations report) :general-recursive-composition-soundness))
-    (doseq [{:keys [children application]} maps]
+    (doseq [{:keys [children application encoded-composition]} maps]
       (is (every? established? children))
-      (is (kernel/verifies? (ansatz/env) (:goal application) (:proof application))))
+      (is (kernel/verifies? (ansatz/env) (:goal application) (:proof application)))
+      (doseq [{:keys [goal proof dependencies]} (vals encoded-composition)]
+        (is (kernel/verifies? (ansatz/env) goal proof))
+        (is (empty? (:unresolved dependencies)))
+        (is (empty? (:non-safe dependencies)))))
     (let [bad (run (assoc-in bags (into [slot 0] leaf) "changed"))
           by-path (into {} (map (juxt (juxt :target :path) identity)) (nodes bad))]
       (is (= :structural-premises-open (:status bad)))
@@ -367,6 +436,27 @@
     (is (contains? (:open-obligations report) :general-structural-soundness))
     (is (= :not-established (:sql-refinement report)))
     (is (= :not-issued (:certificate report)))))
+
+(deftest constructor-and-transitivity-compose-encoded-child-lists
+  (let [constructor (proof-pilot! 'check-obligation! (constructor-obligation))
+        transitivity (proof-pilot! 'check-obligation! (transitivity-obligation))
+        env (ansatz/env)]
+    (doseq [[ob checked] [[(constructor-obligation) constructor]
+                          [(transitivity-obligation) transitivity]]]
+      (is (= (:goal checked) (proof-pilot! 'elaborate-source-proposition! ob)))
+      (is (kernel/verifies? env (:goal checked) (:proof checked)))
+      (is (empty? (get-in checked [:dependencies :non-safe])))
+      (is (empty? (get-in checked [:dependencies :unresolved])))
+      (is (false? (kernel/verifies? env
+                                    (proof-pilot! 'elaborate-source-proposition!
+                                                  (update ob :parameters #(subvec % 0 (- (count %) 3))))
+                                    (:proof checked)))))
+    (doseq [codes [[] [0] [4 0 3] (vec (range 12))]]
+      (let [{:keys [goal proof]} (compose-child-list! constructor codes codes)]
+        (is (= goal (closed-goal (list '= '(List Int) (list-form codes) (list-form codes)))))
+        (is (kernel/verifies? env goal proof))))
+    (is (thrown? Exception (compose-child-list! constructor [0 1] [0 2])))
+    (is (thrown? clojure.lang.ExceptionInfo (compose-child-list! constructor [0] [])))))
 
 (defn -main [& _]
   (binding [ansatz/*verbose* false] (ansatz/load-init!))
