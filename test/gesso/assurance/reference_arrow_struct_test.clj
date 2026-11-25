@@ -134,3 +134,62 @@
           (.awaitSourceBlocking (db/primary-db node) id (Duration/ofSeconds 10))
           (check-document-keys! node id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-empty-structs! [node id empty-id nullable-id rows]
+  (let [data (#'fixture/retained-operation-bytes node id)
+        decoded (arrow/decode-empty-struct-operations data)
+        expected (mapv #(hash-map :kind :sql :query "ASSERT ($1 IS NOT NULL AND ($2 = 0) AND $3 IS NOT NULL)" :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ _ values] (#'fixture/buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/empty-struct-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded)))
+    (is (= [(count rows)] (:logged-operation-spans decoded)))
+    (is (= rows (:rows (arrow/decode-empty-struct-arguments args))))
+    (is (= :unsupported-arrow-struct-field-count (:reason (arrow/decode-document-key-operations data))))
+    (is (= :unsupported-sql-argument (:reason (provider/observe-source-message! node id))))
+    (is (= (assoc-in rows [0 1] 99)
+           (:rows (arrow/decode-empty-struct-arguments (#'fixture/edit-long args values 99)))))
+    (doseq [[bad reason] [[(#'fixture/edit-byte args 0 0) :invalid-arrow-framing]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]
+                          [(Arrays/copyOf args (inc (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-empty-struct-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (let [data (#'fixture/retained-operation-bytes node empty-id)
+          r (arrow/decode-empty-struct-operations data)
+          args (:argument-bytes (first (:groups (arrow/decode-operations data))))]
+      (is (= :decoded (:status r)))
+      (is (= [3] (:logged-operation-spans r)))
+      (is (= (vec (repeat 3 {:kind :sql :query "ASSERT $1 IS NOT NULL" :args [{}]})) (:operations r)))
+      (is (= [[{}] [{}] [{}]] (:rows (arrow/decode-empty-struct-arguments args)))))
+    (let [r (arrow/decode-empty-struct-operations (#'fixture/retained-operation-bytes node nullable-id))]
+      (is (= :unsupported (:status r)))
+      (is (not (contains? r :operations))))))
+
+(deftest selected-empty-structs-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-empty-struct-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows [[{} 0 {:nested {} :status :open}]
+              [{} 1 {:nested {} :status :closed}]]]
+    (is (= [[]] (:rows (arrow/decode-empty-struct-arguments nil))))
+    (try
+      (let [[id empty-id nullable-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! (mapv #(into ["ASSERT (? IS NOT NULL AND (? = 0) AND ? IS NOT NULL)"] %) rows))
+                    empty-id (submit! (vec (repeat 3 ["ASSERT ? IS NOT NULL" {}])))
+                    nullable-id (submit! [["ASSERT ? IS NOT NULL" {:nested {}}]
+                                          ["ASSERT ? IS NOT NULL" {:nested nil}]])]
+                (check-empty-structs! node id empty-id nullable-id rows)
+                [id empty-id nullable-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) nullable-id (Duration/ofSeconds 10))
+          (check-empty-structs! node id empty-id nullable-id rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

@@ -3524,3 +3524,26 @@ Empty structs, nullable fields, document puts, IID correspondence and
 aggregate reference document budgets remain open. No production wiring,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates were not rerun.
+
+* v2670 — decode selected empty Arrow structs
+
+Qualify the observed zero-field nonnullable Struct in a new profile.
+Reuse exact node row-count, null-count and zero-length validity checks;
+reconstruct an empty map per retained row without losing invocation
+cardinality, including inside canonical-key structs. Preserve the
+prior nonempty-struct profiles and reject nullable fields.
+
+Focused JVM: 24 tests / 1370 assertions, zero failures or errors across
+reference Arrow operations, struct and source payload suites. Persistent
+retained empty maps alongside scalar and nested fields match expected
+rows before and after reopening. A separate three-row empty-map-only
+relation preserves all invocations with no value body. Check scalar
+mutation, malformed framing, nullable-field rejection and previous
+profile restrictions. The provider SQL-map observer still rejects.
+XTDB logged shutdown cancellation; the test process exited zero.
+
+Selected empty-struct profile v1. Nullable and absent fields, actual
+document puts, independent IID correspondence and aggregate reference
+document budgets remain open. No production wiring, certificate or
+CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.

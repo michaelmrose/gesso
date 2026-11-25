@@ -301,7 +301,8 @@
       (= :struct-map kind)
       (let [n (.childrenLength f)]
         (require! (< depth 8) :arrow-struct-depth-limit)
-        (require! (<= 1 n 256) :unsupported-arrow-struct-field-count)
+        (require! (<= (if (contains? allowed :empty-struct) 0 1) n 256)
+                  :unsupported-arrow-struct-field-count)
         (let [fields (mapv (fn [i]
                              (let [^Field child (.children f i)
                                    name (.name child)]
@@ -915,3 +916,27 @@
   "Expand selected SQL groups with diagnostic canonical document key maps."
   [bytes]
   (expand-fixed-operations bytes document-key-base document-key-rows!))
+
+(def empty-struct-profile :xtdb-2.2.0-beta1/selected-empty-struct-arrow-operations-v1)
+(def ^:private empty-struct-base (assoc base :profile empty-struct-profile))
+
+(defn- empty-struct-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :struct-map :document-keys :empty-struct}))
+
+(defn decode-empty-struct-arguments
+  "Decode selected canonical-key structs including zero-field nonnullable
+   maps. Preserve row cardinality; nullable and absent fields are excluded."
+  [bytes]
+  (try
+    (assoc empty-struct-base :status :decoded :rows (empty-struct-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc empty-struct-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc empty-struct-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc empty-struct-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-empty-struct-operations
+  "Expand selected diagnostic SQL groups including empty struct maps."
+  [bytes]
+  (expand-fixed-operations bytes empty-struct-base empty-struct-rows!))
