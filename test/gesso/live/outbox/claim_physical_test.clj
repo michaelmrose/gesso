@@ -20,6 +20,7 @@
             [gesso.assurance.observed-correspondence :as correspondence]
             [gesso.model.inductive-plan :as inductive-plan]
             [gesso.live.outbox.initialization :as initialization]
+            [gesso.live.outbox.history-coverage :as history]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-frame :as frame]
             [gesso.model.tx :as tx]
@@ -581,6 +582,16 @@
                                                        (= :committed (:result %))) @writers)) 2))
                        (Thread/sleep 20)
                        (recur))))
+                 (let [audit (history/audit! node (:issued preparations) 32)
+                       steps (:steps audit)
+                       groups (group-by :classification steps)]
+                   (is (= :observed-interval-checked (:status audit)))
+                   (is (= :none (:authority audit)))
+                   (is (= (cond-> #{id} valid? (conj loser-id))
+                          (set (map :command-id (:verified-mapped-transition groups)))))
+                   (is (= 1 (count (:aborted-stutter groups))))
+                   (is (= 4 (count (:observed-mapped-stutter groups))))
+                   (is (empty? (:unclassified groups))))
                  (let [entries @writers
                        claims (filter #(= :claim (:kind %)) entries)
                        workers (filter #(= :worker (:kind %)) entries)

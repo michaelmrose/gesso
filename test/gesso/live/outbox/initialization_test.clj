@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
+            [gesso.live.outbox.history-coverage :as history]
             [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.writer-policy :as policy]
@@ -356,4 +357,36 @@
             (is (false? (writer envelope)))
             (is (= 2 @handoffs)))
           (is (= :invalid-mapped-writer-activation (reason #(policy/activate-policy! writer))))
+          (finally (release)))))))
+
+(deftest bounded-history-audit-never-hides-an-intervening-mapped-change
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (is (= :missing-history-initialization (reason #(history/audit! node admission 16))))
+          (policy/activate-policy! writer)
+          (let [handle (xtdb/adapter-connectable! node)
+                initial (history/audit! handle admission 16)]
+            (is (= :observed-interval-checked (:status initial)))
+            (is (= [] (:steps initial)))
+            ;; Raw writes deliberately bypass mediation to test the independent audit.
+            (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+            (is (= :assert-failed (assert-result #(xt/execute-tx node [["ASSERT FALSE"]]))))
+            (let [report (history/audit! handle admission 16)]
+              (is (= :observed-interval-checked (:status report)))
+              (is (= [:observed-mapped-stutter :aborted-stutter] (mapv :classification (:steps report))))
+              (is (= :none (:authority report)))
+              (is (contains? (:open-obligations report) :infrastructure-writer-footprint-coverage)))
+            (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :item-count 99}]])
+            (xt/execute-tx node seed)
+            (let [report (history/audit! handle admission 16)]
+              (is (= :unclassified-steps (:status report)))
+              (is (= [:observed-mapped-stutter :aborted-stutter :unclassified :unclassified]
+                     (mapv :classification (:steps report))))
+              (is (= :history-step-limit-exceeded (reason #(history/audit! handle admission 3))))
+              (is (= :missing-history-initialization (reason #(history/audit! handle (admission!) 16))))))
           (finally (release)))))))
