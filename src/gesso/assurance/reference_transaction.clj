@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v4)
+(def profile :selected-current-state-transaction-v5)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -15,10 +15,6 @@
 
 (defn- id? [x]
   (and (string? x) (not (str/blank? x)) (<= (count x) 1024)))
-
-(defn- scalar? [x]
-  (or (and (string? x) (<= (count x) 4096)) (boolean? x)
-      (and (integer? x) (<= Long/MIN_VALUE x Long/MAX_VALUE))))
 
 (defn- equality-domain [v]
   ;; Homogeneous closed domains only; no SQL coercion, null or composites.
@@ -41,8 +37,12 @@
       (reject! :unsupported-reference-equality-operands))
     (if (= left right) :assert-true :assert-false)))
 
+(defn- scalar? [x]
+  (#{:i64 :boolean :string :keyword} (equality-domain x)))
+
 (defn- document? [doc]
   (and (map? doc) (nil? (meta doc)) (id? (:xt/id doc))
+       (= :string (equality-domain (:xt/id doc)))
        (<= (count doc) 256)
        (every? (fn [[k v]]
                  (or (= :xt/id k)
@@ -119,6 +119,59 @@
       :assert-field-count (when-let [doc (get rows id)]
                             (= expected (count doc))))))
 
+;; Exact selected mapped scalar guard; each field contributes three
+;; comparisons, with identical bound operands. Do not model STR generally.
+(def ^:private mapped-pattern
+  #"ASSERT \? = \(SELECT COUNT\(\*\) FROM (gesso_[a-z0-9_]+) WHERE (.+)\)")
+
+(def ^:private mapped-column-pattern
+  #"\(([a-z][a-z0-9]*|_id) = \?\)")
+
+(defn- mapped-assertion! [op [_ table predicate]]
+  (let [clauses (str/split predicate #" AND " -1)
+        args (subvec op 1)]
+    (when-not (and (<= 3 (count clauses) (* 3 256))
+                   (zero? (mod (count clauses) 3))
+                   (= (inc (count clauses)) (count args))
+                   (instance? Long (first args)) (= 1 (first args)))
+      (reject! :unsupported-reference-mapped-assertion))
+    (let [checks
+          (mapv (fn [[ordinary printed array-printed] [a b c]]
+                  (let [[_ col] (re-matches mapped-column-pattern ordinary)]
+                    (when-not (and col
+                                   (= printed (str "(STR(" col ") = STR(?))"))
+                                   (= array-printed (str "(STR(ARRAY[" col "]) = STR(ARRAY[?]))"))
+                                   (scalar? a) (= (equality-domain a) (equality-domain b)
+                                                  (equality-domain c))
+                                   (= a b c))
+                      (reject! :unsupported-reference-mapped-assertion))
+                    [(if (= "_id" col) :xt/id (keyword col)) a]))
+                (partition 3 clauses) (partition 3 (subvec args 1)))
+          [id-field id] (first checks)]
+      (when-not (and (= :xt/id id-field) (id? id)
+                     (= :string (equality-domain id))
+                     (= (count checks) (count (distinct (map first checks)))))
+        (reject! :unsupported-reference-mapped-assertion))
+      {:kind :assert-mapped :table (keyword table) :id id :checks checks})))
+
+(defn- mapped-matches! [working {:keys [table id checks]}]
+  (let [row (get-in working [table id])]
+    (and row
+         ;; Validate every reached present comparison, without relying on
+         ;; SQL evaluation order or short-circuiting the field checks.
+         (every? true?
+                 (mapv (fn [[field expected]]
+                         (if-not (contains? row field)
+                           false
+                           (let [actual (get row field)
+                                 a (equality-domain actual)
+                                 b (equality-domain expected)]
+                             (cond
+                               (= a b) (= actual expected)
+                               (= #{a b} #{:string :keyword}) false
+                               :else (reject! :unsupported-reference-mapped-domain)))))
+                       checks)))))
+
 (defn- check-op! [op]
   (when-not (and (vector? op) (nil? (meta op)) (seq op))
     (reject! :unsupported-reference-operation))
@@ -132,6 +185,8 @@
     (count-assertion! op :assert-row-count (re-matches count-pattern (first op)))
     (and (string? (first op)) (re-matches field-count-pattern (first op)))
     (count-assertion! op :assert-field-count (re-matches field-count-pattern (first op)))
+    (and (string? (first op)) (re-matches mapped-pattern (first op)))
+    (mapped-assertion! op (re-matches mapped-pattern (first op)))
     (= :put-docs (first op))
     (let [docs (subvec op (min 2 (count op)))]
       (when-not (and (table? (second op)) (<= 1 (count docs) 16384)
@@ -144,8 +199,8 @@
 (defn execute
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-id document}}. Puts replace entire documents in order;
-   literal, homogeneous parameter equality, selected row-read and count
-   assertions can abort and return the original state. Reads see the tentative state
+   literal, homogeneous parameter equality, selected row-read, count
+   and mapped scalar assertions can abort and return the original state. Reads see the tentative state
    produced by preceding operations. The full vector is structurally validated
    before evaluation, including operations after a false guard; reached reads
    also check the stored operand domain.
@@ -169,6 +224,10 @@
                                (recur working (inc i))
                                (assoc report :status :predicted :committed? false
                                       :state state :failed-assertion-index i))
+                :assert-mapped (if (mapped-matches! working kind)
+                                 (recur working (inc i))
+                                 (assoc report :status :predicted :committed? false
+                                        :state state :failed-assertion-index i))
                 (:assert-row-count :assert-field-count)
                 (if (count-matches? working kind)
                   (recur working (inc i))

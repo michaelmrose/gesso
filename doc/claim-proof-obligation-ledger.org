@@ -1862,3 +1862,32 @@ general SQL, nested mapped value predicates, temporal semantics or a
 universal provider refinement theorem. No production assurance status
 changes or CLM-R2 premise is retired. Full project, physical Claim,
 Chromium and independent proof gates were not rerun.
+* v2609 — model selected mapped scalar document guards
+
+Extend the independent reference document fragment to restricted keyword
+values, including qualified keywords. Require signed JVM longs and
+well-formed bounded Unicode strings consistently in stored documents.
+Recognize the exact generated mapped scalar COUNT(*) guard with identity
+first and three comparison clauses per field: equality, STR equality and
+singleton-array STR equality, each binding the identical typed value.
+Interpret the combined predicate directly over tentative rows, not by
+calling the production formatter or emulating arbitrary SQL STR. Missing
+fields fail; homogeneous values compare exactly; keyword/string pairs
+are distinct; other reached cross-domain comparisons remain unsupported.
+Retain separate field-count guards for additional-field detection.
+Reference profile v5; history v19 unchanged.
+
+Final reference JVM namespace: 7 tests / 942 assertions, zero failures
+or errors. Thirteen new differential transactions use the actual mapped
+scalar formatter and compare outcomes, complete selected visible maps
+and retained envelopes, carrying forward independent predictions only.
+Pure regressions reject changed repeated operands, invalid guard shapes,
+unsupported domains and invalid document values. The selected guard
+uses Gesso-prefixed tables and simple unquoted field identifiers; general
+SQL identifier validity, nested journal structures, additional scalar
+domains and temporal behavior are outside this evidence.
+
+This is finite empirical correspondence, not a universal SQL refinement
+or full mapped value language theorem. No production assurance status
+changes or CLM-R2 premise is retired. Full project, physical Claim,
+Chromium and separate proof gates were not rerun.

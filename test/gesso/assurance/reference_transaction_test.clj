@@ -1,5 +1,6 @@
 (ns gesso.assurance.reference-transaction-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-transaction :as reference]
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.model.tx :as tx]
@@ -158,6 +159,59 @@
     (is (= 1 (:failed-assertion-index
               (reference/execute initial [card-a (field-count 2 "a")]))))))
 
+(def ^:private mapped-table :gesso_refmapped)
+
+(defn- mapped-put [doc]
+  [:put-docs mapped-table (assoc doc :xt/id "a")])
+
+(defn- mapped-guard [checks]
+  (tx/format-assertion
+   (tx/assert-document-decoded-current mapped-table "a" checks)))
+
+(def ^:private mapped-cases
+  [[true [(mapped-put {:value :open :active true})
+          (mapped-guard [[:value :open] [:active true]])]]
+   [false [(mapped-guard [[:value :closed]]) put-other]]
+   [false [(mapped-put {:value :claim/status})
+           (mapped-guard [[:value :other/status]])]]
+   [true [(mapped-put {:value :claim/status})
+          (mapped-guard [[:value :claim/status]])]]
+   [false [(mapped-put {:value "open"}) (mapped-guard [[:value :open]])]]
+   [false [(mapped-put {:value :open}) (mapped-guard [[:value "open"]])]]
+   [true [(mapped-put {:value "café"}) (mapped-guard [[:value "café"]])]]
+   [false [(mapped-guard [[:value "cafe\u0301"]])]]
+   [true [(mapped-put {:value Long/MIN_VALUE :active false})
+          (mapped-guard [[:value Long/MIN_VALUE] [:active false]])]]
+   [false [(mapped-guard [[:value Long/MAX_VALUE]])]]
+   [false [(mapped-put {:value 3}) (mapped-guard [[:active false]])]]
+   [true [(mapped-put {:value :open}) (mapped-guard [[:value :open]])
+          (tx/format-assertion (tx/assert-document-field-count mapped-table "a" 2))]]
+   [false [(mapped-put {:value :open :active true}) (mapped-guard [[:value :open]])
+           (tx/format-assertion (tx/assert-document-field-count mapped-table "a" 2))]]])
+
+(deftest independent-mapped-scalar-guards
+  (let [final (reduce (fn [state [expected ops]]
+                        (let [r (reference/execute state ops)]
+                          (is (= :predicted (:status r)) (pr-str ops))
+                          (is (= expected (:committed? r)) (pr-str ops))
+                          (if expected
+                            (is (not (contains? r :failed-assertion-index)))
+                            (is (= state (:state r))))
+                          (:state r))) initial mapped-cases)]
+    (is (= {:xt/id "a" :value :open} (get-in final [mapped-table "a"]))))
+  (let [guard (mapped-guard [[:value :open]])]
+    (doseq [ops [[(assoc guard 2 "other")]
+                 [(assoc guard 5 :closed)]
+                 [(assoc guard 1 0)]
+                 [(pop guard)]
+                 [(assoc guard 0 (str/replace (first guard) "STR(ARRAY[value])" "STR(value)"))]
+                 [(mapped-put {:value true}) guard]
+                 [["ASSERT FALSE"] (pop guard)]]]
+      (let [r (reference/execute initial ops)]
+        (is (= :unsupported (:status r)) (pr-str ops))
+        (is (not (contains? r :state)))
+        (is (not (contains? r :committed?)))))))
+
 (deftest unsupported-reference-input-does-not-predict
   (doseq [ops [[] [(table-count -1)] [(table-count 16385)]
                [["ASSERT ? = (SELECT COUNT(*) FROM gesso_refcard)" nil]]
@@ -193,6 +247,9 @@
                [[:put-docs {:into :refprobe :valid-from :now} a]]
                [[:put-docs :refprobe (assoc a :xt/valid-to 1)]]
                [[:put-docs :refprobe (assoc a :value nil)]]
+               [[:put-docs :refprobe (assoc a :value 1N)]]
+               [[:put-docs :refprobe (assoc a :value (str (char 0xd800)))]]
+               [[:put-docs :refprobe (assoc a :value (keyword "bad space"))]]
                [[:put-docs :refprobe (assoc a :value {:nested 1})]]
                [[:put-docs :refprobe (assoc a :xt/id 1)]]
                [[:put-docs :refprobe a replacement]]
@@ -213,7 +270,7 @@
                        (let [indexed (into {} (map (juxt :xt/id identity)) rows)]
                          (is (= (count rows) (count indexed)) "No duplicate visible document IDs")
                          [table indexed])))))
-        [:refprobe :refother card-table]))
+        [:refprobe :refother card-table mapped-table]))
 
 (deftest reference-predictions-match-selected-real-xtdb-executions
   (with-open [node (xtn/start-node {})]
@@ -242,7 +299,8 @@
                               [:put-docs :refother {:xt/id "a" :value (+ 200 i)}]])
                            equality-cases)
                           (map second read-cases)
-                          (map second cardinality-cases)))]
+                          (map second cardinality-cases)
+                          (map second mapped-cases)))]
         (when-let [ops (first cases)]
           (let [predicted (reference/execute state ops)
                 id (:tx-id (xt/submit-tx node ops))
