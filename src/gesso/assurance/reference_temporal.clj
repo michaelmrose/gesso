@@ -280,3 +280,60 @@
           (not= (:gesso.live.outbox/lease-until row) (nth guard 3))
           (assoc result :status :mismatch :reason :lease-deadline)
           :else (assoc result :status :matched))))))
+
+(def worker-profile :selected-pending-acquisition-v1)
+
+(defn- supported-claim? [claim]
+  (and (map? claim) (nil? (meta claim))
+       (every? #{:intent-id :lease-id :worker-id :source-id :now :lease-until} (keys claim))
+       (uuid? (:intent-id claim)) (uuid? (:lease-id claim))
+       (string? (:worker-id claim)) (not (str/blank? (:worker-id claim)))
+       (or (not (contains? claim :source-id))
+           (and (string? (:source-id claim)) (not (str/blank? (:source-id claim)))))
+       (clock-instant? (:now claim)) (clock-instant? (:lease-until claim))
+       (<= 1 (.toMillis (java.time.Duration/between (:now claim) (:lease-until claim))) 300000)))
+
+(defn predict-pending-acquisition
+  "Compose a pinned observation, selected pending eligibility, independent
+   physical operation construction and later temporal replay. The observation
+   may be stale relative to the supplied prefix. No live frontier, trusted
+   caller, arbitrary writer closure or external delivery is established."
+  [prefix observed-system observed-valid transaction-time claim]
+  (let [result {:profile worker-profile :authority :none :certificate :not-issued}
+        prior (replay prefix)]
+    (if-not (and (supported-claim? claim) (= :predicted (:status prior))
+                 (clock-instant? transaction-time)
+                 (before? (:system-time (peek (:history prior))) transaction-time))
+      (assoc result :status :unsupported)
+      (let [{:keys [status row]} (observe-outbox-at prior observed-system observed-valid (:intent-id claim))
+            unavailable (fn [reason] (assoc result :status :predicted :outcome :unavailable
+                                            :reason reason :ops [] :replay prior))]
+        (cond
+          (not= :predicted status) (assoc result :status :unsupported)
+          (nil? row) (unavailable :missing)
+          (not (and (= :gesso.live.outbox/publication-intent (:gesso.live.outbox/type row))
+                    (= 1 (:gesso.live.outbox/version row))
+                    (string? (:gesso.live.outbox/source-id row))
+                    (qualified-keyword? (:gesso.live.outbox/operation row))
+                    (qualified-keyword? (:gesso.live.outbox/purpose row))))
+          (assoc result :status :unsupported)
+          (and (contains? claim :source-id) (not= (:source-id claim) (:gesso.live.outbox/source-id row)))
+          (unavailable :source-mismatch)
+          (not= :pending (:gesso.live.outbox/status row)) (unavailable :not-pending)
+          :else
+          (let [deadline (:lease-until claim)
+                doc (assoc (dissoc row :xt/system-from)
+                           :gesso.live.outbox/status :leased
+                           :gesso.live.outbox/lease-id (:lease-id claim)
+                           :gesso.live.outbox/lease-owner (:worker-id claim)
+                           :gesso.live.outbox/lease-until deadline)
+                ops [["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)"
+                      (:intent-id claim) (:xt/system-from row)]
+                     ["ASSERT CURRENT_TIMESTAMP < ?" deadline]
+                     ["ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" deadline]
+                     [:put-docs :gesso_live_outbox doc]]
+                after (replay (conj prefix {:system-time transaction-time :ops ops}))]
+            (if (= :predicted (:status after))
+              (assoc result :status :predicted :ops ops :replay after
+                     :outcome (if (:committed? (peek (:history after))) :acquired :contended))
+              (assoc result :status :unsupported))))))))

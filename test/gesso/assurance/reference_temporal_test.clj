@@ -771,3 +771,73 @@
           (is (= :matched (:status (temporal/lease-fence-correspondence
                                     r (worker-time 3) (worker-time 3) (first @captured)))))
           (is (= next-lease (nth (last @captured) 2))))))))
+
+(defn- pending-claim [id now deadline]
+  {:intent-id id :lease-id other-intent-id :worker-id "worker-a"
+   :source-id "reference-source" :now (worker-time now) :lease-until (worker-time deadline)})
+
+(def ^:private acquisition-seed
+  {:system-time (worker-time 0)
+   :ops [[:put-docs outbox/intent-table pending-intent
+          (source-intent other-intent-id "reference-source")]]})
+
+(def ^:private acquisition-cases
+  ;; [observation time, transaction time, claim, expected outcome, reason]
+  [[0 1 (pending-claim third-intent-id 0 180) :unavailable :missing]
+   [0 1 (assoc (pending-claim intent-id 0 180) :source-id "wrong") :unavailable :source-mismatch]
+   [0 1 (pending-claim intent-id 0 180) :acquired nil]
+   [1 2 (pending-claim intent-id 1 180) :unavailable :not-pending]
+   [0 2 (pending-claim intent-id 1 180) :contended nil]
+   [2 3 (pending-claim other-intent-id 2 3) :contended nil]
+   [3 4 (pending-claim other-intent-id 5 305) :contended nil]
+   [4 5 (pending-claim other-intent-id 5 305) :acquired nil]])
+
+(deftest independently-composed-pending-acquisition
+  (let [prefix [acquisition-seed]
+        claim (pending-claim intent-id 0 180)
+        predict #(temporal/predict-pending-acquisition prefix (worker-time 0) (worker-time 0)
+                                                       (worker-time 1) %)]
+    (doseq [invalid [(assoc claim :worker-id "") (assoc claim :source-id nil)
+                     (assoc claim :now nil) (assoc claim :lease-until (worker-time 0))
+                     (assoc claim :lease-until (worker-time 301)) (assoc claim :extra true)]]
+      (is (= :unsupported (:status (predict invalid))))
+      (is (not (contains? (predict invalid) :ops))))
+    (let [r (predict claim)]
+      (is (= :predicted (:status r)))
+      (is (= :acquired (:outcome r)))
+      (is (= :none (:authority r)))
+      (is (= :not-issued (:certificate r)))
+      (is (= 4 (count (:ops r))))
+      (is (= :leased (get-in (temporal/visible-at (:replay r) (worker-time 1) (worker-time 1))
+                             [outbox/intent-table intent-id :gesso.live.outbox/status]))))))
+
+(deftest composed-pending-acquisition-matches-worker-and-xtdb
+  (with-open [node (xtn/start-node {})]
+    (letfn [(submit! [time ops]
+              (let [id (:tx-id (xt/submit-tx node ops {:system-time time}))]
+                (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+                (:committed (first (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))]
+      (is (true? (submit! (:system-time acquisition-seed) (:ops acquisition-seed))))
+      (let [execute! live.xtdb/execute-tx!
+            prefix
+            (reduce (fn [prefix [observed tx-time claim outcome reason]]
+                      (let [s (worker-time observed) time (worker-time tx-time)
+                            predicted (temporal/predict-pending-acquisition prefix s s time claim)
+                            captured (atom [])
+                            actual (with-redefs [frontier/q-from! (fn [_ [_ id]]
+                                                                  (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? WHERE _id = ?" s s id]))
+                                                 live.xtdb/execute-tx! (fn [connectable ops]
+                                                                         (swap! captured conj ops)
+                                                                         (execute! connectable ops {:system-time time}))]
+                                     (acquisition/acquire-pending! node claim))]
+                        (is (= :predicted (:status predicted)))
+                        (is (= outcome (:outcome predicted) (:status actual)))
+                        (is (= reason (:reason predicted) (:reason actual)))
+                        (is (= (if (seq (:ops predicted)) [(:ops predicted)] []) @captured))
+                        (is (= (frequencies (coalesce-valid (:rectangles (:replay predicted))))
+                               (frequencies (coalesce-valid (provider-rectangles node outbox/intent-table)))))
+                        (if (seq (:ops predicted))
+                          (conj prefix {:system-time time :ops (:ops predicted)})
+                          prefix)))
+                    [acquisition-seed] acquisition-cases)]
+        (is (= 6 (count prefix)))))))

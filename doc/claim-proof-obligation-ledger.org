@@ -2283,3 +2283,32 @@ acquisition, lease ownership proof, complete worker lifecycle refinement
 or universal provider refinement. No production assurance status changes
 and no CLM-R2 premise is retired. Full project, physical Claim, Chromium
 and independent proof gates were not rerun.
+
+* v2625 — compose selected pending worker acquisition
+
+Independently reconstruct a pinned observed intent, validate the selected
+claim domain and pending eligibility (including optional source scope),
+construct the expected physical CAS, clock assertions and replacement,
+and replay the proposed transaction at a supplied later system time.
+Distinguish unavailable observations from contended submissions and
+successful acquisition; unsupported claims do not yield operations.
+Worker profile v1; observation v1, temporal v10, current-state v13 and
+history v19 unchanged.
+
+Combined reference JVM: 43 tests / 5154 assertions, zero failures or
+errors. Eight selected worker calls compare independent outcomes, exact
+operation sequences and complete outbox history rectangles against the
+production pending acquisition function and embedded XTDB. Five calls
+submit real transactions, including stale observations, expired and
+excessive provider-relative deadlines and successful acquisition; three
+unavailable calls submit none. The test pins provider reads and wraps the
+real transaction adapter solely to supply the explicit system time and
+capture operations. The next reference prefix uses predicted operations,
+not observed outcomes or rows. Pure regressions reject unsupported claims.
+
+This is finite composed pending acquisition correspondence, not live
+frontier acquisition, general claim validation, reclamation, acknowledgment,
+external delivery, arbitrary writer closure or universal provider
+refinement. No production assurance status changes and no CLM-R2 premise
+is retired. Full project, physical Claim, Chromium and independent proof
+gates were not rerun.
