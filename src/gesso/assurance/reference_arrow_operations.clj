@@ -7,10 +7,11 @@
             [gesso.assurance.reference-arrow-schema :refer [scalar-kind!]])
   (:import (java.nio ByteBuffer ByteOrder)
            (java.nio.charset StandardCharsets CharacterCodingException)
-           (java.util UUID)
+           (java.util UUID HexFormat)
            (java.time Instant ZoneId)
            (org.apache.arrow.flatbuf Message MessageHeader
-                                    Schema RecordBatch Field Type Union UnionMode Endianness)))
+                                    Schema RecordBatch Field Type Union UnionMode Endianness
+                                    FixedSizeBinary Timestamp TimeUnit)))
 
 (def profile :xtdb-2.2.0-beta1/selected-sql-arrow-operations-v1)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
@@ -914,3 +915,93 @@
   "Expand selected diagnostic SQL groups with nullable structured-map fields."
   [bytes]
   (expand-fixed-operations bytes nullable-map-struct-base nullable-map-struct-rows!))
+
+(def put-envelope-profile :xtdb-2.2.0-beta1/selected-single-put-envelope-arrow-v1)
+(def ^:private put-envelope-base (assoc base :profile put-envelope-profile))
+
+(defn- single-union-field! [^Field f name]
+  (field! f name Type/Union false 1)
+  (let [^Union u (.type f (Union.))]
+    (require! (and u (= UnionMode/Dense (.mode u)) (zero? (.typeIdsLength u)))
+              :unsupported-arrow-union))
+  (.children f 0))
+
+(defn- put-schema! [^Message m ^ByteBuffer body]
+  (let [^Schema schema (.header m (Schema.))]
+    (require! (and schema (zero? (.remaining body)) (= Endianness/Little (.endianness schema))
+                   (= 1 (.fieldsLength schema)) (zero? (.featuresLength schema))
+                   (zero? (.customMetadataLength schema))) :unsupported-arrow-schema)
+    (let [^Field put (field! (single-union-field! (.fields schema 0) "tx-ops") "put-docs" Type/Struct_ false 4)
+          ^Field iids (field! (.children put 0) "iids" Type/List false 1)
+          ^Field iid (field! (.children iids 0) "$data$" Type/FixedSizeBinary false 0)
+          ^FixedSizeBinary binary (.type iid (FixedSizeBinary.))
+          ^Field table (single-union-field! (.children put 1) "documents")
+          table-name (.name table)]
+      (require! (and binary (= 16 (.byteWidth binary))) :unsupported-arrow-iid-width)
+      (require! (and table-name (<= 1 (count table-name) 4095)
+                     (re-matches #"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*" table-name)) :unsupported-arrow-put-table)
+      (field! table table-name Type/List false 1)
+      (doseq [[i name] [[2 "_valid_from"] [3 "_valid_to"]]]
+        (let [^Field f (field! (.children put i) name Type/Timestamp true 0)
+              ^Timestamp t (.type f (Timestamp.))]
+          (require! (and t (= TimeUnit/MICROSECOND (.unit t)) (= "UTC" (.timezone t)))
+                    :unsupported-arrow-put-bound-type)))
+      (let [^Field doc (.children table 0)
+            kind (scalar-kind! doc "$data$" #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                                               :empty-list :recursive-list :struct-map :document-keys :empty-struct})]
+        (require! (struct-kind? kind) :unsupported-arrow-put-document)
+        {:table (keyword table-name) :kind kind}))))
+
+(defn- put-batch! [^Message m ^ByteBuffer body {:keys [table kind]}]
+  (let [^RecordBatch batch (.header m (RecordBatch.))
+        bound-node (+ 6 (node-count kind)) bound-buffer (+ 11 (buffer-count kind))]
+    (require! (and batch (= 1 (.length batch)) (= (+ bound-node 2) (.nodesLength batch))
+                   (nil? (.compression batch)) (zero? (.variadicBufferCountsLength batch))) :unsupported-arrow-put-batch)
+    (let [n (.length (.nodes batch 3))
+          nodes (mapv #(let [node (.nodes batch %)] [(.length node) (.nullCount node)]) (range 6))
+          buffers (buffers! batch body (+ bound-buffer 4))
+          [^ByteBuffer tags ^ByteBuffer indexes _ _ ^ByteBuffer iid-offsets _ ^ByteBuffer iids
+           ^ByteBuffer table-tags ^ByteBuffer table-indexes _ ^ByteBuffer doc-offsets] buffers]
+      (require! (and (<= 1 n 256) (= [[1 -1] [1 0] [1 0] [n 0] [1 -1] [1 0]] nodes))
+                :unsupported-arrow-put-nodes)
+      (require! (and (every? #(zero? (.limit ^ByteBuffer (nth buffers %))) [2 3 5 9])
+                     (= 1 (.limit tags) (.limit table-tags)) (= 4 (.limit indexes) (.limit table-indexes))
+                     (zero? (.get tags 0)) (zero? (.get table-tags 0))
+                     (zero? (.getInt indexes 0)) (zero? (.getInt table-indexes 0))) :unsupported-arrow-put-selection)
+      (require! (and (= 8 (.limit iid-offsets) (.limit doc-offsets))
+                     (zero? (.getInt iid-offsets 0)) (zero? (.getInt doc-offsets 0))
+                     (= n (.getInt iid-offsets 4) (.getInt doc-offsets 4)) (= (* 16 n) (.limit iids)))
+                :unsupported-arrow-put-list-layout)
+      (doseq [i (range 2)]
+        (let [node (.nodes batch (+ bound-node i))
+              ^ByteBuffer validity (nth buffers (+ bound-buffer (* 2 i)))
+              ^ByteBuffer values (nth buffers (+ bound-buffer (* 2 i) 1))]
+          (require! (and (= 1 (.length node)) (#{-1 1} (.nullCount node))
+                         (= 1 (.limit validity)) (zero? (.get validity 0))
+                         (= 8 (.limit values)) (zero? (.getLong values 0))) :unsupported-arrow-put-bounds)))
+      (let [read-doc (value-reader! kind batch 6 buffers 11 n)
+            docs (mapv read-doc (range n))]
+        (require! (every? #(let [id (:xt/id %)] (or (integer? id) (string? id) (uuid? id) (keyword? id))) docs)
+                  :unsupported-arrow-put-document-id)
+        {:kind :put-docs :table table :documents docs
+         :iids (mapv (fn [i] (let [b (byte-array 16) copy (.duplicate iids)]
+                              (.position copy (* 16 i)) (.get copy b) (.formatHex (HexFormat/of) b))) (range n))
+         :bounds {}}))))
+
+(defn decode-put-envelope
+  "Decode a single selected put group and table with absent outer bounds.
+   Retain IID bytes without verifying their correspondence to document IDs.
+   Nonnullable selected documents only; no execution or admission claim."
+  [bytes]
+  (try
+    (require! (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes)) :arrow-byte-limit)
+    (let [stream (doto (ByteBuffer/wrap ^bytes bytes) (.order ByteOrder/LITTLE_ENDIAN))
+          [sm sb] (message! stream MessageHeader/Schema)
+          schema (put-schema! sm sb)
+          [bm bb] (message! stream MessageHeader/RecordBatch)
+          group (put-batch! bm bb schema)]
+      (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream))) :unsupported-arrow-terminator)
+      (assoc put-envelope-base :status :decoded :groups [group] :iid-correspondence :unchecked))
+    (catch clojure.lang.ExceptionInfo e (assoc put-envelope-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _ (assoc put-envelope-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc put-envelope-base :status :unsupported :reason :invalid-arrow-stream))))

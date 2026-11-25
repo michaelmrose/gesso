@@ -3663,3 +3663,31 @@ omission. Explicit null versus absent submission identity is unavailable.
 Actual document puts, IID correspondence and aggregate document budgets
 remain open. No production wiring, certificate or CLM-R2 premise retirement.
 Full project and independent formal gates were not rerun.
+
+* v2676 — decode selected single document-put Arrow envelopes
+
+Qualify the observed single put-docs operation and single table dense
+union with implicit IDs. Require one retained group, equal IID and
+nonnullable document list extents, 1–256 documents, 16-byte IID entries,
+canonical table spelling and selected document fields. Require both
+outer UTC microsecond bounds to be absent with zero padding. Interpret
+retained documents using the existing independent value reader and
+preserve IID bytes as hex; explicitly mark IID correspondence unchecked.
+Do not use XTDB's IID derivation or operation reader in the decoder.
+
+Focused JVM: 29 tests / 1796 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites.
+Persistent retained integer-ID documents and nested journal-key maps
+match expected groups and provider observations before and after
+reopening. Mutate operation/table selections, list extents, bounds,
+UTF-8, document values and IID bytes. Reject mixed operations, multiple
+tables, explicit valid-time options and nullable document fields.
+Mutated IID or document ID remains diagnostic, not identity evidence.
+XTDB logged shutdown cancellation; the test process exited zero.
+
+Selected single-put envelope profile v1. Nullable actual document
+fields, valid-time bounds, IID correspondence, multiple groups and
+aggregate document budgets remain open. No production wiring,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates were not rerun. The operation namespace is 1007 lines;
+extract value interpretation or put-specific decoding next.
