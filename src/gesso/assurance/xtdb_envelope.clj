@@ -183,3 +183,73 @@
           (report :unsupported (:reason (ex-data e)))
           (report :unavailable :envelope-check-failed)))
       (catch Exception _ (report :unavailable :envelope-check-failed)))))
+
+(defn- observed-restricted-operations! [operations]
+  ;; Require an exact round trip through the restricted caller language.
+  ;; Never discard bounds, IID, placeholder order or extra fields.
+  (when-not (and (vector? operations) (<= 1 (count operations) 16384))
+    (reject! :unsupported-operation-sequence))
+  (let [ops (mapv (fn [{:keys [kind query args table documents]}]
+                    (case kind
+                      :sql (do
+                             (when-not (and (string? query) (vector? args))
+                               (reject! :unsupported-observed-sql))
+                             (into [(str/replace query #"(?<![a-zA-Z0-9_$])\$[0-9]+" "?")] args))
+                      :put-docs (do
+                                  (when-not (and (keyword? table) (= "public" (namespace table))
+                                                 (vector? documents))
+                                    (reject! :unsupported-observed-put))
+                                  (into [:put-docs (keyword (name table))] documents))
+                      (reject! :unsupported-observed-operation))) operations)]
+    (when-not (= operations (expected-operations! ops))
+      (reject! :unsupported-observed-envelope))
+    ops))
+
+(defn check-recorded-transition!
+  "Check a committed transition's decoded source-log envelope against its
+   independently acquired, pinned durable v4 witness. No caller operation
+   vector is required. The final logged witness must match exactly, its
+   binding must recompute, and the ledger must independently show commit.
+   This checks decoded correspondence, not writer authority or execution."
+  [node tx-id witness]
+  (let [report (fn [status reason]
+                 (cond-> {:status status :profile binding-profile :authority :none :certificate :not-issued}
+                   reason (assoc :reason reason)))]
+    (try
+      (cond
+        (not (and (map? witness) (= 4 (:profile-version witness)) (some? (:xt/id witness))))
+        (report :unsupported :invalid-transition-envelope-witness)
+        (not= :recorded-unchecked (binding-status witness))
+        (report :unsupported :missing-or-invalid-envelope-binding)
+        :else
+        (let [observed (source-log/observe-source-message! node tx-id)]
+          (case (:status observed)
+            :unavailable (report :unavailable (:reason observed))
+            :unsupported (report :unsupported (:reason observed))
+            :source-message-observed
+            (cond
+              (not= log-profile (:provider-profile observed)) (report :unsupported :source-profile-mismatch)
+              (not= tx-id (:tx-id observed)) (report :mismatch :source-transaction-identity-mismatch)
+              :else
+              (let [ops (observed-restricted-operations! (:operations observed))]
+                (cond
+                  (not= witness (transition-witness! ops)) (report :mismatch :source-witness-mismatch)
+                  (not (bound-transition-envelope? ops)) (report :mismatch :envelope-fingerprint-mismatch)
+                  :else
+                  (let [outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
+                    (cond
+                      (empty? outcomes) (report :unavailable :transaction-outcome-unavailable)
+                      (not (and (= 1 (count outcomes)) (boolean? (:committed (first outcomes)))))
+                      (report :unsupported :invalid-transaction-outcome)
+                      (not= [{:committed true}] outcomes) (report :mismatch :transaction-outcome-mismatch)
+                      :else (assoc (report :matched nil) :tx-id tx-id :operation-count (count ops)
+                                   :envelope-fingerprint (:envelope-fingerprint witness)))))))
+            (report :unsupported :unexpected-source-observation))))
+      (catch InterruptedException e
+        (.interrupt (Thread/currentThread))
+        (throw e))
+      (catch clojure.lang.ExceptionInfo e
+        (if (::unsupported (ex-data e))
+          (report :unsupported (:reason (ex-data e)))
+          (report :unavailable :envelope-check-failed)))
+      (catch Exception _ (report :unavailable :envelope-check-failed)))))

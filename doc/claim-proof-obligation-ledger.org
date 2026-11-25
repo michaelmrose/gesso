@@ -973,3 +973,33 @@ bindings and committed readback/replay statuses. All three JVM runs
 exited 0 with no failures or errors. Independent JVM restart, Ansatz,
 Chromium and full project suites were not rerun. Performance of the new
 digest is not separately measured. No CLM-R2 premise is retired.
+
+* v2579 — independently recompute recorded transition envelope bindings
+
+Add check-recorded-transition! to the restricted envelope comparator.
+The caller supplies the transaction id and an independently read durable
+v4 witness, not the original operation vector. Acquire the exact retained
+primary source message and reconstruct the restricted caller representation
+only if it round-trips exactly through the existing expected-operation
+encoder. Check the final logged witness against the supplied witness,
+recompute its binding, and separately require a committed xt.txs outcome.
+Refuse absent or malformed bindings, nonmatching source identities, altered
+operations, placeholder order, IID, bounds, unsupported shapes and aborted
+or unavailable outcomes. Reports contain no raw transaction values.
+
+The standalone source-log pilot passed 8 tests / 138 assertions, zero
+failures or errors. The first run had one fixture error because execute-tx
+throws on an assertion abort; submit-tx and await now retain the aborted
+transaction id for checking. Add an opt-in Claim regression comparing
+logged operations with independently read durable witnesses; the full
+opt-in Claim run exceeded the container execution limit without a final
+summary. No Claim pass is claimed. Independent JVM restart, Ansatz,
+Chromium and the full project suite were not rerun.
+
+This is a diagnostic comparison, conditional on correct provider decoding,
+retention and the independently acquired witness. A self-consistent digest
+does not establish that a writer followed the expected semantic plan.
+Historical classification and checkpoint profiles remain unchanged. Actual
+historical enforcement, original intended-envelope provenance, transaction
+metadata, writer authority and provider execution refinement remain open.
+No CLM-R2 premise is retired.

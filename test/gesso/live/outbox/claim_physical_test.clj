@@ -670,6 +670,14 @@
                        ;; and exactly one aborted ledger step per recovery mode.
                        ;; Never use command id alone: recovery reuses it.
                        (is (= 1 (count aborted) (count aborted-steps)))
+                       (doseq [{:keys [command-id tx-id]} (:verified-mapped-transition groups)]
+                         (let [w (first (xt/q node ["SELECT * FROM gesso_transition_evidence WHERE _id = ?" command-id]))
+                               checked (envelope/check-recorded-transition! node tx-id w)]
+                           (is (= :matched (:status checked)))
+                           (is (= tx-id (:tx-id checked)))
+                           (is (= (:envelope-fingerprint w) (:envelope-fingerprint checked)))
+                           (is (= :none (:authority checked)))
+                           (is (= :not-issued (:certificate checked)))))
                        (doseq [{:keys [framed-ops result commit-basis]} @submissions
                                :let [committed? (= :committed result)
                                      tx-id (if committed? (xtdb/basis-tx-id commit-basis)

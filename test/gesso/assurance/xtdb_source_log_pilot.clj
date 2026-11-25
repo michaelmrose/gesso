@@ -350,6 +350,49 @@
         (is (= :matched (:status (envelope/check-envelope! node id bound true))))
         (is (= :mismatch (:status (envelope/check-envelope! node id original true))))))))
 
+(deftest recorded-transition-binding-checks-independent-source-log
+  (let [witness {:xt/id "c1" :profile-version 4 :guard-prefix-fingerprint "guard"}
+        bound (envelope/bind-transition-envelope!
+               [["ASSERT ? = ?" 1 1]
+                [:put-docs :probe {:xt/id "p" :value :open}]
+                [:put-docs :gesso_transition_evidence witness]])
+        persisted (peek (peek bound))]
+    (with-open [node (xtn/start-node {})]
+      (let [id (:tx-id (xt/execute-tx node bound))
+            durable (first (xt/q node "SELECT * FROM gesso_transition_evidence"))
+            check #(envelope/check-recorded-transition! node id %)
+            observed (source-log/observe-source-message! node id)]
+        (is (= persisted durable))
+        (is (= {:status :matched :profile envelope/binding-profile :authority :none
+                :certificate :not-issued :tx-id id :operation-count 3
+                :envelope-fingerprint (:envelope-fingerprint durable)} (check durable)))
+        (is (= :missing-or-invalid-envelope-binding (:reason (check witness))))
+        (is (= :source-witness-mismatch (:reason (check (assoc durable :extra true)))))
+        (doseq [[changed reason] [[(assoc observed :tx-id (inc id)) :source-transaction-identity-mismatch]
+                                  [(assoc observed :provider-profile :other) :source-profile-mismatch]
+                                  [(assoc-in observed [:operations 1 :documents 0 :value] "open") :envelope-fingerprint-mismatch]
+                                  [(assoc-in observed [:operations 0 :query] "ASSERT $2 = $1") :unsupported-observed-envelope]
+                                  [(assoc-in observed [:operations 1 :bounds] {:xt/valid-from (Instant/now)}) :unsupported-observed-envelope]
+                                  [(assoc-in observed [:operations 1 :iids 0] "other") :unsupported-observed-envelope]
+                                  [(assoc-in observed [:operations 1 :extra] true) :unsupported-observed-envelope]]]
+          (with-redefs [source-log/observe-source-message! (fn [& _] changed)]
+            (is (= reason (:reason (check durable))))))
+        (let [changed-id (:tx-id (xt/execute-tx node (subvec bound 1)))
+              aborted (envelope/bind-transition-envelope!
+                       [["ASSERT FALSE"] [:put-docs :gesso_transition_evidence witness]])
+              aborted-id (:tx-id (xt/submit-tx node aborted))
+              _ (.awaitTxBlocking ^Database (db/primary-db node) aborted-id (Duration/ofSeconds 10))]
+          (is (= :envelope-fingerprint-mismatch
+                 (:reason (envelope/check-recorded-transition! node changed-id durable))))
+          (is (= :transaction-outcome-mismatch
+                 (:reason (envelope/check-recorded-transition! node aborted-id (peek (peek aborted)))))))
+        (is (= :unavailable (:status (envelope/check-recorded-transition! node (+ id 1000000) durable))))
+        (with-redefs [xt/q (fn [& _] [])]
+          (is (= :transaction-outcome-unavailable (:reason (check durable)))))
+        (with-redefs [xt/q (fn [& _] (throw (ex-info "secret" {:raw bound})))]
+          (is (= {:status :unavailable :reason :envelope-check-failed :profile envelope/binding-profile
+                  :authority :none :certificate :not-issued} (check durable))))))))
+
 (defn -main [& args]
   (let [{:keys [fail error]}
         (if (= ["claim"] (vec args))
