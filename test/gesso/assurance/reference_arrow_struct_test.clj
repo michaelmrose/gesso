@@ -269,3 +269,69 @@
           (.awaitSourceBlocking (db/primary-db node) (first (peek rejected)) (Duration/ofSeconds 10))
           (check-nullable-fields! node id rejected rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- node-position [^bytes data i]
+  ;; Locate a fixture FieldNode using the installed metadata accessor.
+  ;; Mutation is deliberately confined to test code, not the decoder.
+  (let [b (doto (java.nio.ByteBuffer/wrap data) (.order java.nio.ByteOrder/LITTLE_ENDIAN))
+        start (+ 16 (.getInt b 4))
+        m (org.apache.arrow.flatbuf.Message/getRootAsMessage (.slice b start (.getInt b (- start 4))))
+        batch (.header m (org.apache.arrow.flatbuf.RecordBatch.))
+        field (doto (.getDeclaredField com.google.flatbuffers.Struct "bb_pos") (.setAccessible true))]
+    (+ start (.getInt field (.nodes batch i)))))
+
+(defn- check-null-only-fields! [node id rejected rows]
+  (let [data (#'fixture/retained-operation-bytes node id)
+        decoded (arrow/decode-null-only-struct-operations data)
+        expected (mapv #(hash-map :kind :sql :query "ASSERT $1 IS NOT NULL" :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ _ _ values] (#'fixture/buffer-starts args)
+        a-node (node-position args 1)
+        c-node (node-position args 4)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/null-only-struct-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded)))
+    (is (= [(count rows)] (:logged-operation-spans decoded)))
+    (is (= rows (:rows (arrow/decode-null-only-struct-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-nullable-struct-operations data))))
+    (is (= :unsupported-sql-argument (:reason (provider/observe-source-message! node id))))
+    (is (= (assoc-in rows [0 0 :b] "z")
+           (:rows (arrow/decode-null-only-struct-arguments (#'fixture/edit-byte args values 122)))))
+    (doseq [offset [a-node (+ a-node 8) c-node (+ c-node 8)]
+            value [0 -1 4]]
+      (let [r (arrow/decode-null-only-struct-arguments (#'fixture/edit-long args offset value))]
+        (is (= :unsupported (:status r)))
+        (is (= :unsupported-arrow-null-only-layout (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (doseq [other-id rejected]
+      (let [r (arrow/decode-null-only-struct-operations (#'fixture/retained-operation-bytes node other-id))]
+        (is (= :unsupported (:status r)))
+        (is (not (contains? r :operations)))))))
+
+(deftest selected-null-only-fields-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-null-only-struct-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        input [{:a nil :b "x" :nested {:c nil}}
+               {:b "y" :nested {}}
+               {:a nil :b "" :nested {:c nil}}]
+        rows [[{:b "x" :nested {}}] [{:b "y" :nested {}}] [{:b "" :nested {}}]]]
+    (is (= [[]] (:rows (arrow/decode-null-only-struct-arguments nil))))
+    (try
+      (let [[id rejected]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! (mapv #(vector "ASSERT ? IS NOT NULL" %) input))
+                    rejected [(submit! [["ASSERT ? IS NULL" nil]])
+                              (submit! [["ASSERT ? IS NOT NULL" {:xt/id nil}]])
+                              (submit! [["ASSERT ? IS NOT NULL" {:items [nil]}]])]]
+                (check-null-only-fields! node id rejected rows)
+                [id rejected]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek rejected) (Duration/ofSeconds 10))
+          (check-null-only-fields! node id rejected rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

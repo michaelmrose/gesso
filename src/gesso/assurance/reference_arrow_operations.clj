@@ -186,7 +186,7 @@
 
 (defn- buffer-count [kind]
   (cond (nullable-kind? kind) (buffer-count (second kind))
-        (= :empty-child kind) 0
+        (#{:empty-child :null-only-field} kind) 0
         (list-kind? kind) (+ 2 (buffer-count (second kind)))
         (union-kind? kind) (+ 2 (reduce + (map buffer-count (second kind))))
         (struct-kind? kind) (inc (reduce + 0 (map (comp buffer-count second) (second kind))))
@@ -315,8 +315,15 @@
       (fn [row] (if (present? validity row) (reader row) absent-field)))))
 
 (defn- value-reader! [kind ^RecordBatch batch node-index buffers start n]
-  (if (nullable-kind? kind)
+  (cond
+    (= :null-only-field kind)
+    (let [node (.nodes batch node-index)]
+      (require! (and (= n (.length node)) (= n (.nullCount node)))
+                :unsupported-arrow-null-only-layout)
+      (constantly absent-field))
+    (nullable-kind? kind)
     (nullable-reader! (second kind) batch node-index buffers start n)
+    :else
     (let [node (.nodes batch node-index)
           ^ByteBuffer validity (nth buffers start)]
       (require! (and (= n (.length node)) (zero? (.nullCount node))
@@ -805,3 +812,29 @@
   "Expand selected diagnostic SQL groups with nullable scalar struct fields."
   [bytes]
   (expand-fixed-operations bytes nullable-struct-base nullable-struct-rows!))
+
+(def null-only-struct-profile :xtdb-2.2.0-beta1/selected-null-only-scalar-struct-arrow-operations-v1)
+(def ^:private null-only-struct-base (assoc base :profile null-only-struct-profile))
+
+(defn- null-only-struct-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :struct-map :document-keys :empty-struct
+                        :nullable-struct-fields :null-only-fields}))
+
+(defn decode-null-only-struct-arguments
+  "Decode selected nullable scalar and null-only struct fields by omission.
+   Null-only fields require exact row and null counts and no child buffers.
+   Diagnostic only; original absent-versus-null identity is unavailable."
+  [bytes]
+  (try
+    (assoc null-only-struct-base :status :decoded :rows (null-only-struct-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc null-only-struct-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc null-only-struct-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc null-only-struct-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-null-only-struct-operations
+  "Expand selected diagnostic SQL groups with null-only struct fields."
+  [bytes]
+  (expand-fixed-operations bytes null-only-struct-base null-only-struct-rows!))

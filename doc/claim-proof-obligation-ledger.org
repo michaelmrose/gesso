@@ -3592,3 +3592,26 @@ containers, document puts, IID correspondence and aggregate document
 budgets remain open. No production wiring, certificate or CLM-R2
 premise retirement. Full project and independent formal gates were
 not rerun.
+
+* v2673 — decode selected null-only Arrow struct fields
+
+Qualify the observed nullable Null field only within selected structs,
+excluding document IDs. Require exact enclosing row count and null count
+and no field buffers. Reconstruct by omission without claiming recovery
+of the original absent-versus-null submission distinction. Preserve
+neighboring scalar and nested struct values and earlier profile limits.
+
+Focused JVM: 26 tests / 1554 assertions, zero failures or errors across
+reference Arrow operations, struct and source payload suites. Retained
+null-only fields at two nesting levels reconstruct expected diagnostic
+maps before and after reopening. Mutate node lengths and null counts,
+and verify adjacent string values. Reject top-level null, null document
+IDs and null list elements. The initial run failed two assertions due
+to a mutation fixture selecting the string offset rather than value
+buffer; correct the fixture and rerun all three namespaces. XTDB logged
+shutdown cancellation; the passing process exited zero.
+
+Selected null-only scalar struct profile v1. Nullable containers,
+actual document-put semantics, IID correspondence and aggregate document
+budgets remain open. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.

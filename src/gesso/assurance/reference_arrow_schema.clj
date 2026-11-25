@@ -105,11 +105,18 @@
                                (let [key (struct-key! name allowed depth)
                                      nullable-field? (and (contains? allowed :nullable-struct-fields)
                                                           (not= "xt/id" key) (.nullable child))
-                                     child-kind (scalar-kind-at! child name
-                                                                 (cond-> allowed nullable-field?
-                                                                   (conj :nullable-field))
-                                                                 (inc depth))]
-                                 [key (if nullable-field? [:nullable child-kind] child-kind)])))
+                                     null-only? (and nullable-field?
+                                                     (contains? allowed :null-only-fields)
+                                                     (= Type/Null (.typeType child)))
+                                     child-kind (if null-only?
+                                                  (do (field! child name Type/Null true 0)
+                                                      :null-only-field)
+                                                  (scalar-kind-at! child name
+                                                                   (cond-> allowed nullable-field?
+                                                                     (conj :nullable-field))
+                                                                   (inc depth)))]
+                                 [key (if (and nullable-field? (not null-only?))
+                                        [:nullable child-kind] child-kind)])))
                            (range n))]
           (require! (= n (count (distinct (map first fields)))) :duplicate-arrow-struct-key)
           [:struct fields]))
