@@ -192,3 +192,40 @@
           (is (= [(init/marker "s" baseline)] (xt/q node ["SELECT * FROM gesso_initializations"])))
           (is (= [(get-in seed [0 2])] (xt/q node ["SELECT * FROM requests"])))
           (finally (release)))))))
+
+(deftest initialization-readback-is-pinned-and-rechecked-on-restart
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        scope {:source-id "s"}
+        checked (inductive/check-mapped-initialization! admission seed)
+        changed [[:put-docs :requests {:xt/id "r1" :item-count 9}]]
+        execute xtdb/execute-tx!]
+    (with-open [node (xtn/start-node {})]
+      (let [release (xtdb/register-submission-policy! node (policy/build-policy! node config scope))]
+        (try
+          ;; An intervening later commit must not replace the actual receipt's
+          ;; snapshot, nor affect the historical observation on restart.
+          (with-redefs [xtdb/execute-tx! (fn [n ops & [opts]]
+                                         (let [result (execute n ops opts)]
+                                           (xt/execute-tx n changed)
+                                           result))]
+            (is (nil? (policy/initialize! node "s" config))))
+          (is (= [{:xt/id "r1" :item-count 9}] (xt/q node ["SELECT * FROM requests"])))
+          (is (nil? (policy/initialize! node "s" config)))
+          (finally (release)))))
+    (with-open [node (xtn/start-node {})]
+      ;; Simulate a marker from an incompatible physical execution. Even if
+      ;; current rows are repaired, the original historical state must fail.
+      ;; Raw XTDB is used deliberately to simulate missing correspondence.
+      (xt/execute-tx node (conj changed [:put-docs init/table (init/marker "s" checked)]))
+      (xt/execute-tx node seed)
+      (let [release (xtdb/register-submission-policy! node (policy/build-policy! node config scope))]
+        (try
+          (is (true? (init/initialized? node "s" checked)))
+          (is (= :initialization-readback-state-mismatch
+                 (reason #(policy/initialize! node "s" config))))
+          (is (= :initialization-readback-state-mismatch
+                 (reason #(policy/initialize! node "s" config))))
+          (is (= [{:xt/id "r1" :item-count 0}] (xt/q node ["SELECT * FROM requests"])))
+          (finally (release)))))))

@@ -60,11 +60,16 @@
         (vals (:target-map (inductive/describe-mapped-admission admission)))))
 
 (defn initialize!
-  "Initialize only the selected seed, with emptiness guards for every mapped
-   table, including those whose nullable documents are absent from the seed."
+  "Initialize and check the original abstract state from a pinned physical
+   readback. Repeat that check at the marker's historical time on restart;
+   a compatible marker alone cannot bypass a failed readback."
   [node source-id {:keys [admission initializer]}]
-  (initialization/initialize! node source-id initializer (mapped-tables admission)
-                              (when initializer (inductive/check-mapped-initialization! admission initializer))))
+  (when-let [readback (initialization/initialize-and-readback!
+                       node source-id initializer (mapped-tables admission)
+                       (when initializer (inductive/check-mapped-initialization! admission initializer)))]
+    (inductive/check-mapped-initialization-readback!
+     admission initializer (:document-rows readback) (:journal-rows readback)))
+  nil)
 
 (defn- mapped-operations? [ops]
   ;; The issuer checks assertion/put order and the exact original envelope.

@@ -494,6 +494,22 @@
         (merge binding {:tables tables :state state :initialization-fingerprint fingerprint
                         :authority :none :physical-correspondence :not-established})))))
 
+(defn check-mapped-initialization-readback!
+  "Compare supplied physical readback rows with the checked concrete initial
+   constructor using the same original projection and issued mapping. The
+   host supplies pinned rows; this function does not authenticate acquisition
+   or prove physical refinement for arbitrary transactions."
+  [admission seed document-rows journal-rows]
+  (let [checked (check-mapped-initialization! admission seed)
+        {:keys [source]} (registered-mapped! admission)
+        {:keys [target-map decode-outcome!]} source
+        construction (get-in source [:inductive-source :catalog :operations 0 :construction])
+        actual (original-initial-projection construction target-map document-rows journal-rows decode-outcome!)]
+    (when-not (and (= [] journal-rows) (= (:state checked) actual))
+      (reject! :initialization-readback-state-mismatch [] {}))
+    {:state actual :initialization-fingerprint (:initialization-fingerprint checked)
+     :authority :none :physical-correspondence :checked-supplied-projection}))
+
 (defn require-current-mapped-admission!
   "Recheck the original live handles and mapping of this exact issued callable
    against a trusted current assembly source, including decoder and footprint identity.
