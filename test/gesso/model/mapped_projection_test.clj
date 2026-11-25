@@ -5,6 +5,7 @@
             [gesso.model.mapped-projection :as projection]
             [gesso.model.mapped-preparation :as preparation]
             [gesso.model.mapped-frame :as frame]
+            [gesso.assurance.proof.mapped-prestate-semantics :as prestate]
             [gesso.model.certified-plan :as plan]
             [gesso.model.inductive-plan :as inductive]
             [gesso.model.tx :as tx]
@@ -664,6 +665,7 @@
         occupied (record "old" "p2" {:nested {:value "original" :flags [true false]}})
         candidate (record "fresh" "p1")
         guards (frame/formatted-prestate-assertions! mapping rows [occupied])
+        description (prestate/describe! source targets rows [occupied])
         ops (conj guards [:put-docs :gesso_commands candidate])
         result (fn [node tx-ops]
                  (try (xt/execute-tx node tx-ops) :committed
@@ -682,7 +684,14 @@
     (with-open [node (xtn/start-node {})]
       (xt/execute-tx node [[:put-docs :requests (first (:requests rows))]])
       (let [clear! #(xt/execute-tx node [[:delete-docs :gesso_commands "old" "duplicate" "intruder"]])
-            fresh #(xt/q node ["SELECT * FROM gesso_commands WHERE _id = ?" "fresh"])]
+            fresh #(xt/q node ["SELECT * FROM gesso_commands WHERE _id = ?" "fresh"])
+            observed-match? #(try
+                               (:matches? (prestate/observe! source targets rows [occupied] description
+                                            {:requests (xt/q node ["SELECT * FROM requests"])
+                                             :assignments (xt/q node ["SELECT * FROM assignments"])}
+                                            (xt/q node ["SELECT * FROM gesso_commands"])))
+                               (catch clojure.lang.ExceptionInfo e
+                                 (if (= :duplicate-row (:reason (ex-data e))) false (throw e))))]
         (doseq [changed [[]
                          [(assoc-in occupied [:gesso.command/outcome :result] :rejected)]
                          [(assoc-in occupied [:gesso.command/binding :arguments :nested :value] "changed")]
@@ -692,9 +701,63 @@
                          [occupied (record "intruder" "p1")]]]
           (clear!)
           (when (seq changed) (xt/execute-tx node [(into [:put-docs :gesso_commands] changed)]))
+          (is (false? (observed-match?)))
           (is (= :assert-failed (result node ops)))
           (is (empty? (fresh))))
         (clear!)
         (xt/execute-tx node [[:put-docs :gesso_commands occupied]])
+        (is (true? (observed-match?)))
         (is (= :committed (result node ops)))
         (is (= [candidate] (fresh)))))))
+
+(deftest independent-mapped-prestate-predicates-preserve-decoder-input
+  (let [docs (assoc-in rows [:requests 0 :supplemental] "original")
+        occupied (record "old" "p2" {:nested {:value "original" :flags [true false]}})
+        prepared [occupied]
+        description (prestate/describe! source targets docs prepared)
+        observe #(prestate/observe! source targets docs prepared description %1 %2)
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+        document [:document :requests "r1"]
+        nullable [:document :assignments "a1"]
+        empty-slot [:journal-slot "p1" :example/command]
+        occupied-slot [:journal-slot "p2" :example/command]]
+    (is (= {document [:exact-row (first (:requests docs))]
+            nullable [:absent] empty-slot [:absent] occupied-slot [:exact-row occupied]}
+           (:predicates description)))
+    (let [r (observe docs prepared)]
+      (is (:matches? r))
+      (is (= :not-established (:sql-refinement r)))
+      (is (= :not-issued (:certificate r))))
+    (doseq [[actual-docs actual-journal expected]
+            [[(assoc-in docs [:requests 0 :item-count] 3) prepared #{document}]
+             [(assoc-in docs [:requests 0 :supplemental] "different") prepared #{document}]
+             [(assoc docs :requests []) prepared #{document}]
+             [(assoc docs :assignments [{:xt/id "a1" :owner "p1"}]) prepared #{nullable}]
+             [docs [] #{occupied-slot}]
+             [docs [(assoc-in occupied [:gesso.command/outcome :result] :rejected)] #{occupied-slot}]
+             [docs [(assoc-in occupied [:gesso.command/binding :arguments :nested :flags] [false true])] #{occupied-slot}]
+             [docs [occupied (record "new" "p1")] #{empty-slot}]]]
+      (let [r (observe actual-docs actual-journal)]
+        (is (false? (:matches? r)))
+        (is (= expected (:mismatched-targets r)))))
+    (doseq [bad [(update description :predicates dissoc empty-slot)
+                 (assoc-in description [:predicates occupied-slot] [:absent])
+                 (assoc description :mapping-fingerprint "wrong")]]
+      (is (= :prestate-description-mismatch
+             (reason #(prestate/observe! source targets docs prepared bad docs prepared)))))
+    (is (= :duplicate-row (reason #(observe (update docs :requests conj (first (:requests docs))) prepared))))
+    (is (= :duplicate-row (reason #(observe docs [occupied (record "duplicate" "p2")]))))
+    (is (= :unexpected-row (reason #(observe docs [occupied (record "other" "p3")]))))
+    (is (= :invalid-closed-row-sets (reason #(observe (dissoc docs :assignments) prepared))))
+    (is (= :missing-required-row
+           (reason #(prestate/describe! source targets (assoc docs :requests []) prepared))))
+    ;; Finite comparison of the independent row predicate with the existing
+    ;; typed projection, including a change irrelevant to the projection.
+    (doseq [n [1 2 3] enabled [false true] extra ["original" "different"]
+            journal [prepared [] [(record "new" "p1")]]]
+      (let [candidate (assoc docs :requests [{:xt/id "r1" :item-count n
+                                              :enabled enabled :supplemental extra}])
+            r (observe candidate journal)]
+        (is (= (and (= docs candidate) (= prepared journal)) (:matches? r)))
+        (when (:matches? r)
+          (is (= (project docs prepared) (project candidate journal))))))))
