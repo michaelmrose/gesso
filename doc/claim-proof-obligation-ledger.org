@@ -3302,3 +3302,30 @@ Selected Z/UTC microsecond scalar profile v1. No other timezone labels,
 nullable columns, composite or document operation interpretation,
 production wiring, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2661 — decode selected homogeneous int64 Arrow lists
+
+Extend the selected positional argument interpreter with nonnullable
+List columns containing a nonnullable signed 64-bit $data$ child.
+Qualify the parent and child node and buffer extents independently;
+validate monotonic element offsets, exact child coverage and a 256
+item limit per vector. Preserve empty vectors within typed columns,
+scalar columns alongside lists and all earlier profile restrictions.
+Reject unsupported child schemas and partial results.
+
+Focused JVM: 14 tests / 767 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Physical retained
+multiple list columns and scalar arguments match expected ordered
+rows, operation spans and provider observations before and after reopen.
+Check signed extremes, empty vectors, the 256-element boundary, child
+value mutation, malformed offsets, oversized lists and noninteger
+children. Corrected the combined child-count bound after an initial
+run failed 20 assertions. XTDB logged shutdown cancellation; the
+passing test process exited zero.
+
+Selected int64-list scalar profile v1. Other child types, heterogeneous
+and recursive composites, all-empty untyped child schemas, nullable
+columns, document puts and complete provider correspondence remain open.
+The selected per-vector bound is not a complete reference document
+budget. No production wiring, certificate or CLM-R2 premise retirement.
+Full project and independent formal gates were not rerun.

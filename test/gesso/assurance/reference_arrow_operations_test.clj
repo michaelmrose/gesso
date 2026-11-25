@@ -585,3 +585,60 @@
           (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
           (check-utc-retained! node id other-id rows deadline)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-int64-list-retained! [node id oversized-id other-id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-int64-list-operations data)
+        expected (mapv (fn [row] {:kind :sql :query "ASSERT ($1 = $2 AND ($3 = 0))" :args row}) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ offsets _ values] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/int64-list-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-int64-list-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-utc-timestamp-operations data))))
+    (is (= (assoc-in rows [0 0 0] 99)
+           (:rows (arrow/decode-int64-list-arguments (edit-long args values 99)))))
+    (doseq [[bad reason] [[(edit-int args offsets 1) :invalid-arrow-list-offsets]
+                          [(edit-int args (+ offsets 4) -1) :invalid-arrow-list-offsets]
+                          [(edit-int args (+ offsets (* 4 (count rows))) Integer/MAX_VALUE) :invalid-arrow-list-offsets]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-int64-list-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (doseq [[id reason] [[oversized-id :arrow-list-element-limit]
+                         [other-id :unsupported-arrow-field]]]
+      (let [r (arrow/decode-int64-list-operations (retained-operation-bytes node id))]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :operations)))))))
+
+(deftest selected-int64-list-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-list-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows [[[1 2] [3 4] 0] [[] [5] 1]
+              [[Long/MIN_VALUE Long/MAX_VALUE] [] -1]
+              [(vec (range 256)) [0] 0]]]
+    (is (= [[]] (:rows (arrow/decode-int64-list-arguments nil))))
+    (try
+      (let [[id oversized-id other-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! (mapv #(into ["ASSERT (? = ? AND (? = 0))"] %) rows))
+                    oversized-id (submit! [["ASSERT ? = ?" (vec (range 257)) [1]]
+                                           ["ASSERT ? = ?" [1] [1]]])
+                    other-id (submit! [["ASSERT ? = ?" ["x"] ["x"]]])]
+                (check-int64-list-retained! node id oversized-id other-id rows)
+                [id oversized-id other-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
+          (check-int64-list-retained! node id oversized-id other-id rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

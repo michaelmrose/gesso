@@ -230,15 +230,19 @@
                    (and (= Type/FixedSizeBinary type) (= "uuid" name)) :uuid
                    :else (require! false :unsupported-arrow-field)))
                (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
-                     Type/Timestamp :timestamp} type))]
+                     Type/Timestamp :timestamp Type/List :int64-list} type))]
     (require! (contains? allowed kind) :unsupported-arrow-field)
     (if (#{:keyword :uuid} kind)
       (require! (and (= (str "?_" i) (.name f)) (not (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
-      (field! f (str "?_" i) type false 0))
+      (field! f (str "?_" i) type false (if (= :int64-list kind) 1 0)))
     (when (= :integer kind)
       (let [^Int t (.type f (Int.))]
+        (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
+    (when (= :int64-list kind)
+      (let [^Field child (field! (.children f 0) "$data$" Type/Int false 0)
+            ^Int t (.type child (Int.))]
         (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
     (when (= :uuid kind)
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
@@ -271,6 +275,25 @@
             :unsupported-arrow-keyword)
   (keyword s))
 
+(defn- int64-list-reader! [^RecordBatch batch node-index buffers start n]
+  (let [child (.nodes batch (inc node-index))
+        child-count (.length child)
+        ^ByteBuffer offsets (nth buffers (inc start))
+        ^ByteBuffer child-validity (nth buffers (+ start 2))
+        ^ByteBuffer values (nth buffers (+ start 3))]
+    (require! (and (<= 0 child-count (min (quot max-bytes 8) (* 256 n)))
+                   (zero? (.nullCount child)) (zero? (.limit child-validity))
+                   (= (* 8 child-count) (.limit values))
+                   (= (* 4 (inc n)) (.limit offsets)))
+              :unsupported-arrow-list-buffer-layout)
+    (let [xs (mapv #(.getInt offsets (* 4 %)) (range (inc n)))]
+      (require! (and (zero? (first xs)) (= child-count (peek xs)) (apply <= xs))
+                :invalid-arrow-list-offsets)
+      (require! (every? #(<= (- (second %) (first %)) 256) (partition 2 1 xs))
+                :arrow-list-element-limit)
+      (fn [row]
+        (mapv #(.getLong values (* 8 %)) (range (nth xs row) (nth xs (inc row))))))))
+
 (defn- scalar-rows! [bytes allowed]
   (if (nil? bytes)
     [[]]
@@ -285,17 +308,19 @@
                        (zero? (.featuresLength schema)) (zero? (.customMetadataLength schema))
                        (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
         (let [kinds (mapv #(scalar-kind! (.fields schema %) % allowed) (range columns))
-              starts (vec (reductions + 0 (map #(if (#{:string :keyword} %) 3 2) kinds)))]
+              starts (vec (reductions + 0 (map #(case % (:string :keyword) 3 :int64-list 4 2) kinds)))
+              node-starts (vec (reductions + 0 (map #(if (= :int64-list %) 2 1) kinds)))]
           (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
                 ^RecordBatch batch (.header bm (RecordBatch.))
                 n (.length batch)]
             (require! (<= 1 n max-rows) :arrow-argument-row-limit)
-            (require! (and (= columns (.nodesLength batch)) (nil? (.compression batch))
+            (require! (and (= (peek node-starts) (.nodesLength batch)) (nil? (.compression batch))
                            (zero? (.variadicBufferCountsLength batch))) :unsupported-integer-batch)
             (let [buffers (buffers! batch bb (peek starts))
                   readers
                   (mapv (fn [i]
-                          (let [node (.nodes batch i)
+                          (let [node-index (nth node-starts i)
+                                node (.nodes batch node-index)
                                 start (nth starts i)
                                 kind (nth kinds i)
                                 ^ByteBuffer validity (nth buffers start)
@@ -303,6 +328,7 @@
                             (require! (and (= n (.length node)) (zero? (.nullCount node))
                                            (zero? (.limit validity))) :unsupported-integer-buffer-layout)
                             (case kind
+                              :int64-list (int64-list-reader! batch node-index buffers start n)
                               (:string :keyword)
                               (let [^ByteBuffer data (nth buffers (+ start 2))
                                     offsets (offsets! values data n)]
@@ -517,3 +543,27 @@
    No other timezone, SQL temporal semantics or document decoding claim."
   [bytes]
   (expand-fixed-operations bytes utc-timestamp-base utc-timestamp-rows!))
+
+(def int64-list-profile :xtdb-2.2.0-beta1/selected-int64-list-scalar-arrow-operations-v1)
+(def ^:private int64-list-base (assoc base :profile int64-list-profile))
+
+(defn- int64-list-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc :int64-list}))
+
+(defn decode-int64-list-arguments
+  "Decode selected nonnullable homogeneous int64 vectors and earlier scalars.
+   Bound each vector to 256 elements. Other child schemas remain excluded."
+  [bytes]
+  (try
+    (assoc int64-list-base :status :decoded :rows (int64-list-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc int64-list-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc int64-list-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc int64-list-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-int64-list-operations
+  "Expand selected SQL groups containing homogeneous int64 vectors and
+   earlier scalar values. No heterogeneous, nested or nullable lists."
+  [bytes]
+  (expand-fixed-operations bytes int64-list-base int64-list-rows!))
