@@ -168,36 +168,79 @@
           (.remove submission-policies connectable)))
       nil)))
 
-(defn- require-submission-admission! [api connectable tx-ops tx-options]
-  (when-let [entry (locking submission-policies (.get submission-policies connectable))]
+;; The public handle contains no node field. The registry is private and a
+;; handle is valid only for the exact installed policy that issued it.
+(deftype AdapterConnectable [])
+(def ^:private adapter-connectables (java.util.WeakHashMap.))
+
+(defn adapter-connectable!
+  "Issue an opaque adapter-only handle for a node with an installed policy.
+   The handle is not an XTDB/JDBC connectable. Policy release revokes it,
+   including when a different policy is later installed on the same node.
+   This reduces accidental capability leakage, not hostile JVM code access."
+  [node]
+  (locking submission-policies
+    (let [entry (.get submission-policies node)]
+      (when-not entry
+        (throw (ex-info "Adapter handle requires an installed submission policy."
+                        {:reason :missing-adapter-policy})))
+      (let [handle (AdapterConnectable.)]
+        (.put adapter-connectables handle {:node node :policy entry})
+        handle))))
+
+(defn- physical-connectable! [value]
+  (if (instance? AdapterConnectable value)
+    (locking submission-policies
+      (let [{:keys [node policy]} (.get adapter-connectables value)]
+        (when-not (and policy (identical? policy (.get submission-policies node)))
+          (throw (ex-info "Invalid or revoked XTDB adapter handle."
+                          {:reason :invalid-adapter-connectable})))
+        node))
+    value))
+
+(defn same-connectable?
+  "Compare live adapter/node identities without exposing the physical node."
+  [a b]
+  (identical? (physical-connectable! a) (physical-connectable! b)))
+
+(defn status
+  "Observe XTDB status through the adapter, including an issued handle."
+  [node]
+  (xt/status (physical-connectable! node)))
+
+(defn- require-submission-admission! [api entry tx-ops tx-options]
+  (when entry
     (when-not (true? ((:admit? entry) {:api api :tx-ops tx-ops :tx-options tx-options}))
       (throw (ex-info "XTDB submission refused before API invocation."
                       {:error/type ::submission-refused :reason :submission-policy-refused})))))
 
 (defn- invoke-xtdb-api! [api operation connectable tx-ops tx-options]
-  (require-submission-admission! api connectable tx-ops tx-options)
-  ;; Capture immediately adjacent to the *actual* adapter API invocation, not
-  ;; by replaying prepare or accepting an application-reported operation list.
-  ;; The recorded argument object is the exact argument handed to the bound
-  ;; XTDB API function. This remains spoofable by alternate writer paths,
-  ;; with-redefs, and malicious code inside the same process.
-  (let [capture? (boolean *submission-capture*)
-        call-id (when capture? (random-uuid))]
-    (when capture?
-      (capture-api-event! {:call-id call-id :api api :phase :invoked
-                           :tx-ops tx-ops :tx-options tx-options}))
-    (try
-      (let [result (operation connectable tx-ops tx-options)]
-        (when capture?
-          (capture-api-event! {:call-id call-id :api api :phase :returned
-                               :tx-result result}))
-        result)
-      (catch Throwable e
-        (restore-interrupt! e)
-        (when capture?
-          (capture-api-event! {:call-id call-id :api api :phase :threw
-                               :exception-class (.getName (class e))}))
-        (throw e)))))
+  (let [[connectable entry] (locking submission-policies
+                              (let [node (physical-connectable! connectable)]
+                                [node (.get submission-policies node)]))]
+    (require-submission-admission! api entry tx-ops tx-options)
+    ;; Capture immediately adjacent to the *actual* adapter API invocation, not
+    ;; by replaying prepare or accepting an application-reported operation list.
+    ;; The recorded argument object is the exact argument handed to the bound
+    ;; XTDB API function. This remains spoofable by alternate writer paths,
+    ;; with-redefs, and malicious code inside the same process.
+    (let [capture? (boolean *submission-capture*)
+          call-id (when capture? (random-uuid))]
+      (when capture?
+        (capture-api-event! {:call-id call-id :api api :phase :invoked
+                             :tx-ops tx-ops :tx-options tx-options}))
+      (try
+        (let [result (operation connectable tx-ops tx-options)]
+          (when capture?
+            (capture-api-event! {:call-id call-id :api api :phase :returned
+                                 :tx-result result}))
+          result)
+        (catch Throwable e
+          (restore-interrupt! e)
+          (when capture?
+            (capture-api-event! {:call-id call-id :api api :phase :threw
+                                 :exception-class (.getName (class e))}))
+          (throw e))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Debug
@@ -1160,7 +1203,7 @@
    a map-like value as an application context."
   [x]
   (cond
-    (instance? xtdb.api.Xtdb x)
+    (or (instance? xtdb.api.Xtdb x) (instance? AdapterConnectable x))
     x
 
     (map? x)
@@ -1228,7 +1271,7 @@
         (ex "Cannot establish an XTDB request frontier without an XTDB node."
             {:expected-one-of [:xtdb/node
                                :biff.xtdb/node]})))
-     (let [status (*status* node)
+     (let [status (*status* (physical-connectable! node))
            by-database (:latest-completed-txs status)]
        ;; An absent/malformed status observation is not evidence that a
        ;; database has no completed transactions. XTDB represents a known
@@ -2312,9 +2355,9 @@
    Arity mirrors xtdb.api/q. It does not reinterpret the third argument as a
    consistency map. For consistency-aware reads, use q-consistent."
   ([connectable query]
-   (*q* (require-connectable! connectable) query))
+   (*q* (physical-connectable! (require-connectable! connectable)) query))
   ([connectable query opts]
-   (*q* (require-connectable! connectable)
+   (*q* (physical-connectable! (require-connectable! connectable))
         query
         (query-opts opts))))
 
@@ -2336,7 +2379,7 @@
   ([connectable query consistency]
    (q-consistent connectable query consistency nil))
   ([connectable query consistency opts]
-   (*q* (require-connectable! connectable)
+   (*q* (physical-connectable! (require-connectable! connectable))
         query
         (consistent-query-opts consistency opts))))
 
@@ -2379,7 +2422,7 @@
   ([ctx-or-connectable query]
    (q-consistent-from ctx-or-connectable query nil))
   ([ctx-or-connectable query opts]
-   (*q* (require-connectable! (read-connectable-from ctx-or-connectable))
+   (*q* (physical-connectable! (require-connectable! (read-connectable-from ctx-or-connectable)))
         query
         (context-read-query-opts ctx-or-connectable opts))))
 
@@ -2410,15 +2453,27 @@
    (m/via-call m/blk
                #(q-consistent-from ctx-or-connectable query opts))))
 
+(defn- adapter-plan-q [connectable & args]
+  (let [connectable (require-connectable! connectable)]
+    (if (instance? AdapterConnectable connectable)
+      (do
+        (physical-connectable! connectable)
+        ;; Do not return the underlying provider's node-capturing reducible.
+        ;; Recheck the handle when consumption actually starts.
+        (reify clojure.lang.IReduceInit
+          (reduce [_ f initial]
+            (reduce f initial (apply *plan-q* (physical-connectable! connectable) args)))))
+      (apply *plan-q* connectable args))))
+
 (defn plan-q
   "Plain thin XTDB2 plan-q wrapper.
 
    Returns XTDB2's reducible result. This is useful for large result sets.
    This function does not realize the result set."
   ([connectable query]
-   (*plan-q* (require-connectable! connectable) query))
+   (adapter-plan-q connectable query))
   ([connectable query opts]
-   (*plan-q* (require-connectable! connectable)
+   (adapter-plan-q connectable
              query
              (query-opts opts))))
 
@@ -2434,7 +2489,7 @@
   ([connectable query consistency]
    (plan-q-consistent connectable query consistency nil))
   ([connectable query consistency opts]
-   (*plan-q* (require-connectable! connectable)
+   (adapter-plan-q connectable
              query
              (consistent-query-opts consistency opts))))
 
@@ -2443,7 +2498,7 @@
   ([ctx-or-connectable query]
    (plan-q-consistent-from ctx-or-connectable query nil))
   ([ctx-or-connectable query opts]
-   (*plan-q* (require-connectable! (read-connectable-from ctx-or-connectable))
+   (adapter-plan-q (read-connectable-from ctx-or-connectable)
              query
              (context-read-query-opts ctx-or-connectable opts))))
 

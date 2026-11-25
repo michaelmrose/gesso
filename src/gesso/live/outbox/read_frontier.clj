@@ -2,7 +2,6 @@
   "Explicit submitted-log read frontier for selected single-node durable
    observations. Not a transaction snapshot or a proof of noncommit."
   (:require [gesso.live.consistency.xtdb :as xtdb]
-            [xtdb.api :as xt]
             [xtdb.basis :as basis]))
 
 (defn query-options!
@@ -11,7 +10,7 @@
    await tokens, or substitute the latest completed snapshot."
   [node]
   (try
-    (let [submitted (:latest-submitted-msg-ids (xt/status node))]
+    (let [submitted (:latest-submitted-msg-ids (xtdb/status node))]
       (when-not (and (map? submitted) (contains? submitted xtdb/default-database-name)
                      (every? (fn [[db ids]]
                                (and (string? db) (seq db)

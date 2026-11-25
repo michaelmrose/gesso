@@ -150,7 +150,11 @@
                    :post-state-contract! (fn [_ binding] {:required-post-state-values (values (actor binding)) :allowed-post-state-values (values (actor binding))})
                    :outcome-contract! (fn [_ binding] {:expected-outcome {:outcome :request/claimed :helper (actor binding)}})
                    :construct! (fn [{:keys [ctx command-id] :as invocation}]
-                                 (let [helper (actor invocation)
+                                 (let [provider (xtdb/connectable-from ctx)
+                                       _ (is (not (instance? xtdb.api.Xtdb provider)))
+                                       _ (is (not (instance? javax.sql.DataSource provider)))
+                                       _ (is (identical? provider (xtdb/node-from ctx)))
+                                       helper (actor invocation)
                                        row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))
                                        membership (first (frontier/q-from! ctx ["SELECT * FROM memberships WHERE _id = ?" helper]))]
                                    (let [snapshot (semantics/snapshot-at-frontier! ctx)]

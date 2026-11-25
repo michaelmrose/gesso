@@ -267,12 +267,15 @@
              worker (get system managed/handle-key)]
          (when-not (and node source worker (not (live/closed? source)))
            (reject! :missing-started-providers {}))
-         (let [[before _] (swap-vals!
+         (let [provider (if (get-in system [config-key :mapped-writer-policy])
+                          (xtdb/adapter-connectable! node)
+                          node)
+               [before _] (swap-vals!
                            state
                            #(if (= :starting (:phase %))
                               (assoc % :phase :open
-                                     :context {:xtdb/connectable node
-                                               :biff.xtdb/node node
+                                     :context {:xtdb/connectable provider
+                                               :biff.xtdb/node provider
                                                :gesso.live/system source
                                                managed/source-id-key
                                                (get system managed/source-id-key)})
@@ -322,7 +325,10 @@
    is installed AFTER providers, and cannot be omitted or re-ordered.
 
    The installed handler receives the exact owned XTDB and Live providers,
-   overriding request-supplied provider aliases. Admission opens only after
+   overriding request-supplied provider aliases. The mapped writer profile
+   exposes an opaque Gesso adapter handle instead of the raw XTDB node;
+   application queries must use Gesso adapters, not direct XTDB/Biff JDBC.
+   The returned owner system still holds the raw node. Admission opens only after
    checked startup returns. Both stop! and native Biff stop fence new calls
    and drain synchronous invocations before retiring the worker/providers.
    A timed-out or interrupted request drain leaves providers open for retry.

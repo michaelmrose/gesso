@@ -303,7 +303,7 @@
   [admission connectable submission]
   (when-let [scope (.get framed-submission)]
     (when (and (identical? admission (:admission scope))
-               (identical? connectable (:connectable scope))
+               (xtdb/same-connectable? connectable (:connectable scope))
                (= submission (:submission scope))
                (compare-and-set! (:available? scope) true false))
       (:checked scope))))
