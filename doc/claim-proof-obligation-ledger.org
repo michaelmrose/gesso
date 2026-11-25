@@ -2621,3 +2621,29 @@ frontier acquisition, external delivery or universal provider refinement.
 No production assurance status changes and no CLM-R2 premise is retired.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2637 — model selected worker exception evidence
+
+Extend independent cycle orchestration to selected acquisition and delivery
+exception payloads, including absent exception data. Retain an unverified
+acquisition lead only for matching worker/source, UUID identities and
+recognized acquisition action/evidence. Preserve a reported deadline as
+reported data, not a verified timestamp. Retain post-dispatch receipt
+leads only when error classification, dispatch/acknowledgment statuses and
+intent/lease/receipt correlation agree. Distinguish reported source
+acceptance from correlated receipt evidence. Exception data cannot replace
+the cycle's completed prefix, cursor or rescan requirement. Cycle profile
+v3; other reference profiles and history v19 unchanged.
+
+Expanded focused JVM gate: 95 tests / 8056 assertions, zero failures or
+errors across five reference namespaces and the production cycle suite.
+Thirteen acquisition and twelve delivery exception traces compare exact
+interruption envelopes and adapter calls with production. Four unsupported
+hypotheses reject without partial reports. The new tests use scripted
+adapter exceptions, including ordinary exceptions without ex-data.
+
+This is finite exception-evidence correspondence, not authentication,
+physical commitment, deadline validity, JVM cancellation modeling or
+composition with independent physical execution. No production assurance
+status changes and no CLM-R2 premise is retired. Full project, physical
+Claim, Chromium and independent proof gates were not rerun.

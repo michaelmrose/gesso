@@ -2,7 +2,7 @@
   "Selected cycle control flow over explicit adapter-report hypotheses."
   (:require [clojure.string :as str]))
 
-(def profile :selected-worker-cycle-v2)
+(def profile :selected-worker-cycle-v3)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 (def ^:private unsupported (assoc base :status :unsupported))
 (defn- text? [x] (and (string? x) (not (str/blank? x))))
@@ -119,6 +119,37 @@
       {:failure (interrupted results cursor (merge lease receipt) :delivery :invalid-delivery-result
                              (assoc details :source-acceptance :reported))})))
 
+(defn- exception-data? [data]
+  (or (nil? data) (and (map? data) (nil? (meta data)))))
+
+(defn- acquisition-exception [data opts source results cursor]
+  (let [claim (:unverified-lease data)
+        lead (when (and (map? claim)
+                        (= :unverified-acquisition-attempt (:evidence claim))
+                        (uuid? (:intent-id claim)) (uuid? (:lease-id claim))
+                        (= (:worker-id opts) (:worker-id claim))
+                        (= source (:source-id claim))
+                        (#{:acquire-pending :reclaim-expired} (:acquisition-action claim)))
+               (select-keys claim [:intent-id :lease-id :worker-id :source-id
+                                   :lease-until :acquisition-action :evidence]))]
+    (interrupted results cursor lead :acquisition :acquisition-exception
+                 {:original-error/type (:error/type data)})))
+
+(defn- delivery-exception [a data results cursor]
+  (let [lease (assoc (select-keys a [:intent-id :lease-id :worker-id])
+                     :acquisition-status (:status a))
+        post-ack? (= :gesso.live.outbox/post-dispatch-ack-unknown (:error/type data))
+        receipt (when (and post-ack? (= :accepted (:dispatch/status data))
+                           (= :unknown (:acknowledgment/status data))
+                           (uuid? (:receipt-id data))
+                           (= (select-keys a [:intent-id :lease-id])
+                              (select-keys data [:intent-id :lease-id])))
+                  {:receipt-id (:receipt-id data)
+                   :receipt-evidence :unverified-post-dispatch-receipt})]
+    (interrupted results cursor (merge lease receipt) :delivery :delivery-exception
+                 {:original-error/type (:error/type data)
+                  :source-acceptance (if post-ack? :reported :unknown)})))
+
 (defn- raw-attempt [step opts results cursor]
   (let [page (:page step) a (first (:results page))]
     (cond
@@ -129,9 +160,13 @@
       (#{:contended :unavailable} (:status a))
       {:result {:intent-id (:intent-id a) :acquisition-status (:status a) :reason (:reason a)}}
       (#{:acquired :reclaimed} (:status a))
-      (when (and (contains? step :delivery-report)
-                 (or (nil? (:delivery-report step)) (map? (:delivery-report step))))
-        (assoc (raw-delivery a (:delivery-report step) results cursor) :dispatch a))
+      (cond
+        (and (contains? step :delivery-exception) (exception-data? (:delivery-exception step)))
+        {:failure (delivery-exception a (:delivery-exception step) results cursor) :dispatch a}
+        (and (contains? step :delivery-report)
+             (or (nil? (:delivery-report step)) (map? (:delivery-report step))))
+        (assoc (raw-delivery a (:delivery-report step) results cursor) :dispatch a)
+        :else nil)
       :else
       {:failure (interrupted results cursor
                              {:intent-id (:intent-id a) :lease-id (:lease-id a)
@@ -142,7 +177,7 @@
   "Predict a bounded cycle over selected declarative adapter reports. Each
    reached step is an empty page, an acquisition exception without a known
    lease, a single well-formed candidate with optional delivery outcome,
-   or a selected raw returned page and delivery report.
+   or a selected raw returned page, delivery report or exception payload.
    Unreached steps are not consumed. No adapter truth, physical state,
    source delivery, live frontier or restart authority is established."
   [source opts steps]
@@ -162,8 +197,12 @@
           (assoc base :status :predicted :calls calls
                  :failure (interrupted results cursor nil :acquisition :acquisition-exception
                                       {:original-error/type :test/acquisition-unknown}))
+          (and (map? step) (= :acquisition-exception (:kind step))
+               (= #{:kind :data} (set (keys step))) (exception-data? (:data step)))
+          (assoc base :status :predicted :calls calls
+                 :failure (acquisition-exception (:data step) opts source results cursor))
           (and (map? step) (= :raw-page (:kind step))
-               (#{#{:kind :page} #{:kind :page :delivery-report}} (set (keys step)))
+               (#{#{:kind :page} #{:kind :page :delivery-report} #{:kind :page :delivery-exception}} (set (keys step)))
                (raw-page? (:page step)))
           (let [attempt (raw-attempt step opts results cursor)
                 calls (cond-> calls (:dispatch attempt) (conj [:dispatch (:dispatch attempt)]))]

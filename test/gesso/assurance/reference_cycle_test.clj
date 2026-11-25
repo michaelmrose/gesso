@@ -16,6 +16,9 @@
                   (= :unavailable status) (assoc :reason :not-pending))})
 (defn- delivered [n status more? kind]
   (assoc (candidate n status more?) :delivery {:kind kind :receipt-id (id (+ n 200))}))
+(defn- throw-payload! [data]
+  (throw (if (nil? data) (RuntimeException. "adapter failure")
+             (ex-info "adapter failure" data))))
 (defn- run-production [options steps]
   (let [remaining (atom steps) current (atom nil) calls (atom [])
         run (fn []
@@ -28,6 +31,7 @@
                                 (case (:kind step)
                                   :end {:results [] :attempted 0 :halt-reason :observed-end :next-after nil}
                                   :acquisition-error (throw (ex-info "unknown acquisition" {:error/type :test/acquisition-unknown}))
+                                  :acquisition-exception (throw-payload! (:data step))
                                   :raw-page (:page step)
                                   :candidate {:results [a] :attempted 1
                                               :halt-reason (if (:more? step) :page-budget :observed-end)
@@ -39,7 +43,9 @@
                               (let [{:keys [kind receipt-id]} (:delivery @current)
                                     ids (assoc (select-keys a [:intent-id :lease-id]) :receipt-id receipt-id)]
                                 (if (= :raw-page (:kind @current))
-                                  (:delivery-report @current)
+                                  (if (contains? @current :delivery-exception)
+                                    (throw-payload! (:delivery-exception @current))
+                                    (:delivery-report @current))
                                   (case kind
                                   :accepted (assoc ids :status :dispatch-accepted :progression (:progression a)
                                                    :source-result {:status :emitted-many :count 1 :results [{:status :emitted}]}
@@ -166,3 +172,90 @@
       (is (= (run-production opts trace) (select-keys p [:result :calls])))
       (is (= 3 (get-in p [:result :processed])))
       (is (= 1 (get-in p [:result :dispatch-accepted]))))))
+
+(deftest selected-acquisition-exception-evidence
+  (let [first-step (candidate 1 :contended true)
+        later (candidate 3 :unavailable false)
+        claim {:intent-id (id 2) :lease-id (id 102) :worker-id "w"
+               :source-id source :lease-until :reported-deadline
+               :acquisition-action :acquire-pending
+               :evidence :unverified-acquisition-attempt}
+        data {:error/type :gesso.live.outbox/acquisition-unknown
+              :unverified-lease claim :completed [:untrusted] :rescan-required? false}
+        cases [[data claim]
+               [(assoc-in data [:unverified-lease :extra] :ignored) claim]
+               [(assoc-in data [:unverified-lease :acquisition-action] :reclaim-expired)
+                (assoc claim :acquisition-action :reclaim-expired)]
+               [(update data :unverified-lease dissoc :lease-until) (dissoc claim :lease-until)]
+               [(assoc-in data [:unverified-lease :worker-id] "foreign") nil]
+               [(assoc-in data [:unverified-lease :source-id] "foreign") nil]
+               [(assoc-in data [:unverified-lease :intent-id] "invalid") nil]
+               [(assoc-in data [:unverified-lease :lease-id] nil) nil]
+               [(assoc-in data [:unverified-lease :acquisition-action] :unknown) nil]
+               [(assoc-in data [:unverified-lease :evidence] :verified) nil]
+               [(assoc data :unverified-lease [:invalid]) nil]
+               [(dissoc data :unverified-lease) nil]
+               [nil nil]]]
+    (doseq [[payload lead] cases]
+      (let [trace [first-step {:kind :acquisition-exception :data payload} later]
+            p (reference/predict-cycle source opts trace) f (:failure p)]
+        (is (= :predicted (:status p)))
+        (is (= (run-production opts trace) (select-keys p [:failure :calls])))
+        (is (= lead (:in-flight f)))
+        (is (= :acquisition (:phase f)))
+        (is (= :acquisition-exception (:reason f)))
+        (is (= (:error/type payload) (:original-error/type f)))
+        (is (= 1 (:completed-count f)))
+        (is (= (id 1) (:last-completed-cursor f)))
+        (is (= 2 (count (:calls p))))
+        (is (true? (:rescan-required? f)))
+        (is (= :none (:authority p)))))))
+
+(deftest selected-delivery-exception-evidence
+  (let [first-step (candidate 1 :contended true)
+        a (:acquisition (candidate 2 :reclaimed true))
+        page (raw-page a) later (candidate 3 :unavailable false)
+        data (assoc (select-keys a [:intent-id :lease-id]) :receipt-id (id 302)
+                    :error/type :gesso.live.outbox/post-dispatch-ack-unknown
+                    :dispatch/status :accepted :acknowledgment/status :unknown)
+        cases [[data true :reported]
+               [(assoc data :completed [:foreign] :rescan-required? false) true :reported]
+               [(assoc data :intent-id (id 9)) false :reported]
+               [(assoc data :lease-id (id 9)) false :reported]
+               [(assoc data :receipt-id "invalid") false :reported]
+               [(dissoc data :receipt-id) false :reported]
+               [(assoc data :dispatch/status :failed) false :reported]
+               [(assoc data :acknowledgment/status :acknowledged) false :reported]
+               [(dissoc data :acknowledgment/status) false :reported]
+               [(assoc data :error/type :test/other) false :unknown]
+               [(dissoc data :error/type) false :unknown]
+               [nil false :unknown]]]
+    (doseq [[payload receipt? acceptance] cases]
+      (let [trace [first-step (assoc page :delivery-exception payload) later]
+            p (reference/predict-cycle source opts trace) f (:failure p)
+            lead (cond-> (assoc (select-keys a [:intent-id :lease-id :worker-id])
+                               :acquisition-status :reclaimed)
+                   receipt? (assoc :receipt-id (id 302)
+                                   :receipt-evidence :unverified-post-dispatch-receipt))]
+        (is (= :predicted (:status p)))
+        (is (= (run-production opts trace) (select-keys p [:failure :calls])))
+        (is (= lead (:in-flight f)))
+        (is (= :delivery (:phase f)))
+        (is (= :delivery-exception (:reason f)))
+        (is (= (:error/type payload) (:original-error/type f)))
+        (is (= acceptance (:source-acceptance f)))
+        (is (= 1 (:completed-count f)))
+        (is (= (id 1) (:last-completed-cursor f)))
+        (is (= 3 (count (:calls p))))
+        (is (true? (:rescan-required? f)))
+        (is (= :none (:authority p)))))))
+
+(deftest unsupported-exception-hypotheses
+  (let [page (raw-page (:acquisition (candidate 2 :acquired true)))]
+    (doseq [step [{:kind :acquisition-exception :data []}
+                  {:kind :acquisition-exception :data {} :extra true}
+                  (assoc page :delivery-exception "invalid")
+                  (assoc page :delivery-exception {} :delivery-report {})]]
+      (let [p (reference/predict-cycle source opts [step])]
+        (is (= :unsupported (:status p)))
+        (is (not-any? #(contains? p %) [:result :failure :calls]))))))
