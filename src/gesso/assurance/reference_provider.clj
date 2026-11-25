@@ -128,7 +128,7 @@
                                  r))) rows)))
           [] (sort tables)))
 
-(defn compare-quiescent-execution!
+(defn- compare-quiescent*
   "Acquire ledger, retained envelopes and all-time selected table history
    directly from an embedded node. Caller must supply a quiescent node with
    a complete history from empty state, no outstanding transactions and
@@ -137,7 +137,7 @@
    Select the restricted worker envelope checker from expected operations;
    unsupported envelope forms stay unsupported. Limits bound returned rows,
    not provider query resource use. No raw evidence or authority is returned."
-  [node transactions tables]
+  [node transactions tables expected-ids]
   (let [prediction (temporal/replay transactions)
         history (:history prediction)]
     (if-not (and (= :predicted (:status prediction))
@@ -147,9 +147,13 @@
       (acquisition-result :unsupported :unsupported-expectation)
       (try
         (let [ledger (read-ledger! node)]
-          (if (not= (mapv #(select-keys % [:system-time :committed?]) history)
-                    (mapv #(dissoc % :tx-id) ledger))
+          (cond
+            (and expected-ids (not= expected-ids (mapv :tx-id ledger)))
+            (acquisition-result :mismatch :source-identity-sequence-mismatch)
+            (not= (mapv #(select-keys % [:system-time :committed?]) history)
+                  (mapv #(dissoc % :tx-id) ledger))
             (acquisition-result :mismatch :ledger-sequence-mismatch)
+            :else
             (let [envelopes (mapv #(read-envelope! node %1 %2 %3) ledger transactions history)
                   rectangles (read-rectangles! node tables)
                   final-ledger (read-ledger! node)]
@@ -165,3 +169,31 @@
             (acquisition-result :unsupported (:reason (ex-data e)))
             (acquisition-result :unavailable :observation-failed)))
         (catch Exception _ (acquisition-result :unavailable :observation-failed))))))
+
+(defn compare-quiescent-execution!
+  "Compare a selected quiescent history using positional ledger correlation.
+   This diagnostic does not bind caller-supplied source transaction IDs."
+  [node transactions tables]
+  (compare-quiescent* node transactions tables nil))
+
+(def source-binding-profile :selected-source-bound-execution-v1)
+
+(defn compare-source-bound-execution!
+  "Compare a complete selected quiescent history from empty state against
+   explicit ordered source transaction identities. Each expectation is
+   {:tx-id nonnegative-long :system-time Instant :ops vector}. IDs are
+   supplied independently of the ledger being compared, e.g. captured at
+   submission. Never substitute discovered ledger IDs for these inputs.
+   Identity binding is not authenticated submission provenance, a complete
+   source log traversal, a live frontier or a refinement certificate."
+  [node expectations tables]
+  (let [bound #(assoc % :source-binding-profile source-binding-profile)]
+    (if-not (and (vector? expectations) (nil? (meta expectations))
+                 (<= 1 (count expectations) 256)
+                 (every? #(and (map? %) (nil? (meta %))
+                               (= #{:tx-id :system-time :ops} (set (keys %)))
+                               (integer? (:tx-id %)) (<= 0 (:tx-id %) (dec Long/MAX_VALUE))) expectations)
+                 (every? (fn [[a b]] (< (:tx-id a) (:tx-id b))) (partition 2 1 expectations)))
+      (bound (acquisition-result :unsupported :unsupported-source-expectation))
+      (bound (compare-quiescent* node (mapv #(dissoc % :tx-id) expectations) tables
+                                 (mapv :tx-id expectations))))))

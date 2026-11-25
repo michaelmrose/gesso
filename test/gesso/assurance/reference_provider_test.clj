@@ -120,3 +120,45 @@
         (is (= :unavailable (:status (reference/compare-quiescent-execution! node txs tables)))))
       (with-redefs [xt/q (fn [& _] (vec (repeat 257 {})))]
         (is (= :ledger-limit (:reason (reference/compare-quiescent-execution! node txs tables))))))))
+
+(deftest explicit-source-identity-binding
+  (let [txs (transactions)]
+    (with-open [node (xtn/start-node {})]
+      ;; Capture submission identities, not IDs learned from the audit ledger.
+      (let [bound (mapv (fn [{:keys [system-time ops] :as tx}]
+                          (let [id (:tx-id (xt/submit-tx node ops {:system-time system-time}))]
+                            (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+                            (assoc tx :tx-id id))) txs)
+            r (reference/compare-source-bound-execution! node bound tables)]
+        (is (= :matched (:status r)) (pr-str r))
+        (is (= reference/source-binding-profile (:source-binding-profile r)))
+        (is (= {:ledger true :retained-envelopes true :selected-history true} (:checks r)))
+        (is (= :not-established (:provider-refinement r)))
+        (is (= :none (:authority r)))
+        (is (= :not-issued (:certificate r)))
+        ;; Every unbound physical expectation still matches. Wrong identities
+        ;; must fail before any retained envelope or historical table query.
+        (is (= :matched (:status (reference/compare-quiescent-execution! node txs tables))))
+        (with-redefs [envelope/check-envelope! (fn [& _] (throw (AssertionError. "unexpected envelope read")))
+                      envelope/check-worker-attempt-envelope! (fn [& _] (throw (AssertionError. "unexpected worker read")))]
+          (doseq [wrong [(mapv #(update % :tx-id + 100) bound)
+                         (update-in bound [(dec (count bound)) :tx-id] inc)
+                         (pop bound)]]
+            (let [r (reference/compare-source-bound-execution! node wrong tables)]
+              (is (= :mismatch (:status r)))
+              (is (= :source-identity-sequence-mismatch (:reason r))))))
+        (let [wrong (assoc-in bound [4 :ops 0 2 :value] 3)]
+          (is (= :mismatch (:status (reference/compare-source-bound-execution! node wrong tables)))))
+        (with-redefs [xt/q (fn [& _] (throw (AssertionError. "invalid binding must not query")))]
+          (doseq [bad [[] (reverse bound) (mapv #(dissoc % :tx-id) bound)
+                       (assoc-in bound [1 :tx-id] (:tx-id (first bound)))
+                       (assoc bound 0 (nth bound 1))
+                       (assoc-in bound [0 :tx-id] -1)
+                       (assoc-in bound [0 :tx-id] Long/MAX_VALUE)
+                       (assoc-in bound [0 :tx-id] "0")
+                       (assoc-in bound [0 :extra] true)
+                       (with-meta bound {:foreign true})]]
+            (let [r (reference/compare-source-bound-execution! node bad tables)]
+              (is (= :unsupported (:status r)))
+              (is (= :unsupported-source-expectation (:reason r)))
+              (is (not (contains? r :checks))))))))))

@@ -2821,3 +2821,32 @@ remain unsupported. Provider refinement remains not established, no
 authority or certificate is issued, and no CLM-R2 premise is retired.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2643 — bind expected provider execution to source identities
+
+Add a separate source-bound quiescent comparison accepting a closed
+ordered sequence of expected transactions with explicit source IDs.
+Validate bounded, strictly increasing nonnegative long-range identities
+before observation, strip identity metadata for independent temporal
+prediction, and compare the complete expected ID sequence with the
+observed ledger before acquiring envelopes or selected histories. Never
+substitute discovered ledger IDs for supplied expectations. Preserve the
+existing positional diagnostic and its profile; source-binding profile v1.
+
+Expanded focused JVM gate: 107 tests / 8637 assertions, zero failures or
+errors across seven reference namespaces, the production cycle suite and
+operational report suite. Focused provider suite: 3 tests / 86 assertions.
+The new test captures five real XTDB submission IDs and compares their
+bound execution. Incorrect but ordered IDs, a missing suffix, and altered
+attempted operations are rejected even where an unbound expectation or
+physical effects match. Malformed bindings, duplicates, reversed order,
+invalid identity range and extra metadata reject before provider reads.
+Identity mismatches stop before envelope comparison.
+
+This is finite source-identity correspondence under supplied capture
+provenance, not authenticated submission identity, complete source-log
+traversal, live frontier acquisition, retention or universal provider
+refinement. Quiescence and complete history from empty state remain
+premises. No production assurance status changes, no certificate or
+CLM-R2 premise retirement. Full project, physical Claim, Chromium and
+independent proof gates were not rerun.
