@@ -924,12 +924,8 @@
                            legs (pop nodes) (pop starts) counts)]
           (mapv (fn [[tag idx]] (get-in groups [tag idx])) selections))))))
 
-(defn decode-mixed-sql-put
-  "Independently interpret a selected two-leg SQL/put transaction stream.
-   Expand empty or signed int64 SQL argument rows, preserve ordered put
-   groups, and verify every IID. No execution or SQL arity claim."
-  [bytes]
-  (let [result-base (assoc base :profile mixed-sql-put-profile)]
+(defn- decode-mixed-sql-put* [bytes selected-profile rows!]
+  (let [result-base (assoc base :profile selected-profile)]
     (try
       (require! (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes)) :arrow-byte-limit)
       (let [stream (doto (ByteBuffer/wrap ^bytes bytes) (.order ByteOrder/LITTLE_ENDIAN))
@@ -939,12 +935,12 @@
             groups (mixed-batch! bm bb legs)]
         (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream))) :unsupported-arrow-terminator)
         (let [verified (verify-put-iids (assoc result-base :status :decoded :groups (filterv #(= :put-docs (:kind %)) groups))
-                                        mixed-sql-put-profile iid/document-iid)]
+                                        selected-profile iid/document-iid)]
           (require! (= :decoded (:status verified)) (:reason verified))
           (let [{:keys [operations spans]}
                 (reduce (fn [{:keys [operations spans]} {:keys [kind query argument-bytes] :as group}]
                           (let [rows (case kind
-                                       :sql (mapv #(hash-map :kind :sql :query query :args %) (integer-rows! argument-bytes))
+                                       :sql (mapv #(hash-map :kind :sql :query query :args %) (rows! argument-bytes))
                                        :put-docs [group])]
                             (require! (<= (+ (count operations) (count rows)) max-rows) :arrow-expanded-row-limit)
                             {:operations (into operations rows) :spans (conj spans (count rows))}))
@@ -954,3 +950,19 @@
       (catch clojure.lang.ExceptionInfo e (assoc result-base :status :unsupported :reason (:reason (ex-data e))))
       (catch CharacterCodingException _ (assoc result-base :status :unsupported :reason :invalid-arrow-utf8))
       (catch Exception _ (assoc result-base :status :unsupported :reason :invalid-arrow-stream)))))
+
+(defn decode-mixed-sql-put
+  "Independently interpret a selected two-leg SQL/put transaction stream.
+   Expand empty or signed int64 SQL argument rows, preserve ordered put
+   groups, and verify every IID. No execution or SQL arity claim."
+  [bytes]
+  (decode-mixed-sql-put* bytes mixed-sql-put-profile integer-rows!))
+
+(def mixed-scalar-sql-put-profile :xtdb-2.2.0-beta1/selected-mixed-scalar-sql-put-arrow-v1)
+
+(defn decode-mixed-scalar-sql-put
+  "Verify selected mixed SQL/put streams with the previously qualified
+   nonnullable int64, Boolean, UTF-8, keyword, UUID, Z and UTC microsecond
+   scalar argument columns. Preserve group order and exact value types."
+  [bytes]
+  (decode-mixed-sql-put* bytes mixed-scalar-sql-put-profile utc-timestamp-rows!))

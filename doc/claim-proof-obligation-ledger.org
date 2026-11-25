@@ -4053,3 +4053,30 @@ aggregate recursive value budgets and integration into independent
 transaction correspondence remain open. No production wiring, certificate
 or CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2691 — extend mixed SQL/put interpretation to selected scalar arguments
+
+Share the mixed operation decoder behind a profile-specific SQL argument
+reader. Preserve the existing integer-only profile. The new mixed scalar
+profile reuses the qualified int64, Boolean, UTF-8, keyword, UUID and Z/UTC
+microsecond readers, including parameterless invocations. Retain exact
+argument types, operation order, logged spans and independently matched
+IIDs with the existing physical and expanded operation limits.
+
+Focused JVM: 46 tests / 3078 assertions, zero failures or errors across
+reference Arrow operations, struct, put, mixed and source payload suites.
+Real persistent mixed transactions with coalesced seven-column scalar
+rows match expected values and provider observations before and after
+reopening. Exercise signed int64 boundaries, Boolean values, Unicode,
+empty strings, keyword namespaces, UUID bit patterns and both timestamp
+zone labels. Reject malformed UTF-8, invalid keywords, truncated framing,
+list and null argument columns and unsupported timezone labels without
+partial operations. Preserve integer-only profile rejection and integer
+compatibility. Initial test compilation failed due to an extra closing
+parenthesis in the fixture; corrected and reran all five namespaces.
+Passing process exited zero.
+
+Selected mixed scalar SQL/put profile v1. Composite SQL argument rows,
+aggregate recursive value budgets and independent transaction correspondence
+integration remain open. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.
