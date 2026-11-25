@@ -966,3 +966,13 @@
    scalar argument columns. Preserve group order and exact value types."
   [bytes]
   (decode-mixed-sql-put* bytes mixed-scalar-sql-put-profile utc-timestamp-rows!))
+
+(def mixed-recursive-list-sql-put-profile :xtdb-2.2.0-beta1/selected-mixed-recursive-list-sql-put-arrow-v1)
+
+(defn decode-mixed-recursive-list-sql-put
+  "Verify selected mixed SQL/put streams with previously qualified scalar
+   and recursive vector argument columns. Preserve the existing list depth,
+   element and type restrictions, operation order, spans and IID checks.
+   Diagnostic only; no SQL execution or provider refinement claim."
+  [bytes]
+  (decode-mixed-sql-put* bytes mixed-recursive-list-sql-put-profile recursive-list-rows!))

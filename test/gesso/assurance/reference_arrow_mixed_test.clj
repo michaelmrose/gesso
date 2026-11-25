@@ -157,3 +157,84 @@
           (.awaitSourceBlocking (db/primary-db node) (first (peek rejected)) (Duration/ofSeconds 15))
           (check-mixed-scalars! node id integer-id rejected rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-mixed-recursive-lists! [node id depth-id scalar-id rejected rows]
+  (let [decode arrow/decode-mixed-recursive-list-sql-put
+        data (#'fixture/retained-operation-bytes node id)
+        expected (into (mapv #(hash-map :kind :sql
+                                       :query "ASSERT ($1 IS NOT NULL AND ($2 = 0) AND $3 IS NOT NULL)"
+                                       :args %) rows)
+                       [foo sql-true bar])
+        r (decode data)
+        observed (provider/observe-source-message! node id)
+        ;; SQL is the first physical union leg. Locate its first argument
+        ;; relation using the fixture's Arrow metadata buffer offsets.
+        buffers (#'fixture/buffer-starts data)
+        start (nth buffers 8)
+        b (doto (java.nio.ByteBuffer/wrap data) (.order java.nio.ByteOrder/LITTLE_ENDIAN))
+        end (+ start (.getInt b (+ (nth buffers 7) 4)))
+        args (Arrays/copyOfRange data start end)
+        [_ offsets _ inner-offsets _ values] (#'fixture/buffer-starts args)]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :operations)))
+    (is (= arrow/mixed-recursive-list-sql-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= expected (:operations r) (:operations observed)))
+    (is (= [3 1 1 1] (:logged-operation-spans r) (:logged-operation-spans observed)))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-mixed-scalar-sql-put data))))
+    (is (= (assoc-in expected [0 :args 0 0 0] 99)
+           (:operations (decode (#'fixture/edit-long data (+ start values) 99)))))
+    (doseq [[bad reason] [[(#'fixture/edit-int data (+ start offsets) 1) :invalid-arrow-list-offsets]
+                          [(#'fixture/edit-int data (+ start inner-offsets) 1) :invalid-arrow-list-offsets]
+                          [(#'fixture/edit-int data (+ start inner-offsets 4) -1) :invalid-arrow-list-offsets]
+                          [(#'fixture/edit-byte data start 0) :invalid-arrow-framing]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]]]
+      (let [r (decode bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not-any? #(contains? r %) [:groups :operations :logged-operation-spans :iid-correspondence]))))
+    (let [r (decode (#'fixture/retained-operation-bytes node depth-id))]
+      (is (= :decoded (:status r)))
+      (is (= [foo {:kind :sql :query "ASSERT $1 IS NOT NULL" :args [(nth (iterate vector 1) 8)]} bar]
+             (:operations r) (:operations (provider/observe-source-message! node depth-id))))
+      (is (= [1 1 1] (:logged-operation-spans r))))
+    (let [data (#'fixture/retained-operation-bytes node scalar-id)
+          old (arrow/decode-mixed-scalar-sql-put data)
+          new (decode data)]
+      (is (= :matched (:iid-correspondence new)))
+      (is (= (dissoc old :profile) (dissoc new :profile))))
+    (doseq [[other-id reason] rejected]
+      (let [r (decode (#'fixture/retained-operation-bytes node other-id))]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not-any? #(contains? r %) [:groups :operations :logged-operation-spans :iid-correspondence]))))))
+
+(deftest selected-mixed-recursive-lists-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-mixed-recursive-lists-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        p1 [:put-docs :foo {:xt/id 1 :name "a"}]
+        p2 [:put-docs :bar {:xt/id "x" :ok true}]
+        rows [[[[1 2] [] [3]] 0 [[1 "x"] [true :open]]]
+              [[[4] [5 6]] 1 [[] [2 false]]]
+              [[] -1 []]]]
+    (try
+      (let [[id depth-id scalar-id rejected]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitSourceBlocking database id (Duration/ofSeconds 15)) id))
+                    id (submit! (into (mapv #(into ["ASSERT (? IS NOT NULL AND (? = 0) AND ? IS NOT NULL)"] %) rows)
+                                      [p1 ["ASSERT TRUE"] p2]))
+                    depth-id (submit! [p1 ["ASSERT ? IS NOT NULL" (nth (iterate vector 1) 8)] p2])
+                    scalar-id (submit! [p1 ["ASSERT ? IS NOT NULL" "scalar"] p2])
+                    rejected [[(submit! [p1 ["ASSERT ? IS NOT NULL" (nth (iterate vector 1) 9)]]) :arrow-list-depth-limit]
+                              [(submit! [p1 ["ASSERT ? IS NOT NULL" [1 [2]]]]) :unsupported-arrow-list-union-leg]
+                              [(submit! [p1 ["ASSERT ? IS NULL" nil]]) :unsupported-arrow-field]]]
+                (check-mixed-recursive-lists! node id depth-id scalar-id rejected rows)
+                [id depth-id scalar-id rejected]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (first (peek rejected)) (Duration/ofSeconds 15))
+          (check-mixed-recursive-lists! node id depth-id scalar-id rejected rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

@@ -4080,3 +4080,27 @@ Selected mixed scalar SQL/put profile v1. Composite SQL argument rows,
 aggregate recursive value budgets and independent transaction correspondence
 integration remain open. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2692 — extend mixed SQL/put interpretation to recursive vector arguments
+
+Reuse the independently qualified recursive-list SQL argument reader in
+an additional mixed SQL/put profile. Preserve the older integer and scalar
+profiles, ordered physical selections, invocation spans and independent
+IID correspondence. Retain existing depth, list size and schema ceilings;
+no change to reference-domain admission or provider execution semantics.
+
+Focused JVM: 47 tests / 3154 assertions, zero failures or errors across
+reference Arrow operations, struct, put, mixed and source payload suites.
+Real persistent mixed transactions with coalesced recursive vector rows,
+heterogeneous scalar leaves, empty vectors and interleaved put groups
+match expected operations and provider observations before and after
+reopening. Accept eight list levels; reject nine, list-valued union legs,
+null argument columns, malformed nested offsets, framing and truncation
+without partial results. Verify a changed nested int64 value and scalar
+profile compatibility. XTDB logged shutdown cancellation; exit zero.
+
+Selected mixed recursive-list SQL/put profile v1. Nullable SQL argument
+columns, aggregate recursive value budgets and independent transaction
+correspondence integration remain open. No production wiring, certificate
+or CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.
