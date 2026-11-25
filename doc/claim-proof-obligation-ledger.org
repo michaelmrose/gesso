@@ -4537,3 +4537,28 @@ Clock decision v1 is a separate diagnostic, not equal-time state replay
 or end-to-end older-request rejection correspondence. No production
 admission, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2711 — qualify selected equal-system-time temporal replay
+
+Add a separate nondecreasing-system-time replay profile, preserving the
+strict replay and worker observation contracts. Retain transaction order,
+rollback and valid-time overlay semantics. Suppress superseded segments
+with zero system duration, and select the final snapshot at a shared time.
+Admit only document puts and literal/equality assertions in this profile;
+reject state-dependent and clock assertions before replay.
+
+Focused JVM: 98 tests / 6873 assertions, zero failures or errors across
+all eleven prior namespaces in three completed batches (49/3249,
+24/1558, 25/2066). Temporal suite: 12 tests / 1648 assertions. Real
+persistent overlapping equal-time writes, literal abort and later
+supersession match ledger outcomes, point observations and coalesced
+all-time rectangles before and after reopening. Reject decreasing times
+and unsupported guards; preserve strict-profile behavior. The first
+experimental fixture with equal-time state-dependent assertions produced
+38 correspondence failures: the provider rejected two transactions
+predicted to commit. Do not generalize the existing tentative-state
+assertion semantics to equal-time histories. The combined regression
+invocation timed out; completed batches passed. Retained history clock
+integration and older-request rejection remain open. No production
+admission, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.

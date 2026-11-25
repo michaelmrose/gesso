@@ -1,5 +1,6 @@
 (ns gesso.assurance.reference-temporal-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.java.io :as io]
+            [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.reference-temporal-fixtures
              :refer [day sys put a b c d provider-at rectangle provider-rectangles coalesce-valid]]
@@ -248,3 +249,62 @@
       (let [actual (mapcat #(provider-rectangles node %) [:temporalprobe :temporalother])]
         (is (= (frequencies (coalesce-valid (:rectangles r)))
                (frequencies (coalesce-valid actual))))))))
+
+(def ^:private equal-time-transactions
+  [{:system-time (sys 1) :ops [(put :temporalprobe 0 9 a)]}
+   {:system-time (sys 2) :ops [(put :temporalprobe 2 7 b) [:put-docs :temporalprobe a]]}
+   {:system-time (sys 2) :ops [(put :temporalprobe 4 8 c) [:put-docs :temporalprobe b] ["ASSERT ? = ?" 2 2]]}
+   {:system-time (sys 2) :ops [(put :temporalprobe 0 9 c) [:put-docs :temporalprobe c] ["ASSERT FALSE"]]}
+   {:system-time (sys 2) :ops [["ASSERT TRUE"] (put :temporalother 1 3 d)]}
+   {:system-time (sys 3) :ops [(put :temporalprobe 3 5 a)]}])
+
+(defn- check-equal-time-history! [node r ids]
+  (is (= [true true true false true true]
+         (mapv :committed? (:history r))
+         (mapv (fn [id] (:committed (first (xt/q node ["SELECT committed FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ?" id])))) ids)))
+  (doseq [s (range 0 4) v (concat (map day (range -1 11)) (map sys (range 1 5)))]
+    (is (= (temporal/visible-at r (sys s) v) (provider-at node (sys s) v))
+        (str "system " s " valid " v)))
+  (let [actual (mapcat #(provider-rectangles node %) [:temporalprobe :temporalother])]
+    (is (= (frequencies (coalesce-valid (:rectangles r)))
+           (frequencies (coalesce-valid actual))))))
+
+(deftest independently-predicted-equal-system-time-history
+  (let [txs equal-time-transactions
+        r (temporal/replay-equal-time txs)
+        root (java.nio.file.Files/createTempDirectory "gesso-equal-system-time-" (make-array java.nio.file.attribute.FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        at #(get-in (temporal/visible-at r (sys %1) (day %2)) [:temporalprobe "a"])]
+    (is (= :predicted (:status r)))
+    (is (= temporal/equal-time-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :unsupported (:status (temporal/replay txs))))
+    (doseq [guard [(value-guard 2) (row-count 1) ["ASSERT CURRENT_TIMESTAMP < ?" (sys 4)]]]
+      (let [report (temporal/replay-equal-time (update-in txs [2 :ops] conj guard))]
+        (is (= :unsupported (:status report)))
+        (is (= :unsupported-equal-time-assertion (:reason report)))
+        (is (not-any? #(contains? report %) [:history :rectangles]))))
+    (is (= :unsupported (:status (temporal/replay-equal-time [(nth txs 1) (first txs)]))))
+    (is (= (dissoc (temporal/replay transactions) :profile)
+           (dissoc (temporal/replay-equal-time transactions) :profile)))
+    (is (= a (at 1 5)))
+    (is (= b (at 2 3)))
+    (is (= c (at 2 5)))
+    (is (= a (at 2 8)))
+    (is (= a (at 3 4)))
+    (is (= 2 (:failed-assertion-index (nth (:history r) 3))))
+    (is (= (get-in r [:history 2 :segments]) (get-in r [:history 3 :segments])))
+    (is (every? #(or (nil? (:system-to %)) (.isBefore ^Instant (:system-from %) ^Instant (:system-to %))) (:rectangles r)))
+    (try
+      (let [ids (with-open [node (xtn/start-node config)]
+                  (let [database (db/primary-db node)
+                        ids (mapv (fn [tx]
+                                    (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+                                      (.awaitTxBlocking database id (Duration/ofSeconds 15)) id)) txs)]
+                    (check-equal-time-history! node r ids)
+                    ids))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
+          (check-equal-time-history! node r ids)))
+      (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))

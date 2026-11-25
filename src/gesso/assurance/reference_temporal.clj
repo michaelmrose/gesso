@@ -139,7 +139,7 @@
 (defn- overlay [segments table from to doc system-time]
   ;; Preserve issuing system time on unaffected pieces. Close only the
   ;; intersection that is overwritten, and never emit a zero-system-time
-  ;; rectangle for an earlier put in the same transaction.
+  ;; rectangle for an earlier put at the same system time.
   (let [{:keys [active closed]}
         (reduce (fn [acc [a b old origin :as segment]]
                   (if (or (not (before-end? a to)) (not (before-end? from b)))
@@ -200,9 +200,12 @@
               (recur working (inc i))
               {:state prior :committed? false :failed-assertion-index i})))))))
 
-(defn replay
+(def equal-time-profile :selected-bitemporal-equal-time-transaction-v1)
+
+(defn- replay*
   "Replay from empty state. Each transaction is {:system-time Instant :ops
-   vector}. All system times strictly increase. Valid intervals are
+   vector}. System times increase, with ties admitted only by the
+   equal-time profile. Valid intervals are
    half-open and microsecond-aligned, with omitted starts at the supplied
    system time and omitted ends unbounded. Abort retains the prior snapshot.
    Selected assertions read tentative documents at the transaction system
@@ -210,8 +213,8 @@
    Validate all operation shapes before
    replay. Rectangles retain the issuing system time and exclusive supersession
    time. No provider observations, implicit clock or authority are admitted."
-  [transactions]
-  (let [report {:profile profile :authority :none :certificate :not-issued}]
+  [transactions equal-time?]
+  (let [report {:profile (if equal-time? equal-time-profile profile) :authority :none :certificate :not-issued}]
     (try
       (when-not (and (vector? transactions) (nil? (meta transactions))
                      (<= 1 (count transactions) 256))
@@ -220,12 +223,19 @@
         (when-not (and (map? tx) (nil? (meta tx))
                        (= #{:system-time :ops} (set (keys tx)))
                        (instant? system-time)
-                       (or (zero? i) (before? (:system-time (nth transactions (dec i))) system-time))
+                       (or (zero? i)
+                           (let [prior (:system-time (nth transactions (dec i)))]
+                             (or (before? prior system-time) (and equal-time? (= prior system-time)))))
                        (vector? ops) (nil? (meta ops)) (<= 1 (count ops) 256))
           (reject! :unsupported-temporal-transaction)))
       (let [normalized (mapv (fn [{:keys [system-time ops] :as tx}]
                                (assoc tx :ops (mapv #(normalize-op! system-time %) ops)))
                              transactions)]
+        (when (and equal-time?
+                   (some (fn [op] (and (string? (first op))
+                                       (not (#{"ASSERT TRUE" "ASSERT FALSE" "ASSERT ? = ?"} (first op)))))
+                         (mapcat :ops normalized)))
+          (reject! :unsupported-equal-time-assertion))
         (let [{:keys [history segments closed]}
               (reduce (fn [{:keys [history] :as prior} {:keys [system-time ops]}]
                         (let [{:keys [state committed? failed-assertion-index]}
@@ -244,10 +254,25 @@
           (assoc report :status :unsupported :reason (:reason (ex-data e)))
           (throw e))))))
 
+(defn replay
+  "Replay the selected strictly increasing system-time domain."
+  [transactions]
+  (replay* transactions false))
+
+(defn replay-equal-time
+  "Replay ordered transactions with nondecreasing system times. The last
+   committed state at a shared time determines the visible snapshot;
+   superseded same-time segments have no positive system interval. Abort
+   preserves the preceding state, including earlier commits at that time.
+   Only puts and literal/equality assertions are admitted; state-dependent
+   and clock guards are unqualified. Separate diagnostic, not clock admission."
+  [transactions]
+  (replay* transactions true))
+
 (defn visible-at
   "Project complete visible document maps at a system and valid instant."
   [report system-time valid-time]
-  (when (and (= profile (:profile report)) (= :predicted (:status report))
+  (when (and (#{profile equal-time-profile} (:profile report)) (= :predicted (:status report))
              (instant? system-time) (instant? valid-time))
     (project-visible (:segments (last (take-while #(not (before? system-time (:system-time %)))
                                                 (:history report))))
