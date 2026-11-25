@@ -238,6 +238,24 @@
       (require! (= n (count (distinct kinds))) :unsupported-arrow-list-union-leg)
       [:union kinds])))
 
+(defn- struct-key! [name allowed depth]
+  (require! (and name (<= 1 (count name) 4095)) :unsupported-arrow-struct-key)
+  (if (contains? allowed :document-keys)
+    (if (= "_id" name)
+      (do (require! (zero? depth) :unsupported-arrow-struct-key) "xt/id")
+      (let [split (.lastIndexOf ^String name "$")
+            ns-part (when (not= -1 split) (subs name 0 split))
+            local (subs name (inc split))]
+        (require! (and (re-matches #"[a-z][a-z0-9]*(?:_[a-z0-9]+)*" local)
+                       (or (nil? ns-part)
+                           (and (not= "xt" ns-part)
+                                (re-matches #"[a-z][a-z0-9]*(?:\$[a-z][a-z0-9]*)*" ns-part))))
+                  :unsupported-arrow-struct-key)
+        (str (when ns-part (str (.replace ^String ns-part \$ \.) "/"))
+             (.replace ^String local \_ \-))))
+    (do (require! (re-matches #"[a-z][a-z0-9]*" name) :unsupported-arrow-struct-key)
+        name)))
+
 (defn- scalar-kind-at! [^Field f field-name allowed depth]
   (let [type (.typeType f)
         extension? (pos? (.customMetadataLength f))
@@ -287,10 +305,8 @@
         (let [fields (mapv (fn [i]
                              (let [^Field child (.children f i)
                                    name (.name child)]
-                               (require! (and name (<= 1 (count name) 4095)
-                                              (re-matches #"[a-z][a-z0-9]*" name))
-                                         :unsupported-arrow-struct-key)
-                               [name (scalar-kind-at! child name allowed (inc depth))]))
+                               [(struct-key! name allowed depth)
+                                (scalar-kind-at! child name allowed (inc depth))]))
                            (range n))]
           (require! (= n (count (distinct (map first fields)))) :duplicate-arrow-struct-key)
           [:struct fields]))
@@ -874,3 +890,28 @@
   "Expand selected SQL groups including diagnostic struct-map values."
   [bytes]
   (expand-fixed-operations bytes struct-map-base struct-map-rows!))
+
+(def document-key-profile :xtdb-2.2.0-beta1/selected-document-key-arrow-operations-v1)
+(def ^:private document-key-base (assoc base :profile document-key-profile))
+
+(defn- document-key-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :struct-map :document-keys}))
+
+(defn decode-document-key-arguments
+  "Decode selected structs with canonical reference document keys, including
+   the outer _id spelling. Interpret retained field names, not original
+   caller aliases. No document identity, admission or execution claim."
+  [bytes]
+  (try
+    (assoc document-key-base :status :decoded :rows (document-key-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc document-key-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc document-key-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc document-key-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-document-key-operations
+  "Expand selected SQL groups with diagnostic canonical document key maps."
+  [bytes]
+  (expand-fixed-operations bytes document-key-base document-key-rows!))

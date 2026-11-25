@@ -3501,3 +3501,26 @@ Selected struct-map profile v1. Empty structs, namespaced and hyphenated
 keys, nullable fields, document puts and aggregate document budgets
 remain open. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2669 — decode selected canonical Arrow document keys
+
+Independently invert the observed physical field spelling for canonical
+reference keys: underscore-delimited local names and dollar-delimited
+namespace segments. Qualify outer _id as :xt/id without claiming IID
+correspondence. Reject reserved xt namespaces, nested _id, malformed
+separators and duplicate reconstructed keys. Preserve the earlier simple
+struct profile. Interpret retained names, not lost caller aliases.
+
+Focused JVM: 23 tests / 1319 assertions, zero failures or errors across
+reference Arrow operations, struct and source payload suites. Physical
+retained journal and outbox key spellings, nested fields, UTC deadline
+values and outer IDs match expected diagnostic maps before and after
+reopening. Mutate field names, check duplicate and malformed keys, and
+confirm earlier profile and provider SQL-map rejection. XTDB logged
+shutdown cancellation; the test process exited zero.
+
+Selected document-key profile v1. SQL map decoding remains diagnostic.
+Empty structs, nullable fields, document puts, IID correspondence and
+aggregate reference document budgets remain open. No production wiring,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates were not rerun.
