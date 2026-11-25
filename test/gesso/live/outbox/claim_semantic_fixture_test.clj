@@ -416,7 +416,32 @@
     (is (not (admission :pending? accept "c1")))
     (is (= :candidate-publication-expectation-mismatch (reason #(frame! no-publication ctx ops))))
     (is (= :matched (marker (frame! no-publication ctx (into [["ASSERT TRUE"]] writes)))))
-    (is (not (no-publication :pending? accept "c1")))))
+    (is (not (no-publication :pending? accept "c1")))
+    (let [declared-source (assoc source :residual-assertion-derivations (claim/residual-assertion-derivations))
+          both (mapped/build-inductive-mapped-admission! declared-source)
+          residual-only (mapped/build-inductive-mapped-admission! (dissoc declared-source :publication-derivations))
+          empty-residual (mapped/build-inductive-mapped-admission!
+                          (assoc-in declared-source [:residual-assertion-derivations accept] nil))
+          assertions (:assertions (mapped/reconstruct-mapped-residual-assertions! both accept record docs))
+          full (into assertions ops)
+          residual-marker #(get-in % [:frame-handoff :checked :candidate :residual-assertion-expectation])]
+      (is (seq assertions))
+      (is (= :matched (residual-marker (frame! both ctx full))))
+      (is (= :matched (residual-marker (frame! both ctx (into (vec (reverse assertions)) ops)))))
+      (is (= :matched (residual-marker (frame! empty-residual ctx ops))))
+      (is (= :matched (residual-marker (frame! residual-only {} full))))
+      (is (nil? (marker (frame! residual-only {} full))))
+      (doseq [bad [(into (subvec assertions 1) ops)
+                   (into (conj assertions (first assertions)) ops)
+                   (into (conj assertions ["ASSERT TRUE"]) ops)
+                   (into (assoc-in assertions [0 1] "other") ops)]]
+        (is (= :candidate-residual-assertion-mismatch (reason #(frame! both ctx bad))))
+        (is (not (both :pending? accept "c1"))))
+      (is (= :candidate-residual-assertion-mismatch (reason #(frame! empty-residual ctx full))))
+      (is (not (empty-residual :pending? accept "c1")))
+      (is (= :candidate-residual-assertion-mismatch
+             (reason #(frame! residual-only {} (into assertions (subvec ops 1))))))
+      (is (not (residual-only :pending? accept "c1"))))))
 
 (deftest mapped-residual-assertions-derive-from-admitted-prestate
   (let [source (claim/publication-mapped-admission-source (claim/bound-inductive-source!))

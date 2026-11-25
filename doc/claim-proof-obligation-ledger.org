@@ -1446,3 +1446,32 @@ profile; it does not establish arbitrary constructor refinement, SQL
 semantic equivalence or preventive residual admission. Complete write-table
 closure, provider execution refinement and writer authority remain open.
 No CLM-R2 premise is retired.
+
+* v2595 — admit declared residual assertions before physical submission
+
+Extend the private consumed-preparation check in the existing production
+framing action to reconstruct declared residual assertions from the exact
+captured prestate rows and checked command record. Compare the original
+candidate's complete SQL multiset with the reconstructed assertions plus
+canonical absence guards for its outbox puts. Publication declarations,
+when present, independently check those puts first. Residual-only admissions
+check assertion correspondence without claiming publication semantic intent.
+Return matched statuses in the checked candidate, with no raw rows or SQL.
+Both initial and guarded-abort framing use this action; preserve the older
+unframed and diagnostic framed actions, including their arity restrictions.
+A mismatch after preparation consumption cannot reuse that preparation.
+
+Focused JVM validation: 3 tests / 94 assertions, zero failures or errors.
+The production framing test exercises nonempty, reordered and explicitly
+empty residual expectations, omitted, duplicate, extra and altered-argument
+assertions, residual-only admission and missing canonical outbox guards.
+Full opt-in physical Claim with source-log observation: 3 tests / 1116
+assertions, zero failures or errors. Every observed mapped candidate carries
+a matched residual assertion expectation. Full project, Chromium and
+separate proof gates were not rerun.
+
+History and checkpoint profiles remain v12. This is preventive correspondence
+at the production framing boundary, not yet a mandatory residual marker at
+the final writer-policy boundary. Residual order within the prewrite group,
+complete write-table closure, SQL equivalence, provider execution refinement
+and writer authority remain open. No CLM-R2 premise is retired.

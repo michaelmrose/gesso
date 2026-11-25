@@ -77,7 +77,7 @@
                           (let [entry (or (get @pending [command-id id])
                                           (reject! :missing-preparation))]
                             (lower-frame! id (:snapshot entry))))
-          admit-candidate! (fn [id command-id puts frame-mode formatted-guards check-publication!]
+          admit-candidate! (fn [id command-id puts frame-mode formatted-guards check-expectations!]
                    (let [k [command-id id]
                          [prior _] (swap-vals! pending dissoc k)
                          {:keys [binding snapshot inputs]} (or (get prior k) (reject! :missing-preparation))
@@ -104,9 +104,8 @@
                            (frame/require-formatted-prestate-assertions! mapping (:document-rows snapshot)
                                                                           (vec (vals (:records snapshot))) formatted-guards)))
                        (cond-> checked
-                         check-publication!
-                         (assoc :publication-expectation
-                                (check-publication! (:document-rows snapshot) puts (first records)))
+                         check-expectations!
+                         (merge (check-expectations! (:document-rows snapshot) puts (first records)))
                          (some? document-effects)
                          (assoc :document-frame :checked-supplied-complete-rows)
                          frame-mode
@@ -124,7 +123,7 @@
        :admit-framed! (fn
                         ([id command-id puts prefix]
                          (admit-candidate! id command-id puts :exact prefix nil))
-                        ([id command-id puts prefix check-publication!]
-                         (admit-candidate! id command-id puts :exact prefix check-publication!)))
+                        ([id command-id puts prefix check-expectations!]
+                         (admit-candidate! id command-id puts :exact prefix check-expectations!)))
        :discard! (fn [id command-id] (swap! pending dissoc [command-id id]) nil)
        :pending? (fn [id command-id] (contains? @pending [command-id id]))}))))
