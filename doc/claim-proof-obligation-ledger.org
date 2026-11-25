@@ -4461,3 +4461,31 @@ error and first launcher lacked required JVM/Netty flags; corrected
 runs passed. Implicit system times and broader SQL remain unqualified.
 No certificate or CLM-R2 premise retirement. Full project and independent
 formal gates were not rerun.
+
+* v2708 — derive implicit system time from retained source frames
+
+Resolve absent envelope system times using the independently framed
+signed microsecond timestamp and the preceding qualified transaction
+system time. Implement the pinned indexer's implicit clock smoothing:
+use the log timestamp if later, otherwise advance the preceding time by
+one microsecond. Include aborted transactions; maintenance does not
+advance the replay transaction clock. Explicit times take precedence;
+retain the strictly increasing history requirement. Reject missing or
+invalid timestamp context and signed-microsecond overflow. Preserve the
+standalone two-argument projection's explicit-time requirement and
+version the expanded replay input, acquisition and execution profiles.
+
+Focused JVM: 94 tests / 6352 assertions, zero failures or errors across
+all eleven prior namespaces; replay input suite 4 tests / 248 assertions.
+Persistent fixed-clock fixture includes an implicit first time, a later
+explicit time, a smoothed aborted transaction, maintenance and another
+smoothed commit. Independently reconstructed times match the ledger and
+selected all-time rectangles before and after reopening. Check pre-epoch
+conversion, equal and advancing clocks, missing context, invalid prior
+and overflow, and reject non-increasing replay history. The first fixture
+used year 2100 and exposed the existing provider ledger query's current
+valid-time visibility limitation; use a fixed past clock for deterministic
+smoothing without changing provider observation contracts. Future-dated
+ledger coverage, non-increasing explicit system-time semantics and broader
+SQL remain open. No production admission, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.

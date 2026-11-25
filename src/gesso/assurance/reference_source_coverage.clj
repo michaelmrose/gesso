@@ -247,8 +247,8 @@
        (= offset (:tx-id tx)) (instance? Instant (:system-time tx))
        (vector? (:ops tx)) (<= 1 (count (:ops tx)) 256)))
 
-(defn- project-replay-input [offset body]
-  (let [r (replay-input/decode-replay-input offset body)]
+(defn- project-replay-input [offset micros body prior-time]
+  (let [r (replay-input/decode-replay-input offset body micros prior-time)]
     (if (and (= :decoded (:status r)) (= replay-input/profile (:profile r))
              (= :none (:authority r)) (= :not-issued (:certificate r))
              (qualified-replay-input? offset (:transaction r)))
@@ -275,7 +275,7 @@
       (assoc (local-result :unsupported :retained-transaction-not-framed) :message-id target)
       :else
       (loop [samples (seq (map vector frames bytes records)) matched [] inputs []]
-        (if-let [[[offset _ _] body ^Log$Record record] (first samples)]
+        (if-let [[[offset micros _] body ^Log$Record record] (first samples)]
           (let [decoded (payload/decode-payload body)
                 message (:message decoded)]
             (if-not (= :decoded (:status decoded))
@@ -287,7 +287,7 @@
                 (if (or (= target offset) (and all? (= :transaction (:kind message))))
                   (if-let [failure (compare-selected-operation node offset message)]
                     failure
-                    (let [{:keys [input failure]} (when replay? (project-replay-input offset body))]
+                    (let [{:keys [input failure]} (when replay? (project-replay-input offset micros body (:system-time (peek inputs))))]
                       (if failure failure
                           (recur (next samples) (conj matched offset)
                                  (cond-> inputs replay? (conj input))))))
@@ -550,13 +550,13 @@
            :processed-retained-history-binding-profile processed-retained-history-binding-profile)))
 
 (def processed-retained-replay-inputs-profile
-  :xtdb-2.2.0-beta1/selected-processed-retained-replay-inputs-v3)
+  :xtdb-2.2.0-beta1/selected-processed-retained-replay-inputs-v4)
 
 (defn observe-local-processed-retained-replay-inputs!
   "Internal sensitive sample of independently projected replay inputs from
    the same framed payloads as complete operation correspondence. Require
    stable bytes and processed frontiers, exact ordered identities and
-   increasing explicit system times. Empty history yields no inputs.
+   increasing independently resolved system times. Empty history yields no inputs.
    Do not publish inputs or fingerprints. No execution comparison or proof."
   [node]
   (let [sample (observe-processed-retained-history*

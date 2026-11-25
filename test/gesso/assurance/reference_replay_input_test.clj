@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-replay-input :as input]
+            [gesso.assurance.reference-provider :as reference]
             [gesso.assurance.reference-arrow-operations :as arrow]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-source-payload :as payload]
@@ -99,14 +100,14 @@
                         (fn [r] (update-in r [:transaction :tx-id] inc))
                         (fn [r] (dissoc r :transaction))]]
           (with-redefs [input/decode-replay-input
-                        (fn [id bytes] (cond-> (decode! id bytes) (= id last-id) change))]
+                        (fn [id bytes & context] (cond-> (apply decode! id bytes context) (= id last-id) change))]
             (let [r (observe!)]
               (is (= :unsupported (:status r)))
               (is (= :retained-replay-input-not-qualified (:reason r)))
               (is (= last-id (:message-id r)))
               (no-replay-sample! r))))
         (with-redefs [input/decode-replay-input
-                      (fn [id bytes] (cond-> (decode! id bytes)
+                      (fn [id bytes & context] (cond-> (apply decode! id bytes context)
                                        (= id last-id) (assoc-in [:transaction :system-time] first-time)))]
           (let [r (observe!)]
             (is (= :unsupported (:status r)))
@@ -229,4 +230,69 @@
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
           (check-valid-time-inputs! node expected)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-implicit-history! [node ids future txs]
+  (let [log (.getSourceLog (db/primary-db node))
+        frames (with-open [file (RandomAccessFile. (.toFile (#'coverage/local-log-path log)) "r")]
+                 (:frames (#'coverage/local-frames file)))
+        micros (second (first (filter #(= (first ids) (first %)) frames)))
+        stamp (Instant/ofEpochSecond (Math/floorDiv (long micros) 1000000)
+                                     (* 1000 (Math/floorMod (long micros) 1000000)))
+        times [stamp future (.plusNanos future 1000) (.plusNanos future 2000)]
+        expected (mapv (fn [id time ops] {:tx-id id :system-time time :ops ops}) ids times txs)
+        sample (coverage/observe-local-processed-retained-replay-inputs! node)
+        r (reference/compare-local-processed-retained-replay-execution! node #{:probe})
+        ledger (#'reference/read-ledger! node)
+        body (get (read-bytes node) (nth ids 2))]
+    (is (= :observed (:status sample)) (pr-str (dissoc sample :replay-inputs :payload-fingerprint)))
+    (is (= expected (:replay-inputs sample)))
+    (is (= times (mapv :system-time ledger)))
+    (is (= [true true false true] (mapv :committed? ledger)))
+    (is (= :matched (:status r)) (pr-str r))
+    (is (= :matched (:outcome-correspondence r)))
+    (is (= :unsupported (:status (input/decode-replay-input (nth ids 2) body))))
+    (doseq [[m prior expected-time] [[-1 nil (Instant/parse "1969-12-31T23:59:59.999999Z")]
+                                    [0 Instant/EPOCH (.plusNanos Instant/EPOCH 1000)]
+                                    [2 Instant/EPOCH (.plusNanos Instant/EPOCH 2000)]]]
+      (is (= expected-time (get-in (input/decode-replay-input (nth ids 2) body m prior) [:transaction :system-time]))))
+    (doseq [[m prior] [[nil nil] [(inc (bigint Long/MAX_VALUE)) nil] [0 "invalid"]
+                       [0 (Instant/ofEpochSecond 9223372036854 775807000)]]]
+      (is (= :unsupported (:status (input/decode-replay-input (nth ids 2) body m prior)))))
+    (let [decode! input/decode-replay-input]
+      (with-redefs [input/decode-replay-input
+                    (fn [id body micros prior]
+                      (cond-> (decode! id body micros prior)
+                        (= id (peek ids)) (assoc-in [:transaction :system-time] future)))]
+        (let [r (coverage/observe-local-processed-retained-replay-inputs! node)]
+          (is (= :retained-replay-system-time-order (:reason r)))
+          (no-replay-sample! r))))))
+
+(deftest implicit-system-time-from-retained-frames
+  (let [root (Files/createTempDirectory "gesso-implicit-replay-" (make-array FileAttribute 0))
+        clock (java.time.Clock/fixed (Instant/parse "2026-01-01T00:00:00Z") (ZoneId/of "UTC"))
+        config {:log [:local {:path (str root "/log") :instant-src clock}]
+                :storage [:local {:path (str root "/storage")}]}
+        future (Instant/parse "2026-01-02T00:00:00Z")
+        txs [[[:put-docs :probe {:xt/id "a" :value 1}]]
+             [[:put-docs :probe {:xt/id "a" :value 2}]]
+             [[:put-docs :probe {:xt/id "a" :value 3}] ["ASSERT FALSE"]]
+             [[:put-docs :probe {:xt/id "a" :value 4}]]]]
+    (try
+      (let [ids (with-open [node (xtn/start-node config)]
+                  (let [database (db/primary-db node)
+                        a (:tx-id (xt/submit-tx node (nth txs 0)))
+                        b (:tx-id (xt/submit-tx node (nth txs 1) {:system-time future}))
+                        c (:tx-id (xt/submit-tx node (nth txs 2)))
+                        _ (.awaitSourceBlocking database c (Duration/ofSeconds 15))
+                        log (.getSourceLog database)
+                        _ (.appendMessageBlocking log (xtdb.api.log.SourceMessage$FlushBlock. Long/MAX_VALUE))
+                        d (:tx-id (xt/submit-tx node (nth txs 3)))
+                        ids [a b c d]]
+                    (.awaitSourceBlocking database d (Duration/ofSeconds 15))
+                    (check-implicit-history! node ids future txs)
+                    ids))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
+          (check-implicit-history! node ids future txs)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

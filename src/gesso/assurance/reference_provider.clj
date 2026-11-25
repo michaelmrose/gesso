@@ -376,7 +376,7 @@
                :retained-execution-profile retained-execution-profile)
         (dissoc r :source-coverage)))))
 
-(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v3)
+(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v4)
 
 (defn- valid-replay-history? [sample]
   (let [inputs (:replay-inputs sample)]

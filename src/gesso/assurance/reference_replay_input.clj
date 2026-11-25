@@ -5,7 +5,7 @@
             [gesso.assurance.reference-temporal :as temporal])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v3)
+(def profile :selected-retained-replay-input-v4)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -42,19 +42,42 @@
                 (project-put table documents))
     nil))
 
+(defn- frame-instant [micros]
+  (when (and (integer? micros) (<= Long/MIN_VALUE micros Long/MAX_VALUE))
+    (Instant/ofEpochSecond (Math/floorDiv (long micros) 1000000)
+                           (* 1000 (Math/floorMod (long micros) 1000000)))))
+
+(defn- implicit-system-time [micros prior]
+  ;; The pinned Indexer uses max(log timestamp, latest completed time +
+  ;; one microsecond) for implicit times, including after aborted txs.
+  (when-let [stamp (frame-instant micros)]
+    (cond
+      (nil? prior) stamp
+      (not (and (instance? Instant prior)
+                (zero? (mod (.getNano ^Instant prior) 1000))
+                (not (.isBefore ^Instant prior (frame-instant Long/MIN_VALUE)))
+                (.isBefore ^Instant prior (frame-instant Long/MAX_VALUE)))) nil
+      (.isAfter stamp ^Instant prior) stamp
+      :else (.plusNanos ^Instant prior 1000))))
+
 (defn decode-replay-input
   "Project one independently decoded transaction envelope to the selected
-   temporal input domain. Require explicit system time, UTC default zone,
+   temporal input domain. Explicit time takes precedence. The four-argument
+   form may derive implicit time from the supplied framed microseconds and
+   preceding completed transaction time; the two-argument form cannot.
+   Require UTC default zone,
    absent or default xtdb user, no user metadata, ordinary puts, row-level valid-time bounds and exact
    literal/equality assertions.
    The physical coordinate is supplied, not authenticated. No provider
    observations or outcomes are consulted. Internal sensitive input only."
-  [tx-id bytes]
+  ([tx-id bytes] (decode-replay-input tx-id bytes nil nil))
+  ([tx-id bytes frame-micros prior-time]
   (let [fail #(assoc base :status :unsupported :reason %)]
     (if-not (and (integer? tx-id) (<= 0 tx-id (dec Long/MAX_VALUE)))
       (fail :invalid-replay-transaction-id)
       (let [r (payload/decode-payload bytes)
-            {:keys [kind system-time default-tz tx-ops] :as message} (:message r)]
+            {:keys [kind system-time default-tz tx-ops] :as message} (:message r)
+            system-time (if (nil? system-time) (implicit-system-time frame-micros prior-time) system-time)]
         (cond
           (not= :decoded (:status r)) (fail :unsupported-replay-envelope)
           (not (and (= :transaction kind) (instance? Instant system-time)
@@ -76,4 +99,4 @@
                 (if (and (every? some? projected)
                          (= :predicted (:status (temporal/replay [tx]))))
                   (assoc base :status :decoded :transaction (assoc tx :tx-id tx-id))
-                  (fail :unsupported-replay-operation))))))))))
+                  (fail :unsupported-replay-operation)))))))))))
