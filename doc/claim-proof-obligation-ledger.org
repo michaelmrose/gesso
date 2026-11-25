@@ -3760,3 +3760,29 @@ nullable actual puts, explicit bounds, multiple groups and aggregate
 document budgets remain open. No production wiring, certificate or
 CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2680 — independently verify retained keyword document IIDs
+
+Inspect the installed XTDB IID keyword encoding and independently derive
+lowercase hex of the first 16 SHA-256 bytes over UTF-8 k followed by the
+printed keyword including its colon. Qualify namespace and local name
+separately using the selected retained keyword grammar; bound the printed
+spelling to 4096 characters. Preserve namespace, case and punctuation
+without normalization or invoking the provider IID helper. Require every
+retained IID to match its keyword document ID; preserve earlier profiles.
+
+Focused JVM: 35 tests / 2054 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. Eight
+known-answer vectors independently computed with Python hashlib match
+persistent retained puts and provider observations before and after
+reopening. Reject mutated IDs, IIDs, swapped IIDs, malformed UTF-8,
+invalid keyword spellings, other ID families and truncated streams
+without partial groups. Corrected a copied expected rejection reason
+before the passing run loaded the test namespace. XTDB logged shutdown
+cancellation; the test process exited zero.
+
+Selected keyword-IID put profile v1. UUID IID verification, nullable
+actual puts, explicit bounds, multiple groups and aggregate document
+budgets remain open. Correspondence is not authenticity or admission.
+No production wiring, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.

@@ -27,3 +27,18 @@
   (let [input (.getBytes (str "s" id) StandardCharsets/UTF_8)
         digest (.digest (MessageDigest/getInstance "SHA-256") input)]
     (.formatHex (HexFormat/of) digest 0 16)))
+
+(defn keyword-iid
+  "Derive the selected keyword IID from UTF-8 of k followed by the printed
+   keyword, including its colon. Restrict namespace and local name to the
+   selected retained keyword grammar. No provider helper or normalization."
+  [id]
+  (require! (and (keyword? id)
+                 (re-matches #"[a-zA-Z][a-zA-Z0-9_-]*" (name id))
+                 (or (nil? (namespace id))
+                     (re-matches #"[a-zA-Z][a-zA-Z0-9_.-]*" (namespace id)))
+                 (<= (count (str id)) 4096))
+            :unsupported-reference-keyword-id)
+  (let [input (.getBytes (str "k" id) StandardCharsets/UTF_8)
+        digest (.digest (MessageDigest/getInstance "SHA-256") input)]
+    (.formatHex (HexFormat/of) digest 0 16)))
