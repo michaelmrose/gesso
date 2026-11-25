@@ -602,3 +602,24 @@ The round-trip check shares XTDB normalization and decoding; it is not
 an independent proof of the provider codec, nor a general SQL identifier
 formatter qualification. No CLM-R2 premise or certification authority is
 retired here.
+
+* v2566 — physical Claim qualification of accumulated guard changes
+
+Requalify the complete physical Claim namespace after v2563–v2565. For
+all nine submissions across the four recovery modes, extract the actual
+mapped pre-write prefix from the submitted transaction envelope, excluding
+the transition-evidence wrapper and the original operation suffix. Check
+that prefix against the independent version-4 lowering reconstruction
+using the actual actor's source alternative and the corresponding captured
+prestate rows. Preserve the existing acceptance/refusal prefix-size and
+suffix checks. The independent report retains no certification authority
+and does not establish SQL refinement.
+
+The full namespace passed: 3 tests, 811 assertions, no failures or errors.
+This includes the two-helper contention race, valid and invalid recovery
+constructions, the existing replay, history and publication checks,
+pinned snapshot consistency and the refusal-prefix mutation regression.
+Production guard semantics are unchanged in this revision. The strict
+Chromium gate, Ansatz pilot and full project suite were not run. This is
+physical qualification of the fixture, not a universal provider proof or
+closure of CLM-R2.

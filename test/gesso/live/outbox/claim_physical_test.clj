@@ -18,6 +18,7 @@
             [gesso.live.outbox.claim-browser-fixture :as browser]
             [gesso.live.outbox.claim-semantic-fixture :as semantics]
             [gesso.assurance.observed-correspondence :as correspondence]
+            [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.model.inductive-plan :as inductive-plan]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.live.outbox.history-coverage :as history]
@@ -576,8 +577,24 @@
                    (is (every? #(= :exact-generated-prefix (:frame-prefix %)) (vals @checked-candidates)))
                    (doseq [{:keys [identity ops framed-ops]} @submissions]
                      (is (= ops (base-ops! framed-ops)))
-                     (is (= (if (= :accept (keyword (name (:alternative identity)))) 11 14)
-                            (- (count framed-ops) (count ops)))))
+                     (let [alternative (keyword (name (:alternative identity)))
+                           actor (if (= (:alternative identity) (semantics/alternative-id helper alternative))
+                                   helper loser-helper)
+                           snapshot (if (= :accept alternative) @initial-state @recovery-state)
+                           extra (- (count framed-ops) (count ops))
+                           ;; Skip the evidence guard and exclude the evidence put.
+                           prefix (subvec framed-ops 1 (dec extra))
+                           report (lowering/check-prefix! (semantics/source actor alternative)
+                                                          semantics/target-map
+                                                          (:document-rows snapshot)
+                                                          (vec (vals (:records snapshot))) prefix)]
+                       (is (= (:alternative identity) (semantics/alternative-id actor alternative)))
+                       (is (= (if (= :accept alternative) 11 14) extra))
+                       (is (= :checked-exact-prefix (:status report)))
+                       (is (= 4 (:version report)))
+                       (is (= (count prefix) (:assertion-count report)))
+                       (is (= :not-established (:sql-refinement report)))
+                       (is (= :not-issued (:certificate report)))))
                    (doseq [{:keys [identity]} expected]
                      (is (= (:state (if (= :accept (keyword (name (:alternative identity))))
                                      @initial-state @recovery-state))
