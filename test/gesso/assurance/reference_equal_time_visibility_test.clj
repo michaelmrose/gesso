@@ -77,3 +77,84 @@
           (is (= {"old" 2 "same" 3 "new" 2} (values-at node t)))
           (is (= {"old" 2 "same" 4 "new" 2} (values-at node (.plusSeconds t 1))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(def ^:private interval-cases
+  ;; Prior interval, tentative interval, value visible to the assertion
+  ;; at transaction time. Bounds are seconds relative to t, half-open.
+  [[[-10 10] [-5 5] 1]
+   [[-5 5] [-10 10] 1]
+   [[-10 0] [0 5] 2]
+   [[0 10] [-5 0] 1]
+   [[1 10] [-5 5] 2]
+   [[-5 5] [1 10] 1]
+   [[-10 -5] [1 10] nil]
+   [[0 10] [0 5] 1]
+   [[-5 5] [0 10] 1]
+   [[0 10] [-5 5] 1]])
+
+(defn- interval-id [i] (str "interval-" i))
+
+(defn- bounded-put [id v [from to]]
+  [:put-docs {:into :probe :valid-from (.plusSeconds t from) :valid-to (.plusSeconds t to)}
+   {:xt/id id :value v}])
+
+(defn- interval-guard [id v]
+  (if (nil? v) (count-guard id 0) (guard id v)))
+
+(defn- covers? [[from to] point] (and (<= from point) (< point to)))
+
+(defn- expected-interval-values [point committed?]
+  (into {} (keep-indexed
+            (fn [i [prior replacement _]]
+              (when-let [v (cond
+                             (and committed? (covers? replacement point)) 2
+                             (covers? prior point) 1)]
+                [(interval-id i) v])) interval-cases)))
+
+(defn- check-interval-snapshots! [node committed?]
+  (doseq [point [-11 -10 -6 -5 -1 0 1 4 5 9 10 11]]
+    (let [valid-time (.plusSeconds t point)
+          rows (xt/q node ["SELECT _id, value FROM probe FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ?" valid-time t])
+          expected (expected-interval-values point committed?)]
+      (is (= (count expected) (count rows)) (str "valid point " point))
+      (is (= expected (into {} (map (juxt :xt/id :value)) rows))
+          (str "valid point " point " committed replacements? " committed?)))))
+
+(defn- seed-intervals! [node]
+  (last (mapv (fn [i [prior]]
+                (attempt! node t [(bounded-put (interval-id i) 1 prior)] true))
+              (range) interval-cases)))
+
+(defn- characterize-intervals! [node]
+  (check-interval-snapshots! node false)
+  ;; Every opposite guard must abort, preserving the complete seeded
+  ;; interval state; successful guards must commit the actual new rows.
+  (doseq [[i [_ replacement visible]] (map-indexed vector interval-cases)]
+    (let [id (interval-id i)
+          opposite (if (= visible 2) 1 2)]
+      (attempt! node t [(bounded-put id 2 replacement) (guard id opposite)] false)))
+  (check-interval-snapshots! node false)
+  (let [end (last (mapv (fn [i [_ replacement visible]]
+                          (let [id (interval-id i)]
+                            (attempt! node t [(bounded-put id 2 replacement)
+                                              (interval-guard id visible)] true)))
+                        (range) interval-cases))]
+    (check-interval-snapshots! node true)
+    end))
+
+(deftest equal-time-assertion-visibility-at-valid-time-boundaries
+  (let [root (Files/createTempDirectory "gesso-equal-time-intervals-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}]
+    (try
+      (with-open [node (xtn/start-node {})]
+        (seed-intervals! node)
+        (characterize-intervals! node))
+      (let [id (with-open [node (xtn/start-node config)] (seed-intervals! node))
+            end (with-open [node (xtn/start-node config)]
+                  (.awaitSourceBlocking (db/primary-db node) id (Duration/ofSeconds 15))
+                  (characterize-intervals! node))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) end (Duration/ofSeconds 15))
+          (check-interval-snapshots! node true)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

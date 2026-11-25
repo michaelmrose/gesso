@@ -4586,3 +4586,27 @@ Do not infer a general tie-breaking rule for all intervals, storage layouts,
 assertions or worker guards. Equal-time state-dependent replay remains
 unsupported. No production admission, certificate or CLM-R2 premise
 retirement. Other regression namespaces and formal gates were not rerun.
+
+* v2713 — characterize equal-time assertion valid-time boundaries
+
+Extend the pinned provider characterization to ten finite half-open
+interval arrangements around the assertion's transaction valid-time
+point. In the tested single-row cases, a preceding committed row at the
+same system time wins if both rows cover that point. A tentative row is
+visible when only it covers the point; the prior row remains visible
+when only it covers the point, and neither is visible when neither covers
+it. Include containment, partial overlap, adjacent exclusive/inclusive
+boundaries and disjoint past/future intervals. This is characterization,
+not independent replay qualification.
+
+Focused JVM: 14 tests / 2075 assertions, zero failures or errors across
+reference-temporal-test and reference-equal-time-visibility-test. The
+new 348-assertion fixture tests opposite guards that abort, matching
+assertions that commit, and complete selected point snapshots at twelve
+valid times before attempts, after aborts and after commits. Run in
+memory and across persistent reopening before attempts and after commits.
+Do not generalize to multiple prior segments, multiple tentative writes,
+other storage layouts or arbitrary assertion queries. Equal-time
+state-dependent replay remains unsupported. No production admission,
+certificate or CLM-R2 premise retirement. Other regression namespaces
+and formal gates were not rerun.
