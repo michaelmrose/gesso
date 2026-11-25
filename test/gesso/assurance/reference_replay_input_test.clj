@@ -1,5 +1,7 @@
 (ns gesso.assurance.reference-replay-input-test
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [gesso.model.tx :as tx]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-replay-input :as input]
             [gesso.assurance.reference-provider :as reference]
@@ -682,4 +684,71 @@
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek bound)) (Duration/ofSeconds 15))
           (check! node bound)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest strict-retained-mapped-scalar-assertions
+  (let [root (Files/createTempDirectory "gesso-retained-mapped-assertions-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        table :gesso_refmapped
+        put (fn [doc] [:put-docs table (assoc doc :xt/id "a")])
+        guard (fn [checks] (tx/format-assertion (tx/assert-document-decoded-current table "a" checks)))
+        g (guard [[:value :claim/open] [:active true]])
+        txs [[(put {:value :claim/open :active true}) g]
+             [g (put {:value :claim/closed :active false}) (guard [[:value :claim/closed] [:active false]])]
+             [(put {:value "claim/closed" :active false}) (guard [[:value :claim/closed]])]
+             [(guard [[:value :claim/closed] [:active false]])]
+             [(put {:value Long/MIN_VALUE :active false}) (guard [[:value Long/MIN_VALUE] [:active false]])]
+             [(guard [[:value Long/MAX_VALUE]])]
+             [(put {:value "café"}) (guard [[:value "café"]])]
+             [(guard [[:active false]])]]
+        check! (fn [node expected]
+                 (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
+                       result (temporal/replay (mapv #(dissoc % :tx-id) expected))
+                       report (reference/compare-local-processed-retained-replay-execution! node #{table})
+                       id (:tx-id (first expected))
+                       body (get (read-bytes node) id)
+                       arrow! arrow/decode-bounded-operations
+                       ops (-> body payload/decode-payload :message :tx-ops arrow! :operations)
+                       sql (second ops)]
+                   (is (= :observed (:status sample)) (pr-str (dissoc sample :replay-inputs :payload-fingerprint)))
+                   (is (= expected (:replay-inputs sample)))
+                   (is (= :predicted (:status result)))
+                   (is (= [true true false true true false true false] (mapv :committed? (:history result))))
+                   (is (= [1 0 0] (mapv :failed-assertion-index (filter #(not (:committed? %)) (:history result)))))
+                   (is (= :matched (:status report)) (pr-str report))
+                   (is (= 8 (:transaction-count report)))
+                   (is (= :none (:authority report)))
+                   (is (= :not-issued (:certificate report)))
+                   (is (= :unsupported (:status (coverage/observe-local-processed-retained-clocked-inputs! node))))
+                   (is (= :sql (:kind sql)))
+                   (is (= (subvec g 1) (:args sql)))
+                   (doseq [change [#(update % :query str/replace-first "$2" "$3")
+                                   #(update % :query str/replace-first "$2" "$02")
+                                   #(update % :query str/replace-first "$2" "?")
+                                   #(update % :query str/replace-first "STR(ARRAY[_id])" "STR(_id)")
+                                   #(update % :query str/replace-first "gesso_refmapped" "probe")
+                                   #(update % :query str " -- comment")
+                                   #(update % :args pop)
+                                   #(assoc-in % [:args 2] "other")
+                                   #(assoc-in % [:args 0] 0)
+                                   #(assoc-in % [:args 4] :other)]]
+                     (with-redefs [arrow/decode-bounded-operations #(assoc-in (arrow! %) [:operations 1] (change sql))]
+                       (let [r (input/decode-replay-input id body)]
+                         (is (= :unsupported (:status r)) (pr-str (change sql)))
+                         (is (not (contains? r :transaction))))))))]
+    (try
+      (let [expected (with-open [node (xtn/start-node config)]
+                       (let [database (db/primary-db node)
+                             expected (mapv (fn [i ops]
+                                              (let [time (.plusSeconds t i)
+                                                    id (:tx-id (xt/submit-tx node ops {:system-time time}))]
+                                                (.awaitTxBlocking database id (Duration/ofSeconds 15))
+                                                {:tx-id id :system-time time :ops ops})) (range) txs)]
+                         (.awaitSourceBlocking database (:tx-id (peek expected)) (Duration/ofSeconds 15))
+                         (check! node expected)
+                         expected))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
+          (check! node expected)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

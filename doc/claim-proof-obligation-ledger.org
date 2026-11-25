@@ -4814,3 +4814,25 @@ worker, and temporal put forms and malformed input. Observation coverage
 remains bounded and dependent on the existing acquisition and quiescence
 premises; no certificate or CLM-R2 premise retirement. Other regression
 namespaces and independent formal gates were not rerun.
+
+* v2722 — project retained mapped scalar assertions
+
+Invert canonical numbered parameters for selected Gesso mapped scalar
+predicates. Require exact SQL text round trip and operand cardinality;
+reuse the independent checked operation grammar for table, identity,
+scalar comparison triples and distinct fields. Preserve strict temporal
+replay and observation dependencies. Do not expand clocked replay or
+production admission.
+
+Focused JVM: 41 tests / 3716 assertions, zero failures or errors in two
+completed batches: replay input 10 / 800; temporal, provider and retained
+operation 31 / 2916. Persistent history generated with the actual Gesso
+mapped guard formatter round-trips retained operations and matches
+committed and tentative reads, keyword/string distinctions, Boolean
+and signed integer guards, Unicode strings, missing fields, aborts and
+selected historical rectangles before and after reopening. Reject altered
+parameter numbering, repeated or missing operands, malformed comparisons,
+wrong table prefix, comments and wrong cardinality. The first fixture
+invocation had a missing delimiter, corrected before successful tests.
+Field-count and journal projection remain open. No certificate or CLM-R2
+premise retirement; other regression namespaces and formal gates not run.

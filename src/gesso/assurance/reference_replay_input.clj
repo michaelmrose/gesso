@@ -4,10 +4,11 @@
             [gesso.assurance.reference-arrow-operations :as arrow]
             [gesso.assurance.reference-clock :as clock]
             [gesso.assurance.reference-source-payload :as payload]
-            [gesso.assurance.reference-temporal :as temporal])
+            [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v5)
+(def profile :selected-retained-replay-input-v6)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -46,13 +47,29 @@
                       (re-matches #"ASSERT (?:0|[1-9][0-9]{0,4}) = \(SELECT COUNT\(\*\) FROM \"[a-z][a-z0-9_]*\" WHERE _id = \$1\)" query))))
     (into [(str/replace query #"\$[12]" "?")] args)))
 
+(defn- project-mapped-assertion [query args]
+  ;; Invert only the canonical numbered placeholders of the selected mapped
+  ;; guard. Round-trip text equality excludes reordered, repeated and
+  ;; noncanonical parameters; the independent operation grammar checks the
+  ;; complete predicate, repeated scalar operands and identity.
+  (when (and (string? query) (<= 4 (count args) 769)
+             (str/starts-with? query "ASSERT $1 = (SELECT COUNT(*) FROM gesso_"))
+    (let [sql (str/replace query #"\$[0-9]+" "?")
+          n (volatile! 0)
+          round-trip (str/replace sql #"\?" (fn [_] (str "$" (vswap! n inc))))
+          op (into [sql] args)]
+      (when (and (= query round-trip) (= @n (count args))
+                 (seq (current/operation-tables op)))
+        op))))
+
 (defn- project-operation [clocked? {:keys [kind query args table documents bounds] :as op}]
   (case kind
     :sql (when (and (= #{:kind :query :args} (set (keys op))) (vector? args))
            (cond
              (and (#{"ASSERT TRUE" "ASSERT FALSE"} query) (empty? args)) [query]
              (and (= "ASSERT $1 = $2" query) (= 2 (count args))) (into ["ASSERT ? = ?"] args)
-             (not clocked?) (project-state-assertion query args)))
+             (not clocked?) (or (project-state-assertion query args)
+                                (project-mapped-assertion query args))))
     :put-docs (when (and (= #{:kind :table :documents :iids :bounds} (set (keys op)))
                          (keyword? table) (= "public" (namespace table)) (= {} bounds)
                          (vector? documents) (seq documents)
@@ -105,7 +122,8 @@
 
 (defn decode-replay-input
   "Project selected retained operations with explicit time precedence.
-   Includes exact quoted-table row-read and row-count assertions; the
+   Includes exact quoted-table row-read, row-count and mapped scalar
+   assertions; the
    history must still qualify for strictly increasing temporal replay.
    The four-argument form resolves implicit times from the frame and prior
    time; the two-argument form requires explicit time. Clock rejection
