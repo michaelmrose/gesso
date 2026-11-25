@@ -3072,3 +3072,29 @@ semantics, atomic acquisition, authenticated provenance, independent Arrow
 operation interpretation or universal provider refinement. No production
 wiring, certificate or CLM-R2 premise retirement. Full project, physical
 Claim, Chromium and independent proof gates were not rerun.
+
+* v2652 — independently interpret selected SQL Arrow operation groups
+
+Add a bounded SQL-only Arrow stream decoder using Apache Arrow FlatBuffer
+metadata accessors and direct little-endian data-buffer interpretation,
+not the XTDB relation or operation reader. Require the selected schema,
+implicit dense-union IDs, one record batch and four-byte zero terminator.
+Check buffer extents, nodes, union selection, variable-length offsets,
+argument validity and strict query UTF-8. Preserve ordered SQL groups
+and opaque nested argument bytes, including absent argument slots.
+
+Focused JVM: 5 tests / 265 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. The retained
+persistent SQL fixtures match independently specified queries and the
+provider decoder before and after reopening. Correct the original test
+expectation to reflect XTDB's rewriting of positional placeholders to
+$1 and $2. Malformed buffer and framing perturbations reject. XTDB
+logged a cancellation during shutdown; the test process exited zero.
+
+Selected SQL-only profile v1. Stock Arrow Java vector loading failed on
+the installed implicit union-ID schema during investigation. FlatBuffer
+metadata interpretation remains a library dependency, not independently
+verified metadata parsing. Nested argument values, mixed operation
+kinds, document decoding and full physical operation correspondence
+remain open. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.
