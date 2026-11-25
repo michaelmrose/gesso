@@ -214,7 +214,6 @@
                 :mapped-writer-policy
                 {:admission (:issued preparations)
                  :initializer seed
-                 :maintenance! #(semantics/writer-kind! seed "v2480-claim" "v2480" %)
                  :observe! (fn [{:keys [candidate] :as kind}]
                              (when candidate
                                (swap! checked-candidates assoc (dissoc kind :kind :candidate) candidate))

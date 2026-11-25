@@ -161,7 +161,10 @@
               close!)]
     (let [config (get system config-key)
           policy (if-let [mapped (:mapped-writer-policy config)]
-                   (writer-policy/build-policy! node mapped)
+                   (writer-policy/build-policy!
+                    node mapped {:source-id (:source-id config)
+                                 :worker-id (get-in config [:worker-options :worker-id])
+                                 :descriptor (::publication-manifest system)})
                    (:xtdb-submission-policy! config))]
       (when policy
         (reset! release (xtdb/register-submission-policy! node policy))))
@@ -309,7 +312,7 @@
    on the owned node before manifest establishment and retained until close.
    Alternatively :mapped-writer-policy binds the selected framed executor
    to the exact owned node, with one-use initialization and restricted
-   trusted maintenance classification. The two selections are exclusive.
+   framework-owned maintenance admission. The two selections are exclusive.
    Both cover adapter submit/execute calls, not direct or external XTDB writes.
    :live-options allows only owned :rules, :source-options, :dispatch-options.
    :source-id, :worker-options and :rules-context are mandatory. The worker

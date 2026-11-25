@@ -2,9 +2,10 @@
   "Restricted synchronous adapter policy for a selected mapped executor.
    Domain submissions require a genuine framed handoff; initialization is
    exact and one-use. Maintenance is confined to a single infrastructure
-   put with assertion guards and a trusted exact-footprint classifier.
+   put with framework-owned exact-footprint and physical row checks.
    This is local adapter mediation, not closure over raw XTDB writers."
   (:require [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.maintenance-policy :as maintenance]
             [gesso.model.inductive-plan :as inductive]))
 
 (def ^:private maintenance-kinds
@@ -29,30 +30,23 @@
 (defn validate-config!
   "Validate the exact selected policy inputs before acquiring a node.
    The optional initializer is an exact trusted vector, not a general
-   writer grant. The maintenance classifier and observer are trusted."
-  [{:keys [admission initializer maintenance! observe!] :as config}]
+   writer grant. The observer is trusted."
+  [{:keys [admission initializer observe!] :as config}]
   (when-not (and (map? config)
-                 (= #{:admission :initializer :maintenance! :observe!} (set (keys config)))
+                 (= #{:admission :initializer :observe!} (set (keys config)))
                  (or (nil? initializer) (initializer? initializer))
-                 (fn? maintenance!) (fn? observe!))
+                 (fn? observe!))
     (reject! :invalid-mapped-writer-policy))
   (inductive/describe-mapped-admission admission)
   config)
 
-(defn- maintenance-kind [ops]
-  (let [op (peek ops)]
-    (when (and (put-op? op) (= 3 (count op)) (seq (pop ops))
-               (every? #(and (vector? %) (string? (first %))
-                             (re-matches #"ASSERT [^;\r\n]+" (first %))) (pop ops)))
-      (get maintenance-kinds (second op)))))
-
 (defn build-policy!
   "Bind admission to the owned connectable. Return the literal-boolean
-   predicate expected by the XTDB adapter. The maintenance callback must
-   check the precise infrastructure transition. Observer failure refuses
+   predicate expected by the XTDB adapter. Maintenance is bound to the
+   host-owned source, worker and descriptor. Observer failure refuses
    submission. Initialization is consumed on admission, not on commit."
-  [connectable config]
-  (let [{:keys [admission initializer maintenance! observe!]} (validate-config! config)
+  [connectable config infrastructure]
+  (let [{:keys [admission initializer observe!]} (validate-config! config)
         initialized? (atom false)]
     (when-not connectable (reject! :missing-mapped-writer-connectable))
     (fn [{:keys [api tx-ops tx-options] :as envelope}]
@@ -65,10 +59,7 @@
                         (when (and initializer (= initializer tx-ops)
                                    (compare-and-set! initialized? false true))
                           {:kind :initializer})
-                        (when-let [expected (maintenance-kind tx-ops)]
-                          (let [checked (try (maintenance! tx-ops)
-                                             (catch clojure.lang.ExceptionInfo _ nil))]
-                            (when (= expected (:kind checked)) checked))))]
+                        (maintenance/admit connectable infrastructure tx-ops))]
            (when kind
              (observe! kind)
              true)))))))
