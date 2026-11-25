@@ -9,7 +9,7 @@
             [xtdb.api :as xt])
   (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-provider-execution-comparison-v2)
+(def profile :selected-provider-execution-comparison-v3)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued
                      :provider-refinement :not-established})
 (def ^:private unsupported (assoc base :status :unsupported))
@@ -84,7 +84,7 @@
                          :else :mismatch)]
         (assoc base :status status :checks checks :transaction-count (count history))))))
 
-(def acquisition-profile :selected-quiescent-provider-observation-v2)
+(def acquisition-profile :selected-quiescent-provider-observation-v3)
 
 (defn- acquisition-result [status reason]
   (assoc base :acquisition-profile acquisition-profile :status status :reason reason))
@@ -189,7 +189,7 @@
   [node transactions tables]
   (compare-quiescent* node transactions tables nil))
 
-(def source-binding-profile :selected-source-bound-execution-v2)
+(def source-binding-profile :selected-source-bound-execution-v3)
 
 (defn- source-expectations? [expectations]
   (and (vector? expectations) (nil? (meta expectations))
@@ -324,7 +324,7 @@
     (cond-> r (= :matched (:source-coverage r))
       (assoc :payload-correspondence :matched :processed-frontier :matched))))
 
-(def retained-execution-profile :selected-processed-retained-execution-v2)
+(def retained-execution-profile :selected-processed-retained-execution-v3)
 
 (defn- valid-bound-history? [sample]
   (let [ids (:transaction-ids sample)
@@ -376,7 +376,7 @@
                :retained-execution-profile retained-execution-profile)
         (dissoc r :source-coverage)))))
 
-(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v2)
+(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v3)
 
 (defn- valid-replay-history? [sample]
   (let [inputs (:replay-inputs sample)]

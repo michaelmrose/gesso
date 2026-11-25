@@ -745,3 +745,68 @@
           (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek bound)) (Duration/ofSeconds 15))
           (check-temporal-put-execution! node bound)))
       (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
+
+(defn- check-row-temporal-execution! [node expected]
+  (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
+        compare! #(reference/compare-local-processed-retained-replay-execution! node #{:providerprobe})
+        prediction (temporal/replay (mapv #(dissoc % :tx-id) expected))
+        tx (peek expected)
+        ops (:ops tx)
+        check #(envelope/check-temporal-envelope! node (:tx-id tx) % false)
+        r (compare!)]
+    (is (= :observed (:status sample)) (pr-str (dissoc sample :replay-inputs :payload-fingerprint)))
+    (is (= expected (:replay-inputs sample)))
+    (is (= [true true false] (mapv :committed? (:history prediction))))
+    (is (= 1 (:failed-assertion-index (peek (:history prediction)))))
+    (is (= :matched (:status r)) (pr-str r))
+    (is (= :matched (:outcome-correspondence r) (:operation-correspondence r)))
+    (is (= 3 (:transaction-count r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:status (check ops))))
+    (is (= :unsupported-put-shape (:reason (envelope/check-envelope! node (:tx-id tx) ops false))))
+    (doseq [changed [(update-in ops [0 2 :xt/valid-from] #(.plusSeconds % 1))
+                     (update-in ops [0 3] dissoc :xt/valid-to)
+                     (update ops 0 #(assoc % 2 (nth % 3) 3 (nth % 2)))]]
+      (is (= :operation-sequence-mismatch (:reason (check changed)))))
+    (doseq [bad [(assoc-in ops [0 1 :row-valid-time?] false)
+                 (assoc-in ops [0 1 :valid-from] (time-at 0))
+                 (assoc-in ops [0 2 :xt/valid-from] nil)
+                 (update-in ops [0 2 :xt/valid-from] #(.plusNanos % 1))
+                 (assoc-in ops [0 3 :xt/valid-from] (get-in ops [0 3 :xt/valid-to]))]]
+      (is (= :unsupported (:status (check bad))))
+      (is (= :unsupported (:status (temporal/replay [{:system-time (:system-time tx) :ops bad}])))))
+    (let [bad (assoc-in ops [0 3 :xt/id] (get-in ops [0 2 :xt/id]))]
+      (is (= :unsupported (:status (temporal/replay [{:system-time (:system-time tx) :ops bad}])))))
+    (is (= r (compare!)))))
+
+(deftest direct-retained-execution-with-heterogeneous-row-bounds
+  (let [root (Files/createTempDirectory "gesso-row-temporal-envelope-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        from (java.time.Instant/parse "1969-12-31T23:59:59.999999Z")
+        to (time-at 100)
+        rows [[{:xt/id "a" :value 1 :xt/valid-from from :xt/valid-to to}
+               {:xt/id "b" :value 2 :xt/valid-to to}
+               {:xt/id "c" :value 3}]
+              [{:xt/id "a" :value 4 :xt/valid-from (time-at 1)}
+               {:xt/id "b" :value 5 :xt/valid-from from :xt/valid-to (time-at 10)}]
+              [{:xt/id "a" :value 6 :xt/valid-from from}
+               {:xt/id "b" :value 7 :xt/valid-to to}]]]
+    (try
+      (let [expected (with-open [node (xtn/start-node config)]
+                       (let [database (db/primary-db node)
+                             expected (mapv (fn [i docs]
+                                              (let [time (time-at i)
+                                                    ops (cond-> [(into [:put-docs :providerprobe] docs)] (= i 2) (conj ["ASSERT FALSE"]))
+                                                    id (:tx-id (xt/submit-tx node ops {:system-time time}))]
+                                                (.awaitTxBlocking database id (Duration/ofSeconds 15))
+                                                {:tx-id id :system-time time
+                                                 :ops (assoc-in ops [0 1] {:into :providerprobe :row-valid-time? true})}))
+                                            (range) rows)]
+                         (.awaitSourceBlocking database (:tx-id (peek expected)) (Duration/ofSeconds 15))
+                         (check-row-temporal-execution! node expected)
+                         expected))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
+          (check-row-temporal-execution! node expected)))
+      (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))

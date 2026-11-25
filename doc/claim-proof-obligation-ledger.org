@@ -4435,3 +4435,29 @@ option maps. Heterogeneous row bounds, implicit system times and broader
 assertions remain outside the selected direct replay domain. No production
 admission, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2707 — qualify heterogeneous retained document valid-time bounds
+
+Preserve one put group and its ordered document rows when explicit
+valid-time bounds differ. Project an internal row-valid-time option with
+exact Instant row fields, validate all rows and distinct document IDs,
+and apply independently normalized row intervals without changing the
+operation or assertion indices. Reconstruct exact retained UTC row fields
+in the temporal diagnostic envelope checker. Retain uniform projections,
+defaults, prior production envelope and worker contracts. Version the
+expanded temporal replay, replay-input, acquisition and comparison
+profiles; no production admission change.
+
+Focused JVM: 93 tests / 6316 assertions, zero failures or errors across
+the ten prior namespaces plus reference-temporal-test. Provider, replay
+input and temporal subset: 28 tests / 2171 assertions. Persistent
+heterogeneous finite, from-only, to-only and default row intervals match
+independent outcomes and selected all-time rectangles before and after
+reopening. Include pre-epoch bounds and an aborted multi-row write;
+retain the failed assertion index. Detect changed attempted row bounds
+and row order; reject invalid marker/options, null, non-microsecond or
+empty intervals and duplicate IDs. Initial test source had a delimiter
+error and first launcher lacked required JVM/Netty flags; corrected
+runs passed. Implicit system times and broader SQL remain unqualified.
+No certificate or CLM-R2 premise retirement. Full project and independent
+formal gates were not rerun.

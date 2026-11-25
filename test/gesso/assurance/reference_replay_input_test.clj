@@ -60,7 +60,7 @@
                     expected (mapv (fn [i ops] {:tx-id (submit! i ops) :system-time (.plusSeconds t i) :ops ops})
                                    (range) txs)
                     rejected [(submit! 3 [["ASSERT ? IS NOT NULL" 1]])
-                              (submit! 4 [[:put-docs :probe {:xt/id "b" :xt/valid-from t}
+                              (submit! 4 [[:put-docs :probe {:xt/id 5 :xt/valid-from t}
                                                    {:xt/id "c"}]])
                               (:tx-id (xt/submit-tx node [["ASSERT TRUE"]]))]]
                 (.awaitSourceBlocking database (peek rejected) (Duration/ofSeconds 15))
@@ -188,9 +188,8 @@
         (is (= :decoded (:status r)))
         (is (= input/profile (:profile r)))
         (is (= tx (:transaction r)))))
-    ;; Retained facts with different bounds are not silently coalesced.
-    (doseq [alter [(fn [r] (update-in r [:operations 0 :documents 1] dissoc :xt/valid-from))
-                   (fn [r] (assoc-in r [:operations 0 :documents 0 :xt/valid-from] nil))
+    ;; Invalid retained facts are not silently coalesced.
+    (doseq [alter [(fn [r] (assoc-in r [:operations 0 :documents 0 :xt/valid-from] nil))
                    (fn [r] (assoc-in r [:operations 0 :bounds] {:xt/valid-from Instant/EPOCH}))
                    (fn [r] (update-in r [:operations 0 :documents]
                                      #(mapv (fn [d] (assoc d :xt/valid-to (:xt/valid-from d))) %)))

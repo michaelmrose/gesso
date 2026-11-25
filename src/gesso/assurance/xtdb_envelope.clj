@@ -17,7 +17,7 @@
 (defn- reject! [reason]
   (throw (ex-info "Unsupported expected envelope." {::unsupported true :reason reason})))
 
-(def temporal-profile :xtdb-2.2.0-beta1/restricted-temporal-envelope-v1)
+(def temporal-profile :xtdb-2.2.0-beta1/restricted-temporal-envelope-v2)
 
 (defn- temporal-put-options! [opts]
   (when-not (and (map? opts) (nil? (meta opts)) (contains? opts :into)
@@ -73,7 +73,11 @@
                 {:kind :sql :query query :args (mapv #(value! % 0 false) args)}))
             (put! [op]
               (let [opts (second op)
-                    bounds (if (and temporal? (map? opts)) (temporal-put-options! opts) {})
+                    row? (and temporal? (map? opts) (contains? opts :row-valid-time?))
+                    _ (when (and row? (not (and (= #{:into :row-valid-time?} (set (keys opts)))
+                                               (true? (:row-valid-time? opts)) (nil? (meta opts)))))
+                        (reject! :unsupported-temporal-put-options))
+                    bounds (if (and temporal? (map? opts) (not row?)) (temporal-put-options! opts) {})
                     table (if (and temporal? (map? opts)) (:into opts) opts)]
                 (when-not (and (simple-keyword? table)
                                (re-matches #"[a-z][a-z0-9_]*" (name table))
@@ -82,9 +86,15 @@
                 (text! (name table))
                 (let [docs (mapv (fn [doc]
                                    (when-not (and (map? doc) (contains? doc :xt/id)
-                                                  (not-any? #(contains? doc %) [:xt/valid-from :xt/valid-to]))
+                                                  (or row? (not-any? #(contains? doc %) [:xt/valid-from :xt/valid-to])))
                                      (reject! :unsupported-document-shape))
-                                   (value! (merge doc bounds) 0 true)) (subvec op 2))]
+                                   (let [row-keys [:xt/valid-from :xt/valid-to]
+                                         row-bounds (when row?
+                                                      (temporal-put-options!
+                                                       (reduce-kv (fn [m k v] (assoc m (keyword (name k)) v))
+                                                                  {:into table} (select-keys doc row-keys))))]
+                                     (value! (merge (apply dissoc doc row-keys) bounds row-bounds) 0 true)))
+                                 (subvec op 2))]
                   {:kind :put-docs :table (keyword "public" (name table)) :documents docs
                    :iids (mapv #(.formatHex (HexFormat/of) (Iid/getAsIid (:xt/id %))) docs)
                    :bounds {}})))]
@@ -207,7 +217,7 @@
   (check-envelope* node tx-id ops committed? expected-operations! identity))
 
 (defn check-temporal-envelope!
-  "Compare selected uniform explicit put options as exact retained UTC
+  "Compare selected uniform and row-level explicit put options as exact retained UTC
    row fields. Do not normalize observed documents, IIDs or outer bounds.
    The restricted production and worker envelope profiles are unchanged."
   [node tx-id ops committed?]

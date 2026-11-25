@@ -5,7 +5,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-bitemporal-transaction-v10)
+(def profile :selected-bitemporal-transaction-v11)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -76,6 +76,28 @@
            :expired (not (before? system-time (version-instant deadline)))
            :active (before? system-time (version-instant deadline))))))
 
+(defn- normalize-row-put! [system-time opts docs]
+  (let [table (:into opts)
+        bound-keys [:xt/valid-from :xt/valid-to]]
+    (when-not (and (= #{:into :row-valid-time?} (set (keys opts)))
+                   (true? (:row-valid-time? opts)) (nil? (meta opts))
+                   (<= 1 (count docs) 16384)
+                   (every? #(and (map? %) (nil? (meta %))) docs))
+      (reject! :unsupported-temporal-put))
+    (let [plain (mapv #(apply dissoc % bound-keys) docs)
+          decoded (current/execute {} (vector (into [:put-docs table] plain)))
+          intervals (mapv (fn [doc]
+                            (let [from (get doc :xt/valid-from system-time)
+                                  to (:xt/valid-to doc)]
+                              (when-not (and (instant? from)
+                                             (or (not (contains? doc :xt/valid-to)) (instant? to))
+                                             (before-end? from to))
+                                (reject! :unsupported-temporal-put))
+                              [from to])) docs)]
+      (when-not (= :predicted (:status decoded)) (reject! :unsupported-temporal-put))
+      (into [:put-docs {:into table :row-intervals intervals}]
+            (map #(get-in decoded [:state table (:xt/id %)]) plain)))))
+
 (defn- normalize-op! [system-time op]
   (when-not (and (vector? op) (nil? (meta op)))
     (reject! :unsupported-temporal-operation))
@@ -88,21 +110,24 @@
         op)
     (let [[kind raw-opts & docs] op
           opts (if (keyword? raw-opts) {:into raw-opts} raw-opts)]
-      (when-not (and (= :put-docs kind) (map? opts) (nil? (meta opts))
-                     (contains? opts :into)
-                     (every? #{:into :valid-from :valid-to} (keys opts)))
-        (reject! :unsupported-temporal-put))
-      (let [table (:into opts)
-            from (get opts :valid-from system-time)
-            to (:valid-to opts)
-            decoded (current/execute {} [(into [:put-docs table] docs)])]
-        (when-not (and (instant? from)
-                       (or (not (contains? opts :valid-to)) (instant? to))
-                       (before-end? from to)
-                       (= :predicted (:status decoded)))
-          (reject! :unsupported-temporal-put))
-        (into [:put-docs {:into table :valid-from from :valid-to to}]
-              (map #(get-in decoded [:state table (:xt/id %)]) docs))))))
+      (if (and (= :put-docs kind) (map? opts) (contains? opts :row-valid-time?))
+        (normalize-row-put! system-time opts docs)
+        (do
+          (when-not (and (= :put-docs kind) (map? opts) (nil? (meta opts))
+                         (contains? opts :into)
+                         (every? #{:into :valid-from :valid-to} (keys opts)))
+            (reject! :unsupported-temporal-put))
+          (let [table (:into opts)
+                from (get opts :valid-from system-time)
+                to (:valid-to opts)
+                decoded (current/execute {} [(into [:put-docs table] docs)])]
+            (when-not (and (instant? from)
+                           (or (not (contains? opts :valid-to)) (instant? to))
+                           (before-end? from to)
+                           (= :predicted (:status decoded)))
+              (reject! :unsupported-temporal-put))
+            (into [:put-docs {:into table :valid-from from :valid-to to}]
+                  (map #(get-in decoded [:state table (:xt/id %)]) docs))))))))
 
 (defn- rectangle [table [from to doc origin] end]
   {:table table :document doc :valid-from from :valid-to to
@@ -132,14 +157,14 @@
      :closed closed}))
 
 (defn- apply-put [state system-time [_ opts & docs]]
-  (reduce (fn [s doc]
+  (reduce (fn [s [i doc]]
             (let [table (:into opts)
+                  [from to] (if-let [intervals (:row-intervals opts)]
+                              (nth intervals i) [(:valid-from opts) (:valid-to opts)])
                   path [:segments table (:xt/id doc)]
-                  {:keys [active closed]} (overlay (get-in s path) table
-                                                   (:valid-from opts) (:valid-to opts)
-                                                   doc system-time)]
+                  {:keys [active closed]} (overlay (get-in s path) table from to doc system-time)]
               (-> s (assoc-in path active) (update :closed into closed))))
-          state docs))
+          state (map-indexed vector docs)))
 
 (defn- active-rectangles [segments]
   (vec (for [[table rows] segments [_ intervals] rows segment intervals]
