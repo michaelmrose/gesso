@@ -137,3 +137,27 @@
           (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
           (check-single-layouts! node ids)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest selected-signed-int32-argument-correspondence
+  (let [root (Files/createTempDirectory "gesso-operation-int32-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        args [(int Integer/MIN_VALUE) (int -1) (int 0) (int Integer/MAX_VALUE) Long/MAX_VALUE]
+        sql (into ["ASSERT ? < ? AND ? < ? AND ? > 0"] args)]
+    (try
+      (with-open [node (xtn/start-node config)]
+        (doseq [ops [[sql] [[:put-docs :probe {:xt/id "a"}] sql]]]
+          (let [id (:tx-id (xt/submit-tx node ops))
+                _ (.awaitSourceBlocking (db/primary-db node) id (Duration/ofSeconds 15))
+                bytes (#'fixture/retained-operation-bytes node id)
+                decoded (arrow/decode-bounded-operations bytes)
+                observed (provider/observe-operation-bytes! node bytes)
+                actual (:args (peek (:operations decoded)))]
+            (is (= :decoded (:status decoded)) (pr-str decoded))
+            (is (= args actual))
+            (is (= (mapv class args) (mapv class actual)))
+            (is (= (mapv class args) (mapv class (:args (peek (:operations observed))))))
+            (is (= :matched (:status (correspondence/compare-operation-bytes! node bytes))))
+            (is (= :unsupported (:status (arrow/decode-mixed-bounded-sql-put bytes))))
+            (is (= :unsupported (:status (arrow/decode-bounded-operations
+                                          (java.util.Arrays/copyOf bytes (dec (alength bytes))))))))))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

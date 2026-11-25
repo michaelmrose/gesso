@@ -11,7 +11,7 @@
   (:import (java.nio ByteBuffer ByteOrder)
            (java.nio.charset StandardCharsets CharacterCodingException)
            (org.apache.arrow.flatbuf Message MessageHeader
-                                    Schema RecordBatch Field Type Union UnionMode Endianness)))
+                                    Schema RecordBatch Field Type Union UnionMode Endianness Int)))
 
 (def profile :xtdb-2.2.0-beta1/selected-sql-arrow-operations-v1)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
@@ -165,12 +165,19 @@
 
 (defn- argument-kind! [^Field field name allowed]
   (let [nullable-columns? (contains? allowed :nullable-sql-columns)
-        allowed (disj allowed :nullable-sql-columns)]
-    (if (and nullable-columns? (.nullable field))
-      (if (= Type/Null (.typeType field))
-        (do (field! field name Type/Null true 0) :null-only-field)
-        [:nullable (scalar-kind! field name (conj allowed :nullable-field :nullable-list-fields))])
-      (scalar-kind! field name allowed))))
+        int32? (contains? allowed :sql-int32)
+        allowed (disj allowed :nullable-sql-columns :sql-int32)]
+    (if (and int32? (= Type/Int (.typeType field))
+             (= 32 (.bitWidth ^Int (.type field (Int.))))
+             (not (.nullable field)))
+      (do (field! field name Type/Int false 0)
+          (require! (.isSigned ^Int (.type field (Int.))) :unsupported-integer-type)
+          :integer32)
+      (if (and nullable-columns? (.nullable field))
+        (if (= Type/Null (.typeType field))
+          (do (field! field name Type/Null true 0) :null-only-field)
+          [:nullable (scalar-kind! field name (conj allowed :nullable-field :nullable-list-fields))])
+        (scalar-kind! field name allowed)))))
 
 (defn- argument-column-order! [^Schema schema columns]
   ;; Nodes and buffers follow physical schema order, not SQL positions.
@@ -1045,13 +1052,17 @@
   (with-value-budget
     #(decode-mixed-sql-put* bytes mixed-bounded-sql-put-profile positional-sql-rows!)))
 
-(def bounded-operation-profile :xtdb-2.2.0-beta1/selected-bounded-sql-put-operations-arrow-v1)
+(def bounded-operation-profile :xtdb-2.2.0-beta1/selected-bounded-sql-put-operations-arrow-v2)
 
 (defn decode-bounded-operations
   "Interpret selected SQL-only, put-only or mixed streams with one shared
    recursive value budget. Select the layout from validated union metadata,
-   never by retrying a rejected stream under another profile. SQL-only
+   never by retrying a rejected stream under another profile. Also admit
+   nonnullable top-level signed int32 SQL arguments (not document fields). SQL-only
    streams have no IID obligation. Diagnostic only; retain mixed limits."
   [bytes]
   (with-value-budget
-    #(decode-mixed-sql-put* bytes bounded-operation-profile positional-sql-rows! true)))
+    #(decode-mixed-sql-put* bytes bounded-operation-profile
+                             (fn [args] (scalar-rows! args #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                                                            :empty-list :recursive-list :nullable-sql-columns :reordered-sql-columns :sql-int32}))
+                             true)))

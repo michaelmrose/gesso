@@ -92,6 +92,10 @@
                       :unsupported-arrow-timestamp-buffer-layout)
             (let [zone (ZoneId/of (if (= :timestamp-utc kind) "UTC" "Z"))]
               #(timestamp-value! (.getLong values (* 8 %)) zone)))
+        :integer32
+        (do (require! (= (* 4 n) (.limit values))
+                      :unsupported-integer-buffer-layout)
+            #(.getInt values (* 4 %)))
         :integer
         (do (require! (= (* 8 n) (.limit values))
                       :unsupported-integer-buffer-layout)

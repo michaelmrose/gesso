@@ -4877,3 +4877,32 @@ parameter numbering, count other than zero or one, unsupported operands
 and missing journal observation scope. Occupied recursive journal value
 assertions remain open. No production admission, certificate or CLM-R2
 premise retirement. Other regression namespaces and formal gates not run.
+
+* v2725 — project retained recursive journal value assertions
+
+Qualify canonical numbered SQL parameters for the selected occupied
+journal value predicate, preserving nested dollar-bearing column names
+and checking the existing independent recursive operation grammar. The
+actual generated 59-column predicate exposed signed int32 count operands
+which the physical decoder previously rejected. Admit only nonnullable
+signed int32 top-level SQL argument columns in the bounded operation
+profile, preserving Integer values and the existing 64-column ceiling;
+leave older Arrow profiles and document-field interpretation unchanged.
+Version bounded operation, operation correspondence and strict replay
+profiles. Clocked state-dependent replay remains unsupported.
+
+Focused JVM: 70 tests / 5429 assertions, zero failures or errors in two
+completed batches: replay input and operation correspondence 16 / 1133;
+Arrow mixed, Arrow operations, temporal, provider and retained operation
+54 / 4296. Real generated occupied-slot guard (59 arguments) matches
+retained operations, binding and outcome checks, empty map and scalar
+vector checks, rollback and historical rectangles before and after
+reopening. Reject changed parameter numbering, malformed vector index,
+empty map predicate, operands and comments. Separate physical regression
+matches signed int32 extremes and mixed int32/int64 argument classes in
+SQL-only and mixed streams; legacy mixed reader and truncated streams
+reject. Initial fixture failed physical qualification and produced a
+secondary fixture error; corrected by qualifying actual int32 encoding,
+not by altering generated operands. Larger guards above 64 columns remain
+unsupported. No production admission, certificate or CLM-R2 premise
+retirement; full project and independent formal gates not rerun.
