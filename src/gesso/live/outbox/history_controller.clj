@@ -1,9 +1,11 @@
 (ns gesso.live.outbox.history-controller
   "Owner-driven lifecycle for bounded mapped history observations. The owner
    supplies trusted load/save callbacks and a deployment-specific secret.
-   No scheduler, request-path authority, or certification is introduced."
+   Optional paced scheduling shares the owner-driven admission fence.
+   No request-path authority or certification is introduced."
   (:require [clojure.string :as str]
-            [gesso.live.outbox.history-coverage :as history])
+            [gesso.live.outbox.history-coverage :as history]
+            [gesso.live.outbox.history-scheduler :as scheduler])
   (:import [java.util.concurrent TimeUnit]
            [java.util.concurrent.locks ReentrantLock]))
 
@@ -12,7 +14,8 @@
 
 (defn validate-options! [opts]
   (when-not (and (map? opts)
-                 (= #{:key :deployment-id :load! :save! :max-steps} (set (keys opts)))
+                 (= #{:key :deployment-id :load! :save! :max-steps} (disj (set (keys opts)) :schedule))
+                 (or (not (contains? opts :schedule)) (scheduler/valid-options? (:schedule opts)))
                  (bytes? (:key opts)) (= 32 (alength ^bytes (:key opts)))
                  (string? (:deployment-id opts)) (not (str/blank? (:deployment-id opts)))
                  (<= (count (:deployment-id opts)) 512)
@@ -27,7 +30,8 @@
    save! must durably replace it or throw. The owner must ensure exclusive
    storage ownership and atomic persistence. Startup errors propagate;
    unresolved observed steps are diagnostic and do not prevent startup.
-   A failed advance retains the last successfully persisted cursor."
+   A failed advance retains the last successfully persisted cursor.
+   Optional :schedule runs one paced chunk at a time after startup."
   [node admission opts]
   (let [{:keys [key deployment-id load! save! max-steps]} (validate-options! opts)
         key (aclone ^bytes key)
@@ -36,6 +40,7 @@
                        (history/restore-checkpoint! node admission sealed key deployment-id)))
         state (atom {:phase :open :report nil :last-error nil})
         lock (ReentrantLock.)
+        scheduled (atom nil)
         advance! (fn []
                    (when (or (.isHeldByCurrentThread lock) (not (.tryLock lock)))
                      (reject! :history-controller-busy))
@@ -61,7 +66,12 @@
                  (when (.isHeldByCurrentThread lock)
                    (reject! :history-controller-busy))
                  (swap! state #(if (= :closed (:phase %)) % (assoc % :phase :closing)))
-                 (let [acquired? (try (.tryLock lock (long timeout-ms) TimeUnit/MILLISECONDS)
+                 (let [deadline (+ (System/nanoTime) (.toNanos TimeUnit/MILLISECONDS (long timeout-ms)))
+                       remaining #(max 0 (- deadline (System/nanoTime)))
+                       _ (when-let [s @scheduled]
+                           (when-not ((:stop! s) (remaining))
+                             (reject! :history-controller-not-drained)))
+                       acquired? (try (.tryLock lock (long (remaining)) TimeUnit/NANOSECONDS)
                                       (catch InterruptedException e
                                         (.interrupt (Thread/currentThread))
                                         (throw e)))]
@@ -70,5 +80,9 @@
                      (swap! state assoc :phase :closed)
                      (finally (.unlock lock)))
                    nil))]
-    (advance!)
-    {:advance! advance! :status (fn [] @state) :close! close!}))
+    (let [initial (advance!)]
+      (when-let [schedule (:schedule opts)]
+        (reset! scheduled (scheduler/start! schedule advance! #(= :open (:phase @state)) initial))))
+    {:advance! advance!
+     :status (fn [] (cond-> @state @scheduled (assoc :schedule ((:status @scheduled)))))
+     :close! close!}))

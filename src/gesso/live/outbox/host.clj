@@ -333,9 +333,11 @@
    Optional :history-audit requires the mapped profile and trusted owner
    :load!, :save!, :key, :deployment-id and :max-steps options. Restore and
    persist a first bounded chunk before request admission. Further chunks
-   are owner-driven via audit-history!. Startup transport errors propagate;
+   are owner-driven via audit-history! or optional :schedule with explicit
+   :catch-up-ms, :idle-ms, :failure-ms and :max-failure-ms pacing.
+   Startup transport errors propagate;
    unresolved findings remain diagnostic. Stop fences and drains audit work
-   before native provider shutdown. No audit scheduler is installed.
+   before native provider shutdown, including the optional scheduler.
    :live-options allows only owned :rules, :source-options, :dispatch-options.
    :source-id, :worker-options and :rules-context are mandatory. The worker
    is installed AFTER providers, and cannot be omitted or re-ordered.

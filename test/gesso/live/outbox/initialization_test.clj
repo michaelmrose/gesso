@@ -566,3 +566,36 @@
                 (is (= :closed (:phase (status))))
                 (is (= :history-controller-closed (reason advance))))))
           (finally (release)))))))
+
+(deftest scheduled-history-controller-advances-and-persists
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        sealed (atom nil)
+        saved (promise)
+        saves (atom 0)
+        opts {:key (byte-array 32) :deployment-id "scheduled-test" :max-steps 1
+              :load! #(deref sealed)
+              :save! (fn [value] (reset! sealed value)
+                       (when (= 2 (swap! saves inc)) (deliver saved true)))
+              :schedule {:catch-up-ms 10 :idle-ms 1000 :failure-ms 100 :max-failure-ms 400}}]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :item-count 99}]])
+          (xt/execute-tx node seed)
+          (let [c (controller/start! node admission opts)]
+            (try
+              (is (= true (deref saved 10000 :timeout)))
+              (finally ((:close! c) 10000)))
+            (let [status ((:status c))]
+              (is (= :closed (:phase status)))
+              (is (= :stopped (get-in status [:schedule :phase])))
+              (is (= :success (get-in status [:schedule :last-outcome])))
+              (is (= {:unclassified 2} (get-in status [:report :counts])))
+              (is (true? (get-in status [:report :caught-up?])))
+              (is (= {:unclassified 2} (get-in @sealed [:payload :counts])))
+              (is (= :history-controller-closed (reason (:advance! c))))))
+          (finally (release)))))))
