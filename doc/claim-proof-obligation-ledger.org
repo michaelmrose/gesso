@@ -4514,3 +4514,26 @@ atomic acquisition, production admission, certificate or CLM-R2 premise
 retirement. Non-increasing explicit system-time semantics and broader
 state-dependent assertion coverage remain open. Full project and
 independent formal gates were not rerun.
+
+* v2710 — qualify equal and older explicit retained clock decisions
+
+Inspect the pinned XTDB indexer and independently resolve clock decisions
+from signed frame microseconds, requested time and preceding completed time.
+Equal explicit times pass the clock check; strictly older requested times
+reject before operation execution and acquire the default smoothed or
+frame time. Distinguish clock admission from commit prediction. Reject
+invalid context, non-microsecond values and overflow. Retain the existing
+strictly increasing replay and acquisition profiles pending integration.
+
+Focused JVM: 97 tests / 6461 assertions, zero failures or errors across
+all eleven prior namespaces; replay input suite 6 tests / 301 assertions.
+Persistent fixed-clock history matches predicted assigned ledger times
+before and after reopening: two equal explicit commits, an older requested
+write rejected without a document, and a subsequent implicit commit.
+Check unsmoothed and smoothed rejection decisions, negative frame time,
+equal time admission, invalid precision and overflow. The first broader
+regression invocation timed out at the tool boundary; rerun passed.
+Clock decision v1 is a separate diagnostic, not equal-time state replay
+or end-to-end older-request rejection correspondence. No production
+admission, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.

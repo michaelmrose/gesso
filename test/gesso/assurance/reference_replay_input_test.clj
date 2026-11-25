@@ -296,3 +296,81 @@
           (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
           (check-implicit-history! node ids future txs)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-clock-decisions! [node ids t]
+  (let [log (.getSourceLog (db/primary-db node))
+        frames (with-open [file (RandomAccessFile. (.toFile (#'coverage/local-log-path log)) "r")]
+                 (:frames (#'coverage/local-frames file)))
+        micros (into {} (map (juxt first second) frames))
+        bodies (read-bytes node)
+        requests (mapv #(get-in (payload/decode-payload (get bodies %)) [:message :system-time]) ids)
+        reports (reduce (fn [rs [id requested]]
+                          (conj rs (input/resolve-retained-clock (get micros id) requested (:system-time (peek rs)))))
+                        [] (map vector ids requests))
+        times [t t (.plusNanos t 1000) (.plusNanos t 2000)]
+        ledger (#'reference/read-ledger! node)]
+    (is (= [t t (.minusSeconds t 1) nil] requests))
+    (is (every? #(= :resolved (:status %)) reports))
+    (is (every? #(= input/clock-profile (:profile %)) reports))
+    (is (every? #(= :none (:authority %)) reports))
+    (is (every? #(= :not-issued (:certificate %)) reports))
+    (is (= [:execute :execute :reject-before-execution :execute] (mapv :decision reports)))
+    (is (= [:explicit :explicit :smoothed :smoothed] (mapv :time-source reports)))
+    (is (= times (mapv :system-time reports) (mapv :system-time ledger)))
+    (is (= ids (mapv :tx-id ledger)))
+    (is (= [true true false true] (mapv :committed? ledger)))
+    (is (= :invalid-system-time (:reason (nth reports 2))))
+    ;; Equal-time execution is allowed, not a guarantee of commit. A
+    ;; backwards attempted write must leave no persisted document.
+    (is (= #{"a" "b" "d"} (set (map :xt/id (xt/q node ["SELECT _id FROM probe FOR VALID_TIME ALL FOR SYSTEM_TIME ALL"])))))
+    ;; The existing strict temporal replay profile remains unchanged.
+    (is (= :retained-replay-system-time-order
+           (:reason (coverage/observe-local-processed-retained-replay-inputs! node))))))
+
+(deftest retained-clock-decisions-for-equal-and-backwards-explicit-times
+  (let [root (Files/createTempDirectory "gesso-clock-decisions-" (make-array FileAttribute 0))
+        clock (java.time.Clock/fixed (Instant/parse "2026-01-01T00:00:00Z") (ZoneId/of "UTC"))
+        config {:log [:local {:path (str root "/log") :instant-src clock}]
+                :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-02T00:00:00Z")]
+    (try
+      (let [ids (with-open [node (xtn/start-node config)]
+                  (let [database (db/primary-db node)
+                        ids (mapv (fn [[id requested]]
+                                    (:tx-id (xt/submit-tx node [[:put-docs :probe {:xt/id id :value 1}]]
+                                                          (cond-> {} requested (assoc :system-time requested)))))
+                                  [["a" t] ["b" t] ["c" (.minusSeconds t 1)] ["d" nil]])]
+                    (.awaitSourceBlocking database (peek ids) (Duration/ofSeconds 15))
+                    (check-clock-decisions! node ids t)
+                    ids))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
+          (check-clock-decisions! node ids t)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest retained-clock-decision-boundaries
+  (let [resolve! input/resolve-retained-clock
+        epoch Instant/EPOCH
+        before (.minusNanos epoch 1000)
+        after (.plusNanos epoch 1000)
+        max-time (Instant/ofEpochSecond 9223372036854 775807000)]
+    (doseq [[micros requested prior expected decision source]
+            [[-1 nil nil before :execute :frame]
+             [0 epoch epoch epoch :execute :explicit]
+             [2 before epoch (.plusNanos epoch 2000) :reject-before-execution :frame]
+             [0 before epoch after :reject-before-execution :smoothed]
+             [0 nil epoch after :execute :smoothed]
+             [0 max-time max-time max-time :execute :explicit]]]
+      (let [r (resolve! micros requested prior)]
+        (is (= :resolved (:status r)))
+        (is (= [expected decision source] ((juxt :system-time :decision :time-source) r)))))
+    (doseq [[micros requested prior reason]
+            [[nil epoch nil :invalid-clock-frame]
+             [0 (.plusNanos epoch 1) nil :invalid-requested-system-time]
+             [0 nil "invalid" :invalid-prior-system-time]
+             [0 nil max-time :retained-clock-overflow]
+             [0 epoch max-time :retained-clock-overflow]]]
+      (let [r (resolve! micros requested prior)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)))
+        (is (not-any? #(contains? r %) [:system-time :decision :time-source]))))))
