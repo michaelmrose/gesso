@@ -2,6 +2,9 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [gesso.model.tx :as tx]
+            [gesso.choreo.identity :as identity]
+            [gesso.model.command-resolution :as resolution]
+            [gesso.model.mapped-frame :as frame]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-replay-input :as input]
             [gesso.assurance.reference-provider :as reference]
@@ -800,6 +803,78 @@
                      (with-redefs [arrow/decode-bounded-operations #(assoc-in (arrow! %) [:operations 2] (assoc bad :kind :sql))]
                        (let [r (input/decode-replay-input id body)]
                          (is (= :unsupported (:status r)) (pr-str bad))
+                         (is (not (contains? r :transaction))))))))]
+    (try
+      (let [expected (with-open [node (xtn/start-node config)]
+                       (let [database (db/primary-db node)
+                             expected (mapv (fn [i ops]
+                                              (let [time (.plusSeconds t i)
+                                                    id (:tx-id (xt/submit-tx node ops {:system-time time}))]
+                                                (.awaitTxBlocking database id (Duration/ofSeconds 15))
+                                                {:tx-id id :system-time time :ops ops})) (range) txs)]
+                         (.awaitSourceBlocking database (:tx-id (peek expected)) (Duration/ofSeconds 15))
+                         (check! node expected)
+                         expected))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
+          (check! node expected)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest strict-retained-journal-slot-assertions
+  (let [root (Files/createTempDirectory "gesso-retained-journal-slot-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        binding (fn [id p op] {:command-id (identity/command-id id) :principal (identity/principal p)
+                               :operation op :arguments {:request-id "r"}})
+        target (binding "c1" "helper-a" :request/claim)
+        row (fn [b] (resolution/command-record b {:status :claimed} "t1"))
+        put (fn [b] [:put-docs :gesso_commands (row b)])
+        empty-slot (resolution/principal-operation-slot-assertion target)
+        occupied (first (frame/formatted-prestate-assertions!
+                         {:target-map {:outcome [:journal-slot "helper-a" :request/claim]}} {} [(row target)]))
+        duplicate (put (binding "c2" "helper-a" :request/claim))
+        txs [[empty-slot]
+             [occupied]
+             [(put (binding "c3" "helper-b" :request/claim))
+              (put (binding "c4" "helper-a" :request/release)) empty-slot]
+             [(put target) occupied]
+             [duplicate occupied]
+             [empty-slot]
+             [occupied]
+             [duplicate]
+             [occupied]]
+        check! (fn [node expected]
+                 (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
+                       prediction (temporal/replay (mapv #(dissoc % :tx-id) expected))
+                       report (reference/compare-local-processed-retained-replay-execution! node #{:gesso_commands})
+                       id (:tx-id (first expected))
+                       body (get (read-bytes node) id)
+                       arrow! arrow/decode-bounded-operations
+                       sql (-> body payload/decode-payload :message :tx-ops arrow! :operations first)]
+                   (is (= :observed (:status sample)) (pr-str (dissoc sample :replay-inputs :payload-fingerprint)))
+                   (is (= expected (:replay-inputs sample)))
+                   (is (= :predicted (:status prediction)))
+                   (is (= [true false true true false false true true false] (mapv :committed? (:history prediction))))
+                   (is (= [0 1 0 0] (mapv :failed-assertion-index (filter #(not (:committed? %)) (:history prediction)))))
+                   (is (= :matched (:status report)) (pr-str report))
+                   (is (= 9 (:transaction-count report)))
+                   (is (= :none (:authority report)))
+                   (is (= :not-issued (:certificate report)))
+                   (is (= :unsupported (:status (coverage/observe-local-processed-retained-clocked-inputs! node))))
+                   (is (= :unsupported (:status (reference/compare-local-processed-retained-replay-execution! node #{:probe}))))
+                   (is (= (subvec empty-slot 1) (:args sql)))
+                   (doseq [change [#(update % :query str/replace-first "$1" "$2")
+                                   #(update % :query str/replace-first "$1" "$01")
+                                   #(update % :query str/replace-first "ASSERT 0" "ASSERT 2")
+                                   #(update % :query str/replace-first " AND " " OR ")
+                                   #(update % :query str/replace-first "gesso$choreo$identity$value" "value")
+                                   #(update % :query str " -- comment")
+                                   #(update % :args pop)
+                                   #(assoc-in % [:args 0] 1)
+                                   #(assoc-in % [:args 1] "request/claim")]]
+                     (with-redefs [arrow/decode-bounded-operations #(assoc-in (arrow! %) [:operations 0] (change sql))]
+                       (let [r (input/decode-replay-input id body)]
+                         (is (= :unsupported (:status r)) (pr-str (change sql)))
                          (is (not (contains? r :transaction))))))))]
     (try
       (let [expected (with-open [node (xtn/start-node config)]

@@ -4857,3 +4857,23 @@ counts, wrong identity domain and comments. Only selected non-absent
 top-level fields are covered, not arbitrary null or nested equality.
 No production admission, certificate or CLM-R2 premise retirement.
 Other regression namespaces and independent formal gates not rerun.
+
+* v2724 — project retained command journal slot assertions
+
+Recognize exact retained zero and one row principal/operation slot
+selectors over gesso_commands. Preserve dollar signs in nested column
+names and canonical parameter order; validate string principal and
+keyword operation through the independent checked grammar. Keep strict
+system-time history and clocked replay restriction unchanged.
+
+Focused JVM: 43 tests / 3832 assertions, zero failures or errors in two
+completed batches: replay input 12 / 916; temporal, provider and retained
+operation 31 / 2916. Persistent nine-transaction history using actual
+command records and slot guard generators matches exact retained inputs,
+empty and occupied slots, unrelated principals and operations, tentative
+incorporation, duplicate-slot abort and rollback, and selected historical
+rectangles before and after reopening. Reject malformed SQL, incorrect
+parameter numbering, count other than zero or one, unsupported operands
+and missing journal observation scope. Occupied recursive journal value
+assertions remain open. No production admission, certificate or CLM-R2
+premise retirement. Other regression namespaces and formal gates not run.

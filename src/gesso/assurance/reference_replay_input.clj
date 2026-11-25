@@ -8,7 +8,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v7)
+(def profile :selected-retained-replay-input-v8)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -57,6 +57,14 @@
     (let [op (into [(str/replace query #"\$[12]" "?")] args)]
       (when (seq (current/operation-tables op)) op))))
 
+(defn- project-journal-slot-assertion [query args]
+  ;; Exact slot selector; dollar signs in column names are not parameters.
+  (when (and (= 2 (count args))
+             (#{"ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE (gesso$command$binding).principal.gesso$choreo$identity$value = $1 AND (gesso$command$binding).operation = $2)"
+                "ASSERT 1 = (SELECT COUNT(*) FROM gesso_commands WHERE (gesso$command$binding).principal.gesso$choreo$identity$value = $1 AND (gesso$command$binding).operation = $2)"} query))
+    (let [op (into [(str/replace query #"\$[12]" "?")] args)]
+      (when (= #{:gesso_commands} (current/operation-tables op)) op))))
+
 (defn- project-mapped-assertion [query args]
   ;; Invert only the canonical numbered placeholders of the selected mapped
   ;; guard. Round-trip text equality excludes reordered, repeated and
@@ -80,7 +88,8 @@
              (and (= "ASSERT $1 = $2" query) (= 2 (count args))) (into ["ASSERT ? = ?"] args)
              (not clocked?) (or (project-state-assertion query args)
                                 (project-mapped-assertion query args)
-                                (project-field-count-assertion query args))))
+                                (project-field-count-assertion query args)
+                                (project-journal-slot-assertion query args))))
     :put-docs (when (and (= #{:kind :table :documents :iids :bounds} (set (keys op)))
                          (keyword? table) (= "public" (namespace table)) (= {} bounds)
                          (vector? documents) (seq documents)
@@ -134,7 +143,7 @@
 (defn decode-replay-input
   "Project selected retained operations with explicit time precedence.
    Includes exact quoted-table row-read, row-count, mapped scalar and
-   document field-count assertions; the history must still qualify for strictly increasing temporal replay.
+   document field-count and journal slot assertions; the history must still qualify for strictly increasing temporal replay.
    The four-argument form resolves implicit times from the frame and prior
    time; the two-argument form requires explicit time. Clock rejection
    and equal-time history qualification are outside this legacy profile."
