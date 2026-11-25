@@ -584,6 +584,8 @@
                            extra (- (count framed-ops) (count ops))
                            ;; Skip the evidence guard and exclude the evidence put.
                            prefix (subvec framed-ops 1 (dec extra))
+                           witness (peek (peek framed-ops))
+                           fingerprint (frame/prefix-evidence! prefix)
                            report (lowering/check-prefix! (semantics/source actor alternative)
                                                           semantics/target-map
                                                           (:document-rows snapshot)
@@ -594,7 +596,36 @@
                        (is (= 4 (:version report)))
                        (is (= (count prefix) (:assertion-count report)))
                        (is (= :not-established (:sql-refinement report)))
-                       (is (= :not-issued (:certificate report)))))
+                       (is (= :not-issued (:certificate report)))
+                       (is (= :gesso_transition_evidence (second (peek framed-ops))))
+                       (is (= 4 (:profile-version witness)))
+                       (is (= (:command-id identity) (:xt/id witness)))
+                       (is (= (:alternative identity) (:alternative witness)))
+                       (is (= fingerprint (select-keys witness (keys fingerprint))))
+                       (is (= fingerprint (select-keys (get @checked-candidates identity) (keys fingerprint))))))
+                   (let [committed (filter #(= :committed (:result %)) @submissions)
+                         aborted (remove #(= :committed (:result %)) @submissions)
+                         witnesses (into {} (map (fn [{:keys [framed-ops]}]
+                                                   (let [w (peek (peek framed-ops))] [(:xt/id w) w]))) committed)
+                         durable (into {} (map (juxt :xt/id identity))
+                                       (xt/q node "SELECT * FROM gesso_transition_evidence"))]
+                     (is (= (count committed) (count witnesses)))
+                     (is (= witnesses durable))
+                     (doseq [{:keys [framed-ops]} aborted
+                             :let [w (peek (peek framed-ops))]]
+                       ;; A refused acceptance and committed recovery can share
+                       ;; a command id, but never the same durable witness.
+                       (is (not= w (get durable (:xt/id w)))))
+                     (doseq [[status report] @correspondence-reports
+                             :let [transition (:transition report)
+                                   w (get durable (:command-id transition))]]
+                       (is (#{:incorporated :replay} status))
+                       (is (some? w))
+                       (is (= (:guard-profile w) (:guard-profile transition)))
+                       (is (= (:guard-prefix-fingerprint w)
+                              (get-in transition [:fingerprints :guard-prefix-fingerprint])))
+                       (is (= :checked-reconstructed-prefix
+                              (get-in transition [:prestate :guard-prefix-correspondence])))))
                    (doseq [{:keys [identity]} expected]
                      (is (= (:state (if (= :accept (keyword (name (:alternative identity))))
                                      @initial-state @recovery-state))
@@ -618,6 +649,10 @@
                    (is (= :none (:authority audit)))
                    (is (= (cond-> #{id} valid? (conj loser-id))
                           (set (map :command-id (:verified-mapped-transition groups)))))
+                   (is (= (set (map (fn [{:keys [identity commit-basis]}]
+                                      [(:command-id identity) (xtdb/basis-tx-id commit-basis)])
+                                    (filter #(= :committed (:result %)) @submissions)))
+                          (set (map (juxt :command-id :tx-id) (:verified-mapped-transition groups)))))
                    (is (= 1 (count (:aborted-stutter groups))))
                    (is (= 4 (count (:verified-infrastructure-transition groups))))
                    (is (= {:lease-acquisition 2 :dispatch-acknowledgment 2}

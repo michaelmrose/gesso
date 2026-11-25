@@ -647,3 +647,28 @@ relabelled as if they contained the stronger prefix. This is a deliberate
 compatibility boundary; no automatic migration or replay compatibility for
 legacy selected mapped evidence is supplied. Full prefix hashing also
 inherits the bounded subject encoder's limits. No CLM-R2 premise is retired.
+
+* v2568 — durable guard evidence through physical Claim recovery
+
+The complete physical Claim namespace requalifies the version-4 durable
+transition witness across the four recovery modes. For each of the nine
+actual submitted envelopes, independently reconstruct the exact prefix
+from the actor-specific source and captured prestate, then fingerprint
+the extracted prefix using the shared canonical digest implementation.
+Require the guard profile and fingerprint to agree with both the admitted
+candidate and the evidence put, and verify witness command and alternative
+identity. Compare the complete durable witness row set with the committed
+submissions only. An aborted acceptance cannot leave its witness behind,
+even when a successful refusal subsequently uses the same command id.
+
+Check incorporation and replay reports against the persisted profile and
+fingerprint and require the reconstructed-preceding-prefix status. Match
+verified history transition classifications to the actual committed
+(command id, transaction id) pairs, not command identity alone. This is
+fixture-level correlation across the observed execution and history path,
+not independent authentication of arbitrary writers or proof of the
+provider's transaction-internal read basis. Production is unchanged.
+
+The complete namespace passed: 3 tests, 931 assertions, zero failures or
+errors. The strict Chromium gate, Ansatz pilot and full project suite were
+not executed. No CLM-R2 premise or certification authority is retired.
