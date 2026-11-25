@@ -711,6 +711,7 @@
                          (is (= :none (:authority report)))
                          (is (= :not-issued (:certificate report))))))
                    (is (= 4 (count (:verified-infrastructure-transition groups))))
+                   (is (every? #(= :matched (:worker-envelope %)) (:verified-infrastructure-transition groups)))
                    (is (= {:lease-acquisition 2 :dispatch-acknowledgment 2}
                           (frequencies (map :maintenance (:verified-infrastructure-transition groups)))))
                    (is (empty? (:observed-mapped-stutter groups)))
@@ -724,10 +725,10 @@
                      (is (= report (:report (host/history-status started))))
                      (is (= :declared (:publication-expectation-profile report)))
                      (is (= :declared (:residual-assertion-profile report)))
-                     (is (= :v15-declared-expectations-checked
+                     (is (= :v16-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :residual-assertion-correspondence])))
-                     (is (= :v15-declared-expectations-checked
+                     (is (= :v16-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
                      (let [operational (host/assurance-status started)]

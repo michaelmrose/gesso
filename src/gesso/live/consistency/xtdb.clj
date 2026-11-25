@@ -244,6 +244,11 @@
   [connectable tx-id]
   (envelope/check-recorded-abort! (physical-connectable! connectable) tx-id))
 
+(defn check-worker-envelope!
+  "Compare reconstructed worker operations through the opaque adapter."
+  [connectable tx-id ops]
+  (envelope/check-worker-envelope! (physical-connectable! connectable) tx-id ops))
+
 (defn current-submission-policy-token
   "Observe the current opaque policy generation through a live handle or
    physical node. The token grants no submission or registration authority."

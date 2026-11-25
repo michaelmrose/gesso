@@ -1587,3 +1587,40 @@ This is conditional aborted-stutter evidence, not proof of rollback or
 abort cause, intended attempted operations, provider execution or writer
 authority. Infrastructure retained-operation correspondence remains open.
 No CLM-R2 premise is retired.
+
+* v2600 — verify retained outbox worker envelopes
+
+After checking the pinned historical worker state relation, reconstruct
+its full ordered SQL guard vector and complete replacement document from
+before/after rows, rather than from the worker's constructor or retained
+submission. Require the exact retained transaction identity, decoded
+operation sequence and independently observed committed outcome. Refuse
+omitted, changed or extra guards, extra tables and repeated replacements.
+The source decoder now retains SQL timestamp values. A separate restricted
+worker comparator accepts only the fixed worker guard forms and compares
+SQL timestamps as instants (the provider exposes different UTC zone
+representations for SQL and document timestamps). Document values, IIDs,
+valid-time bounds and operation order remain exact. The generic mapped
+assertion language is unchanged. Report bounded matched status only.
+Advance history, checkpoints and operational prefix reporting to v16;
+v15 and earlier checkpoints require rescanning.
+
+Final JVM maintenance-policy and operational-report namespaces: 7 tests /
+257 assertions, zero failures or errors. Real production acquisition,
+expired lease reclamation and acknowledgment match reconstructed envelopes
+through the opaque adapter. Real adversarial worker replacements with
+missing, extra or altered guards, extra unselected writes and duplicate
+puts fail the isolated historical worker classifier despite matching its
+state relation. Unavailable retained messages are tested by injection.
+Full opt-in physical Claim source-log suite: 3 tests / 1128 assertions,
+zero failures or errors, with all verified worker steps matched. Full
+initialization/history, mapped-projection, source-log pilot, project,
+Chromium and separate proof gates were not rerun.
+
+Worker state and retained-operation correspondence do not authenticate the
+observed lease owner or dispatch receipt, establish external delivery,
+prove provider timestamp/rollback semantics or close arbitrary writers.
+Aborted worker attempts with temporal guards are not yet qualified by the
+restricted abort comparator. Initialization and manifest establishment
+still require separate retained-operation correspondence. No CLM-R2 premise
+is retired.

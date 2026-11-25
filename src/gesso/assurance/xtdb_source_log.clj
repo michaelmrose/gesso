@@ -47,6 +47,7 @@
   (when (> *depth* (:max-depth *limits*)) (reject! :decoded-depth-limit))
   (cond
     (or (string? v) (keyword? v) (boolean? v) (integer? v) (uuid? v)) v
+    (or (instance? Instant v) (instance? ZonedDateTime v)) v
     (instance? java.util.List v) (binding [*depth* (inc *depth*)] (mapv decode-value! v))
     :else (reject! :unsupported-sql-argument)))
 

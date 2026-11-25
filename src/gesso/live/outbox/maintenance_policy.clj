@@ -138,3 +138,24 @@
                            :gesso.live.outbox/dispatch-receipt-id (:gesso.live.outbox/dispatch-receipt-id new)
                            :gesso.live.outbox/dispatch-adapter (:gesso.live.outbox/dispatch-adapter new))))
         :dispatch-acknowledgment))))
+
+(defn historical-worker-envelope
+  "Reconstruct the complete worker submission from pinned before/after
+   rows, after independently checking the state relation. The observed
+   worker and receipt are still unauthenticated. No current read or original
+   transaction constructor is consulted."
+  [source-id time old new]
+  (when-let [kind (observe-worker-transition source-id time old new)]
+    (let [id (:xt/id old)
+          version (:xt/system-from old)
+          deadline (:gesso.live.outbox/lease-until new)
+          old-deadline (:gesso.live.outbox/lease-until old)
+          guards (case kind
+                   :lease-acquisition [["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)" id version]
+                                       ["ASSERT CURRENT_TIMESTAMP < ?" deadline]
+                                       ["ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" deadline]]
+                   :expired-lease-reclamation [["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP >= ?)" id version old-deadline]
+                                                ["ASSERT CURRENT_TIMESTAMP < ?" deadline]
+                                                ["ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" deadline]]
+                   :dispatch-acknowledgment [["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)" id version old-deadline]])]
+      {:maintenance kind :ops (conj guards [:put-docs outbox/intent-table (dissoc new :xt/system-from)])})))

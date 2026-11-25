@@ -141,21 +141,15 @@
             (binding-evidence! (assoc-in ops [(dec (count ops)) 2]
                                          (apply dissoc witness binding-keys)))))))
 
-(defn check-envelope!
-  "Compare a nonempty vector of generated ASSERT and canonical public
-   put-docs operations (without temporal options) against one exact
-   transaction and expected boolean commit outcome. Returns :matched,
-   :mismatch, :unsupported or :unavailable; no raw values or SQL in the
-   report. Match is decoded operation equality only; does not cover
-   transaction metadata, caller bytes, writer identity or certification."
-  [node tx-id ops committed?]
+(defn- check-envelope*
+  [node tx-id ops committed? expected! normalize-observed]
   (let [report (fn [status reason]
                  (cond-> {:status status :profile profile :authority :none :certificate :not-issued}
                    reason (assoc :reason reason)))]
     (try
       (if-not (boolean? committed?)
         (report :unsupported :invalid-expected-outcome)
-        (let [expected (expected-operations! ops)
+        (let [expected (expected! ops)
               observed (source-log/observe-source-message! node tx-id)]
           (case (:status observed)
             :unavailable (report :unavailable (:reason observed))
@@ -164,7 +158,7 @@
             (cond
               (not= log-profile (:provider-profile observed)) (report :unsupported :source-profile-mismatch)
               (not= tx-id (:tx-id observed)) (report :mismatch :source-transaction-identity-mismatch)
-              (not= expected (:operations observed)) (report :mismatch :operation-sequence-mismatch)
+              (not= expected (normalize-observed (:operations observed))) (report :mismatch :operation-sequence-mismatch)
               :else
               (let [outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
                 (cond
@@ -183,6 +177,59 @@
           (report :unsupported (:reason (ex-data e)))
           (report :unavailable :envelope-check-failed)))
       (catch Exception _ (report :unavailable :envelope-check-failed)))))
+
+(defn check-envelope!
+  "Compare a nonempty vector of generated ASSERT and canonical public
+   put-docs operations (without temporal options) against one exact
+   transaction and expected boolean commit outcome. Returns :matched,
+   :mismatch, :unsupported or :unavailable; no raw values or SQL in the
+   report. Match is decoded operation equality only; does not cover
+   transaction metadata, caller bytes, writer identity or certification."
+  [node tx-id ops committed?]
+  (check-envelope* node tx-id ops committed? expected-operations! identity))
+
+(def ^:private worker-guard-arities
+  {"ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)" 2
+   "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP >= ?)" 3
+   "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)" 3
+   "ASSERT CURRENT_TIMESTAMP < ?" 1
+   "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" 1})
+
+(defn- timestamp-instant [v]
+  (if (instance? ZonedDateTime v) (.toInstant ^ZonedDateTime v) v))
+
+(defn- normalize-worker-operations [operations]
+  ;; SQL timestamp arguments have instant semantics. Arrow represents the
+  ;; same timestamp with a different UTC zone for SQL and document values.
+  ;; Do not normalize documents, bounds, IIDs, query text or other values.
+  (mapv #(if (= :sql (:kind %)) (update % :args (fn [args] (mapv timestamp-instant args))) %) operations))
+
+(defn- expected-worker-operations! [ops]
+  (when-not (and (vector? ops) (<= 2 (count ops) 4)
+                 (vector? (peek ops)) (= 3 (count (peek ops)))
+                 (= [:put-docs :gesso_live_outbox] (subvec (peek ops) 0 2)))
+    (reject! :invalid-worker-envelope))
+  (let [guards (mapv (fn [op]
+                       (let [[sql & args] op
+                             n (get worker-guard-arities sql)
+                             args (mapv timestamp-instant args)]
+                         (when-not (and (vector? op) n (= n (count args))
+                                        (if (= 1 n)
+                                          (instance? Instant (first args))
+                                          (and (uuid? (first args)) (every? #(instance? Instant %) (rest args)))))
+                           (reject! :invalid-worker-guard))
+                         (let [i (volatile! 0)]
+                           {:kind :sql :query (str/replace sql #"\?" (fn [_] (str "$" (vswap! i inc)))) :args args})))
+                     (pop ops))]
+    (into guards (expected-operations! [(peek ops)]))))
+
+(defn check-worker-envelope!
+  "Compare reconstructed worker guards and the complete pinned replacement
+   with the retained committed operation sequence. Only the fixed worker
+   SQL forms admit timestamp arguments; mapped assertion grammar is unchanged.
+   SQL timestamps are compared as instants, not caller representations."
+  [node tx-id ops]
+  (check-envelope* node tx-id ops true expected-worker-operations! normalize-worker-operations))
 
 (defn- observed-restricted-operations! [operations]
   ;; Require an exact round trip through the restricted caller language.

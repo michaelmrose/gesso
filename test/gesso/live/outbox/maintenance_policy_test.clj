@@ -1,6 +1,9 @@
 (ns gesso.live.outbox.maintenance-policy-test
   (:require [clojure.test :refer [deftest is]]
             [gesso.live.consistency.xtdb :as xtdb]
+            [gesso.assurance.xtdb-envelope :as envelope]
+            [gesso.assurance.xtdb-source-log :as source-log]
+            [gesso.live.outbox.history-coverage :as history]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.acknowledgment :as ack]
@@ -51,14 +54,26 @@
                               :lease-id (random-uuid) :now (Instant/now)
                               :lease-until (.plusSeconds (Instant/now) 60)})
               first-claim (claim pending-id)
-              second-claim (claim expired-id)]
-          (is (= :acquired (:status (acquisition/acquire-pending! node first-claim))))
-          (is (= :reclaimed (:status (acquisition/reclaim-expired! node second-claim))))
+              second-claim (claim expired-id)
+              read-row (fn [id] (first (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" id])))
+              verify! (fn [id kind execute!]
+                        (let [before (read-row id)
+                              result (execute!)
+                              after (read-row id)
+                              time (get-in result [:consistency :system-time])
+                              tx-id (get-in result [:consistency :tx-id])
+                              expected (policy/historical-worker-envelope "s" time before after)]
+                          (is (= kind (:maintenance expected)))
+                          (is (= :matched (:status (xtdb/check-worker-envelope! (xtdb/adapter-connectable! node) tx-id (:ops expected)))))
+                          result))]
+          (is (= :acquired (:status (verify! pending-id :lease-acquisition #(acquisition/acquire-pending! node first-claim)))))
+          (is (= :reclaimed (:status (verify! expired-id :expired-lease-reclamation #(acquisition/reclaim-expired! node second-claim)))))
           (doseq [c [first-claim second-claim]]
-            (is (= :acknowledged (:status (ack/acknowledge-dispatch!
-                                          node (assoc (select-keys c [:intent-id :worker-id :lease-id])
-                                                      :receipt {:receipt-id (random-uuid)
-                                                                :adapter :example/adapter :result :accepted}))))))
+            (is (= :acknowledged (:status (verify! (:intent-id c) :dispatch-acknowledgment
+                                          #(ack/acknowledge-dispatch!
+                                            node (assoc (select-keys c [:intent-id :worker-id :lease-id])
+                                                        :receipt {:receipt-id (random-uuid)
+                                                                  :adapter :example/adapter :result :accepted})))))))
           (is (= [:manifest :worker :worker :worker :worker] (mapv (comp :kind first) @seen)))
           (is (every? #(nil? (check (second %))) (rest @seen)))
           (is (nil? (check [42])))
@@ -102,3 +117,52 @@
     (is (nil? (observe active (assoc acknowledged :gesso.live.outbox/lease-owner "other"))))
     (is (nil? (observe active (assoc acknowledged :gesso.live.outbox/dispatch-receipt-id "fake"))))
     (is (nil? (policy/observe-worker-transition "other" time pending leased)))))
+
+(deftest historical-worker-envelope-checks-retained-operations
+  (with-open [node (xtn/start-node {})]
+    (let [id (random-uuid)
+          pending {:xt/id id :gesso.live.outbox/type outbox/intent-type
+                   :gesso.live.outbox/version outbox/intent-version
+                   :gesso.live.outbox/status :pending :gesso.live.outbox/source-id "s"
+                   :gesso.live.outbox/command-id "c1" :extra "preserve"}
+          read-row #(first (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" id]))
+          classify (fn [before after tx-id]
+                     (let [time (.toInstant ^java.time.ZonedDateTime (:xt/system-from after))
+                           expected (policy/historical-worker-envelope "s" time before after)]
+                       (is (some? expected))
+                       (#'history/classify-worker! node {:tx-id tx-id} (assoc expected :intent-id id))))]
+      (doseq [[mode expected] [[:valid :verified-infrastructure-transition]
+                               [:unguarded :unclassified]
+                               [:extra-write :unclassified]
+                               [:extra-assertion :unclassified]
+                               [:changed-argument :unclassified]
+                               [:duplicate-put :unclassified]]]
+        (xt/execute-tx node [[:put-docs :gesso_live_outbox pending]])
+        (let [before (read-row)
+              deadline (.plusSeconds (Instant/now) 60)
+              leased (assoc pending :gesso.live.outbox/status :leased
+                            :gesso.live.outbox/lease-owner "w" :gesso.live.outbox/lease-id (random-uuid)
+                            :gesso.live.outbox/lease-until deadline)
+              guards [["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)" id (:xt/system-from before)]
+                      ["ASSERT CURRENT_TIMESTAMP < ?" deadline]
+                      ["ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" deadline]]
+              put [:put-docs :gesso_live_outbox leased]
+              ops (case mode
+                    :valid (conj guards put)
+                    :unguarded [put]
+                    :extra-write (conj guards put [:put-docs :unselected {:xt/id "hidden" :value 1}])
+                    :extra-assertion (into [["ASSERT TRUE"]] (conj guards put))
+                    :changed-argument (conj (assoc-in guards [1 1] (.plusSeconds deadline 1)) put)
+                    :duplicate-put (conj guards put put))
+              tx-id (:tx-id (xt/execute-tx node ops))
+              after (read-row)
+              report (classify before after tx-id)]
+          (is (= expected (:classification report)) (name mode))
+          (is (= (when (= :valid mode) :matched) (:worker-envelope report)))
+          (is (= (when-not (= :valid mode) :historical-worker-envelope-mismatch) (:reason report)))
+          (is (not (contains? report :ops)))
+          (when (= :valid mode)
+            (let [expected-ops (:ops (policy/historical-worker-envelope "s" (.toInstant ^java.time.ZonedDateTime (:xt/system-from after)) before after))]
+              (is (= :unsupported (:status (envelope/check-envelope! node tx-id expected-ops true))))
+              (with-redefs [source-log/observe-source-message! (fn [& _] {:status :unavailable :reason :source-message-not-retained})]
+                (is (= :historical-worker-envelope-unavailable (:reason (classify before after tx-id))))))))))))

@@ -92,7 +92,7 @@
                   :all-declared-invariants-conditionally-inductive? true
                   :declared-invariant-ids #{:example/nonnegative}}
         snapshot (update sample :report assoc
-                         :profile :selected-mapped-ledger-chunk-v15
+                         :profile :selected-mapped-ledger-chunk-v16
                          :publication-expectation-profile :declared
                          :residual-assertion-profile :declared
                          :initialization {:system-time time :catalog-fingerprint "catalog"
@@ -101,20 +101,21 @@
         joined (report/describe-application abstract snapshot)
         arg (:physical-induction joined)]
     (is (= :conditional-observed-prefix-argument (:status arg)))
-    (is (= :v15-prefix-checked (get-in arg [:premises :visible-valid-time-continuity])))
-    (is (= :v15-mapped-steps-checked (get-in arg [:premises :recorded-envelope-correspondence])))
-    (is (= :v15-mapped-steps-checked (get-in arg [:premises :intended-guard-prefix-correspondence])))
-    (is (= :v15-mapped-steps-checked (get-in arg [:premises :intended-mapped-write-correspondence])))
-    (is (= :v15-assertion-only-stutters-checked (get-in arg [:premises :committed-stutter-correspondence])))
-    (is (= :v15-restricted-aborts-checked (get-in arg [:premises :aborted-stutter-correspondence])))
-    (is (= :v15-mapped-steps-checked (get-in arg [:premises :mapped-write-table-closure])))
-    (is (= :v15-mapped-steps-checked (get-in arg [:premises :transition-evidence-write-correspondence])))
-    (is (= :v15-mapped-steps-checked (get-in arg [:premises :publication-outbox-correspondence])))
-    (is (= :v15-mapped-steps-checked (get-in arg [:premises :publication-record-correspondence])))
-    (is (= :v15-declared-expectations-checked (get-in arg [:premises :publication-expectation-correspondence])))
+    (is (= :v16-prefix-checked (get-in arg [:premises :visible-valid-time-continuity])))
+    (is (= :v16-mapped-steps-checked (get-in arg [:premises :recorded-envelope-correspondence])))
+    (is (= :v16-mapped-steps-checked (get-in arg [:premises :intended-guard-prefix-correspondence])))
+    (is (= :v16-mapped-steps-checked (get-in arg [:premises :intended-mapped-write-correspondence])))
+    (is (= :v16-assertion-only-stutters-checked (get-in arg [:premises :committed-stutter-correspondence])))
+    (is (= :v16-restricted-aborts-checked (get-in arg [:premises :aborted-stutter-correspondence])))
+    (is (= :v16-worker-steps-checked (get-in arg [:premises :worker-envelope-correspondence])))
+    (is (= :v16-mapped-steps-checked (get-in arg [:premises :mapped-write-table-closure])))
+    (is (= :v16-mapped-steps-checked (get-in arg [:premises :transition-evidence-write-correspondence])))
+    (is (= :v16-mapped-steps-checked (get-in arg [:premises :publication-outbox-correspondence])))
+    (is (= :v16-mapped-steps-checked (get-in arg [:premises :publication-record-correspondence])))
+    (is (= :v16-declared-expectations-checked (get-in arg [:premises :publication-expectation-correspondence])))
     (is (= :open (get-in (report/describe-application abstract (assoc-in snapshot [:report :publication-expectation-profile] :not-declared))
                          [:physical-induction :premises :publication-expectation-correspondence])))
-    (is (= :v15-declared-expectations-checked (get-in arg [:premises :residual-assertion-correspondence])))
+    (is (= :v16-declared-expectations-checked (get-in arg [:premises :residual-assertion-correspondence])))
     (doseq [profile [nil :not-declared]]
       (is (= :open (get-in (report/describe-application abstract (assoc-in snapshot [:report :residual-assertion-profile] profile))
                            [:physical-induction :premises :residual-assertion-correspondence]))))
@@ -142,6 +143,7 @@
                    [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v12)]
                    [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v13)]
                    [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v14)]
+                   [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v15)]
                    [abstract (assoc-in snapshot [:report :initialization :catalog-fingerprint] "different")]
                    [abstract (assoc-in snapshot [:report :initialization :system-time] (.plusSeconds time 1))]
                    [abstract (assoc-in snapshot [:report :counts] {:unknown 1})]
