@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-source-coverage
   "Bounded identity coverage of the installed embedded source logs."
-  (:require [gesso.assurance.reference-source-payload :as payload]
+  (:require [gesso.assurance.reference-operation-correspondence :as operation]
+            [gesso.assurance.reference-source-payload :as payload]
             [xtdb.db-catalog :as db])
   (:import (java.io RandomAccessFile)
            (java.lang ReflectiveOperationException)
@@ -220,20 +221,47 @@
       :expected-block-index)
     :kind))
 
-(defn- compare-local-payloads [report frames bytes records]
-  ;; Only compare after coordinates, order and cardinality have matched.
-  (if-not (= :observed (:status report))
-    report
+(defn- compare-selected-operation [node offset message]
+  (let [r (operation/compare-operation-bytes! node (:tx-ops message))]
+    (when-not (and (= :matched (:status r))
+                   (= operation/profile (:profile r))
+                   (= :matched (:operation-correspondence r))
+                   (= :none (:authority r))
+                   (= :not-issued (:certificate r)))
+      (cond-> (assoc (local-result (case (:status r)
+                                    :mismatch :mismatch
+                                    :unsupported :unsupported
+                                    :unavailable :unavailable
+                                    :unsupported)
+                                  :retained-operation-not-matched)
+                     :message-id offset :operation-reason (:reason r))
+        (:field r) (assoc :field (:field r))
+        (:decode-reason r) (assoc :decode-reason (:decode-reason r))))))
+
+(defn- compare-local-payloads [report frames bytes records node target]
+  ;; Compare only after coordinates, order and cardinality have matched.
+  ;; The selected operation comparison uses the independently decoded
+  ;; envelope at the same coordinate, never a second retained-log lookup.
+  (cond
+    (not= :observed (:status report)) report
+    (and (some? target) (not (some #{target} (:transaction-ids report))))
+    (assoc (local-result :unsupported :retained-transaction-not-framed) :message-id target)
+    :else
     (or (some (fn [[[offset _ _] bytes ^Log$Record record]]
                 (let [decoded (payload/decode-payload bytes)]
                   (if-not (= :decoded (:status decoded))
                     (assoc (local-result :unsupported :unsupported-source-payload)
                            :message-id offset :decode-reason (:reason decoded))
-                    (when-let [field (payload-mismatch (:message decoded) (.getMessage record))]
+                    (if-let [field (payload-mismatch (:message decoded) (.getMessage record))]
                       (assoc (local-result :mismatch :source-payload-mismatch)
-                             :message-id offset :field field)))))
+                             :message-id offset :field field)
+                      (when (= target offset)
+                        (compare-selected-operation node offset (:message decoded)))))))
               (map vector frames bytes records))
-        (assoc report :payload-correspondence :matched))))
+        (cond-> (assoc report :payload-correspondence :matched)
+          (some? target) (assoc :operation-correspondence :matched
+                                :operation-message-id target
+                                :operation-profile operation/profile)))))
 
 (def payload-binding-profile :xtdb-2.2.0-beta1/selected-local-payload-binding-v1)
 
@@ -250,7 +278,7 @@
         (.update digest body)))
     (.formatHex (HexFormat/of) (.digest digest))))
 
-(defn- observe-local* [node payload? bind?]
+(defn- observe-local* [node payload? bind? target]
   (if-not (db/<-node node)
     (local-result :unsupported :embedded-primary-log-required)
     (try
@@ -273,7 +301,7 @@
                                     (into [] (take (inc max-records))
                                           (iterator-seq (.iterator (.readRecords log 0 (inc end))))))
                           report (classify-local-records framing records end)
-                          report (if payload? (compare-local-payloads report frames bytes records) report)]
+                          report (if payload? (compare-local-payloads report frames bytes records node target) report)]
                       (cond
                         (and payload? (not= framing (local-frames file)))
                         (local-result :unavailable :source-log-changed-during-observation)
@@ -298,7 +326,7 @@
    field and stable quiescent file; not independent payload decoding,
    retention, an atomic snapshot, processed frontier or tamper detection."
   [node]
-  (observe-local* node false false))
+  (observe-local* node false false nil))
 
 (defn observe-local-payload-coverage!
   "Additionally compare every selected independently decoded envelope with
@@ -307,7 +335,7 @@
    Return no raw payloads. No independent Arrow interpretation, processed
    frontier, atomic snapshot, cross-observation content binding or proof."
   [node]
-  (assoc (observe-local* node true false) :payload-profile local-payload-profile
+  (assoc (observe-local* node true false nil) :payload-profile local-payload-profile
          :decoder-profile payload/profile))
 
 (defn observe-local-payload-bound-coverage!
@@ -316,8 +344,23 @@
    receipt. Equality assumes collision resistance and stable acquisition;
    not authenticated provenance, atomic snapshot or independent Arrow semantics."
   [node]
-  (assoc (observe-local* node true true) :payload-profile local-payload-profile
+  (assoc (observe-local* node true true nil) :payload-profile local-payload-profile
          :decoder-profile payload/profile :payload-binding-profile payload-binding-profile))
+
+(def retained-operation-profile :xtdb-2.2.0-beta1/selected-retained-operation-correspondence-v1)
+
+(defn observe-local-retained-operation!
+  "Compare selected envelopes across the framed local log and independently
+   compare operations at one requested transaction offset. Both comparisons
+   occur within the same bounded acquisition and final framing/byte rechecks.
+   Other transactions receive envelope checks only. No processed frontier,
+   atomic snapshot, execution, authenticated provenance or certification."
+  [node tx-id]
+  (let [report (if (and (integer? tx-id) (<= 0 tx-id Long/MAX_VALUE))
+                 (observe-local* node true false tx-id)
+                 (local-result :unsupported :invalid-retained-transaction-id))]
+    (assoc report :retained-operation-profile retained-operation-profile
+           :payload-profile local-payload-profile :decoder-profile payload/profile)))
 
 (def local-processed-profile :xtdb-2.2.0-beta1/selected-local-processed-frontier-v1)
 

@@ -4208,3 +4208,29 @@ frontier or transaction execution. Full retained transaction integration,
 other operation-only layouts and production correspondence remain open.
 No admission change, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2697 — bind selected operation correspondence to retained frames
+
+Compare independently decoded envelopes across the selected epoch-zero
+local source log and independently compare mixed operation bytes at one
+explicit transaction offset within that same acquisition. Require a
+framed transaction identity, matching provider envelope and qualified
+operation comparison before final framing, payload and submitted-end
+rechecks. Other transactions receive envelope checks only. Return no
+partial match or sensitive payload on failure; preserve earlier profiles.
+
+Focused JVM: 63 tests / 3974 assertions, zero failures or errors across
+eight namespaces, including the previous six, reference provider and
+retained operation correspondence. A real persistent log with maintenance,
+a mixed transaction and an SQL-only transaction matches the selected mixed
+record before and after reopening. Reject maintenance/interior/missing
+coordinates, unsupported layouts, mismatched envelopes, unavailable or
+unqualified operation results and changed final payload samples. A later
+envelope mismatch invalidates an earlier operation match. XTDB shutdown
+cancellation logged; process exited zero.
+
+Selected retained operation correspondence v1 remains a bounded diagnostic
+for one transaction at a stable observed local log. No processed-frontier
+binding, atomic snapshot, execution or authenticated provenance. No
+admission change, certificate or CLM-R2 premise retirement. Full project
+and independent formal gates were not rerun.
