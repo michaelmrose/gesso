@@ -3098,3 +3098,31 @@ verified metadata parsing. Nested argument values, mixed operation
 kinds, document decoding and full physical operation correspondence
 remain open. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2653 — decode selected parameterless Arrow argument relations
+
+Independently qualify the nested zero-column Arrow stream, including
+little-endian schema, a single bodyless record batch, positive bounded
+row count and exact terminator. An absent argument slot denotes one
+invocation; an explicit zero-column relation carries its own count.
+Expand ordered SQL groups into empty argument vectors, retaining the
+logged operation spans. Reject an entire unsupported stream and bound
+total expanded invocations before constructing the result. Preserve
+the existing opaque SQL group decoder.
+
+Focused JVM: 6 tests / 330 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. The physical
+persistent fixture now includes consecutive identical parameterless
+statements; independently expanded operations and spans match the
+specified expectations and XTDB observations before and after reopening.
+Check absent and explicit relations, row boundaries, malformed framing,
+multiple batches, trailing bytes and aggregate expansion overflow.
+Parameterized retained relations reject without partial operations.
+
+Selected parameterless profile v1. This is decoding of argument row
+cardinality, not SQL arity checking or execution semantics. Nonempty
+scalar argument relations, mixed operation kinds, independent document
+decoding and full provider correspondence remain open. Arrow metadata
+accessors remain a dependency. No production wiring, certificate or
+CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.

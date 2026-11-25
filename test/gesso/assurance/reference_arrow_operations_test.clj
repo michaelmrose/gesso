@@ -16,6 +16,7 @@
            (java.util Arrays)
            (org.apache.arrow.memory RootAllocator)
            (org.apache.arrow.flatbuf Message RecordBatch)
+           (xtdb.arrow Relation)
            (xtdb.tx TxWriter TxOp$Sql)))
 
 (defn- edit-byte [^bytes data offset value]
@@ -65,6 +66,58 @@
       (doseq [bad [nil (byte-array 0) (byte-array (inc (* 16 1024 1024)))]]
         (is (= :arrow-byte-limit (:reason (arrow/decode-operations bad))))))))
 
+(defn- zero-column-bytes [^RootAllocator al n]
+  (with-open [rel (Relation. al)]
+    (.setRowCount rel (int n))
+    (.getAsArrowStream rel)))
+
+(deftest parameterless-relation-decoding
+  (with-open [al (RootAllocator. (* 16 1024 1024))]
+    (is (= {:profile arrow/parameterless-profile :authority :none
+            :certificate :not-issued :status :decoded :encoding :absent :row-count 1}
+           (arrow/decode-parameterless-arguments nil)))
+    (doseq [n [1 2 16384]]
+      (let [r (arrow/decode-parameterless-arguments (zero-column-bytes al n))]
+        (is (= :decoded (:status r)))
+        (is (= :zero-column-relation (:encoding r)))
+        (is (= n (:row-count r)))))
+    (let [data (zero-column-bytes al 3)
+          batch-start (+ 8 (.getInt (doto (ByteBuffer/wrap data) (.order ByteOrder/LITTLE_ENDIAN)) 4))
+          extra-batch (byte-array (concat (take (- (alength data) 4) data)
+                                          (drop batch-start data)))]
+      (doseq [[bad reason] [[(zero-column-bytes al 0) :arrow-argument-row-limit]
+                            [(zero-column-bytes al 16385) :arrow-argument-row-limit]
+                            [(byte-array 0) :arrow-argument-byte-limit]
+                            [42 :arrow-argument-byte-limit]
+                            [(byte-array (inc (* 16 1024 1024))) :arrow-argument-byte-limit]
+                            [(edit-byte data 0 0) :invalid-arrow-framing]
+                            [(edit-int data 4 7) :invalid-arrow-metadata-length]
+                            [(edit-byte data batch-start 0) :invalid-arrow-framing]
+                            [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]
+                            [(Arrays/copyOf data (inc (alength data))) :unsupported-arrow-terminator]
+                            [extra-batch :unsupported-arrow-terminator]]]
+        (let [r (arrow/decode-parameterless-arguments bad)]
+          (is (= :unsupported (:status r)))
+          (is (= reason (:reason r)) (pr-str r))
+          (is (not (contains? r :row-count))))))
+    (with-open [args (Relation. al) too-many (Relation. al)]
+      (.setRowCount args 3)
+      (.setRowCount too-many 16384)
+      (let [data (TxWriter/toArrowBytes [(TxOp$Sql. "ASSERT TRUE" args)
+                                        (TxOp$Sql. "ASSERT FALSE" nil)] al)
+            r (arrow/decode-parameterless-operations data)]
+        (is (= :decoded (:status r)))
+        (is (= [3 1] (:logged-operation-spans r)))
+        (is (= (mapv (fn [q] {:kind :sql :query q :args []})
+                     ["ASSERT TRUE" "ASSERT TRUE" "ASSERT TRUE" "ASSERT FALSE"])
+               (:operations r))))
+      (let [data (TxWriter/toArrowBytes [(TxOp$Sql. "ASSERT TRUE" too-many)
+                                        (TxOp$Sql. "ASSERT FALSE" nil)] al)
+            r (arrow/decode-parameterless-operations data)]
+        (is (= :unsupported (:status r)))
+        (is (= :arrow-expanded-row-limit (:reason r)))
+        (is (not (contains? r :operations)))))))
+
 (defn- check-retained! [node expected]
   (let [log (.getSourceLog (db/primary-db node))
         path (#'coverage/local-log-path log)]
@@ -82,7 +135,18 @@
             (is (= :decoded (:status envelope)))
             (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :groups)))
             (is (= :source-message-observed (:status observed)))
-            (is (= queries (mapv :query (:groups decoded)) (mapv :query (:operations observed))))
+            (is (= (mapv first (partition-by identity queries)) (mapv :query (:groups decoded))))
+            (is (= queries (mapv :query (:operations observed))))
+            (let [expanded (arrow/decode-parameterless-operations (get-in envelope [:message :tx-ops]))]
+              (if (some #{"ASSERT $1 = $2"} queries)
+                (do (is (= :unsupported (:status expanded)))
+                    (is (= :unsupported-parameterless-schema (:reason expanded)))
+                    (is (not (contains? expanded :operations))))
+                (do (is (= :decoded (:status expanded)))
+                    (is (= (mapv (fn [q] {:kind :sql :query q :args []}) queries)
+                           (:operations expanded) (:operations observed)))
+                    (is (= (mapv count (partition-by identity queries))
+                           (:logged-operation-spans expanded) (:logged-operation-spans observed))))))
             (is (every? #(and (bytes? %) (pos? (alength ^bytes %))) (map :argument-bytes (:groups decoded)))))))
       (is (= (set (keys expected)) (set (map first (:frames (#'coverage/local-frames file)))))))))
 
@@ -95,10 +159,10 @@
                        (let [database (db/primary-db node)
                              submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
                                                  (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
-                             a (submit! [["ASSERT TRUE"] ["ASSERT FALSE"]])
+                             a (submit! [["ASSERT TRUE"] ["ASSERT TRUE"] ["ASSERT FALSE"]])
                              b (submit! [["ASSERT ? = ?" 42 42]])
                              ;; XTDB rewrites positional placeholders on submission.
-                             expected {a ["ASSERT TRUE" "ASSERT FALSE"] b ["ASSERT $1 = $2"]}]
+                             expected {a ["ASSERT TRUE" "ASSERT TRUE" "ASSERT FALSE"] b ["ASSERT $1 = $2"]}]
                          (check-retained! node expected) expected))]
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (apply max (keys expected)) (Duration/ofSeconds 10))

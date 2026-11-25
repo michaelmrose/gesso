@@ -137,3 +137,70 @@
       (catch clojure.lang.ExceptionInfo e (assoc base :status :unsupported :reason (:reason (ex-data e))))
       (catch CharacterCodingException _ (assoc base :status :unsupported :reason :invalid-arrow-utf8))
       (catch Exception _ (assoc base :status :unsupported :reason :invalid-arrow-stream)))))
+
+(def parameterless-profile :xtdb-2.2.0-beta1/selected-parameterless-arrow-operations-v1)
+(def ^:private parameterless-base (assoc base :profile parameterless-profile))
+
+(defn- parameterless-rows! [bytes]
+  ;; An absent slot represents one invocation. An explicit zero-column
+  ;; relation carries its own count, including coalesced invocations.
+  (if (nil? bytes)
+    1
+    (do
+      (require! (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes))
+                :arrow-argument-byte-limit)
+      (let [stream (doto (ByteBuffer/wrap ^bytes bytes) (.order ByteOrder/LITTLE_ENDIAN))
+            [^Message sm ^ByteBuffer sb] (message! stream MessageHeader/Schema)
+            ^Schema schema (.header sm (Schema.))]
+        (require! (and schema (zero? (.remaining sb))
+                       (= Endianness/Little (.endianness schema))
+                       (zero? (.fieldsLength schema)) (zero? (.featuresLength schema))
+                       (zero? (.customMetadataLength schema)))
+                  :unsupported-parameterless-schema)
+        (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
+              ^RecordBatch batch (.header bm (RecordBatch.))]
+          (require! (and batch (zero? (.remaining bb))
+                         (zero? (.nodesLength batch)) (zero? (.buffersLength batch))
+                         (nil? (.compression batch)) (zero? (.variadicBufferCountsLength batch)))
+                    :unsupported-parameterless-batch)
+          (let [n (.length batch)]
+            (require! (<= 1 n max-rows) :arrow-argument-row-limit)
+            (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
+                      :unsupported-arrow-terminator)
+            n))))))
+
+(defn decode-parameterless-arguments
+  "Decode an absent argument slot or one selected zero-column Arrow relation.
+   Return the exact invocation count. This does not check SQL arity."
+  [bytes]
+  (try
+    (assoc parameterless-base :status :decoded
+           :encoding (if (nil? bytes) :absent :zero-column-relation)
+           :row-count (parameterless-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc parameterless-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch Exception _
+      (assoc parameterless-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-parameterless-operations
+  "Expand selected SQL groups into ordered invocations with empty argument
+   vectors. Reject the entire stream if any group is unsupported or total
+   expanded rows exceed the bound. SQL arity, nonempty parameter relations,
+   execution semantics and provider refinement remain open."
+  [bytes]
+  (let [decoded (decode-operations bytes)]
+    (if-not (= :decoded (:status decoded))
+      (assoc parameterless-base :status :unsupported :reason (:reason decoded))
+      (try
+        (let [groups (:groups decoded)
+              spans (mapv #(parameterless-rows! (:argument-bytes %)) groups)]
+          (require! (<= (reduce + 0 spans) max-rows) :arrow-expanded-row-limit)
+          (assoc parameterless-base :status :decoded :logged-operation-spans spans
+                 :operations (into [] cat
+                                   (map (fn [{:keys [query]} n]
+                                          (repeat n {:kind :sql :query query :args []}))
+                                        groups spans))))
+        (catch clojure.lang.ExceptionInfo e
+          (assoc parameterless-base :status :unsupported :reason (:reason (ex-data e))))
+        (catch Exception _
+          (assoc parameterless-base :status :unsupported :reason :invalid-arrow-stream))))))
