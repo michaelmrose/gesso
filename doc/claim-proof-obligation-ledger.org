@@ -4562,3 +4562,27 @@ invocation timed out; completed batches passed. Retained history clock
 integration and older-request rejection remain open. No production
 admission, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2712 — characterize equal-system-time assertion visibility
+
+Isolate the v2711 assertion discrepancy using real pinned XTDB SQL
+assertions and ordinary puts. A same-time preceding committed row is
+visible; fresh tentative rows and replacements of strictly older-system-
+time rows are visible to assertions. In the tested overlapping same-time
+replacement, the assertion sees the preceding committed value rather than
+the tentative value. A guard for the new value aborts with assert-failed;
+a guard for the old value commits the replacement. Count remains one.
+A subsequent transaction observes the committed replacement. A later
+system time restores the tested read-your-write behavior.
+
+Focused JVM: 13 tests / 1727 assertions, zero failures or errors across
+reference-temporal-test and reference-equal-time-visibility-test. The new
+79-assertion characterization runs in memory and on persistent history
+reopened between seed and assertion sequence, then checks final snapshots
+after a second reopen. Initial test used unquoted identifiers outside the
+reference assertion grammar; corrected to its exact SQL grammar. This
+is provider characterization, not independent semantic qualification.
+Do not infer a general tie-breaking rule for all intervals, storage layouts,
+assertions or worker guards. Equal-time state-dependent replay remains
+unsupported. No production admission, certificate or CLM-R2 premise
+retirement. Other regression namespaces and formal gates were not rerun.
