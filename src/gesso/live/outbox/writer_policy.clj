@@ -8,6 +8,7 @@
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.maintenance-policy :as maintenance]
             [gesso.live.outbox.initialization :as initialization]
+            [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.model.inductive-plan :as inductive]))
 
@@ -107,7 +108,7 @@
    policy closed; restart must construct a new policy and recheck history.
    This is not proof of all intervening or future physical writes."
   [policy]
-  (let [{:keys [connectable config source-id phase] :as entry}
+  (let [{:keys [connectable config source-id descriptor phase] :as entry}
         (locking policies (.get policies policy))
         token (when entry (xtdb/submission-policy-token connectable policy))]
     (when-not token
@@ -115,7 +116,9 @@
     (when-not (compare-and-set! phase :pending :checking)
       (reject! :invalid-mapped-writer-activation))
     (try
-      (let [observation (initialize-observation! connectable source-id config)]
+      (let [establishment (manifest/check-retained-establishment! connectable source-id descriptor)
+            initial (initialize-observation! connectable source-id config)
+            observation (merge initial (manifest/require-initialization-root! connectable source-id establishment initial))]
         (when-not (xtdb/submission-policy-current? connectable token)
           (reject! :uninstalled-mapped-writer-policy))
         (correspondence/record-activation! connectable policy token (:admission config) observation)
@@ -170,5 +173,5 @@
              true)))))]
       (locking policies
         (.put policies policy {:connectable connectable :config config
-                               :source-id source-id :phase phase}))
+                               :source-id source-id :descriptor (:descriptor infrastructure) :phase phase}))
       policy)))

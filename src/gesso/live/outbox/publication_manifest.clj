@@ -3,7 +3,9 @@
    profile. This is not a migration tool or a fence against arbitrary writers."
   (:require [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.model :as model]
-            [gesso.live.outbox.read-frontier :as frontier]))
+            [gesso.live.outbox.read-frontier :as frontier]
+            [xtdb.basis :as basis])
+  (:import [java.time ZonedDateTime]))
 
 (defn- keyword-parts [k]
   [(namespace k) (name k)])
@@ -63,3 +65,65 @@
              ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = ?)" source-id]
              [:put-docs :gesso_publication_manifests expected]]))
     nil))
+
+(def ^:private complete-manifest-query
+  "SELECT *, _system_from FROM gesso_publication_manifests WHERE _id = ?")
+
+(defn- expected-establishment [source-id descriptor]
+  [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_publication_manifests WHERE _id = ?)" source-id]
+   ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = ?)" source-id]
+   [:put-docs :gesso_publication_manifests
+    {:xt/id source-id :profile-version 1 :descriptor descriptor}]])
+
+(defn check-retained-establishment!
+  "For selected mapped activation, require the complete current manifest to
+   match the installed descriptor and its exact retained committed envelope.
+   An unselected descriptor requires absence. This observes, never enrolls."
+  [node source-id selected]
+  (let [rows (frontier/q-from! node [complete-manifest-query source-id])
+        row (first rows)
+        stamp (:xt/system-from row)]
+    (if (nil? selected)
+      (if (= [] rows) {:manifest-envelope :not-selected}
+          (reject! :publication-manifest-mismatch source-id))
+      (do
+        (when-not (and (string? selected) (vector? rows) (= 1 (count rows))
+                       (instance? ZonedDateTime stamp)
+                       (= {:xt/id source-id :profile-version 1 :descriptor selected}
+                          (dissoc row :xt/system-from)))
+          (reject! :publication-manifest-mismatch source-id))
+        (let [time (.toInstant ^ZonedDateTime stamp)
+              ledger (frontier/q-from! node ["SELECT _id, committed, system_time FROM xt.txs WHERE system_time = ? LIMIT 2" time])
+              entry (first ledger)
+              id (:xt/id entry)
+              recorded (:system-time entry)]
+          (when-not (and (= 1 (count ledger)) (integer? id) (true? (:committed entry))
+                         (instance? ZonedDateTime recorded) (= time (.toInstant ^ZonedDateTime recorded)))
+            (reject! :manifest-ledger-mismatch source-id))
+          (let [ops (expected-establishment source-id selected)
+                checked (xtdb/check-manifest-envelope! node id ops)]
+            (when-not (and (= :matched (:status checked)) (= id (:tx-id checked))
+                           (true? (:committed? checked)) (= (count ops) (:operation-count checked)))
+              (reject! (case (:status checked)
+                         :unavailable :manifest-envelope-unavailable
+                         :unsupported :manifest-envelope-unsupported
+                         :mismatch :manifest-envelope-mismatch
+                         :manifest-envelope-invalid-result) source-id))
+            {:manifest-envelope :matched :manifest-tx-id id :manifest-row row}))))))
+
+(defn require-initialization-root!
+  "Require the same checked manifest (or selected absence) at the pinned
+   initialization root, strictly after establishment. Return bounded evidence
+   only; the descriptor and physical row do not enter the report."
+  [node source-id establishment {:keys [initialization-tx-id system-time]}]
+  (let [opts (assoc (frontier/query-options! node)
+                    :snapshot-token (basis/->time-basis-str {xtdb/default-database-name [system-time]})
+                    :current-time system-time)
+        rows (xtdb/q-from node [complete-manifest-query source-id] opts)]
+    (when-not (case (:manifest-envelope establishment)
+                :not-selected (= [] rows)
+                :matched (and (< (:manifest-tx-id establishment) initialization-tx-id)
+                              (= [(:manifest-row establishment)] rows))
+                false)
+      (reject! :manifest-initialization-root-mismatch source-id))
+    (select-keys establishment [:manifest-envelope :manifest-tx-id])))

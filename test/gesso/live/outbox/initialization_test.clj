@@ -7,6 +7,7 @@
             [gesso.assurance.xtdb-source-log :as source-log]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
+            [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.history-coverage :as history]
             [gesso.live.outbox.history-controller :as controller]
             [gesso.live.outbox.physical-correspondence :as correspondence]
@@ -656,10 +657,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v16)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v17)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v17 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v18 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:unclassified] (mapv :classification (:steps prefix))))
@@ -765,7 +766,7 @@
                                              :puts [[:put-docs :gesso_commands record]]})]
               (xt/execute-tx node (envelope/bind-transition-envelope! (ops "good")))
               (let [prefix (history/audit-chunk! handle admission 8)]
-                (is (= :selected-mapped-ledger-chunk-v17 (:profile prefix)))
+                (is (= :selected-mapped-ledger-chunk-v18 (:profile prefix)))
                 (is (= :observed-interval-checked (:status prefix)))
                 (is (= [:matched] (mapv :recorded-envelope (:steps prefix))))
                 (is (= [:matched] (mapv :intended-guard-prefix (:steps prefix))))
@@ -960,4 +961,39 @@
                 (do (is (= :matched (:initialization-envelope observation)))
                     (is (= id (:initialization-tx-id observation)))
                     (is (= :observed-interval-checked (:status (history/audit! node admission 8)))))))
+            (finally (release))))))))
+
+(deftest retained-manifest-required-at-mapped-activation
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        scope {:source-id "s" :descriptor "profile"}
+        ops [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_publication_manifests WHERE _id = ?)" "s"]
+             ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = ?)" "s"]
+             [:put-docs :gesso_publication_manifests {:xt/id "s" :profile-version 1 :descriptor "profile"}]]]
+    (doseq [[mode submitted expected] [[:exact ops nil]
+                                       [:unguarded [(peek ops)] :manifest-envelope-mismatch]
+                                       [:extra (conj ops [:put-docs :unselected {:xt/id "hidden" :value 1}]) :manifest-envelope-mismatch]
+                                       [:duplicate (conj ops (peek ops)) :manifest-envelope-mismatch]
+                                       [:missing nil :publication-manifest-mismatch]
+                                       [:wrong-descriptor (assoc-in ops [2 2 :descriptor] "other") :publication-manifest-mismatch]
+                                       [:after-initialization ops :manifest-initialization-root-mismatch]]]
+      (with-open [node (xtn/start-node {})]
+        (when (= :after-initialization mode)
+          (policy/initialize! node "s" config))
+        (let [id (when submitted (:tx-id (xt/execute-tx node submitted)))
+              writer (policy/build-policy! node config scope)
+              release (xtdb/register-submission-policy! node writer)]
+          (try
+            (is (= expected (reason #(policy/activate-policy! writer))) (name mode))
+            (if expected
+              (do (is (nil? (correspondence/initialization-observation node admission)))
+                  (is (= :missing-history-initialization (reason #(history/audit! node admission 8))))
+                  (when-not (= :after-initialization mode)
+                    (is (empty? (xt/q node "SELECT * FROM gesso_initializations")))))
+              (let [initial (:initialization (history/audit! node admission 8))]
+                (is (= :matched (:manifest-envelope initial)))
+                (is (= id (:manifest-tx-id initial)))
+                (is (< id (:initialization-tx-id initial)))
+                (is (not (contains? initial :manifest-row)))))
             (finally (release))))))))

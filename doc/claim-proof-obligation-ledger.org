@@ -1653,3 +1653,35 @@ not proof of pre-initialization history, independent guard-lowering semantics,
 provider execution or writer authority. The compatibility initialization API
 remains readback-only. Manifest establishment and aborted worker attempts with
 temporal guards still require qualification. No CLM-R2 premise is retired.
+
+* v2602 — qualify retained publication manifest establishment
+
+Before selected mapped writer activation, read the complete current manifest
+and require exact correspondence to the captured installed descriptor. Resolve
+its physical system-from to one committed ledger identity and independently
+compare the retained ordered absence guards and exact manifest put. Refuse
+missing or mismatched source evidence, extra operations and wrong descriptors.
+After the checked initializer, read at its pinned system and valid time and
+require the same manifest, with establishment strictly earlier than the root.
+For an unselected descriptor require absence at both observations. Record only
+bounded manifest status and transaction identity in the initialization
+observation; bind that evidence into history and durable checkpoint scope.
+Advance history, checkpoints and operational reporting to v18; earlier
+checkpoints require rescanning. The compatibility-only manifest API remains
+unchanged; this is a requirement of mapped activation.
+
+Final JVM initialization/history, publication-manifest and operational-report
+namespaces: 30 tests / 672 assertions, zero failures or errors. A missing
+closing parenthesis in the new regression was corrected before the successful
+complete run. Real embedded controls exercise exact establishment, omitted
+guards, extra and duplicate writes, missing and wrong-descriptor manifests,
+and establishment after the initializer. Full opt-in physical Claim with
+source-log observation: 3 tests / 1136 assertions, zero failures or errors.
+The actual installed descriptor now qualifies the manifest at the root.
+Full mapped-projection, project, Chromium and separate proof gates not rerun.
+
+This is descriptor-relative retained establishment and root correspondence,
+not proof of the compiled descriptor's semantics, all pre-initialization
+history, or prevention of raw concurrent writers. Aborted temporal worker
+attempts, provider execution refinement and physical writer authority remain
+open. No CLM-R2 premise is retired.

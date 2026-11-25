@@ -672,6 +672,7 @@
                    (is (= :none (:authority audit)))
                    (is (= :declared (:publication-expectation-profile audit)))
                    (is (= :declared (:residual-assertion-profile audit)))
+                   (is (= :matched (get-in audit [:initialization :manifest-envelope])))
                    (is (every? #(= :matched (:residual-assertion-expectation %)) (:verified-mapped-transition groups)))
                    (is (every? #(= :matched (:write-table-closure %)) (:verified-mapped-transition groups)))
                    (is (every? #(= :matched (:publication-expectation %)) (:verified-mapped-transition groups)))
@@ -725,10 +726,12 @@
                      (is (= report (:report (host/history-status started))))
                      (is (= :declared (:publication-expectation-profile report)))
                      (is (= :declared (:residual-assertion-profile report)))
-                     (is (= :v17-declared-expectations-checked
+                     (is (= :matched (get-in (host/combined-assurance-status started)
+                                             [:physical-induction :premises :manifest-establishment-correspondence])))
+                     (is (= :v18-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :residual-assertion-correspondence])))
-                     (is (= :v17-declared-expectations-checked
+                     (is (= :v18-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
                      (let [operational (host/assurance-status started)]
