@@ -543,7 +543,23 @@
                 verify #(inductive/check-historical-mapped-poststate!
                          admission (first journal) % current-docs journal)]
             (is (= witness (inductive/mapped-transition-evidence! admission checked)))
-            (is (= 3 (:profile-version witness)))
+            (is (= 4 (:profile-version witness)))
+            (is (= frame/guard-profile (:guard-profile witness)))
+            (is (= (select-keys (:candidate checked) [:guard-profile :guard-prefix-fingerprint])
+                   (select-keys witness [:guard-profile :guard-prefix-fingerprint])))
+            (is (= :checked-reconstructed-prefix
+                   (:guard-prefix-correspondence (inductive/check-mapped-prestate! admission witness docs []))))
+            (is (= :historical-guard-prefix-mismatch
+                   (reason #(inductive/check-mapped-prestate! admission witness
+                              (assoc-in docs [:requests 0 :hidden] "different") []))))
+            (is (= :historical-guard-prefix-mismatch
+                   (reason #(inductive/check-mapped-prestate! admission
+                              (assoc witness :guard-prefix-fingerprint (str "sha256:" (apply str (repeat 64 "0")))) docs []))))
+            (let [legacy (-> witness (assoc :profile-version 3)
+                             (dissoc :guard-profile :guard-prefix-fingerprint))]
+              (is (= :invalid-historical-mapped-evidence (reason #(verify legacy))))
+              (is (= :invalid-historical-mapped-evidence
+                     (reason #(inductive/check-mapped-prestate! admission legacy docs [])))))
             (is (= [["input" "allowed" "boolean" "true"]] (:input-witness witness)))
             (is (some #{["example" "owner" "nil"]} (:prestate-witness witness)))
             (is (= :checked-supplied-witness (:abstract-relation (verify witness))))
@@ -1148,3 +1164,17 @@
           (is (= :committed (attempt! node prefix))))
         (is (= :committed (attempt! node ops)))
         (is (= [marker] (written)))))))
+
+(deftest guard-prefix-fingerprint-binds-ordered-typed-arguments
+  (let [id (java.util.UUID/fromString "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        prefix [["ASSERT ? = ?" id :open] ["ASSERT ? = ?" [1 "open"] true]]
+        evidence (frame/prefix-evidence! prefix)]
+    (is (= frame/guard-profile (:guard-profile evidence)))
+    (is (= evidence (frame/prefix-evidence! prefix)))
+    (doseq [changed [(vec (reverse prefix)) (pop prefix)
+                     (assoc-in prefix [0 0] "ASSERT TRUE")
+                     (assoc-in prefix [0 1] (str id))
+                     (assoc-in prefix [0 1] [:uuid (str id)])
+                     (assoc-in prefix [0 2] "open")
+                     (assoc-in prefix [1 1] ["1" "open"])]]
+      (is (not= evidence (frame/prefix-evidence! changed))))))

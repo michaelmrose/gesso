@@ -4,6 +4,7 @@
   (:require [clojure.string :as str]
             [clojure.set :as set]
             [gesso.model.tx :as tx]
+            [gesso.assurance.subject :as subject]
             [gesso.model.command-resolution :as resolution]
             [gesso.choreo.identity :as identity]
             [xtdb.util :as xt-util])
@@ -235,3 +236,30 @@
     (when-not (every? (fn [[guard n]] (<= n (get supplied guard 0))) required)
       (reject! :missing-frame-prestate-assertion))
     true))
+
+(def guard-profile :gesso.model.mapped-frame/xtdb-2.2.0-beta1-v4)
+
+(defn- prefix-value! [v]
+  ;; Tag all values, including vectors, so UUID conversion cannot alias
+  ;; a string or a literal vector. Keep integer equality mathematical.
+  (cond
+    (uuid? v) [:uuid (str v)]
+    (vector? v) [:vector (mapv prefix-value! v)]
+    (string? v) [:string v]
+    (keyword? v) [:keyword v]
+    (boolean? v) [:boolean v]
+    (integer? v) [:integer v]
+    :else (reject! :unsupported-prefix-fingerprint-value)))
+
+(defn prefix-evidence!
+  "Structural identity of the exact ordered SQL prefix and bound values.
+   Uses the bounded semantic-subject encoder, not SQL equivalence or an
+   execution attestation. Change the guard profile on lowering changes."
+  [prefix]
+  (when-not (and (vector? prefix) (every? #(and (vector? %) (string? (first %))) prefix))
+    (reject! :invalid-prefix-fingerprint-input))
+  {:guard-profile guard-profile
+   :guard-prefix-fingerprint
+   (:fingerprint (subject/describe-subject
+                  {:kind :rule :id ::guard-prefix
+                   :interface {:profile guard-profile :prefix (prefix-value! prefix)}}))})

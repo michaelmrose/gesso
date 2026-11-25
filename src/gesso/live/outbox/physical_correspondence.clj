@@ -54,10 +54,11 @@
      :transition {:command-id (:xt/id evidence)
                   :alternative (:alternative evidence)
                   :system-time commit-time
+                  :guard-profile (:guard-profile evidence)
                   :fingerprints (select-keys evidence [:catalog-fingerprint :induction-fingerprint
                                                        :mapping-fingerprint :transition-fingerprint
                                                        :input-derivation-fingerprint :witness-fingerprint
-                                                       :poststate-fingerprint])
+                                                       :poststate-fingerprint :guard-prefix-fingerprint])
                   :prestate prestate
                   :poststate (:physical-correspondence semantic)
                   :relation (:abstract-relation semantic)

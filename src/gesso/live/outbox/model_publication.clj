@@ -347,9 +347,10 @@
     (let [prior-opts (assoc opts :snapshot-token
                             (basis/->time-basis-str {xtdb/default-database-name [preceding-time]}))
           {:keys [docs journal]} (mapped-rows! node admission prior-opts)]
-      (inductive/check-mapped-prestate! admission evidence docs journal)
-      {:system-time preceding-time :tx-id (:xt/id preceding)
-       :physical-correspondence :checked-preceding-projection})))
+      (let [checked (inductive/check-mapped-prestate! admission evidence docs journal)]
+        {:system-time preceding-time :tx-id (:xt/id preceding)
+         :guard-prefix-correspondence (:guard-prefix-correspondence checked)
+         :physical-correspondence :checked-preceding-projection}))))
 
 (defn- check-committed-poststate! [ctx {:keys [admission checked evidence]} receipt]
   (try

@@ -623,3 +623,27 @@ Production guard semantics are unchanged in this revision. The strict
 Chromium gate, Ansatz pilot and full project suite were not run. This is
 physical qualification of the fixture, not a universal provider proof or
 closure of CLM-R2.
+
+* v2567 — durable mapped guard profile and prefix correspondence
+
+The exact framed preparation now records the current version-4 guard
+profile and a canonical structural digest of the ordered formatted SQL
+prefix and bound values. The bounded subject encoder tags scalars and
+vectors, including UUIDs, before hashing; integer identity is mathematical.
+The transition witness advances to profile-version 4 and persists both
+fields in the same transaction. At the pinned preceding basis, verification
+first checks the abstract prestate and then reconstructs the complete
+mapped prefix and compares its identity, including unmapped document
+fields. Poststate-only verification checks the profile and digest shape,
+not its prestate correspondence. Readback exposes the reconstructed-prefix
+check. A digest does not independently authenticate execution or prove SQL
+semantics; the trusted admission/handoff and observed basis are premises.
+
+The stronger history audit, chunk and authenticated checkpoint profiles
+advance to v4. Older checkpoints cannot skip the new classification
+check; the conditional physical-prefix argument requires a v4 report.
+Legacy transition witnesses are refused by the current verifier, not
+relabelled as if they contained the stronger prefix. This is a deliberate
+compatibility boundary; no automatic migration or replay compatibility for
+legacy selected mapped evidence is supplied. Full prefix hashing also
+inherits the bounded subject encoder's limits. No CLM-R2 premise is retired.

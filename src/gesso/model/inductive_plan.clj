@@ -615,8 +615,15 @@
 
 (def ^:private original-witness-relation projection/check-transition-relation!)
 
-(defn- transition-evidence [description alternative mapping command-id before inputs state]
-  {:xt/id command-id :profile-version 3
+(defn- current-guard-evidence? [evidence]
+  (and (= frame/guard-profile (:guard-profile evidence))
+       (string? (:guard-prefix-fingerprint evidence))
+       (re-matches #"sha256:[0-9a-f]{64}" (:guard-prefix-fingerprint evidence))))
+
+(defn- transition-evidence [description alternative mapping command-id before inputs state guards]
+  {:xt/id command-id :profile-version 4
+   :guard-profile (:guard-profile guards)
+   :guard-prefix-fingerprint (:guard-prefix-fingerprint guards)
    :catalog-fingerprint (:catalog-fingerprint description)
    :induction-fingerprint (:induction-fingerprint description)
    :mapping-fingerprint (:fingerprint mapping)
@@ -639,6 +646,7 @@
 
 (defn mapped-transition-evidence!
   "Describe the checked abstract witness of an admitted framed candidate.
+   The prefix identity describes the exact checked SQL and bound values.
    Its prestate and inputs are supplied observations, not physical proof.
    The executor must bind it to the same atomic transaction as the command journal."
   [admission {:keys [identity candidate]}]
@@ -647,19 +655,22 @@
         mapping (get-in description [:operation-mappings alternative])]
     (when-not (and mapping (string? (:command-id identity))
                    (= :exact-generated-prefix (:frame-prefix candidate))
+                   (current-guard-evidence? candidate)
                    (= (:fingerprint mapping) (:mapping-fingerprint candidate))
                    (= (:transition-fingerprint mapping) (:transition-fingerprint candidate))
                    (map? (:before candidate)) (map? (:inputs candidate)) (map? (:after candidate))
                    (identical? original-initial-identity subject/describe-subject))
       (reject! :invalid-mapped-transition-evidence [] {}))
     (transition-evidence description alternative mapping (:command-id identity)
-                         (:before candidate) (:inputs candidate) (:after candidate))))
+                         (:before candidate) (:inputs candidate) (:after candidate) candidate)))
 
 (defn check-historical-mapped-poststate!
   "Recompute the expected evidence from the original mapping and supplied
    historical rows. The caller must establish the exact command commit time
    and same-transaction evidence. Re-evaluate the relation over the saved
-   abstract prestate and inputs; their physical provenance is not established."
+   abstract prestate and inputs; their physical provenance is not established.
+   The guard fingerprint is only shape-checked here; check-mapped-prestate!
+   must separately reconstruct it from preceding rows."
   [admission record evidence document-rows journal-rows]
   (let [{:keys [source description]} (registered-mapped! admission)
         alternative (:alternative evidence)
@@ -672,7 +683,8 @@
     (when-not (and original mapping (string? (:xt/id record))
                    (contains? (:write-targets mapping) slot)
                    (some #(= record %) journal-rows)
-                   (= 3 (:profile-version evidence))
+                   (= 4 (:profile-version evidence))
+                   (current-guard-evidence? evidence)
                    (identical? original-witness-relation projection/check-transition-relation!)
                    (identical? original-initial-projection projection/project-state!)
                    (identical? original-initial-identity subject/describe-subject))
@@ -681,7 +693,7 @@
                                                document-rows journal-rows (:decode-outcome! source))
           before (decode-valuation! (:prestate-witness evidence))
           inputs (decode-valuation! (:input-witness evidence))]
-      (when-not (= evidence (transition-evidence description alternative mapping (:xt/id record) before inputs actual))
+      (when-not (= evidence (transition-evidence description alternative mapping (:xt/id record) before inputs actual evidence))
         (reject! :historical-mapped-poststate-mismatch [] {}))
       (require-derived-inputs! original (get-in description [:input-derivations alternative]) binding before inputs)
       (original-witness-relation original before inputs actual)
@@ -690,7 +702,8 @@
        :input-correspondence :checked-command-and-prestate-selectors})))
 
 (defn check-mapped-prestate!
-  "Compare the durable prestate witness with a supplied physical projection.
+  "Compare the durable prestate witness with a supplied physical projection
+   and reconstruct the exact current-profile guard prefix from those rows.
    The caller must independently establish the preceding system-time basis
    at the committing transaction's valid time. This is not an attestation
    of the provider's transaction-internal read basis or input derivation."
@@ -701,14 +714,20 @@
         original (some (fn [{:keys [id construction]}]
                          (when (= id alternative) construction))
                        (get-in source [:inductive-source :catalog :operations]))]
-    (when-not (and original mapping (= 3 (:profile-version evidence))
+    (when-not (and original mapping (= 4 (:profile-version evidence))
+                   (current-guard-evidence? evidence)
                    (identical? original-initial-projection projection/project-state!))
       (reject! :invalid-historical-mapped-evidence [] {}))
     (let [actual (original-initial-projection original (:target-map source)
                                               document-rows journal-rows (:decode-outcome! source))]
       (when-not (= (decode-valuation! (:prestate-witness evidence)) actual)
         (reject! :mapped-prestate-mismatch [] {}))
-      {:authority :none :physical-correspondence :checked-supplied-prestate})))
+      (when-not (= (select-keys evidence [:guard-profile :guard-prefix-fingerprint])
+                   (frame/prefix-evidence! (frame/formatted-prestate-assertions!
+                                            mapping document-rows journal-rows)))
+        (reject! :historical-guard-prefix-mismatch [] {}))
+      {:authority :none :physical-correspondence :checked-supplied-prestate
+       :guard-prefix-correspondence :checked-reconstructed-prefix})))
 
 (defn check-mapped-poststate!
   "Compare the complete supplied projection with the admitted transition's

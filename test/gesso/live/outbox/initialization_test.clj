@@ -647,10 +647,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v2)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v3)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v3 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v4 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))

@@ -228,7 +228,7 @@
         {:keys [basis rows]} (observe-range! scope nil max-steps false)
         steps (classify-range! scope rows)]
     (require-current-scope! scope)
-    {:profile :selected-mapped-ledger-coverage-v3 :authority :none
+    {:profile :selected-mapped-ledger-coverage-v4 :authority :none
      :status (if (some #(= :unclassified (:classification %)) steps)
                :unclassified-steps :observed-interval-checked)
      :initialization (:initial scope) :through-basis basis :steps steps
@@ -274,7 +274,7 @@
          next-checkpoint (HistoryCheckpoint.)]
      (require-current-scope! scope)
      (locking checkpoints (.put checkpoints next-checkpoint next-state))
-     {:profile :selected-mapped-ledger-chunk-v3 :authority :none
+     {:profile :selected-mapped-ledger-chunk-v4 :authority :none
       :status (cond first-unclassified :unclassified-steps
                     caught-up? :observed-interval-checked
                     :else :partial-interval)
@@ -314,13 +314,13 @@
   "Export an issued checkpoint as authenticated, plain EDN data. The trusted
    owner must persist it and a separate 32-byte secret key, unique to this
    database and trusted audit/decoder implementation. Change deployment-id
-   (or rotate the key) when that implementation changes. Versions 1 and 2
-   cannot be restored: they did not check interior valid-time boundaries.
+   (or rotate the key) when that implementation changes. Versions 1 through 3
+   cannot be restored: they lack the current durable guard-prefix check.
    No writer authority."
   [connectable admission checkpoint key deployment-id]
   (let [scope (audit-scope! connectable admission 1)
         prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
-        payload {:profile :selected-mapped-history-checkpoint-v3
+        payload {:profile :selected-mapped-history-checkpoint-v4
                  :scope (durable-scope scope deployment-id)
                  :anchor (update (:anchor prior) :system-time str)
                  :counts (:counts prior)
@@ -339,7 +339,7 @@
   (let [scope (audit-scope! connectable admission 1)
         {:keys [payload mac]} sealed]
     (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
-                   (map? payload) (= :selected-mapped-history-checkpoint-v3 (:profile payload))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v4 (:profile payload))
                    (string? mac) (re-matches #"[0-9a-f]{64}" mac)
                    (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
                                           (checkpoint-mac key payload)))

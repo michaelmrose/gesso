@@ -98,7 +98,7 @@
                       (:through-basis r)
                       (not (pos? (compare (:system-time initial)
                                          (xtdb/basis-system-time (:through-basis r))))))
-        clean? (and (= :selected-mapped-ledger-chunk-v3 (:profile r))
+        clean? (and (= :selected-mapped-ledger-chunk-v4 (:profile r))
                     (#{:observed-interval-checked :partial-interval} (:status history))
                     (= (:status r) (:status history))
                     (= (:caught-up? r) (= :observed-interval-checked (:status r)))
@@ -114,8 +114,8 @@
      :premises {:source-identity (if matching? :matched :open)
                 :abstract-induction (if abstract? :conditionally-checked :open)
                 :physical-initialization (if initial? :observed-projection-checked :open)
-                :historical-step-coverage (if clean? :clean-v3-prefix :open)
-                :visible-valid-time-continuity (if clean? :v3-prefix-checked :open)}
+                :historical-step-coverage (if clean? :clean-v4-prefix :open)
+                :visible-valid-time-continuity (if clean? :v4-prefix-checked :open)}
      :invariant-ids (if eligible? invariants #{})
      :through (when eligible? (get-in history [:coverage :through]))
      :open-obligations #{:historical-retention-and-checkpoint-integrity

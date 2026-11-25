@@ -109,7 +109,9 @@
                          frame-mode
                          (assoc :frame-prestate :checked-supplied-prewrite-guards)
                          (= :exact frame-mode)
-                         (assoc :frame-prefix :exact-generated-prefix)))))
+                         (assoc :frame-prefix :exact-generated-prefix)
+                         (= :exact frame-mode)
+                         (merge (frame/prefix-evidence! formatted-guards))))))
           admit! (fn
                    ([id command-id puts] (admit-candidate! id command-id puts nil nil))
                    ([id command-id puts formatted-guards]
