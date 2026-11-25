@@ -6,6 +6,7 @@
             [gesso.model.mapped-preparation :as preparation]
             [gesso.model.mapped-frame :as frame]
             [gesso.assurance.proof.mapped-prestate-semantics :as prestate]
+            [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.model.certified-plan :as plan]
             [gesso.model.inductive-plan :as inductive]
             [gesso.model.tx :as tx]
@@ -761,3 +762,43 @@
         (is (= (and (= docs candidate) (= prepared journal)) (:matches? r)))
         (when (:matches? r)
           (is (= (project docs prepared) (project candidate journal))))))))
+
+(deftest source-relative-prefix-correspondence
+  (let [mapping (plan/check-target-mapping! source targets)
+        occupied (record "old" "p2" {:nested {:value "original" :flags [true false]}})
+        journal [occupied]
+        prefix (frame/formatted-prestate-assertions! mapping rows journal)
+        check #(lowering/check-prefix! source targets rows journal %)
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+        report (with-redefs [frame/formatted-prestate-assertions! (fn [& _] (throw (ex-info "Unexpected generator call" {})))]
+                 (check prefix))]
+    (is (= :checked-exact-prefix (:status report)))
+    (is (= (:fingerprint mapping) (:mapping-fingerprint report)))
+    (is (= 7 (:assertion-count report)))
+    (is (= prefix (into [] (mapcat :assertions) (:groups report))))
+    (is (= (:predicates (prestate/describe! source targets rows journal))
+           (into {} (map (juxt :target :predicate)) (:groups report))))
+    (is (= :not-established (:sql-refinement report)))
+    (is (= :none (:authority report)))
+    (is (= :not-issued (:certificate report)))
+    (is (contains? (:open-obligations report) :transaction-internal-read-basis))
+    (doseq [i (range (count prefix))]
+      (is (= :noncanonical-lowering-prefix
+             (reason #(check (into (subvec prefix 0 i) (subvec prefix (inc i)))))))
+      (is (= :noncanonical-lowering-prefix
+             (reason #(check (assoc prefix i ["ASSERT TRUE"]))))))
+    (doseq [bad [(seq prefix) (vec (reverse prefix)) (conj prefix (first prefix))
+                 (assoc-in prefix [0 1] "wrong-id")
+                 (assoc-in prefix [(dec (count prefix)) (dec (count (peek prefix)))] "wrong-value")]]
+      (is (= :noncanonical-lowering-prefix (reason #(check bad)))))
+    (is (= :noncanonical-lowering-prefix
+           (reason #(lowering/check-prefix! source targets (assoc-in rows [:requests 0 :item-count] 4) journal prefix))))
+    (is (= :noncanonical-lowering-prefix
+           (reason #(lowering/check-prefix! source targets rows [] prefix))))
+    (doseq [[docs records] [[rows []]
+                            [(assoc rows :assignments [{:xt/id "a1" :owner "p1"}]) journal]
+                            [rows [(record "new" "p1") occupied]]]]
+      (let [generated (frame/formatted-prestate-assertions! mapping docs records)]
+        (is (= :checked-exact-prefix (:status (lowering/check-prefix! source targets docs records generated))))))
+    (is (= :unsupported-value
+           (reason #(lowering/check-prefix! source targets (assoc-in rows [:requests 0 :extra] nil) journal prefix))))))
