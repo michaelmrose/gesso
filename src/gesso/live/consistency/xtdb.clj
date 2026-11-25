@@ -157,7 +157,7 @@
   [connectable admit?]
   (when-not (and connectable (fn? admit?))
     (throw (ex-info "Invalid XTDB submission policy." {:reason :invalid-submission-policy})))
-  (let [entry {:admit? admit?}]
+  (let [entry {:admit? admit? :token (Object.)}]
     (locking submission-policies
       (when (.containsKey submission-policies connectable)
         (throw (ex-info "XTDB submission policy already registered." {:reason :duplicate-submission-policy})))
@@ -167,6 +167,21 @@
         (when (identical? entry (.get submission-policies connectable))
           (.remove submission-policies connectable)))
       nil)))
+
+(defn submission-policy-token
+  "Return an opaque generation identity only for the exact registered policy."
+  [connectable admit?]
+  (locking submission-policies
+    (let [entry (.get submission-policies connectable)]
+      (when (and entry (identical? admit? (:admit? entry)))
+        (:token entry)))))
+
+(defn submission-policy-current?
+  "Check that an opaque registration generation remains installed."
+  [connectable token]
+  (locking submission-policies
+    (and (some? token)
+         (identical? token (:token (.get submission-policies connectable))))))
 
 ;; The public handle contains no node field. The registry is private and a
 ;; handle is valid only for the exact installed policy that issued it.

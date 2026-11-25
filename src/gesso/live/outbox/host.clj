@@ -167,11 +167,11 @@
                                  :descriptor (::publication-manifest system)})
                    (:xtdb-submission-policy! config))]
       (when policy
-        (reset! release (xtdb/register-submission-policy! node policy))))
-    (manifest/require-compatible! node (get-in system [config-key :source-id])
-                                  (::publication-manifest system))
-    (when-let [mapped (get-in system [config-key :mapped-writer-policy])]
-      (writer-policy/initialize! node (get-in system [config-key :source-id]) mapped))
+        (reset! release (xtdb/register-submission-policy! node policy)))
+      (manifest/require-compatible! node (:source-id config)
+                                    (::publication-manifest system))
+      (when (:mapped-writer-policy config)
+        (writer-policy/activate-policy! policy)))
     (assoc system :xtdb/connectable node ::close-node! close!)))
 
 (defn- stop-xtdb! [system]

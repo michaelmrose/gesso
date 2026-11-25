@@ -5,6 +5,7 @@
    put with framework-owned exact-footprint and physical row checks.
    This is local adapter mediation, not closure over raw XTDB writers."
   (:require [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.maintenance-policy :as maintenance]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.model.inductive-plan :as inductive]))
@@ -84,25 +85,55 @@
                        (not (#{initialization/table :gesso_publication_manifests}
                              (second %)))) puts))))
 
+;; Registration and activation are process-local owner responsibilities. A
+;; copied initialization report is not an activation credential.
+(def ^:private policies (java.util.WeakHashMap.))
+
+(defn activate-policy!
+  "Enable mapped writes only after the exact installed policy's captured
+   initializer has passed pinned physical readback. Failure leaves that
+   policy closed; restart must construct a new policy and recheck history.
+   This is not proof of all intervening or future physical writes."
+  [policy]
+  (let [{:keys [connectable config source-id phase] :as entry}
+        (locking policies (.get policies policy))
+        token (when entry (xtdb/submission-policy-token connectable policy))]
+    (when-not token
+      (reject! :uninstalled-mapped-writer-policy))
+    (when-not (compare-and-set! phase :pending :checking)
+      (reject! :invalid-mapped-writer-activation))
+    (try
+      (initialize! connectable source-id config)
+      (when-not (xtdb/submission-policy-current? connectable token)
+        (reject! :uninstalled-mapped-writer-policy))
+      (reset! phase {:registration token})
+      nil
+      (catch Throwable e
+        (reset! phase :failed)
+        (throw e)))))
+
 (defn build-policy!
   "Bind admission to the owned connectable. Return the literal-boolean
    predicate expected by the XTDB adapter. Maintenance is bound to the
    host-owned source, worker and descriptor. Observer failure refuses
    submission. Initialization is consumed locally on admission and
-   durably on commit of the seed and its marker."
+   durably on commit of the seed and its marker. Mapped operations
+   remain disabled until activate-policy! checks the captured initializer."
   [connectable config infrastructure]
   (let [{:keys [admission initializer observe!]} (validate-config! config)
         initialized? (atom false)
+        phase (atom :pending)
         source-id (:source-id infrastructure)
         checked-init (inductive/check-mapped-initialization! admission initializer)
         seed-ops (initialization/transaction source-id initializer (mapped-tables admission) checked-init)]
     (when-not connectable (reject! :missing-mapped-writer-connectable))
-    (fn [{:keys [api tx-ops tx-options] :as envelope}]
+    (let [policy (fn [{:keys [api tx-ops tx-options] :as envelope}]
       (boolean
        (when (and (= :execute-tx api) (empty? tx-options)
                   (vector? tx-ops) (seq tx-ops))
          (let [kind (or (when-let [{:keys [identity candidate]}
-                                  (when (mapped-operations? tx-ops)
+                                  (when (and (xtdb/submission-policy-current? connectable (:registration @phase))
+                                             (mapped-operations? tx-ops))
                                     (publication/claim-framed-submission! admission connectable envelope))]
                           (assoc identity :kind :mapped-operation :candidate candidate))
                         (when (and seed-ops (= seed-ops tx-ops)
@@ -113,4 +144,8 @@
                         (maintenance/admit connectable infrastructure tx-ops))]
            (when kind
              (observe! kind)
-             true)))))))
+             true)))))]
+      (locking policies
+        (.put policies policy {:connectable connectable :config config
+                               :source-id source-id :phase phase}))
+      policy)))

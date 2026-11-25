@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
+            [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.writer-policy :as policy]
             [gesso.model.inductive-plan :as inductive]
             [gesso.model.inductive-plan-test]
@@ -281,4 +282,65 @@
           (is (= :assert-failed (assert-result #(policy/initialize! node "s" config))))
           (is (empty? (xt/q node ["SELECT * FROM gesso_initializations"])))
           (is (= [{:xt/id "r1" :status :claimed}] (xt/q node ["SELECT * FROM requests"])))
+          (finally (release)))))))
+
+(deftest mapped-writer-activation-requires-physical-init-of-exact-policy
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        scope {:source-id "s"}
+        checked (inductive/check-mapped-initialization! admission seed)
+        envelope {:api :execute-tx :tx-options {} :tx-ops seed}
+        handoffs (atom 0)
+        ;; Isolate only the one-use handoff for this gate regression. Real
+        ;; framed handoffs are exercised by the physical Claim suite.
+        claim (fn [& _]
+                (swap! handoffs inc)
+                {:identity {:alternative :example/initialize}
+                 :candidate {:authority :none}})]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config scope)
+            another (policy/build-policy! node config scope)]
+        (is (= :uninstalled-mapped-writer-policy (reason #(policy/activate-policy! writer))))
+        (let [release (xtdb/register-submission-policy! node writer)]
+          (try
+            (is (= :uninstalled-mapped-writer-policy (reason #(policy/activate-policy! another))))
+            (with-redefs [publication/claim-framed-submission! claim]
+              (is (false? (writer envelope)))
+              (is (= 0 @handoffs))
+              ;; A compatible committed marker by itself does not open the gate.
+              (is (nil? (policy/initialize! node "s" config)))
+              (is (false? (writer envelope)))
+              (is (= 0 @handoffs))
+              (is (nil? (policy/activate-policy! writer)))
+              (is (true? (writer envelope)))
+              (is (= 1 @handoffs))
+              (is (= :invalid-mapped-writer-activation (reason #(policy/activate-policy! writer)))))
+            (finally (release))))
+        ;; Installing the same callable again is a different generation.
+        (let [release (xtdb/register-submission-policy! node writer)]
+          (try
+            (with-redefs [publication/claim-framed-submission! claim]
+              (is (false? (writer envelope)))
+              (is (= 1 @handoffs)))
+            (finally (release))))
+        (let [release (xtdb/register-submission-policy! node another)]
+          (try
+            (is (nil? (policy/activate-policy! another)))
+            (with-redefs [publication/claim-framed-submission! claim]
+              (is (true? (another envelope)))
+              (is (= 2 @handoffs)))
+            (finally (release))))))
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node (conj (assoc-in seed [0 2 :item-count] 9)
+                               [:put-docs init/table (init/marker "s" checked)]))
+      (let [writer (policy/build-policy! node config scope)
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (is (= :initialization-readback-state-mismatch
+                 (reason #(policy/activate-policy! writer))))
+          (with-redefs [publication/claim-framed-submission! claim]
+            (is (false? (writer envelope)))
+            (is (= 2 @handoffs)))
+          (is (= :invalid-mapped-writer-activation (reason #(policy/activate-policy! writer))))
           (finally (release)))))))
