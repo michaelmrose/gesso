@@ -245,3 +245,13 @@
   [node expectations tables]
   (compare-source-coverage* node expectations tables coverage/observe-local-coverage!
                             #(assoc % :source-coverage-profile coverage/local-profile)))
+
+(defn compare-local-processed-source-execution!
+  "Require retained local byte-frame coverage and stable processed source
+   coordinates before and after source-bound execution comparison. No wait,
+   atomic snapshot, cross-process retention or refinement authority."
+  [node expectations tables]
+  (let [r (compare-source-coverage* node expectations tables coverage/observe-local-processed-coverage!
+                                    #(assoc % :source-coverage-profile coverage/local-profile
+                                              :processed-profile coverage/local-processed-profile))]
+    (cond-> r (= :matched (:source-coverage r)) (assoc :processed-frontier :matched))))

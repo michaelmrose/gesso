@@ -77,9 +77,9 @@
        :processed (.getLatestProcessedMsgId database)
        :ingestion-failed? (some? (.getIngestionError database))})))
 
-(defn- frontier-correspondence [before coverage after]
-  (let [tag #(assoc % :processed-profile processed-profile)
-        fail #(tag (result %1 %2))]
+(defn- frontier-correspondence* [source-profile frontier-profile before coverage after]
+  (let [tag #(assoc % :processed-profile frontier-profile)
+        fail #(tag (assoc (result %1 %2) :profile source-profile))]
     (cond
       (or (nil? before) (nil? after)) (fail :unsupported :unsupported-source-log)
       (or (:ingestion-failed? before) (:ingestion-failed? after))
@@ -88,8 +88,13 @@
       (not= before after) (fail :unavailable :source-frontier-changed-during-observation)
       (not= (:submitted before) (:last-message-id coverage))
       (fail :unavailable :source-frontier-coverage-mismatch)
-      (< (:processed before) (:submitted before)) (fail :unavailable :source-processing-incomplete)
+      (not (and (integer? (:processed before)) (<= -1 (:processed before))))
+      (fail :unavailable :source-frontier-contradiction)
       (> (:processed before) (:submitted before)) (fail :unavailable :source-frontier-contradiction)
+      (and (contains? coverage :record-offsets) (not= -1 (:processed before))
+           (not (some #{(:processed before)} (:record-offsets coverage))))
+      (fail :unavailable :source-processed-offset-not-framed)
+      (< (:processed before) (:submitted before)) (fail :unavailable :source-processing-incomplete)
       :else (tag (assoc coverage :processed-message-id (:processed before))))))
 
 (defn observe-processed-coverage!
@@ -105,7 +110,7 @@
       (let [before (read-frontier! node)
             coverage (observe-coverage! node)
             after (read-frontier! node)]
-        (frontier-correspondence before coverage after))
+        (frontier-correspondence* profile processed-profile before coverage after))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
         (throw e))
@@ -210,3 +215,32 @@
         (throw e))
       (catch ReflectiveOperationException _ (local-result :unsupported :unsupported-local-log-layout))
       (catch Exception _ (local-result :unavailable :source-log-read-failed)))))
+
+(def local-processed-profile :xtdb-2.2.0-beta1/selected-local-processed-frontier-v1)
+
+(defn- read-local-frontier! [node]
+  (let [^Database database (db/primary-db node)
+        log (.getSourceLog database)]
+    (when (and (instance? LocalLog log) (zero? (.getEpoch ^LocalLog log)))
+      {:submitted (.getLatestSubmittedOffset ^LocalLog log)
+       :processed (.getLatestProcessedMsgId database)
+       :ingestion-failed? (some? (.getIngestionError database))})))
+
+(defn observe-local-processed-coverage!
+  "Require stable submitted/processed byte-offset coordinates around local
+   framing and decoded coverage. A nonnegative processed coordinate must
+   identify a framed record, not an interior byte or the end of file.
+   No wait, atomic snapshot, retention or independent watcher semantics."
+  [node]
+  (let [fail #(assoc (local-result %1 %2) :processed-profile local-processed-profile)]
+    (if-not (db/<-node node)
+      (fail :unsupported :embedded-primary-log-required)
+      (try
+        (let [before (read-local-frontier! node)
+              coverage (observe-local-coverage! node)
+              after (read-local-frontier! node)]
+          (frontier-correspondence* local-profile local-processed-profile before coverage after))
+        (catch InterruptedException e
+          (.interrupt (Thread/currentThread))
+          (throw e))
+        (catch Exception _ (fail :unavailable :source-frontier-read-failed))))))

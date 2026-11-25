@@ -2945,3 +2945,31 @@ established. File and frame bounds do not sandbox provider decoding.
 No assurance status changes, no certificate or CLM-R2 premise retirement.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2647 — compare persistent processed source frontiers
+
+Compose the independently framed epoch-zero local source coverage with
+stable submitted and processed message identities and ingestion state.
+Require nonnegative processed offsets to identify framed record starts,
+not interior bytes or EOF. Distinguish lag at an earlier record (or the
+empty sentinel) from contradictory coordinates. Recheck the processed
+coverage after source-bound execution comparison. Preserve existing
+coverage-only APIs and the in-memory processed profile. Share the frontier
+comparison, conservatively rejecting malformed processed coordinates.
+Local processed-frontier profile v1; historical assurance unchanged.
+
+Expanded focused JVM gate: 113 tests / 8764 assertions, zero failures or
+errors across seven reference namespaces, production cycle and operational
+report suites. The persistent five-transaction, six-maintenance fixture
+matches before and after reopening. Controlled frontier samples reject
+lag behind a maintenance suffix, interior and EOF offsets, empty and
+invalid coordinates, ingestion errors, changing samples and mismatched
+coverage. Actual maintenance appends invalidate the comparison; wrong
+backends reject. Corrected test delimiters before the passing run.
+
+This is selected stable frontier correspondence under the installed
+watcher and framing semantics, not independent payload decoding, atomic
+snapshot acquisition, retention or writer closure. No implicit catch-up
+wait, production assurance upgrade, certificate or CLM-R2 premise
+retirement. Full project, physical Claim, Chromium and independent proof
+gates were not rerun.

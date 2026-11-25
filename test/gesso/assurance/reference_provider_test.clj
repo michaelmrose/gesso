@@ -307,12 +307,50 @@
                 (is (= :unsupported (:status (coverage/observe-coverage! node))))
                 (is (= :source-transaction-coverage-mismatch
                        (:reason (reference/compare-local-source-covered-execution! node (pop bound) tables))))
+                (let [processed (coverage/observe-local-processed-coverage! node)
+                      r (reference/compare-local-processed-source-execution! node bound tables)]
+                  (is (= :observed (:status processed)))
+                  (is (= (:last-message-id observed) (:processed-message-id processed)))
+                  (is (> (:processed-message-id processed) (:tx-id (peek bound))))
+                  (is (= :matched (:status r)))
+                  (is (= :matched (:processed-frontier r)))
+                  (is (= coverage/local-processed-profile (:processed-profile r)))
+                  (is (= :not-established (:provider-refinement r)))
+                  (is (= :none (:authority r)))
+                  (is (= :not-issued (:certificate r))))
                 [bound observed]))]
         (with-open [node (xtn/start-node config)]
           (let [database (db/primary-db node)]
             (.awaitSourceBlocking database (:last-message-id initial) (Duration/ofSeconds 10))
             (is (= initial (coverage/observe-local-coverage! node)))
             (is (= :matched (:status (reference/compare-local-source-covered-execution! node bound tables))))
+            (let [processed (coverage/observe-local-processed-coverage! node)
+                  end (:last-message-id initial)
+                  sample {:submitted end :processed end :ingestion-failed? false}]
+              (is (= initial (dissoc processed :processed-profile :processed-message-id)))
+              (is (= end (:processed-message-id processed)))
+              (is (= :matched (:status (reference/compare-local-processed-source-execution! node bound tables))))
+              (doseq [[a b reason]
+                      (let [lag (assoc sample :processed (:tx-id (peek bound)))
+                            interior (assoc sample :processed (dec end))
+                            eof (assoc sample :processed (:file-bytes initial))]
+                        [[lag lag :source-processing-incomplete]
+                         [interior interior :source-processed-offset-not-framed]
+                         [eof eof :source-frontier-contradiction]
+                         [(assoc sample :processed -1) (assoc sample :processed -1) :source-processing-incomplete]
+                         [(assoc sample :processed nil) (assoc sample :processed nil) :source-frontier-contradiction]
+                         [(assoc sample :ingestion-failed? true) sample :source-ingestion-failed]
+                         [sample (assoc sample :ingestion-failed? true) :source-ingestion-failed]
+                         [lag sample :source-frontier-changed-during-observation]
+                         [(update sample :submitted inc) (update sample :submitted inc) :source-frontier-coverage-mismatch]])]
+                (let [samples (atom [a b])]
+                  (with-redefs-fn {#'coverage/read-local-frontier! (fn [_] (let [s (first @samples)] (swap! samples subvec 1) s))
+                                    #'reference/compare-source-bound-execution! (fn [& _] (throw (AssertionError. "unavailable frontier must not compare")))}
+                    (fn []
+                      (let [r (reference/compare-local-processed-source-execution! node bound tables)]
+                        (is (= :unavailable (:status r)))
+                        (is (= reason (:reason r)))
+                        (is (not (contains? r :processed-frontier)))))))))
             (let [compare! reference/compare-source-bound-execution!]
               (with-redefs [reference/compare-source-bound-execution!
                             (fn [& args]
@@ -321,7 +359,11 @@
                                     id (.getMsgId (.appendMessageBlocking log (SourceMessage$FlushBlock. Long/MAX_VALUE)))]
                                 (.awaitSourceBlocking database id (Duration/ofSeconds 10)) r))]
                 (is (= :source-log-changed-during-comparison
-                       (:reason (reference/compare-local-source-covered-execution! node bound tables)))))))))
+                       (:reason (reference/compare-local-source-covered-execution! node bound tables))))
+                (let [r (reference/compare-local-processed-source-execution! node bound tables)]
+                  (is (= :unavailable (:status r)))
+                  (is (= :source-log-changed-during-comparison (:reason r)))
+                  (is (not (contains? r :processed-frontier)))))))))
       (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
 
 (deftest local-source-framing-rejects-incomplete-and-contradictory-records
@@ -356,3 +398,8 @@
           (.setLength file (inc (* 64 1024 1024)))
           (is (= :source-byte-limit (:reason (scan file))))))
       (finally (Files/deleteIfExists path)))))
+
+(deftest local-processed-coverage-requires-local-backend
+  (is (= :embedded-primary-log-required (:reason (coverage/observe-local-processed-coverage! nil))))
+  (with-open [node (xtn/start-node {})]
+    (is (= :unsupported-source-log (:reason (coverage/observe-local-processed-coverage! node))))))
