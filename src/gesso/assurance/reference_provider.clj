@@ -1,8 +1,10 @@
 (ns gesso.assurance.reference-provider
   "Bounded comparison of independently expected execution and supplied observations."
-  (:require [gesso.assurance.reference-temporal :as temporal]
-            [gesso.assurance.xtdb-envelope :as envelope])
-  (:import (java.time Instant)))
+  (:require [clojure.string :as str]
+            [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.xtdb-envelope :as envelope]
+            [xtdb.api :as xt])
+  (:import (java.time Instant ZonedDateTime)))
 
 (def profile :selected-provider-execution-comparison-v1)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued
@@ -69,3 +71,97 @@
                          envelopes-match? :matched
                          :else :mismatch)]
         (assoc base :status status :checks checks :transaction-count (count history))))))
+
+(def acquisition-profile :selected-quiescent-provider-observation-v1)
+
+(defn- acquisition-result [status reason]
+  (assoc base :acquisition-profile acquisition-profile :status status :reason reason))
+
+(defn- observation-reject! [reason]
+  (throw (ex-info "Unsupported provider observation" {::observation-rejected true :reason reason})))
+
+(defn- table-name? [table]
+  (and (simple-keyword? table) (re-matches #"[a-z][a-z0-9_]*" (name table))
+       (not (str/starts-with? (name table) "xt_"))))
+
+(defn- observed-instant! [v]
+  (cond (instance? ZonedDateTime v) (.toInstant ^ZonedDateTime v)
+        (instance? Instant v) v
+        :else (observation-reject! :invalid-observed-timestamp)))
+
+(defn- read-ledger! [node]
+  (let [rows (xt/q node ["SELECT _id, committed, system_time FROM xt.txs ORDER BY _id LIMIT 257"])]
+    (when (> (count rows) 256) (observation-reject! :ledger-limit))
+    (let [ledger (mapv (fn [{:keys [xt/id committed system-time] :as row}]
+                         (when-not (and (= #{:xt/id :committed :system-time} (set (keys row)))
+                                        (integer? id) (<= 0 id) (boolean? committed))
+                           (observation-reject! :invalid-ledger-row))
+                         {:tx-id id :committed? committed :system-time (observed-instant! system-time)}) rows)]
+      (when-not (every? (fn [[a b]] (< (:tx-id a) (:tx-id b))) (partition 2 1 ledger))
+        (observation-reject! :invalid-ledger-order))
+      ledger)))
+
+(def ^:private worker-assertions
+  #{"ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)"
+    "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP >= ?)"
+    "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)"
+    "ASSERT CURRENT_TIMESTAMP < ?" "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?"})
+
+(defn- read-envelope! [node row tx entry]
+  ((if (some #(contains? worker-assertions (first %)) (:ops tx))
+     envelope/check-worker-attempt-envelope!
+     envelope/check-envelope!)
+   node (:tx-id row) (:ops tx) (:committed? entry)))
+
+(defn- read-rectangles! [node tables]
+  (reduce (fn [acc table]
+            (let [remaining (- 65536 (count acc))
+                  rows (xt/q node [(str "SELECT *, _valid_from, _valid_to, _system_from, _system_to FROM \"public\".\""
+                                        (name table) "\" FOR VALID_TIME ALL FOR SYSTEM_TIME ALL LIMIT " (inc remaining))])]
+              (when (> (count rows) remaining) (observation-reject! :rectangle-limit))
+              (into acc (map (fn [row]
+                               (let [end (fn [k] (when-some [v (get row k)] (observed-instant! v)))
+                                     r {:table table :document (dissoc row :xt/valid-from :xt/valid-to :xt/system-from :xt/system-to)
+                                        :valid-from (observed-instant! (:xt/valid-from row)) :valid-to (end :xt/valid-to)
+                                        :system-from (observed-instant! (:xt/system-from row)) :system-to (end :xt/system-to)}]
+                                 (when-not (rectangle? r tables) (observation-reject! :invalid-history-row))
+                                 r))) rows)))
+          [] (sort tables)))
+
+(defn compare-quiescent-execution!
+  "Acquire ledger, retained envelopes and all-time selected table history
+   directly from an embedded node. Caller must supply a quiescent node with
+   a complete history from empty state, no outstanding transactions and
+   the expected transaction sequence. Re-read the bounded ledger to detect
+   visible changes, not to establish quiescence or an atomic snapshot.
+   Select the restricted worker envelope checker from expected operations;
+   unsupported envelope forms stay unsupported. Limits bound returned rows,
+   not provider query resource use. No raw evidence or authority is returned."
+  [node transactions tables]
+  (let [prediction (temporal/replay transactions)
+        history (:history prediction)]
+    (if-not (and (= :predicted (:status prediction))
+                 (set? tables) (<= 1 (count tables) 128) (every? table-name? tables)
+                 (every? tables (for [tx transactions op (:ops tx) :when (= :put-docs (first op))]
+                                  (if (map? (second op)) (:into (second op)) (second op)))))
+      (acquisition-result :unsupported :unsupported-expectation)
+      (try
+        (let [ledger (read-ledger! node)]
+          (if (not= (mapv #(select-keys % [:system-time :committed?]) history)
+                    (mapv #(dissoc % :tx-id) ledger))
+            (acquisition-result :mismatch :ledger-sequence-mismatch)
+            (let [envelopes (mapv #(read-envelope! node %1 %2 %3) ledger transactions history)
+                  rectangles (read-rectangles! node tables)
+                  final-ledger (read-ledger! node)]
+              (if (not= ledger final-ledger)
+                (acquisition-result :unavailable :ledger-changed-during-observation)
+                (assoc (compare-execution transactions tables {:ledger ledger :envelopes envelopes :rectangles rectangles})
+                       :acquisition-profile acquisition-profile)))))
+        (catch InterruptedException e
+          (.interrupt (Thread/currentThread))
+          (throw e))
+        (catch clojure.lang.ExceptionInfo e
+          (if (::observation-rejected (ex-data e))
+            (acquisition-result :unsupported (:reason (ex-data e)))
+            (acquisition-result :unavailable :observation-failed)))
+        (catch Exception _ (acquisition-result :unavailable :observation-failed))))))

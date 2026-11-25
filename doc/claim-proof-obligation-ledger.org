@@ -2788,3 +2788,36 @@ conditions remain premises. The diagnostic does not authenticate supplied
 reports, establish retention or universal provider semantics, or retire
 any CLM-R2 premise. Full project, physical Claim, Chromium and independent
 proof gates were not rerun.
+
+* v2642 — acquire bounded quiescent provider evidence
+
+Add direct acquisition of ordered ledger rows, correlated retained-envelope
+checks and selected all-time historical rectangles from an embedded XTDB
+node. Independently predict before observing, reject incomplete selected
+put-table sets and unsafe table identifiers, correlate expected operations
+with ledger identities and choose the restricted worker envelope checker
+from the expected guard forms. Detect extra or missing ledger entries,
+incorrect commit outcomes and system times. Bound returned ledger rows,
+selected tables and aggregate rectangles, and re-read the ledger after
+observation to detect visible changes. Acquisition profile v1; existing
+comparison and history profiles unchanged.
+
+Expanded focused JVM gate: 106 tests / 8592 assertions, zero failures or
+errors across seven reference namespaces, the production cycle suite and
+operational report suite. Both expanded runs passed; corrected focused
+provider suite: 2 tests / 41 assertions. The new test acquires evidence
+for five real XTDB transactions and rejects a different attempted write
+with identical abort effects, extra/missing ledger entries, simulated
+ledger change, unavailable envelopes, read failure, unsafe selections
+and excess ledger rows. Corrected test wrapper arity delegation before
+the passing focused run. Source and history comparisons remain strict.
+
+This eliminates caller assembly of selected comparison reports, not the
+premises of a quiescent embedded node, complete history from empty state,
+no outstanding transactions or correct provider semantics. Re-reading the
+ledger is not an atomic snapshot or proof of quiescence; row limits do
+not bound provider resource usage. Unsupported temporal envelope forms
+remain unsupported. Provider refinement remains not established, no
+authority or certificate is issued, and no CLM-R2 premise is retired.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.

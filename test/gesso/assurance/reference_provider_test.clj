@@ -83,3 +83,40 @@
           (is (= expected (:status (reference/compare-execution txs tables changed)))))
         (is (= :unsupported (:status (reference/compare-execution txs #{:providerprobe} observed))))
         (is (= :unsupported (:status (reference/compare-execution [] tables observed))))))))
+
+(deftest direct-quiescent-provider-comparison
+  (let [txs (transactions)]
+    (with-open [node (xtn/start-node {})]
+      (observe! node txs)
+      (let [r (reference/compare-quiescent-execution! node txs tables)]
+        (is (= :matched (:status r)) (pr-str r))
+        (is (= reference/acquisition-profile (:acquisition-profile r)))
+        (is (= {:ledger true :retained-envelopes true :selected-history true} (:checks r)))
+        (is (= :not-established (:provider-refinement r)))
+        (is (= :none (:authority r)))
+        (is (= :not-issued (:certificate r))))
+      ;; Same abort and history, but different retained attempted write.
+      (let [changed (assoc-in txs [4 :ops 0 2 :value] 3)]
+        (is (= :mismatch (:status (reference/compare-quiescent-execution! node changed tables)))))
+      (is (= :ledger-sequence-mismatch (:reason (reference/compare-quiescent-execution! node (pop txs) tables))))
+      (is (= :ledger-sequence-mismatch (:reason (reference/compare-quiescent-execution!
+                                                node (conj txs {:system-time (time-at 13) :ops [["ASSERT TRUE"]]}) tables))))
+      (let [q xt/q calls (atom 0)]
+        (with-redefs [xt/q (fn [node query & opts]
+                            (let [rows (q node query (or (first opts) {}))]
+                              (if (= ["SELECT _id, committed, system_time FROM xt.txs ORDER BY _id LIMIT 257"] query)
+                                (if (= 2 (swap! calls inc)) (pop rows) rows)
+                                rows)))]
+          (is (= :ledger-changed-during-observation
+                 (:reason (reference/compare-quiescent-execution! node txs tables))))
+          (is (= 2 @calls))))
+      (with-redefs [envelope/check-worker-attempt-envelope!
+                    (fn [& _] {:status :unavailable :profile envelope/profile})]
+        (is (= :unavailable (:status (reference/compare-quiescent-execution! node txs tables)))))
+      (with-redefs [xt/q (fn [& _] (throw (AssertionError. "invalid expectation must not query")))]
+        (doseq [bad [#{:providerprobe} (conj tables (keyword "x;drop")) (conj tables :xt_txs)]]
+          (is (= :unsupported (:status (reference/compare-quiescent-execution! node txs bad))))))
+      (with-redefs [xt/q (fn [& _] (throw (ex-info "read failed" {})))]
+        (is (= :unavailable (:status (reference/compare-quiescent-execution! node txs tables)))))
+      (with-redefs [xt/q (fn [& _] (vec (repeat 257 {})))]
+        (is (= :ledger-limit (:reason (reference/compare-quiescent-execution! node txs tables))))))))
