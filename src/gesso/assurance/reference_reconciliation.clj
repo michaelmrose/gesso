@@ -1,10 +1,10 @@
 (ns gesso.assurance.reference-reconciliation
-  "Selected read-only reconciliation of an interrupted in-flight worker call."
+  "Selected read-only reconciliation of completed and in-flight worker reports."
   (:require [clojure.string :as str]
             [gesso.assurance.reference-temporal :as temporal])
   (:import (java.time ZonedDateTime)))
 
-(def profile :selected-in-flight-reconciliation-v1)
+(def profile :selected-worker-reconciliation-v2)
 (def ^:private base-report {:profile profile :authority :none :certificate :not-issued})
 (def ^:private unsupported (assoc base-report :status :unsupported))
 (defn- text? [x] (and (string? x) (not (str/blank? x))))
@@ -47,29 +47,94 @@
                            :matching-acknowledgment-recorded
                            :else :other-receipt-recorded))))
 
+(defn- completed-entry? [entry]
+  (and (map? entry) (nil? (meta entry)) (uuid? (:intent-id entry))
+       (case (:acquisition-status entry)
+         (:acquired :reclaimed)
+         (and (= :dispatch-accepted (:status entry))
+              (text? (:worker-id entry)) (uuid? (:lease-id entry))
+              (uuid? (:receipt-id entry)) (some? (:progression entry)))
+         (:contended :unavailable)
+         (and (nil? (:status entry))
+              (not-any? #(contains? entry %) [:lease-id :receipt-id]))
+         false)))
+
+(defn- completed-prefix? [failure]
+  (if (contains? failure :completed)
+    (let [entries (:completed failure)]
+      (and (vector? entries) (nil? (meta entries)) (<= (count entries) 128)
+           (= (count entries) (:completed-count failure))
+           (every? completed-entry? entries)
+           (every? (fn [[a b]] (neg? (compare (str (:intent-id a)) (str (:intent-id b)))))
+                   (partition 2 1 entries))
+           (or (empty? entries) (= (:intent-id (peek entries)) (:last-completed-cursor failure)))))
+    (not-any? #(contains? failure %) [:completed-count :last-completed-cursor])))
+
+(defn- inspection-plan [source failure]
+  (when (and (text? source) (map? failure) (nil? (meta failure))
+             (every? #{:error/type :rescan-required? :in-flight :completed
+                       :completed-count :last-completed-cursor} (keys failure))
+             (= :gesso.live.outbox/cycle-interrupted (:error/type failure))
+             (true? (:rescan-required? failure))
+             (or (nil? (:in-flight failure)) (claim? (:in-flight failure)))
+             (completed-prefix? failure))
+    (conj (mapv (fn [entry] {:kind :completed :entry entry :read? (some? (:status entry))})
+                (:completed failure))
+          {:kind :in-flight :entry (:in-flight failure) :read? (some? (:in-flight failure))})))
+
+(defn- completed-disposition [row entry]
+  (cond
+    (not= :dispatch-accepted (:gesso.live.outbox/status row)) :not-terminal
+    (and (= (:worker-id entry) (:gesso.live.outbox/lease-owner row))
+         (= (:lease-id entry) (:gesso.live.outbox/lease-id row))
+         (= (:receipt-id entry) (:gesso.live.outbox/dispatch-receipt-id row)))
+    :matching-acknowledgment-recorded
+    :else :different-acknowledgment-recorded))
+
+(defn- inspect-planned [prior source {:keys [kind entry read?]} point]
+  (if-not read?
+    (if (= :completed kind)
+      {:intent-id (:intent-id entry) :status :no-dispatch-claim}
+      {:status :unidentified})
+    (let [[s v] point
+          id (:intent-id entry)
+          {:keys [status row]} (temporal/observe-outbox-at prior s v id)]
+      (cond
+        (not= :predicted status) nil
+        (nil? row) {:status :missing :intent-id id}
+        (not (row? row id source)) nil
+        :else {:status ((if (= :completed kind) completed-disposition disposition) row entry)
+               :intent-id id :observed-status (:gesso.live.outbox/status row)
+               :observed-system-from (:xt/system-from row)}))))
+
+(defn- predict-plan [prior source failure plan points]
+  (if-not (and plan (vector? points) (nil? (meta points))
+               (= (count points) (count (filter :read? plan)))
+               (every? #(and (vector? %) (nil? (meta %)) (= 2 (count %))) points))
+    unsupported
+    (loop [remaining (seq plan) reads (seq points) observations []]
+      (if-let [item (first remaining)]
+        (if-let [observation (inspect-planned prior source item (first reads))]
+          (recur (next remaining) (if (:read? item) (next reads) reads)
+                 (conj observations observation))
+          unsupported)
+        (assoc base-report :status :predicted :observation
+               (cond-> (assoc (peek observations) :rescan-required? true)
+                 (contains? failure :completed) (assoc :completed-observations (pop observations))))))))
+
+(defn predict-inspection-with-reads
+  "Predict the selected reconciliation response with an explicit ordered
+   vector of [system-time valid-time] points, one per actual row read.
+   Validate the entire reported prefix first. No-dispatch entries consume
+   no point. The supplied snapshots need not be identical; no atomic read,
+   frontier freshness, noncommit conclusion or restart authority follows."
+  [prior source failure points]
+  (predict-plan prior source failure (inspection-plan source failure) points))
+
 (defn predict-inspection
-  "Predict only the selected in-flight reconciliation response at supplied
-   pinned system/valid points. Physical replay is an input hypothesis, not
-   knowledge available to a worker whose reply was lost. No completed
-   prefix, live frontier, noncommit conclusion or restart authority."
+  "Convenience for selected reconciliation at one supplied pinned point.
+   This does not establish atomicity of production reconciliation reads."
   [prior system-time valid-time source failure]
-  (let [claim (:in-flight failure)
-        predicted #(assoc base-report :status :predicted :observation
-                          (assoc % :rescan-required? true))]
-    (if-not (and (text? source) (map? failure) (nil? (meta failure))
-                 (every? #{:error/type :rescan-required? :in-flight} (keys failure))
-                 (= :gesso.live.outbox/cycle-interrupted (:error/type failure))
-                 (true? (:rescan-required? failure))
-                 (or (nil? claim) (claim? claim)))
-      unsupported
-      (if (nil? claim)
-        (predicted {:status :unidentified})
-        (let [{:keys [status row]} (temporal/observe-outbox-at prior system-time valid-time (:intent-id claim))]
-          (cond
-            (not= :predicted status) unsupported
-            (nil? row) (predicted {:status :missing :intent-id (:intent-id claim)})
-            (not (row? row (:intent-id claim) source)) unsupported
-            :else (predicted {:status (disposition row claim)
-                              :intent-id (:intent-id claim)
-                              :observed-status (:gesso.live.outbox/status row)
-                              :observed-system-from (:xt/system-from row)})))))))
+  (let [plan (inspection-plan source failure)]
+    (predict-plan prior source failure plan
+                  (vec (repeat (count (filter :read? plan)) [system-time valid-time])))))

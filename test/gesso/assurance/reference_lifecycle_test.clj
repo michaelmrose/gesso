@@ -206,3 +206,91 @@
           (is (not (contains? actual :may-replay?))))
         (is (= (frequencies (coalesce-valid (get-in history [:replay :rectangles])))
                (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) [:gesso_live_outbox :lifecycleprobe])))))))))
+
+(defn- completed-claim [intent lease owner receipt acquisition-status]
+  {:intent-id (id intent) :lease-id (id lease) :worker-id owner
+   :receipt-id (id receipt) :acquisition-status acquisition-status
+   :status :dispatch-accepted :progression {:basis :reported}})
+
+(defn- with-completed [failure entries]
+  (assoc failure :completed entries :completed-count (count entries)
+         :last-completed-cursor (:intent-id (peek entries))))
+
+(deftest independently-predicted-completed-prefix-reconciliation
+  (let [r (lifecycle/predict-lifecycle steps)
+        prior (:replay r)
+        a (completed-claim 1 12 "b" 22 :reclaimed)
+        b (completed-claim 2 13 "c" 23 :acquired)
+        missing (completed-claim 3 14 "d" 24 :acquired)
+        skipped {:intent-id (id 4) :acquisition-status :contended :reason :stale}
+        unavailable {:intent-id (id 5) :acquisition-status :unavailable :reason :missing}
+        failure (interruption 2 13 "c" 23)
+        no-flight (dissoc failure :in-flight)
+        cases [[(with-completed failure [a skipped unavailable]) [12 14]
+                [:matching-acknowledgment-recorded :no-dispatch-claim :no-dispatch-claim] :same-lease-active]
+               [(with-completed failure [a b missing]) [10 14 15 15]
+                [:not-terminal :not-terminal :missing] :matching-acknowledgment-recorded]
+               [(with-completed no-flight [a b]) [12 15]
+                [:matching-acknowledgment-recorded :matching-acknowledgment-recorded] :unidentified]
+               [(with-completed no-flight [(assoc a :worker-id "wrong") (assoc b :receipt-id (id 21))]) [15 15]
+                [:different-acknowledgment-recorded :different-acknowledgment-recorded] :unidentified]
+               [(with-completed no-flight [(assoc a :lease-id (id 11))]) [15]
+                [:different-acknowledgment-recorded] :unidentified]
+               [(with-completed no-flight [skipped unavailable]) []
+                [:no-dispatch-claim :no-dispatch-claim] :unidentified]
+               [(with-completed failure []) [15] [] :matching-acknowledgment-recorded]
+               [(with-completed no-flight []) [] [] :unidentified]]]
+    (with-open [node (xtn/start-node {})]
+      (submit-history! node (:transactions r))
+      (doseq [[envelope times expected status] cases]
+        (let [points (mapv #(vector (time-at %) (time-at %)) times)
+              p (reference-reconciliation/predict-inspection-with-reads prior "lifecycle" envelope points)
+              reads (atom [])
+              expected-ids (cond-> (mapv :intent-id (filter :status (:completed envelope)))
+                             (:in-flight envelope) (conj (get-in envelope [:in-flight :intent-id])))
+              actual (with-redefs [frontier/q-from! (fn [_ [_ intent-id :as query]]
+                                                     (let [[s v] (nth points (count @reads))]
+                                                       (swap! reads conj intent-id)
+                                                       ((pinned-read node s v) node query)))]
+                       (reconciliation/inspect! node "lifecycle" envelope))]
+          (is (= :predicted (:status p)))
+          (is (= expected (mapv :status (:completed-observations actual))))
+          (is (= status (:status actual)))
+          (is (= (:observation p) actual))
+          (is (= expected-ids @reads))
+          (is (true? (:rescan-required? actual)))
+          (is (= :none (:authority p)))
+          (is (= :not-issued (:certificate p)))
+          (is (not (contains? actual :may-replay?)))))
+      (let [valid (with-completed no-flight [a b])
+            invalids [(assoc valid :completed-count 1)
+                      (assoc valid :last-completed-cursor (id 1))
+                      (assoc valid :completed [b a])
+                      (assoc valid :completed [a a])
+                      (assoc valid :completed (vec (repeat 129 a)))
+                      (assoc valid :completed [a (dissoc b :progression)])
+                      (assoc valid :completed [a (assoc b :worker-id " ")])
+                      (assoc valid :completed [a (assoc b :receipt-id "bad")])
+                      (assoc valid :completed [a (assoc b :acquisition-status :contended)])
+                      (assoc valid :completed [a (assoc unavailable :lease-id (id 11))])
+                      (assoc valid :completed :not-a-vector)]
+            points (vec (repeat 2 [(time-at 15) (time-at 15)]))]
+        (doseq [envelope invalids]
+          (let [p (reference-reconciliation/predict-inspection-with-reads prior "lifecycle" envelope points)
+                reads (atom 0)
+                rejected (with-redefs [frontier/q-from! (fn [& _] (swap! reads inc)
+                                                          (throw (ex-info "Unexpected read" {})))]
+                           (try (reconciliation/inspect! node "lifecycle" envelope)
+                                (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+            (is (= :invalid-completed-prefix rejected))
+            (is (zero? @reads))
+            (is (= :unsupported (:status p)))
+            (is (not (contains? p :observation)))))
+        (doseq [bad-points [[] (pop points) (conj points (first points))
+                            [[(time-at 15)] (second points)]
+                            [[(time-at 16) (time-at 16)] (second points)]]]
+          (let [p (reference-reconciliation/predict-inspection-with-reads prior "lifecycle" valid bad-points)]
+            (is (= :unsupported (:status p)))
+            (is (not (contains? p :observation)))))
+        (is (= (reference-reconciliation/predict-inspection-with-reads prior "lifecycle" valid points)
+               (reference-reconciliation/predict-inspection prior (time-at 15) (time-at 15) "lifecycle" valid)))))))

@@ -2480,3 +2480,33 @@ restart authorization and external delivery remain outside this fragment.
 No production assurance status changes and no CLM-R2 premise is retired.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2632 — model selected completed-prefix reconciliation
+
+Validate bounded completed reports before predicting any row observation:
+strict UUID order, count and final cursor, acquisition classification,
+and required owner, token, receipt and progression presence. Distinguish
+no-dispatch reports from physical acknowledgment claims. Compose completed
+observations and in-flight inspection using one explicitly supplied pinned
+system/valid point per actual read; skipped claims consume no point.
+Require matching terminal owner, token and receipt. No atomic snapshot,
+restart or replay authority follows. Reconciliation profile v2; all other
+reference profiles and history v19 unchanged.
+
+Combined reference JVM: 54 tests / 6686 assertions, zero failures or
+errors. Eight additional selected reconciliation cases compare complete
+production responses and ordered provider reads with independent
+predictions, including distinct snapshots within a response, matching
+and differing terminal metadata, nonterminal and missing records,
+no-dispatch claims and empty prefixes. Eleven invalid prefix cases are
+rejected before any provider read; five unsupported read schedules
+return no observation. Report fixtures are supplied claims, not verified
+cycle provenance; pinned reads use real XTDB with frontier acquisition
+replaced by explicit observation points.
+
+This establishes finite selected completed-prefix correspondence, not
+progression authentication, live frontier acquisition, atomic multi-row
+inspection, restart authorization or universal provider refinement. No
+production assurance status changes and no CLM-R2 premise is retired.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.
