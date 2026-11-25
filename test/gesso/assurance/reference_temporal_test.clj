@@ -911,3 +911,67 @@
                         (conj prefix {:system-time time :ops (:ops predicted)}) prefix)))
                   reclamation-seed reclamation-cases)]
       (is (= 9 (count prefix))))))
+
+(def ^:private owner-fence {:intent-id intent-id :lease-id other-intent-id :worker-id "worker-a"})
+(def ^:private fence-cases
+  ;; [observed seconds, tx instant, fence, writes, outcome, reason]
+  (let [marker (fn [v] [[:put-docs :temporalprobe {:xt/id "marker" :value v}]])]
+    [[1 (worker-time 2) (assoc owner-fence :intent-id third-intent-id) (marker 1) :rejected :missing-lease]
+     [1 (worker-time 2) (assoc owner-fence :intent-id other-intent-id) (marker 1) :rejected :not-leased]
+     [1 (worker-time 2) (assoc owner-fence :lease-id intent-id) (marker 1) :rejected :stale-lease]
+     [1 (worker-time 2) (assoc owner-fence :worker-id "worker-b") (marker 1) :rejected :stale-lease]
+     [1 (worker-time 2) owner-fence (conj (marker 2) [:put-docs outbox/intent-table first-lease]) :committed nil]
+     [1 (worker-time 3) owner-fence (marker 3) :contended nil]
+     [2 (worker-time 4) owner-fence (marker 4) :committed nil]
+     [4 (.minusNanos first-deadline 1000) owner-fence (marker 5) :committed nil]
+     [4 first-deadline owner-fence (marker 6) :contended nil]
+     [4 (worker-time 181) owner-fence (marker 7) :contended nil]]))
+
+(deftest independently-composed-active-fence
+  (let [prior (temporal/replay reclamation-seed)
+        predict #(temporal/predict-active-fence prior (worker-time 1) (worker-time 1) %)]
+    (is (= :guarded (:outcome (predict owner-fence))))
+    (is (= :none (:authority (predict owner-fence))))
+    (doseq [f [(dissoc owner-fence :lease-id) (assoc owner-fence :worker-id "")
+               (assoc owner-fence :extra true) (assoc owner-fence :intent-id "id")]]
+      (is (= :unsupported (:status (predict f)))))
+    (let [r (temporal/predict-active-fenced-transaction reclamation-seed
+              (worker-time 1) (worker-time 1) (worker-time 2) owner-fence
+              [["ASSERT TRUE"]])]
+      (is (= :unsupported (:status r)))
+      (is (not (contains? r :ops))))))
+
+(deftest composed-active-fencing-matches-worker-and-xtdb
+  (with-open [node (xtn/start-node {})]
+    (doseq [tx reclamation-seed]
+      (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+        (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+        (is (= [{:committed true}] (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+    (let [prefix
+          (reduce (fn [prefix [observed time fence writes outcome reason]]
+                    (let [s (worker-time observed)
+                          predicted (temporal/predict-active-fenced-transaction prefix s s time fence writes)
+                          built (try
+                                  {:ops (with-redefs [frontier/q-from! (fn [_ [_ id]]
+                                            (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? WHERE _id = ?" s s id]))]
+                                          (acquisition/active-lease-guard-ops node fence))}
+                                  (catch clojure.lang.ExceptionInfo e
+                                    (if (= :gesso.live.outbox/invalid-acquisition (:error/type (ex-data e)))
+                                      {:reason (:reason (ex-data e))} (throw e))))
+                          ops (if (:ops built) (into (:ops built) writes) [])
+                          actual (if (empty? ops) :rejected
+                                   (try (live.xtdb/execute-tx! node ops {:system-time time}) :committed
+                                        (catch Throwable e
+                                          (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                                            :contended (throw e)))))]
+                      (is (= :predicted (:status predicted)))
+                      (is (= outcome (:outcome predicted) actual))
+                      (is (= reason (:reason predicted) (:reason built)))
+                      (is (= (:ops predicted) ops))
+                      (is (= (frequencies (coalesce-valid (:rectangles (:replay predicted))))
+                             (frequencies (coalesce-valid (mapcat #(provider-rectangles node %)
+                                                                  [outbox/intent-table :temporalprobe])))))
+                      (if (seq (:ops predicted))
+                        (conj prefix {:system-time time :ops (:ops predicted)}) prefix)))
+                  reclamation-seed fence-cases)]
+      (is (= 8 (count prefix))))))

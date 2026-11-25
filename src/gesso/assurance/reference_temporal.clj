@@ -281,7 +281,7 @@
           (assoc result :status :mismatch :reason :lease-deadline)
           :else (assoc result :status :matched))))))
 
-(def worker-profile :selected-worker-acquisition-v2)
+(def worker-profile :selected-worker-acquisition-v3)
 
 (defn- supported-claim? [claim]
   (and (map? claim) (nil? (meta claim))
@@ -364,3 +364,61 @@
    before submission; an unexpired or stale observed lease is contended."
   [prefix observed-system observed-valid transaction-time claim]
   (predict-acquisition :reclaim prefix observed-system observed-valid transaction-time claim))
+
+(defn predict-active-fence
+  "Derive the selected physical active guard from a pinned observed row.
+   A matching owner at observation is not a successful later fence."
+  [prior observed-system observed-valid fence]
+  (let [result {:profile worker-profile :authority :none :certificate :not-issued}
+        rejected (fn [reason] (assoc result :status :predicted :outcome :rejected
+                                     :reason reason :ops []))]
+    (if-not (and (map? fence) (nil? (meta fence))
+                 (= #{:intent-id :lease-id :worker-id} (set (keys fence)))
+                 (uuid? (:intent-id fence)) (uuid? (:lease-id fence))
+                 (string? (:worker-id fence)) (not (str/blank? (:worker-id fence))))
+      (assoc result :status :unsupported)
+      (let [{:keys [status row]} (observe-outbox-at prior observed-system observed-valid (:intent-id fence))]
+        (cond
+          (not= :predicted status) (assoc result :status :unsupported)
+          (nil? row) (rejected :missing-lease)
+          (not (and (= :gesso.live.outbox/publication-intent (:gesso.live.outbox/type row))
+                    (= 1 (:gesso.live.outbox/version row))
+                    (string? (:gesso.live.outbox/source-id row))
+                    (qualified-keyword? (:gesso.live.outbox/operation row))
+                    (qualified-keyword? (:gesso.live.outbox/purpose row))))
+          (assoc result :status :unsupported)
+          (not= :leased (:gesso.live.outbox/status row)) (rejected :not-leased)
+          (not (and (uuid? (:gesso.live.outbox/lease-id row))
+                    (string? (:gesso.live.outbox/lease-owner row))
+                    (not (str/blank? (:gesso.live.outbox/lease-owner row)))
+                    (instance? ZonedDateTime (:gesso.live.outbox/lease-until row))))
+          (assoc result :status :unsupported)
+          (not (and (= (:lease-id fence) (:gesso.live.outbox/lease-id row))
+                    (= (:worker-id fence) (:gesso.live.outbox/lease-owner row))))
+          (rejected :stale-lease)
+          :else (assoc result :status :predicted :outcome :guarded
+                       :ops [["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)"
+                              (:intent-id fence) (:xt/system-from row) (:gesso.live.outbox/lease-until row)]]))))))
+
+(defn predict-active-fenced-transaction
+  "Compose a selected active fence with supplied physical puts in ONE
+   transaction. This predicts execution, not authorization of the puts,
+   acknowledgment semantics, or permission to perform external effects."
+  [prefix observed-system observed-valid transaction-time fence writes]
+  (let [prior (replay prefix)
+        result (predict-active-fence prior observed-system observed-valid fence)]
+    (cond
+      (not= :predicted (:status result)) result
+      (not (and (clock-instant? transaction-time)
+                (before? (:system-time (peek (:history prior))) transaction-time)
+                (vector? writes) (nil? (meta writes)) (<= 1 (count writes) 255)
+                (every? #(and (vector? %) (= :put-docs (first %))) writes)))
+      (select-keys (assoc result :status :unsupported) [:profile :authority :certificate :status])
+      (= :rejected (:outcome result)) (assoc result :replay prior)
+      :else (let [ops (into (:ops result) writes)
+                  after (replay (conj prefix {:system-time transaction-time :ops ops}))]
+              (if (= :predicted (:status after))
+                (assoc result :ops ops :replay after
+                       :outcome (if (:committed? (peek (:history after))) :committed :contended))
+                (select-keys (assoc result :status :unsupported)
+                             [:profile :authority :certificate :status]))))))

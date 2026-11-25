@@ -2341,3 +2341,34 @@ side-effect fencing, complete worker lifecycle or universal provider
 refinement. No production assurance status changes and no CLM-R2 premise
 is retired. Full project, physical Claim, Chromium and independent proof
 gates were not rerun.
+
+* v2627 — compose selected active worker ownership fencing
+
+Independently derive the active fence from pinned observed intent,
+lease token and owner identity. Distinguish missing, non-leased and
+stale ownership from unsupported observations. Compose the guard with
+selected caller-supplied physical puts in one transaction, predicting
+commit or contention at supplied provider time. A constructed guard
+alone is not an execution result or authorization of its suffix.
+Worker profile v3; observation v1, temporal v10, current-state v13 and
+history v19 unchanged.
+
+Combined reference JVM: 47 tests / 5283 assertions, zero failures or
+errors. Ten active-fence cases compare the production constructor,
+exact operations, outcomes and complete outbox/marker history rectangles.
+Six submit real transactions through the production adapter; four are
+rejected before submission. Cover mismatched owner/token, missing and
+non-leased rows, identical-value rewrite invalidating an earlier version,
+one microsecond before expiry, exact expiry and later expiry. Pure
+regressions reject unsupported fences and suffix shapes. Corrected a
+test-only delimiter and catch type for XTDB assertion conflicts before
+the passing run. Pinned reads and supplied clocks remain harness inputs;
+reference prefixes use predicted operations.
+
+This establishes finite composed active fencing correspondence, not
+arbitrary write authorization, production acknowledgment semantics,
+external-effect fencing, live frontier acquisition or universal provider
+refinement. No production assurance status changes and no CLM-R2 premise
+is retired. Full project, physical Claim, Chromium and independent proof
+gates were not rerun. The temporal test namespace is now 977 lines;
+split worker coverage before extending it substantially.
