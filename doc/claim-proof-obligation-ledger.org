@@ -3201,3 +3201,29 @@ composite values, document operations, SQL arity and execution semantics,
 and universal provider refinement remain open. No production wiring,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates were not rerun.
+
+* v2657 — decode selected keyword Arrow extension arguments
+
+Qualify the installed xt/clj-keyword extension on UTF-8 storage by
+requiring exactly its name and empty extension metadata. Decode the
+symbol spelling directly and admit only the reference transaction
+keyword grammar, with the same length bound, before constructing a
+keyword. Preserve distinction from ordinary strings, mixed scalar rows,
+coalesced spans and earlier narrower profile restrictions.
+
+Focused JVM: 10 tests / 581 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Physical retained
+qualified and unqualified keywords, strings with identical spellings,
+integers and Booleans match expected rows and provider operations before
+and after reopening. Mutate extension identity, keyword spelling, UTF-8
+and offsets; reject an actual retained keyword outside the selected
+reference grammar without partial operations. Corrected an unmatched
+source delimiter before the passing run. XTDB logged shutdown
+cancellation; the test process exited zero.
+
+Selected int64/Boolean/UTF-8/keyword profile v1. Arrow metadata accessors
+remain a dependency. Other extension types, nullable columns, temporal
+and composite values, document operations, SQL arity and execution
+semantics, and universal provider refinement remain open. No production
+wiring, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.

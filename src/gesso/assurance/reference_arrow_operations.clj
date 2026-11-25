@@ -209,6 +209,41 @@
 (def ^:private integer-base (assoc base :profile integer-profile))
 (def ^:private max-argument-columns 64)
 
+(defn- scalar-kind! [^Field f i allowed]
+  (let [type (.typeType f)
+        extension? (pos? (.customMetadataLength f))
+        kind (if extension?
+               (do
+                 (require! (and (= Type/Utf8 type)
+                                (= 2 (.customMetadataLength f))
+                                (= {"ARROW:extension:name" "xt/clj-keyword"
+                                    "ARROW:extension:metadata" ""}
+                                   (into {} (map (fn [j]
+                                                   (let [kv (.customMetadata f j)]
+                                                     [(.key kv) (.value kv)]))
+                                                 (range 2)))))
+                           :unsupported-arrow-field)
+                 :keyword)
+               (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string} type))]
+    (require! (contains? allowed kind) :unsupported-arrow-field)
+    (if (= :keyword kind)
+      (require! (and (= (str "?_" i) (.name f)) (not (.nullable f))
+                     (zero? (.childrenLength f)) (nil? (.dictionary f)))
+                :unsupported-arrow-field)
+      (field! f (str "?_" i) type false 0))
+    (when (= :integer kind)
+      (let [^Int t (.type f (Int.))]
+        (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
+    kind))
+
+(defn- keyword-value! [s]
+  ;; Match the selected reference transaction keyword domain. The retained
+  ;; symbol spelling has no leading colon. Reject before interning.
+  (require! (and (<= 1 (count s) 4095)
+                 (re-matches #"(?:[a-zA-Z][a-zA-Z0-9_.-]*/)?[a-zA-Z][a-zA-Z0-9_-]*" s))
+            :unsupported-arrow-keyword)
+  (keyword s))
+
 (defn- scalar-rows! [bytes allowed]
   (if (nil? bytes)
     [[]]
@@ -222,19 +257,8 @@
         (require! (and (zero? (.remaining sb)) (= Endianness/Little (.endianness schema))
                        (zero? (.featuresLength schema)) (zero? (.customMetadataLength schema))
                        (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
-        (let [kinds (mapv (fn [i]
-                            (let [^Field f (.fields schema i)
-                                  kind (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string}
-                                            (.typeType f))]
-                              (require! (contains? allowed kind) :unsupported-arrow-field)
-                              (field! f (str "?_" i) (.typeType f) false 0)
-                              (when (= :integer kind)
-                                (let [^Int t (.type f (Int.))]
-                                  (require! (and t (= 64 (.bitWidth t)) (.isSigned t))
-                                            :unsupported-integer-type)))
-                              kind))
-                          (range columns))
-              starts (vec (reductions + 0 (map #(if (= :string %) 3 2) kinds)))]
+        (let [kinds (mapv #(scalar-kind! (.fields schema %) % allowed) (range columns))
+              starts (vec (reductions + 0 (map #(if (#{:string :keyword} %) 3 2) kinds)))]
           (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
                 ^RecordBatch batch (.header bm (RecordBatch.))
                 n (.length batch)]
@@ -252,12 +276,13 @@
                             (require! (and (= n (.length node)) (zero? (.nullCount node))
                                            (zero? (.limit validity))) :unsupported-integer-buffer-layout)
                             (case kind
-                              :string
+                              (:string :keyword)
                               (let [^ByteBuffer data (nth buffers (+ start 2))
                                     offsets (offsets! values data n)]
                                 (fn [row]
-                                  (str (.decode (.newDecoder StandardCharsets/UTF_8)
-                                                (ByteBuffer/wrap (value-bytes! data offsets row))))))
+                                  (let [s (str (.decode (.newDecoder StandardCharsets/UTF_8)
+                                                        (ByteBuffer/wrap (value-bytes! data offsets row))))]
+                                    (if (= :keyword kind) (keyword-value! s) s))))
                               :boolean
                               (do (require! (= (quot (+ n 7) 8) (.limit values))
                                             :unsupported-integer-buffer-layout)
@@ -354,3 +379,27 @@
    No nullable columns, coercion, SQL arity or execution semantics claim."
   [bytes]
   (expand-fixed-operations bytes string-base string-rows!))
+
+(def keyword-profile :xtdb-2.2.0-beta1/selected-int64-boolean-utf8-keyword-arrow-operations-v1)
+(def ^:private keyword-base (assoc base :profile keyword-profile))
+
+(defn- keyword-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword}))
+
+(defn decode-keyword-arguments
+  "Decode selected keyword extension columns and earlier scalar types.
+   Require exact extension metadata and the restricted keyword grammar."
+  [bytes]
+  (try
+    (assoc keyword-base :status :decoded :rows (keyword-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc keyword-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc keyword-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc keyword-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-keyword-operations
+  "Expand selected SQL groups with keyword, UTF-8, Boolean, int64 or empty
+   rows. Other extensions, nullable columns and SQL semantics are excluded."
+  [bytes]
+  (expand-fixed-operations bytes keyword-base keyword-rows!))

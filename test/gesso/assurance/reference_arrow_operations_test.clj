@@ -349,3 +349,65 @@
           (.awaitSourceBlocking (db/primary-db node) empty-id (Duration/ofSeconds 10))
           (check-string-retained! node id empty-id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- find-byte-sequence [^bytes data text]
+  (let [pattern (.getBytes ^String text java.nio.charset.StandardCharsets/UTF_8)]
+    (first (filter (fn [i] (every? #(= (aget pattern %) (aget data (+ i %)))
+                                 (range (alength pattern))))
+                   (range (inc (- (alength data) (alength pattern))))))))
+
+(defn- check-keyword-retained! [node id invalid-id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-keyword-operations data)
+        expected (mapv (fn [row] {:kind :sql :query "ASSERT ($1 = $2 AND ($3 = $4) AND ($5 = 0) AND $6)" :args row}) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ offsets values] (buffer-starts args)
+        extension (find-byte-sequence args "xt/clj-keyword")]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/keyword-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-keyword-arguments args))))
+    (is (keyword? (get-in (:rows (arrow/decode-keyword-arguments args)) [0 0])))
+    (is (string? (get-in (:rows (arrow/decode-keyword-arguments args)) [0 2])))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-string-operations data))))
+    (is (= (assoc-in rows [0 0] :zpen)
+           (:rows (arrow/decode-keyword-arguments (edit-byte args values 122)))))
+    (doseq [[bad reason] [[(edit-byte args extension 121) :unsupported-arrow-field]
+                          [(edit-byte args values 58) :unsupported-arrow-keyword]
+                          [(edit-byte args values 47) :unsupported-arrow-keyword]
+                          [(edit-byte args values 255) :invalid-arrow-utf8]
+                          [(edit-int args (+ offsets 4) -1) :invalid-arrow-value-offsets]]]
+      (let [r (arrow/decode-keyword-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (let [r (arrow/decode-keyword-operations (retained-operation-bytes node invalid-id))]
+      (is (= :unsupported (:status r)))
+      (is (= :unsupported-arrow-keyword (:reason r)))
+      (is (not (contains? r :operations))))))
+
+(deftest selected-keyword-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-keyword-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows [[:open :open "open" "open" 0 true]
+              [:claim/status :claim/status "claim/status" "claim/status" -1 false]
+              [:Gesso.test/Status_1 :Gesso.test/Status_1 "" "" 0 true]]]
+    (is (= [[]] (:rows (arrow/decode-keyword-arguments nil))))
+    (try
+      (let [[id invalid-id] (with-open [node (xtn/start-node config)]
+                              (let [database (db/primary-db node)
+                                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                                    id (submit! (mapv #(into ["ASSERT (? = ? AND (? = ?) AND (? = 0) AND ?)"] %) rows))
+                                    invalid-id (submit! [["ASSERT ? = ?" :123 :123]])]
+                                (check-keyword-retained! node id invalid-id rows)
+                                [id invalid-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) invalid-id (Duration/ofSeconds 10))
+          (check-keyword-retained! node id invalid-id rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
