@@ -6,6 +6,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is run-tests]]
             [gesso.assurance.xtdb-source-log :as source-log]
+            [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.model.mapped-frame :as frame]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-projection-test]
@@ -74,23 +75,14 @@
     :else (reject! :unsupported-claim-operation)))
 
 (defn check-claim-envelope!
-  "Compare the complete restricted Claim submission with an exact retained
-   log observation and its separate provider outcome. Diagnostic only."
+  "Compatibility adapter for the existing opt-in regression callers."
   [node tx-id ops committed?]
-  (let [expected (mapv expected-claim-operation! ops)
-        observed (observe-source-message! node tx-id)
-        outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
-    (when-not (= :source-message-observed (:status observed))
-      (reject! :claim-source-message-unavailable))
-    (when-not (= expected (:operations observed))
-      (throw (ex-info "Claim source-log envelope differs from submitted operations."
-                      {:reason :claim-envelope-mismatch :tx-id tx-id
-                       :expected expected :observed (:operations observed)})))
-    (when-not (= [{:committed committed?}] outcomes)
-      (reject! :claim-transaction-outcome-mismatch))
-    {:status :checked-decoded-claim-envelope
-     :tx-id tx-id :committed? committed? :operation-count (count expected)
-     :authority :none :certificate :not-issued}))
+  (let [checked (envelope/check-envelope! node tx-id ops committed?)]
+    (case (:status checked)
+      :matched (-> checked (dissoc :profile) (assoc :status :checked-decoded-claim-envelope))
+      :mismatch (reject! (if (= :transaction-outcome-mismatch (:reason checked))
+                           :claim-transaction-outcome-mismatch :claim-envelope-mismatch))
+      (reject! :claim-source-message-unavailable))))
 
 (deftest retained-source-log-distinguishes-guarded-unguarded-and-aborted-transactions
   (let [lookup #(deref (ns-resolve 'gesso.model.mapped-projection-test %))
@@ -283,6 +275,42 @@
       (is (= {:status :unavailable :reason :source-message-not-retained}
              (source-log/observe-source-message! node (+ tx-id 1000000))))
       (is (= :source-message-observed (:status (observe {})))))))
+
+(deftest production-envelope-comparison-contract
+  (with-open [node (xtn/start-node {})]
+    (let [ops [["ASSERT ? = ?" :open :open] [:put-docs :probe {:xt/id "a" :value "secret"}]]
+          id (:tx-id (xt/execute-tx node ops))
+          check #(envelope/check-envelope! node id %1 %2)
+          result (check ops true)]
+      (is (= {:status :matched :profile envelope/profile :authority :none
+              :certificate :not-issued :tx-id id :committed? true :operation-count 2} result))
+      (is (= :transaction-outcome-mismatch (:reason (check ops false))))
+      (is (= :operation-sequence-mismatch (:reason (check (subvec ops 1) true))))
+      (is (= :operation-sequence-mismatch (:reason (check (assoc-in ops [1 2 :value] "other") true))))
+      (doseq [[bad reason] [[[ ["ASSERT '?' = '?'" ]] :unsupported-assertion-text]
+                            [[["ASSERT TRUE -- ?" 1]] :unsupported-assertion-text]
+                            [[["ASSERT $1 = $1" 1]] :unsupported-assertion-text]
+                            [[["ASSERT ? = ?" 1]] :unsupported-placeholder-shape]
+                            [[[:put-docs {:into :probe} {:xt/id "a"}]] :unsupported-put-shape]
+                            [[[:put-docs :probe {:xt/id "a" :value nil}]] :unsupported-expected-value]
+                            [[[:put-docs :probe {:xt/id "a" :xt/valid-from (Instant/now)}]] :unsupported-document-shape]
+                            [[[:delete-docs :probe "a"]] :unsupported-operation]]]
+        (is (= {:status :unsupported :reason reason :profile envelope/profile
+                :authority :none :certificate :not-issued} (check bad true))))
+      (is (= :invalid-expected-outcome (:reason (check ops nil))))
+      (is (= :unavailable (:status (envelope/check-envelope! node (+ id 1000000) ops true))))
+      ;; A provider record or query result cannot silently change identity,
+      ;; profile, or outcome. No raw SQL, parameters, or errors escape.
+      (let [observed (source-log/observe-source-message! node id)]
+        (doseq [[changed reason] [[(assoc observed :tx-id (inc id)) :source-transaction-identity-mismatch]
+                                  [(assoc observed :provider-profile :old) :source-profile-mismatch]]]
+          (with-redefs [source-log/observe-source-message! (fn [& _] changed)]
+            (is (= reason (:reason (check ops true))))))
+        (with-redefs [xt/q (fn [& _] [])]
+          (is (= :transaction-outcome-unavailable (:reason (check ops true)))))
+        (with-redefs [xt/q (fn [& _] (throw (ex-info "secret" {:raw ops})))]
+          (is (= {:status :unavailable :reason :envelope-check-failed :profile envelope/profile
+                  :authority :none :certificate :not-issued} (check ops true))))))))
 
 (defn -main [& args]
   (let [{:keys [fail error]}

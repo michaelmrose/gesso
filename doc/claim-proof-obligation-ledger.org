@@ -900,3 +900,37 @@ version attestation. No production history classification, checkpoint,
 writer authority or certification semantics change. Independent JVM,
 full Claim, Ansatz, Chromium and full project suites were not rerun.
 No CLM-R2 premise is retired.
+
+* v2577 — restricted production envelope correspondence
+
+Extract the expected-operation construction and comparison into
+gesso.assurance.xtdb-envelope (restricted-envelope-v1). Compare a
+nonempty vector of generated ASSERT and canonical public put-docs
+operations with the exact retained decoded source message and the
+separate xt.txs outcome. Check provider profile and transaction identity
+before comparing ordered operations. The report distinguishes matched,
+mismatch, unsupported and unavailable; no raw SQL, parameters, documents
+or exception payloads are returned. A matched report has no authority
+and issues no certificate. The pilot compatibility adapter exercises
+this production implementation while retaining independent expected
+operation construction for the standalone decoded observations.
+
+Restrict expected SQL to the generated assertion text fragment, rejecting
+quoted literals, comments, standalone numbered placeholders and invalid
+parameter counts. The initial run exposed unquoted dollar signs inside
+normalized journal identifiers; the corrected fragment accepts these
+identifier forms. This is not a general SQL parser. Refuse temporal put
+options, explicit nulls and unsupported expected operation/value shapes;
+bound expected operation count, charged values, text and nesting. These
+are decoding/comparison budgets, not a provider resource sandbox.
+
+The corrected complete standalone pilot passed 6 tests / 101 assertions,
+zero failures or errors, exit status 0. New cases cover operation and
+outcome mismatch, invalid expectations, missing log/outcome, wrong source
+identity or profile and sanitized acquisition failure. The initial run
+failed with 3 failures and 1 error before the identifier correction.
+Full Claim, independent JVM, Ansatz, Chromium and project suites were
+not rerun. Historical classification and checkpoints are unchanged;
+transaction metadata, expected-envelope provenance, writer identity,
+trusted retention/acquisition and provider execution refinement remain
+open. No CLM-R2 premise is retired.
