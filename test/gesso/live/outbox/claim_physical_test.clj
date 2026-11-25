@@ -61,7 +61,7 @@
         writers (atom [])
         seed-admitted? (atom false)
         policy-admissions (atom [])
-        preparations (atom {})
+        preparations (semantics/build-prepared-admission!)
         checked-candidates (atom {})
         execute-adapter xtdb/execute-tx!
         execute xtdb/execute-tx-from!
@@ -128,8 +128,8 @@
                                        row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))
                                        membership (first (frontier/q-from! ctx ["SELECT * FROM memberships WHERE _id = ?" helper]))]
                                    (let [snapshot (semantics/snapshot-at-frontier! ctx)]
-                                     (swap! preparations assoc [(identity/raw-value command-id)
-                                                                (semantics/alternative-id helper :accept)] snapshot))
+                                     ((:prepare! preparations) (semantics/alternative-id helper :accept)
+                                      (select-keys invocation [:command-id :principal :operation :arguments]) snapshot {}))
                                    (swap! observed conj [(identity/raw-value command-id) helper row])
                                    (.countDown ready)
                                    (when-not (.await ready 15 TimeUnit/SECONDS)
@@ -160,8 +160,8 @@
                      (swap! recovery-trace conj [:construct command-id])
                      (let [snapshot (semantics/snapshot-at-frontier! ctx)]
                        (reset! recovery-state snapshot)
-                       (swap! preparations assoc [(identity/raw-value command-id)
-                                                  (semantics/alternative-id (actor invocation) :refuse)] snapshot))
+                       ((:prepare! preparations) (semantics/alternative-id (actor invocation) :refuse)
+                        (select-keys invocation [:command-id :principal :operation :arguments]) snapshot {}))
                      (let [row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))]
                        (when (= :claimed (:status row))
                          {:spec nil
@@ -560,15 +560,16 @@
                                                                   (= id (:command-id %))) entries)))
                            guards (filterv #(string? (first %)) accepted)
                            puts (filterv #(= :put-docs (first %)) accepted)
-                           k [id (semantics/alternative-id helper :accept)]
+                           alternative (semantics/alternative-id helper :accept)
+                           binding (:gesso.command/binding (get-in before [:records id]))
                            original-admissions @policy-admissions
                            original-checks @checked-candidates]
                        ;; Even the original valid vector needs an unused preparation.
                        (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
                        ;; A genuine current snapshot is not an acceptable open-state preparation.
-                       (swap! preparations assoc k before)
+                       ((:prepare! preparations) alternative binding before {})
                        (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
-                       (is (not (contains? @preparations k)))
+                       (is (not ((:pending? preparations) alternative id)))
                        (is (= original-admissions @policy-admissions))
                        (is (= original-checks @checked-candidates))
                        ;; A well-shaped write is not enough without every source-derived predicate.

@@ -9,6 +9,7 @@
             [gesso.model.tx :as model-tx]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-projection :as projection]
+            [gesso.model.mapped-preparation :as preparation]
             [gesso.assurance.transition :as construction]
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.induction :as induction]
@@ -349,20 +350,14 @@
     (require! (= (:state snapshot) (:before checked)))
     checked))
 
+(defn build-prepared-admission! []
+  (preparation/build-admission! (catalog) target-map decode-claim-outcome!))
+
 (defn admit-prepared-candidate!
-  "Consume one fixture-owned preparation for this command and alternative,
-   then check the actual submitted candidate. A failed check also consumes
-   the preparation; another attempt needs a new trusted preparation."
-  [preparations {:keys [command-id alternative]} ops]
-  (let [k [command-id alternative]
-        [prior _] (swap-vals! preparations dissoc k)
-        snapshot (get prior k)
-        record (first (mapcat #(drop 2 %) (filter #(and (= :put-docs (first %))
-                                                        (= :gesso_commands (second %))) ops)))
-        helper (identity/raw-value (get-in record [:gesso.command/binding :principal]))
-        step (keyword (name alternative))]
-    (require! (and snapshot (= alternative (alternative-id helper step))))
-    (check-prepared-candidate! helper step snapshot ops)))
+  "The caller has already checked the full SQL and publication footprint."
+  [admission {:keys [command-id alternative]} ops]
+  ((:admit! admission) alternative command-id
+   (filterv #(and (= :put-docs (first %)) (not= :gesso_live_outbox (second %))) ops)))
 
 (defn correlate-history!
   "Reconcile the selected fixture's pinned state/ledger windows and actual

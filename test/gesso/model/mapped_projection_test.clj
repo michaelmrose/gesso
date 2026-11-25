@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is]]
             [gesso.choreo.identity :as identity]
             [gesso.model.command-resolution :as resolution]
-            [gesso.model.mapped-projection :as projection]))
+            [gesso.model.mapped-projection :as projection]
+            [gesso.model.mapped-preparation :as preparation]))
 
 (def ^:private source
   {:subject {:kind :operation :id :example/projection :interface {:operation :example/projection}}
@@ -96,3 +97,48 @@
     (is (= :candidate-write-target-mismatch (reason (assoc-in puts [1 2] (record "c1" "p2")) [])))
     (is (= (:before r) (:after (projection/check-put-candidate! source targets rows []
                                           (constantly :accepted) {} []))))))
+
+(deftest mapped-preparations-bind-complete-command-and-consume-once
+  (let [id :example/projection
+        original (assoc source :writes #{:example/count :example/one}
+                        :replacements {:example/count [:literal 3] :example/one [:literal :accepted]}
+                        :frame #{:example/enabled :example/owner :example/two})
+        catalog {:declared-operation-ids #{id} :operations [{:id id :construction original}]}
+        {:keys [prepare! admit! discard! pending?]} (preparation/build-admission!
+                    catalog targets #(get-in % [:gesso.command/outcome :result]))
+        row (record "c1" "p1") binding (:gesso.command/binding row)
+        snapshot {:document-rows rows :records {} :state (project rows [])}
+        puts [[:put-docs :requests {:xt/id "r1" :item-count 3 :enabled false}]
+              [:put-docs :gesso_commands row]]
+        prepare #(prepare! id binding snapshot {})
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= :missing-preparation (reason #(admit! id "c1" puts))))
+    (is (= :unknown-operation (reason #(prepare! :example/unknown binding snapshot {}))))
+    (is (= :binding-slot-mismatch (reason #(prepare! id (:gesso.command/binding (record "c1" "p2")) snapshot {}))))
+    (is (= :preparation-state-mismatch (reason #(prepare! id binding (assoc-in snapshot [:state :example/count] 9) {}))))
+    (prepare)
+    (is (pending? id "c1"))
+    (is (= :duplicate-pending-preparation (reason prepare)))
+    (is (= :missing-preparation (reason #(admit! id "other" puts))))
+    (is (pending? id "c1"))
+    (is (= :candidate-binding-mismatch
+           (reason #(admit! id "c1" (assoc-in puts [1 2 :gesso.command/binding :arguments] {:different true})))))
+    (is (not (pending? id "c1")))
+    (is (= :missing-preparation (reason #(admit! id "c1" puts))))
+    (prepare)
+    (discard! id "c1")
+    (is (not (pending? id "c1")))
+    (prepare)
+    (let [gate (promise)
+          contender #(future @gate (or (reason (fn [] (admit! id "c1" puts))) :admitted))
+          a (contender) b (contender)]
+      (deliver gate true)
+      (is (= #{:admitted :missing-preparation} #{(deref a 5000 :timeout) (deref b 5000 :timeout)})))
+    (is (not (pending? id "c1")))
+    (prepare)
+    (is (= :candidate-relation-mismatch (reason #(admit! id "c1" (assoc-in puts [0 2 :item-count] 4)))))
+    (is (not (pending? id "c1")))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (preparation/build-admission! (assoc catalog :declared-operation-ids #{}) targets identity/identity)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (preparation/build-admission! (update catalog :operations conj (first (:operations catalog))) targets identity/identity)))))
