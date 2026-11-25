@@ -510,6 +510,32 @@
     {:state actual :initialization-fingerprint (:initialization-fingerprint checked)
      :authority :none :physical-correspondence :checked-supplied-projection}))
 
+(defn mapped-transition-evidence!
+  "Describe the expected poststate of an admitted framed candidate. This
+   record is an expectation, not proof of physical verification. The executor
+   must bind it to the same atomic transaction as the command journal."
+  [admission {:keys [identity candidate]}]
+  (let [description (describe-mapped-admission admission)
+        alternative (:alternative identity)
+        mapping (get-in description [:operation-mappings alternative])]
+    (when-not (and mapping (string? (:command-id identity))
+                   (= :exact-generated-prefix (:frame-prefix candidate))
+                   (= (:fingerprint mapping) (:mapping-fingerprint candidate))
+                   (= (:transition-fingerprint mapping) (:transition-fingerprint candidate))
+                   (map? (:after candidate))
+                   (identical? original-initial-identity subject/describe-subject))
+      (reject! :invalid-mapped-transition-evidence [] {}))
+    {:xt/id (:command-id identity) :profile-version 1
+     :catalog-fingerprint (:catalog-fingerprint description)
+     :induction-fingerprint (:induction-fingerprint description)
+     :mapping-fingerprint (:fingerprint mapping)
+     :transition-fingerprint (:transition-fingerprint mapping)
+     :alternative alternative
+     :poststate-fingerprint (:fingerprint
+                            (original-initial-identity
+                             {:kind :rule :id ::mapped-poststate
+                              :interface {:state (:after candidate)}}))}))
+
 (defn check-mapped-poststate!
   "Compare the complete supplied projection with the admitted transition's
    expected poststate, using the selected original operation and decoder.

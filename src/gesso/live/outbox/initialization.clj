@@ -50,7 +50,7 @@
    seed and checked report. The installed policy independently derives both."
   [source-id seed mapped-tables checked]
   (when seed
-    (let [tables (sort (into (into #{:gesso_commands :gesso_live_outbox} mapped-tables) (map second) seed))]
+    (let [tables (sort (into (into #{:gesso_commands :gesso_live_outbox :gesso_transition_evidence} mapped-tables) (map second) seed))]
       (into (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_initializations WHERE _id = ?)" source-id]]
                   (map (fn [t] [(str "ASSERT 0 = (SELECT COUNT(*) FROM " (name t) ")")]) tables))
             (conj seed [:put-docs table (marker source-id checked)])))))
@@ -68,7 +68,8 @@
                       {:reason :initialization-readback-marker-mismatch})))
     (let [journal (read! ["SELECT * FROM gesso_commands"])
           outbox (read! ["SELECT * FROM gesso_live_outbox"])]
-      (when-not (and (= [] journal) (= [] outbox))
+      (when-not (and (= [] journal) (= [] outbox)
+                     (= [] (read! ["SELECT * FROM gesso_transition_evidence"])))
         (throw (ex-info "Initialization did not establish empty infrastructure."
                         {:reason :initialization-readback-infrastructure-mismatch})))
       {:system-time time

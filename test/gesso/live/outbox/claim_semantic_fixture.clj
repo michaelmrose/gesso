@@ -236,6 +236,7 @@
       (= (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_initializations WHERE _id = ?)" source-id]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox)"]
+                ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM memberships)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM request_assignments)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM requests)"]]

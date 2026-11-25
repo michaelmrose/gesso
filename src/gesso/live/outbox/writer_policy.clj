@@ -15,7 +15,7 @@
    :gesso_live_outbox :worker})
 
 (def ^:private reserved-tables
-  (into #{:gesso_commands initialization/table} (keys maintenance-kinds)))
+  (into #{:gesso_commands :gesso_transition_evidence initialization/table} (keys maintenance-kinds)))
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid mapped writer policy." {:reason reason})))

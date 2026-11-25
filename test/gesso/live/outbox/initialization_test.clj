@@ -121,9 +121,9 @@
   (let [config #(hash-map :admission % :initializer [[:put-docs :requests {:xt/id "r1" :item-count 0}]] :observe! identity)
         check #(reason (fn [] (policy/validate-config! (config %))))
         canonical? (deref (ns-resolve 'gesso.live.outbox.writer-policy 'mapped-operations?))]
-    (doseq [table [:gesso_initializations :gesso_publication_manifests :gesso_live_outbox]]
+    (doseq [table [:gesso_initializations :gesso_publication_manifests :gesso_live_outbox :gesso_transition_evidence]]
       (is (= :reserved-mapped-document-table (check (admission! table #{})))))
-    (doseq [table [:gesso_initializations :gesso_publication_manifests :other_effects]]
+    (doseq [table [:gesso_initializations :gesso_publication_manifests :other_effects :gesso_transition_evidence]]
       (is (= :unsupported-mapped-auxiliary-table (check (admission! :requests #{table})))))
     (is (nil? (check (admission! :requests #{:gesso_live_outbox}))))
     (let [base [["ASSERT TRUE"] [:put-docs :requests {:xt/id "r1"}]

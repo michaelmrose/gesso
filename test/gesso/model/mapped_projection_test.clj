@@ -408,7 +408,7 @@
             _ (reset! release-policy (live-xtdb/register-submission-policy! node policy))
             request-row #(first (xt/q node ["SELECT * FROM requests WHERE _id = ?" "r1"]))
             empty-writes? #(every? empty? (map (fn [table] (xt/q node [(str "SELECT _id FROM " table)]))
-                                               ["assignments" "gesso_commands" "gesso_live_outbox"]))]
+                                               ["assignments" "gesso_commands" "gesso_live_outbox" "gesso_transition_evidence"]))]
         (is (= :mapped-admission-requires-closed-contract
                (reason #(publication/build-executor (dissoc opts :outcome-contract!)))))
         (is (= :unregistered-mapped-admission
@@ -445,6 +445,8 @@
           (is (= [assignment] (xt/q node ["SELECT * FROM assignments"])))
           (is (= [{:xt/id "valid"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
           (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+          (is (= [(inductive/mapped-transition-evidence! admission (last @claimed))]
+                 (xt/q node ["SELECT * FROM gesso_transition_evidence"])))
           (is (not (admission :pending? id "valid")))
           (is (= :replay (:status (exec (call "valid")))))
           (is (= 3 @constructs))
@@ -480,5 +482,7 @@
             (is (= :mapped-poststate-mismatch (:reason (ex-data (ex-cause failure)))))
             (is (= after (request-row)))
             (is (= [{:xt/id "mismatch"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
+            (is (= #{"valid" "mismatch"}
+                   (set (map :xt/id (xt/q node ["SELECT _id FROM gesso_transition_evidence"])))))
             (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))
         (finally (when-let [release @release-policy] (release)))))))

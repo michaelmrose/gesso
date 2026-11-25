@@ -249,7 +249,7 @@
     ;; Reject direct model commands targeting framework-owned tables before
     ;; adding the framework's own canonical command-record creation.
     (when (some (fn [{:model/keys [entity-type]}]
-                  (contains? #{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests" "gesso_initializations"}
+                  (contains? #{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests" "gesso_initializations" "gesso_transition_evidence"}
                              (-> entity-type name str/lower-case (str/replace "-" "_"))))
                 (:commands fragment))
       (reject! :reserved-durable-model-table {}))
@@ -308,7 +308,7 @@
                (compare-and-set! (:available? scope) true false))
       (:checked scope))))
 
-(defn- check-committed-poststate! [ctx {:keys [admission checked]} receipt]
+(defn- check-committed-poststate! [ctx {:keys [admission checked evidence]} receipt]
   (try
     (let [basis (xtdb/tx-result-basis (:tx-result receipt))
           _ (when-not basis (reject! :missing-mapped-commit-basis {}))
@@ -326,6 +326,9 @@
                                [table (xtdb/q-from node [(str "SELECT * FROM " (name table))] opts)]))
                      (sort tables))
           journal (xtdb/q-from node ["SELECT * FROM gesso_commands"] opts)]
+      (when-not (= [evidence] (xtdb/q-from node ["SELECT * FROM gesso_transition_evidence WHERE _id = ?"
+                                                (:xt/id evidence)] opts))
+        (reject! :mapped-transition-evidence-mismatch {}))
       (inductive/check-mapped-poststate! admission checked docs journal)
       (assoc receipt :mapped-readback {:basis basis :authority :none
                                        :physical-correspondence :checked-commit-basis-projection}))
@@ -453,9 +456,19 @@
       ;; Consume the exact preparation before physical submission. This is
       ;; intentionally outside transaction recovery: a failed local admission
       ;; is not an XTDB abort or evidence of an uncertain commit.
-      (let [checked (admission :admit-framed! original actual)]
-        (assoc plan :ops (:tx-ops actual)
-               :frame-handoff {:admission admission :submission actual :checked checked})))
+      (let [checked (admission :admit-framed! original actual)
+            evidence (inductive/mapped-transition-evidence! admission checked)
+            ;; The closed footprint excludes this framework-owned record.
+            ;; Add it only after admission; bind the final vector to the handoff.
+            ops (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)"
+                        (:xt/id evidence)]]
+                      (conj (:tx-ops actual) [:put-docs :gesso_transition_evidence evidence]))
+            submission (assoc actual :tx-ops ops)]
+        (when-not (= (:xt/id evidence) (:xt/id (:record plan)))
+          (reject! :mapped-transition-evidence-command-mismatch {}))
+        (assoc plan :ops ops
+               :frame-handoff {:admission admission :submission submission
+                               :checked checked :evidence evidence})))
     plan))
 
 (defn- guarded-abort-outcome! [invocation may-disclose? construct! failure contract admission]
@@ -781,7 +794,7 @@
 (defn- require-distinct-physical-entities! [entity-topics]
   (reduce (fn [seen entity]
             (let [physical (physical-entity-name! entity)]
-              (when (#{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests" "gesso_initializations"}
+              (when (#{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests" "gesso_initializations" "gesso_transition_evidence"}
                       (second physical))
                 (reject! :reserved-durable-model-table {:entity-type entity}))
               (when-let [previous (get seen physical)]
