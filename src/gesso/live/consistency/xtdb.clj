@@ -222,7 +222,9 @@
   ([connectable tx-id witness]
    (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness))
   ([connectable tx-id witness prefix]
-   (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness prefix)))
+   (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness prefix))
+  ([connectable tx-id witness prefix writes]
+   (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness prefix writes)))
 
 (defn current-submission-policy-token
   "Observe the current opaque policy generation through a live handle or

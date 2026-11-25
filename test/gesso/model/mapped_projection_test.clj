@@ -1231,6 +1231,8 @@
     (doseq [[mode reason] [[:valid nil]
                            [:unguarded :historical-envelope-mismatch]
                            [:self-bound-unguarded :historical-intended-guard-prefix-mismatch]
+                           [:self-bound-hidden-change :unmapped-document-frame-mismatch]
+                           [:self-bound-duplicate-put :historical-intended-mapped-writes-mismatch]
                            [:unbound :historical-envelope-unsupported]
                            [:other-prestate :historical-guard-prefix-mismatch]
                            [:legacy :invalid-historical-mapped-evidence]
@@ -1252,7 +1254,15 @@
                   bound-witness (peek (peek bound))
                   unguarded? (#{:unguarded :self-bound-unguarded} mode)
                   unguarded-ops (into [] (filter #(= :put-docs (first %))) (:tx-ops base))
+                  actual-base (case mode
+                                :self-bound-hidden-change (mapv (fn [op] (if (= [:put-docs :requests] (vec (take 2 op)))
+                                                                          (assoc-in op [2 :hidden] "changed") op)) (:tx-ops framed))
+                                :self-bound-duplicate-put (conj (:tx-ops framed) [:put-docs :requests (first (:requests after))])
+                                (if unguarded? unguarded-ops (:tx-ops framed)))
                   corrupted (case mode
+                              (:self-bound-hidden-change :self-bound-duplicate-put)
+                              (peek (peek (envelope/bind-transition-envelope!
+                                          (conj actual-base [:put-docs :gesso_transition_evidence witness]))))
                               :valid bound-witness
                               :unguarded bound-witness
                               :self-bound-unguarded (peek (peek (envelope/bind-transition-envelope!
@@ -1268,8 +1278,7 @@
               ;; A removed guard contradicts the recorded complete envelope.
               ;; A self-bound raw unguarded writer now fails the independent
               ;; reconstructed prefix check, not the recorded digest check.
-              (let [ops (conj (if unguarded? unguarded-ops (:tx-ops framed))
-                              [:put-docs :gesso_transition_evidence corrupted])
+              (let [ops (conj actual-base [:put-docs :gesso_transition_evidence corrupted])
                     prior-observations @observations]
                 (when unguarded?
                   (is (every? #(= :put-docs (first %)) ops))
@@ -1281,7 +1290,8 @@
                 (xt/execute-tx node ops)
                 (is (= prior-observations @observations)))
               (is (= [corrupted] (xt/q node "SELECT * FROM gesso_transition_evidence")))
-              (is (= (:requests after) (xt/q node "SELECT * FROM requests")))
+              (is (= (:requests (if (= :self-bound-hidden-change mode) (assoc-in after [:requests 0 :hidden] "changed") after))
+                     (xt/q node "SELECT * FROM requests")))
               (is (= [command] (xt/q node "SELECT * FROM gesso_commands")))
               (let [chunk (history/audit-chunk! node admission 8 (:checkpoint initial))
                     whole (history/audit! node admission 8)

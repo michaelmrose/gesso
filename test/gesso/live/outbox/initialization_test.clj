@@ -649,10 +649,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v5)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v6)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v6 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v7 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))
@@ -750,13 +750,16 @@
           (let [handle (xtdb/adapter-connectable! node)
                 read-source source-log/observe-source-message!]
             (with-redefs [inductive/reconstruct-mapped-prestate-prefix! (constantly [["ASSERT ? = ?" 1 1]])
-                          inductive/check-historical-mapped-poststate! (constantly {})]
+                          inductive/reconstruct-historical-mapped-writes!
+                          (fn [_ record & _] {:tables #{:requests :gesso_commands}
+                                             :puts [[:put-docs :gesso_commands record]]})]
               (xt/execute-tx node (envelope/bind-transition-envelope! (ops "good")))
               (let [prefix (history/audit-chunk! handle admission 8)]
-                (is (= :selected-mapped-ledger-chunk-v6 (:profile prefix)))
+                (is (= :selected-mapped-ledger-chunk-v7 (:profile prefix)))
                 (is (= :observed-interval-checked (:status prefix)))
                 (is (= [:matched] (mapv :recorded-envelope (:steps prefix))))
                 (is (= [:matched] (mapv :intended-guard-prefix (:steps prefix))))
+                (is (= [:matched] (mapv :intended-mapped-writes (:steps prefix))))
                 (xt/execute-tx node (ops "missing"))
                 (xt/execute-tx node (assoc (envelope/bind-transition-envelope! (ops "altered")) 0 ["ASSERT ? = ?" 2 2]))
                 (let [unavailable-id (:tx-id (xt/execute-tx node (envelope/bind-transition-envelope! (ops "unavailable"))))

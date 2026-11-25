@@ -1065,3 +1065,38 @@ This establishes conditional intended guard-prefix correspondence only.
 The remaining intended operation suffix, auxiliary and infrastructure writes,
 provider decoding/retention, transaction-internal read basis and actual
 writer authority are still open. No CLM-R2 premise is retired.
+
+* v2582 — compare intended mapped writes with retained source
+
+Select the complete replacement rows for the admitted document write
+coordinates from pinned poststate after the existing semantic and input
+checks. Check supplemental values, key presence and unchanged fields
+against pinned prestate using the admitted document effects. Require all
+nonwritten selected rows to be preserved and the journal write target to
+be exactly the command slot. This reconstructs a selected-table expectation
+from checked historical rows and the admitted source, not from the logged
+operations or the caller's original write vector.
+
+Require the retained envelope's complete decoded puts over all mapped
+tables and the command journal to equal this expectation with multiplicity.
+Grouping of disjoint puts is not asserted. Missing, extra, changed and
+repeated selected writes cannot satisfy the comparison. The prior recorded
+binding and intended guard-prefix checks remain mandatory. The five-argument
+comparator operates through the opaque adapter and returns no raw values.
+Advance history, checkpoint and operational prefix profiles to v7; v6
+checkpoints require rescanning.
+
+Focused JVM validation: 8 tests / 366 assertions, zero failures or errors.
+The adversarial history regression now rejects self-bound transactions
+with changed unmapped fields or duplicate mapped puts despite their valid
+abstract poststate and matching recorded binding. Selected comparator,
+history/checkpoint and operational report regressions passed. The isolated
+history fixture still stubs semantic judgments. Full Claim, Chromium,
+independent proof and the full regression suite were not rerun.
+
+This is conditional correspondence for complete selected mapped document
+replacements and the observed command record, not independently established
+command outcome contents beyond the admitted decoder and relation. Extra
+assertions, auxiliary/infrastructure writes, transaction metadata, source
+log refinement and actual writer/authorization provenance remain open.
+No CLM-R2 premise is retired.

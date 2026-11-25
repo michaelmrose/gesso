@@ -375,6 +375,15 @@
                         [(first bound) (first bound)]]]
           (is (= :intended-guard-prefix-mismatch
                  (:reason (envelope/check-recorded-transition! node id durable prefix)))))
+        (let [writes {:tables #{:probe :gesso_commands} :puts [(second bound)]}
+              check-writes #(envelope/check-recorded-transition! node id durable [(first bound)] %)]
+          (is (= :matched (:intended-mapped-writes (check-writes writes))))
+          (doseq [bad [nil (assoc writes :tables #{:probe})
+                       (update writes :puts conj (second bound))]]
+            (is (= :invalid-intended-mapped-writes (:reason (check-writes bad)))))
+          (doseq [changed [(assoc-in writes [:puts 0 2 :value] :other)
+                           (update writes :puts conj [:put-docs :gesso_commands {:xt/id "missing"}])]]
+            (is (= :intended-mapped-writes-mismatch (:reason (check-writes changed))))))
         (is (= :missing-or-invalid-envelope-binding (:reason (check witness))))
         (is (= :source-witness-mismatch (:reason (check (assoc durable :extra true)))))
         (doseq [[changed reason] [[(assoc observed :tx-id (inc id)) :source-transaction-identity-mismatch]

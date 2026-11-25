@@ -205,13 +205,36 @@
       (reject! :unsupported-observed-envelope))
     ops))
 
+(defn- selected-put-entries [operations tables]
+  ;; Compare full decoded documents with multiplicity. Grouping disjoint
+  ;; puts is immaterial here; duplicate writes are not silently collapsed.
+  (frequencies (for [{:keys [kind table documents]} operations
+                     :when (and (= :put-docs kind) (contains? tables table))
+                     doc documents]
+                 [table doc])))
+
+(defn- expected-selected-puts! [{:keys [tables puts] :as expectation}]
+  (when-not (and (map? expectation) (= #{:tables :puts} (set (keys expectation)))
+                 (set? tables) (seq tables) (contains? tables :gesso_commands)
+                 (every? #(and (simple-keyword? %) (re-matches #"[a-z][a-z0-9_]*" (name %))) tables)
+                 (not (contains? tables :gesso_transition_evidence))
+                 (vector? puts) (seq puts)
+                 (every? #(and (vector? %) (= :put-docs (first %)) (contains? tables (second %))) puts))
+    (reject! :invalid-intended-mapped-writes))
+  (let [tables (set (map #(keyword "public" (name %)) tables))
+        operations (expected-operations! puts)
+        ids (for [{:keys [table documents]} operations doc documents] [table (:xt/id doc)])]
+    (when-not (= (count ids) (count (distinct ids)))
+      (reject! :invalid-intended-mapped-writes))
+    {:tables tables :entries (selected-put-entries operations tables)}))
+
 (defn- check-recorded-transition*
   "Check a committed transition's decoded source-log envelope against its
    independently acquired, pinned durable v4 witness. No caller operation
    vector is required. The final logged witness must match exactly, its
    binding must recompute, and the ledger must independently show commit.
    This checks decoded correspondence, not writer authority or execution."
-  [node tx-id witness require-prefix? prefix]
+  [node tx-id witness require-prefix? prefix require-writes? writes]
   (let [report (fn [status reason]
                  (cond-> {:status status :profile binding-profile :authority :none :certificate :not-issued}
                    reason (assoc :reason reason)))]
@@ -227,6 +250,7 @@
         (report :unsupported :invalid-intended-guard-prefix)
         :else
         (let [expected-prefix (when require-prefix? (expected-operations! prefix))
+              expected-writes (when require-writes? (expected-selected-puts! writes))
               observed (source-log/observe-source-message! node tx-id)]
           (case (:status observed)
             :unavailable (report :unavailable (:reason observed))
@@ -244,6 +268,10 @@
                        (or (>= (count expected-prefix) (count ops))
                            (not= expected-prefix (subvec (:operations observed) 0 (count expected-prefix)))))
                   (report :mismatch :intended-guard-prefix-mismatch)
+                  (and require-writes?
+                       (not= (:entries expected-writes)
+                             (selected-put-entries (:operations observed) (:tables expected-writes))))
+                  (report :mismatch :intended-mapped-writes-mismatch)
                   :else
                   (let [outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
                     (cond
@@ -253,7 +281,8 @@
                       (not= [{:committed true}] outcomes) (report :mismatch :transaction-outcome-mismatch)
                       :else (cond-> (assoc (report :matched nil) :tx-id tx-id :operation-count (count ops)
                                            :envelope-fingerprint (:envelope-fingerprint witness))
-                              require-prefix? (assoc :intended-guard-prefix :matched)))))))
+                              require-prefix? (assoc :intended-guard-prefix :matched)
+                              require-writes? (assoc :intended-mapped-writes :matched)))))))
             (report :unsupported :unexpected-source-observation))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -268,8 +297,12 @@
   "Check a retained committed transition against its recorded binding.
    The four-argument form additionally requires an independently derived,
    nonempty ordered guard prefix at the start of the decoded transaction.
-   Neither form establishes intended writes or writer authority."
+   The five-argument form also checks complete selected-table puts with
+   multiplicity against independent expectations. Auxiliary writes,
+   remaining assertion intent and writer authority remain unestablished."
   ([node tx-id witness]
-   (check-recorded-transition* node tx-id witness false nil))
+   (check-recorded-transition* node tx-id witness false nil false nil))
   ([node tx-id witness prefix]
-   (check-recorded-transition* node tx-id witness true prefix)))
+   (check-recorded-transition* node tx-id witness true prefix false nil))
+  ([node tx-id witness prefix writes]
+   (check-recorded-transition* node tx-id witness true prefix true writes)))

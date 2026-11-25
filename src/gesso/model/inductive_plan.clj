@@ -705,6 +705,38 @@
        :input-correspondence :checked-command-and-prestate-selectors
        :expected-envelope (envelope/binding-status evidence)})))
 
+(defn reconstruct-historical-mapped-writes!
+  "Internal: select complete replacement rows for exactly the admitted
+   write targets from pinned poststate, checking the semantic relation and
+   document frame against pinned prestate. Return a selected-table put
+   expectation, not authority or a claim about auxiliary writes."
+  [admission record evidence before-docs after-docs journal-rows]
+  (check-historical-mapped-poststate! admission record evidence after-docs journal-rows)
+  (let [{:keys [description]} (registered-mapped! admission)
+        alternative (:alternative evidence)
+        mapping (get-in description [:operation-mappings alternative])
+        targets (:write-targets mapping)
+        binding (:gesso.command/binding (resolution/require-record record))
+        slot [:journal-slot (identity/raw-value (:principal binding)) (:operation binding)]
+        document-targets (filter #(= :document (first %)) targets)
+        tables (conj (set (keys after-docs)) :gesso_commands)
+        puts (mapv (fn [[_ table id]]
+                     (let [matches (filterv #(= id (:xt/id %)) (get after-docs table))]
+                       (when-not (= 1 (count matches))
+                         (reject! :historical-mapped-write-row-missing [] {}))
+                       [:put-docs table (first matches)])) document-targets)]
+    (when-not (= #{slot} (set (filter #(= :journal-slot (first %)) targets)))
+      (reject! :historical-mapped-journal-target-mismatch [] {}))
+    (frame/check-replacements! mapping (get-in description [:document-effects alternative]) before-docs puts)
+    ;; Nonwritten complete rows must also be preserved, not just their
+    ;; projected fields. Ignore query row ordering, not field presence.
+    (let [index (fn [docs] (into {} (map (fn [[table rows]] [table (into {} (map (juxt :xt/id clojure.core/identity)) rows)])) docs))
+          expected (reduce (fn [docs [_ table row]] (assoc-in docs [table (:xt/id row)] row))
+                           (index before-docs) puts)]
+      (when-not (= expected (index after-docs))
+        (reject! :historical-mapped-document-frame-mismatch [] {})))
+    {:tables tables :puts (conj puts [:put-docs :gesso_commands record])}))
+
 (defn reconstruct-mapped-prestate-prefix!
   "Internal historical verifier: return the exact reconstructed guard vector.
    Do not expose it through operational reports. Compare the durable prestate witness with a supplied physical projection
