@@ -213,6 +213,12 @@
                      doc documents]
                  [table doc])))
 
+(def ^:private outbox-absence-sql
+  "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)")
+
+(defn- outbox-guard-entries [ops]
+  (frequencies (filter #(= outbox-absence-sql (first %)) ops)))
+
 (defn- expected-selected-puts! [{:keys [tables puts] :as expectation}]
   (when-not (and (map? expectation) (= #{:tables :puts} (set (keys expectation)))
                  (set? tables) (seq tables) (contains? tables :gesso_commands)
@@ -226,7 +232,14 @@
         ids (for [{:keys [table documents]} operations doc documents] [table (:xt/id doc)])]
     (when-not (= (count ids) (count (distinct ids)))
       (reject! :invalid-intended-mapped-writes))
-    {:tables tables :entries (selected-put-entries operations tables)}))
+    (let [outbox? (contains? tables :public/gesso_live_outbox)
+          mapped-tables (disj tables :public/gesso_live_outbox)
+          outbox-entries (selected-put-entries operations #{:public/gesso_live_outbox})]
+      {:tables mapped-tables :entries (selected-put-entries operations mapped-tables)
+       :outbox? outbox? :outbox-entries outbox-entries
+       :outbox-guards (frequencies (for [[[_ doc] n] outbox-entries
+                                        _ (range n)]
+                                    [outbox-absence-sql (:xt/id doc)]))})))
 
 (defn- check-recorded-transition*
   "Check a committed transition's decoded source-log envelope against its
@@ -275,6 +288,15 @@
                        (not= (:entries expected-writes)
                              (selected-put-entries (:operations observed) (:tables expected-writes))))
                   (report :mismatch :intended-mapped-writes-mismatch)
+                  (and (:outbox? expected-writes)
+                       (not= (:outbox-entries expected-writes)
+                             (selected-put-entries (:operations observed) #{:public/gesso_live_outbox})))
+                  (report :mismatch :publication-outbox-write-mismatch)
+                  (and (:outbox? expected-writes)
+                       (not= (:outbox-guards expected-writes)
+                             (outbox-guard-entries (take-while #(string? (first %)) ops))
+                             (outbox-guard-entries ops)))
+                  (report :mismatch :publication-outbox-guard-mismatch)
                   :else
                   (let [outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
                     (cond
@@ -286,7 +308,8 @@
                                            :envelope-fingerprint (:envelope-fingerprint witness))
                               require-prefix? (assoc :intended-guard-prefix :matched)
                               require-writes? (assoc :intended-mapped-writes :matched
-                                                     :transition-evidence-write :matched)))))))
+                                                     :transition-evidence-write :matched)
+                              (:outbox? expected-writes) (assoc :publication-outbox :matched)))))))
             (report :unsupported :unexpected-source-observation))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -303,8 +326,10 @@
    The four-argument form additionally requires an independently derived,
    nonempty ordered guard prefix at the start of the decoded transaction.
    The five-argument form also checks complete selected-table puts with
-   multiplicity against independent expectations. Auxiliary writes,
-   remaining assertion intent and writer authority remain unestablished."
+   multiplicity against independent expectations. Including the outbox
+   table also requires exactly its expected prewrite absence guards.
+   Publication semantic intent and remaining assertion/writer authority
+   are not established."
   ([node tx-id witness]
    (check-recorded-transition* node tx-id witness false nil false nil))
   ([node tx-id witness prefix]

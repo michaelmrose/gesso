@@ -1131,3 +1131,33 @@ proof gates were not rerun.
 Remaining assertions and auxiliary/infrastructure puts, transaction metadata,
 source-log refinement, transaction-internal reads and writer authorization
 remain open. No CLM-R2 premise is retired.
+
+* v2584 — compare historical publication outbox writes and guards
+
+The selected mapped writer policy admits only the canonical outbox as an
+auxiliary table. Extend the historical selected-table expectation to include
+all appended outbox rows from the pinned before/after snapshots. Refuse
+appended rows when the admission does not declare that auxiliary table.
+Always include the outbox table in the envelope comparison, including for
+journal-only transitions and other transitions with no observed append.
+Require equality of full decoded outbox puts with multiplicity, separately
+from mapped and journal puts. Derive the canonical absence assertion for
+each expected intent id and require the exact multiset of those assertions
+both before the first put and throughout the transaction. Report only the
+matched status or a bounded mismatch reason, not intent contents.
+
+Advance historical coverage, authenticated checkpoints and operational
+prefix arguments to v9. Previously authenticated v8 cursors must be rescanned.
+This checks the observed publication contribution, not the semantic necessity,
+cardinality, derived identity, topic, subject or purpose of that contribution
+under the admitted source. Other assertion text and unselected tables remain
+open; no general assertion equivalence or writer authentication is claimed.
+
+Focused JVM validation: 8 tests / 567 assertions, zero failures or errors.
+The adversarial mapped-history regression accepts a guarded append and
+refuses self-bound duplicate outbox puts, missing, wrong, late or repeated
+canonical absence guards. The zero-append fixture and authenticated v8
+checkpoint refusal also pass. No CLM-R2 premise is retired.
+The complete opt-in physical Claim source-log suite also passed: 3 tests /
+1052 assertions, zero failures or errors. Full project, Chromium and separate
+proof gates were not rerun.

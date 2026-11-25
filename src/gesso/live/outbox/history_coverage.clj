@@ -7,8 +7,9 @@
    remain unproven. Mapped transitions require a matching retained envelope;
    also check the reconstructed prestate guard prefix against the retained
    operations following the framework evidence-absence guard, and compare
-   complete selected mapped puts and the sole evidence write. Auxiliary writes,
-   remaining assertion intent and writer identity remain unestablished."
+   complete selected mapped puts, the sole evidence write and observed outbox
+   append/absence guards. Publication semantic intent, remaining assertions
+   and writer identity remain unestablished."
   (:require [gesso.assurance.subject :as subject]
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.live.consistency.xtdb :as xtdb]
@@ -120,6 +121,17 @@
           (when-let [kind (maintenance/observe-worker-transition source-id time row (get new id))]
             {:classification :verified-infrastructure-transition :maintenance kind :intent-id id}))))))
 
+(defn- include-publication-writes! [admission before after writes]
+  (let [added (apply dissoc after (keys before))]
+    (when (and (seq added)
+               (not (contains? (:auxiliary-tables (inductive/describe-mapped-admission admission))
+                               outbox/intent-table)))
+      (reject! :historical-undeclared-publication-outbox))
+    (-> writes
+        (update :tables conj outbox/intent-table)
+        (update :puts into (mapv (fn [row] [:put-docs outbox/intent-table row])
+                                 (plain-rows added))))))
+
 (defn- require-recorded-envelope! [node tx-id evidence prefix writes]
   (let [checked (xtdb/check-recorded-transition-envelope! node tx-id evidence prefix writes)]
     (case (:status checked)
@@ -127,6 +139,7 @@
                               (= :matched (:intended-guard-prefix checked))
                               (= :matched (:intended-mapped-writes checked))
                               (= :matched (:transition-evidence-write checked))
+                              (= :matched (:publication-outbox checked))
                               (= tx-id (:tx-id checked))
                               (= (:envelope-fingerprint evidence) (:envelope-fingerprint checked)))
                  (reject! :historical-envelope-invalid-result))
@@ -136,6 +149,8 @@
                            :intended-guard-prefix-mismatch :historical-intended-guard-prefix-mismatch
                            :intended-mapped-writes-mismatch :historical-intended-mapped-writes-mismatch
                            :transition-evidence-write-mismatch :historical-transition-evidence-write-mismatch
+                           :publication-outbox-write-mismatch :historical-publication-outbox-write-mismatch
+                           :publication-outbox-guard-mismatch :historical-publication-outbox-guard-mismatch
                            :historical-envelope-mismatch))
       (reject! :historical-envelope-invalid-result))))
 
@@ -186,11 +201,12 @@
                              mapped-prefix)
                 writes (inductive/reconstruct-historical-mapped-writes!
                         admission (dissoc command :xt/system-from) evidence
-                        (docs before) (docs after) (plain-rows (:journal after)))]
+                        (docs before) (docs after) (plain-rows (:journal after)))
+                writes (include-publication-writes! admission (:outbox before) (:outbox after) writes)]
             (require-recorded-envelope! node (:xt/id current) evidence prefix writes))
           (assoc base :classification :verified-mapped-transition :command-id id
                  :recorded-envelope :matched :intended-guard-prefix :matched :intended-mapped-writes :matched
-                 :transition-evidence-write :matched)
+                 :transition-evidence-write :matched :publication-outbox :matched)
           (catch clojure.lang.ExceptionInfo e
             (assoc base :classification :unclassified :reason (or (:reason (ex-data e)) :transition-check-failed)))))
 
@@ -263,7 +279,7 @@
         {:keys [basis rows]} (observe-range! scope nil max-steps false)
         steps (classify-range! scope rows)]
     (require-current-scope! scope)
-    {:profile :selected-mapped-ledger-coverage-v8 :authority :none
+    {:profile :selected-mapped-ledger-coverage-v9 :authority :none
      :status (if (some #(= :unclassified (:classification %)) steps)
                :unclassified-steps :observed-interval-checked)
      :initialization (:initial scope) :through-basis basis :steps steps
@@ -277,7 +293,7 @@
 (defn- checkpoint-state! [scope checkpoint]
   (when (some? checkpoint)
     (let [prior (locking checkpoints (.get checkpoints checkpoint))]
-      (when-not (and prior (= :selected-mapped-history-checkpoint-v8 (:profile prior))
+      (when-not (and prior (= :selected-mapped-history-checkpoint-v9 (:profile prior))
                      (identical? (:token scope) (:token prior))
                      (identical? (:admission scope) (:admission prior))
                      (= (:initial scope) (:initial prior)))
@@ -306,12 +322,12 @@
          anchor (peek rows)
          through (xtdb/basis (:xt/id anchor) (ledger-time anchor))
          next-state (assoc (select-keys scope [:token :initial :admission])
-                           :profile :selected-mapped-history-checkpoint-v8
+                           :profile :selected-mapped-history-checkpoint-v9
                            :anchor anchor :counts counts :first-unclassified first-unclassified)
          next-checkpoint (HistoryCheckpoint.)]
      (require-current-scope! scope)
      (locking checkpoints (.put checkpoints next-checkpoint next-state))
-     {:profile :selected-mapped-ledger-chunk-v8 :authority :none
+     {:profile :selected-mapped-ledger-chunk-v9 :authority :none
       :status (cond first-unclassified :unclassified-steps
                     caught-up? :observed-interval-checked
                     :else :partial-interval)
@@ -351,14 +367,13 @@
   "Export an issued checkpoint as authenticated, plain EDN data. The trusted
    owner must persist it and a separate 32-byte secret key, unique to this
    database and trusted audit/decoder implementation. Change deployment-id
-   (or rotate the key) when that implementation changes. Versions 1 through 7
-   cannot be restored: they lack the complete publication guard prefix
-   and sole transition-evidence write check.
+   (or rotate the key) when that implementation changes. Versions 1 through 8
+   cannot be restored: they lack the outbox append and absence guard check.
    No writer authority."
   [connectable admission checkpoint key deployment-id]
   (let [scope (audit-scope! connectable admission 1)
         prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
-        payload {:profile :selected-mapped-history-checkpoint-v8
+        payload {:profile :selected-mapped-history-checkpoint-v9
                  :scope (durable-scope scope deployment-id)
                  :anchor (update (:anchor prior) :system-time str)
                  :counts (:counts prior)
@@ -377,7 +392,7 @@
   (let [scope (audit-scope! connectable admission 1)
         {:keys [payload mac]} sealed]
     (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
-                   (map? payload) (= :selected-mapped-history-checkpoint-v8 (:profile payload))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v9 (:profile payload))
                    (string? mac) (re-matches #"[0-9a-f]{64}" mac)
                    (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
                                           (checkpoint-mac key payload)))
@@ -389,7 +404,7 @@
                                      (update :system-time #(Instant/parse %)))
           checkpoint (HistoryCheckpoint.)
           state (assoc (select-keys scope [:token :initial :admission])
-                       :profile :selected-mapped-history-checkpoint-v8
+                       :profile :selected-mapped-history-checkpoint-v9
                        :anchor anchor :counts (:counts payload) :first-unclassified first-unclassified)]
       ;; Verify the anchor at a pinned frontier; no classification or extension.
       (observe-range! scope anchor 1 true)
