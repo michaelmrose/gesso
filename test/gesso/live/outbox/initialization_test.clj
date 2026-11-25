@@ -647,10 +647,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v1)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v2)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v2 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v3 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))
@@ -663,6 +663,37 @@
                     whole (history/audit! handle admission 8)]
                 (is (= :unclassified-steps (:status extended)))
                 (is (= :sampled-valid-time-discontinuity (get-in extended [:first-unclassified :reason])))
+                (is (= {:observed-mapped-stutter 1 :unclassified 1} (:counts extended)))
+                (is (= (:steps whole) (into (:steps prefix) (:steps extended))))
+                (is (contains? (:open-obligations extended) :valid-time-continuity-between-steps)))))
+          (finally (release)))))))
+
+(deftest history-refuses-transient-valid-time-changes-with-equal-endpoints
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (let [handle (xtdb/adapter-connectable! node)
+                start (.plusSeconds (java.time.Instant/now) 5)
+                end (.plusSeconds start 1)]
+            (xt/execute-tx node [[:put-docs {:into :requests :valid-from start :valid-to end}
+                                 {:xt/id "r1" :item-count -1}]])
+            (let [prefix (history/audit-chunk! handle admission 8)
+                  key (byte-array 32)
+                  sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "interior-v3")
+                  cursor (history/restore-checkpoint! handle admission sealed key "interior-v3")]
+              (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))
+              (let [remaining (.toMillis (java.time.Duration/between (java.time.Instant/now) end))]
+                (when (>= remaining 0) (Thread/sleep (+ 100 remaining))))
+              (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+              (let [extended (history/audit-chunk! handle admission 8 cursor)
+                    whole (history/audit! handle admission 8)]
+                (is (= :unclassified-steps (:status extended)))
+                (is (= :interior-valid-time-boundary (get-in extended [:first-unclassified :reason])))
                 (is (= {:observed-mapped-stutter 1 :unclassified 1} (:counts extended)))
                 (is (= (:steps whole) (into (:steps prefix) (:steps extended))))
                 (is (contains? (:open-obligations extended) :valid-time-continuity-between-steps)))))

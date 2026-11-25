@@ -1,9 +1,10 @@
 (ns gesso.live.outbox.history-coverage
   "Bounded, read-only audit of the selected mapped host's visible ledger.
    A mapped stutter is not a proof of an infrastructure writer's authority.
-   Check continuity at sampled valid-time endpoints, not all instants.
-   No claim is made about valid-time evolution between those endpoints,
-   hidden tables, transaction-internal reads, or external writer closure."
+   Check sampled endpoints and refuse intervening visible valid-time
+   boundaries at the pinned prior system basis. Historical retention,
+   hidden tables, transaction-internal reads and external writer closure
+   remain unproven."
   (:require [gesso.assurance.subject :as subject]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.physical-correspondence :as correspondence]
@@ -44,6 +45,39 @@
      :outbox (read! :gesso_live_outbox)
      :manifests (read! :gesso_publication_manifests)
      :initialization (read! :gesso_initializations)}))
+
+(def ^:private infrastructure-tables
+  #{:gesso_commands :gesso_transition_evidence :gesso_live_outbox
+    :gesso_publication_manifests :gesso_initializations})
+
+(defn- interior-boundary? [from to value]
+  (and (instance? ZonedDateTime value)
+       (let [instant (.toInstant ^ZonedDateTime value)]
+         (and (neg? (compare from instant)) (neg? (compare instant to))))))
+
+(defn- visible-valid-boundary? [node tables opts from to]
+  ;; A single matching boundary is enough to refuse this interval. Use
+  ;; the prior system basis, not the transaction being classified or the
+  ;; latest snapshot. Endpoints are checked separately by classify-step!.
+  (let [opts (assoc opts :snapshot-token (basis/->time-basis-str
+                                         {xtdb/default-database-name [from]})
+                         :current-time from)]
+    (boolean
+     (some (fn [table]
+             (let [sql (str "SELECT _valid_from, _valid_to FROM " (name table)
+                            " FOR VALID_TIME ALL"
+                            " WHERE ((_valid_from > ? AND _valid_from < ?)"
+                            " OR (_valid_to > ? AND _valid_to < ?)) LIMIT 1")
+                   rows (xtdb/q-from node [sql from to from to] opts)]
+               (when-not (and (vector? rows) (<= (count rows) 1)
+                              (every? (fn [row]
+                                        (and (map? row)
+                                             (or (interior-boundary? from to (:xt/valid-from row))
+                                                 (interior-boundary? from to (:xt/valid-to row)))))
+                                      rows))
+                 (reject! :invalid-visible-valid-time-boundary-result))
+               (seq rows)))
+           (sort (into infrastructure-tables tables))))))
 
 (defn- plain-rows [index]
   (mapv #(dissoc % :xt/system-from) (vals index)))
@@ -96,6 +130,9 @@
       ;; prestate. Compare at the SAME pinned prior system-time basis.
       (not= previous before)
       (assoc base :classification :unclassified :reason :sampled-valid-time-discontinuity)
+
+      (visible-valid-boundary? node tables opts previous-time time)
+      (assoc base :classification :unclassified :reason :interior-valid-time-boundary)
 
       (= before after)
       (assoc base :classification (if (:committed current) :observed-mapped-stutter :aborted-stutter))
@@ -191,7 +228,7 @@
         {:keys [basis rows]} (observe-range! scope nil max-steps false)
         steps (classify-range! scope rows)]
     (require-current-scope! scope)
-    {:profile :selected-mapped-ledger-coverage-v2 :authority :none
+    {:profile :selected-mapped-ledger-coverage-v3 :authority :none
      :status (if (some #(= :unclassified (:classification %)) steps)
                :unclassified-steps :observed-interval-checked)
      :initialization (:initial scope) :through-basis basis :steps steps
@@ -237,7 +274,7 @@
          next-checkpoint (HistoryCheckpoint.)]
      (require-current-scope! scope)
      (locking checkpoints (.put checkpoints next-checkpoint next-state))
-     {:profile :selected-mapped-ledger-chunk-v2 :authority :none
+     {:profile :selected-mapped-ledger-chunk-v3 :authority :none
       :status (cond first-unclassified :unclassified-steps
                     caught-up? :observed-interval-checked
                     :else :partial-interval)
@@ -277,13 +314,13 @@
   "Export an issued checkpoint as authenticated, plain EDN data. The trusted
    owner must persist it and a separate 32-byte secret key, unique to this
    database and trusted audit/decoder implementation. Change deployment-id
-   (or rotate the key) when that implementation changes. Version 1 cursors
-   cannot be restored: they did not check sampled valid-time continuity.
+   (or rotate the key) when that implementation changes. Versions 1 and 2
+   cannot be restored: they did not check interior valid-time boundaries.
    No writer authority."
   [connectable admission checkpoint key deployment-id]
   (let [scope (audit-scope! connectable admission 1)
         prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
-        payload {:profile :selected-mapped-history-checkpoint-v2
+        payload {:profile :selected-mapped-history-checkpoint-v3
                  :scope (durable-scope scope deployment-id)
                  :anchor (update (:anchor prior) :system-time str)
                  :counts (:counts prior)
@@ -302,7 +339,7 @@
   (let [scope (audit-scope! connectable admission 1)
         {:keys [payload mac]} sealed]
     (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
-                   (map? payload) (= :selected-mapped-history-checkpoint-v2 (:profile payload))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v3 (:profile payload))
                    (string? mac) (re-matches #"[0-9a-f]{64}" mac)
                    (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
                                           (checkpoint-mac key payload)))
