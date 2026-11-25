@@ -3329,3 +3329,31 @@ columns, document puts and complete provider correspondence remain open.
 The selected per-vector bound is not a complete reference document
 budget. No production wiring, certificate or CLM-R2 premise retirement.
 Full project and independent formal gates were not rerun.
+
+* v2662 — decode selected homogeneous scalar Arrow lists
+
+Generalize homogeneous list qualification to nonnullable int64, Boolean,
+UTF-8, keyword and UUID children. Share scalar buffer interpretation with
+positional argument columns; independently qualify exact child fields,
+metadata, node counts, parent element offsets and child buffer extents.
+Retain the selected 256-element per-vector limit and the earlier integer
+list profile restrictions. Preserve empty vectors within typed columns,
+coalesced invocation order and scalar arguments alongside vectors.
+
+Focused JVM: 15 tests / 838 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Physical retained
+mixed homogeneous list columns and scalar arguments match expected rows,
+operation spans and provider observations before and after reopening.
+Mutate Boolean bits, string and keyword bytes, UUID bytes and offsets;
+reject malformed framing, invalid child values, heterogeneous, nested
+and nullable children without partial operations. The initial exploratory
+probe used SQL without argument placeholders and failed to submit;
+the regression uses explicit placeholders. XTDB logged a shutdown
+cancellation; the passing test process exited zero.
+
+Selected homogeneous scalar-list profile v1. Temporal list children,
+heterogeneous and recursive composites, untyped all-empty lists and
+nullable columns remain outside the selected profile. No independent
+document-put interpretation, aggregate reference document budget,
+production wiring, certificate or CLM-R2 premise retirement. Full project
+and independent formal gates were not rerun.

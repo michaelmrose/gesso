@@ -642,3 +642,66 @@
           (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
           (check-int64-list-retained! node id oversized-id other-id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-scalar-list-retained! [node id unsupported-ids rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-scalar-list-operations data)
+        query "ASSERT ($1 IS NOT NULL AND $2 IS NOT NULL AND $3 IS NOT NULL AND $4 IS NOT NULL AND $5 IS NOT NULL AND ($6 = 0))"
+        expected (mapv #(hash-map :kind :sql :query query :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ bool-offsets _ bool-values _ _ _ str-offsets str-values _ _ _ _ keyword-values _ _ _ uuid-values] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/scalar-list-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-scalar-list-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-int64-list-operations data))))
+    (doseq [[bad expected-rows]
+            [[(edit-byte args bool-values (bit-xor 1 (aget ^bytes args bool-values))) (update-in rows [0 0 0] not)]
+             [(edit-byte args str-values 121) (assoc-in rows [0 1 0] "y")]
+             [(edit-byte args keyword-values 122) (assoc-in rows [0 2 0] :zpen)]
+             [(edit-byte args uuid-values 128) (assoc-in rows [0 3 0] #uuid "80112233-4455-6677-8899-aabbccddeeff")]]]
+      (is (= expected-rows (:rows (arrow/decode-scalar-list-arguments bad)))))
+    (doseq [[bad reason] [[(edit-int args bool-offsets 1) :invalid-arrow-list-offsets]
+                          [(edit-int args (+ str-offsets 4) -1) :invalid-arrow-value-offsets]
+                          [(edit-byte args str-values 255) :invalid-arrow-utf8]
+                          [(edit-byte args keyword-values 58) :unsupported-arrow-keyword]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-scalar-list-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (doseq [other-id unsupported-ids]
+      (let [r (arrow/decode-scalar-list-operations (retained-operation-bytes node other-id))]
+        (is (= :unsupported (:status r)) (pr-str (dissoc r :operations)))
+        (is (not (contains? r :operations)))))))
+
+(deftest selected-scalar-lists-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-scalar-list-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows [[[true false true false true false true false true] ["x" "" "😀"] [:open :claim/status]
+               [#uuid "00112233-4455-6677-8899-aabbccddeeff"] [1 -1] 0]
+              [[] [] [] [] [] 1]
+              [[false true] ["é" "é"] [:closed] [#uuid "ffffffff-ffff-ffff-ffff-ffffffffffff"] [Long/MIN_VALUE] -1]]]
+    (is (= [[]] (:rows (arrow/decode-scalar-list-arguments nil))))
+    (try
+      (let [[id unsupported-ids]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! (mapv #(into ["ASSERT (? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND (? = 0))"] %) rows))
+                    unsupported-ids [(submit! [["ASSERT ? IS NOT NULL" [1 "x"]]])
+                                     (submit! [["ASSERT ? IS NOT NULL" [[1]]]])
+                                     (submit! [["ASSERT ? IS NOT NULL" [nil true]]])
+                                     (submit! [["ASSERT ? IS NOT NULL" [true (java.time.Instant/parse "2026-01-01T00:00:00Z")]]])]]
+                (check-scalar-list-retained! node id unsupported-ids rows)
+                [id unsupported-ids]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek unsupported-ids) (Duration/ofSeconds 10))
+          (check-scalar-list-retained! node id unsupported-ids rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

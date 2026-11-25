@@ -211,7 +211,7 @@
 (def ^:private integer-base (assoc base :profile integer-profile))
 (def ^:private max-argument-columns 64)
 
-(defn- scalar-kind! [^Field f i allowed]
+(defn- scalar-kind! [^Field f field-name allowed]
   (let [type (.typeType f)
         extension? (pos? (.customMetadataLength f))
         kind (if extension?
@@ -230,24 +230,26 @@
                    (and (= Type/FixedSizeBinary type) (= "uuid" name)) :uuid
                    :else (require! false :unsupported-arrow-field)))
                (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
-                     Type/Timestamp :timestamp Type/List :int64-list} type))]
+                     Type/Timestamp :timestamp Type/List (if (contains? allowed :scalar-list)
+                                                           :scalar-list :int64-list)} type))]
     (require! (contains? allowed kind) :unsupported-arrow-field)
     (if (#{:keyword :uuid} kind)
-      (require! (and (= (str "?_" i) (.name f)) (not (.nullable f))
+      (require! (and (= field-name (.name f)) (not (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
-      (field! f (str "?_" i) type false (if (= :int64-list kind) 1 0)))
+      (field! f field-name type false (if (#{:int64-list :scalar-list} kind) 1 0)))
     (when (= :integer kind)
       (let [^Int t (.type f (Int.))]
-        (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
-    (when (= :int64-list kind)
-      (let [^Field child (field! (.children f 0) "$data$" Type/Int false 0)
-            ^Int t (.type child (Int.))]
         (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
     (when (= :uuid kind)
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
         (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
-    (if (= :timestamp kind)
+    (cond
+      (#{:int64-list :scalar-list} kind)
+      [:list (scalar-kind! (.children f 0) "$data$"
+                           (if (= :int64-list kind) #{:integer}
+                               #{:integer :boolean :string :keyword :uuid}))]
+      (= :timestamp kind)
       (let [^Timestamp t (.type f (Timestamp.))
             zone (when t (.timezone t))]
         (require! (and t (= TimeUnit/MICROSECOND (.unit t))
@@ -255,7 +257,7 @@
                            (and (= "UTC" zone) (contains? allowed :timestamp-utc))))
                   :unsupported-arrow-timestamp-type)
         (if (= "UTC" zone) :timestamp-utc :timestamp))
-      kind)))
+      :else kind)))
 
 (def ^:private timestamp-min (Instant/parse "0001-01-01T00:00:00Z"))
 (def ^:private timestamp-end (Instant/parse "9999-01-01T00:00:00Z"))
@@ -275,24 +277,67 @@
             :unsupported-arrow-keyword)
   (keyword s))
 
-(defn- int64-list-reader! [^RecordBatch batch node-index buffers start n]
+(defn- list-kind? [kind] (vector? kind))
+
+(defn- buffer-count [kind]
+  (if (list-kind? kind)
+    (+ 2 (buffer-count (second kind)))
+    (if (#{:string :keyword} kind) 3 2)))
+
+(defn- scalar-reader! [kind buffers start n]
+  (let [^ByteBuffer values (nth buffers (inc start))]
+    (case kind
+        (:string :keyword)
+        (let [^ByteBuffer data (nth buffers (+ start 2))
+              offsets (offsets! values data n)]
+          (fn [row]
+            (let [s (str (.decode (.newDecoder StandardCharsets/UTF_8)
+                                  (ByteBuffer/wrap (value-bytes! data offsets row))))]
+              (if (= :keyword kind) (keyword-value! s) s))))
+        :boolean
+        (do (require! (= (quot (+ n 7) 8) (.limit values))
+                      :unsupported-integer-buffer-layout)
+            #(present? values %))
+        :uuid
+        (do (require! (= (* 16 n) (.limit values))
+                      :unsupported-uuid-buffer-layout)
+            ;; Fixed binary is a byte string, not an Arrow
+            ;; little-endian numeric value.
+            (let [v (doto (.duplicate values) (.order ByteOrder/BIG_ENDIAN))]
+              (fn [row]
+                (let [offset (* 16 row)]
+                  (UUID. (.getLong v offset) (.getLong v (+ offset 8)))))))
+        (:timestamp :timestamp-utc)
+        (do (require! (= (* 8 n) (.limit values))
+                      :unsupported-arrow-timestamp-buffer-layout)
+            (let [zone (ZoneId/of (if (= :timestamp-utc kind) "UTC" "Z"))]
+              #(timestamp-value! (.getLong values (* 8 %)) zone)))
+        :integer
+        (do (require! (= (* 8 n) (.limit values))
+                      :unsupported-integer-buffer-layout)
+            #(.getLong values (* 8 %))))))
+
+(defn- list-reader! [kind ^RecordBatch batch node-index buffers start n]
   (let [child (.nodes batch (inc node-index))
         child-count (.length child)
         ^ByteBuffer offsets (nth buffers (inc start))
-        ^ByteBuffer child-validity (nth buffers (+ start 2))
-        ^ByteBuffer values (nth buffers (+ start 3))]
+        ^ByteBuffer child-validity (nth buffers (+ start 2))]
     (require! (and (<= 0 child-count (min (quot max-bytes 8) (* 256 n)))
                    (zero? (.nullCount child)) (zero? (.limit child-validity))
-                   (= (* 8 child-count) (.limit values))
                    (= (* 4 (inc n)) (.limit offsets)))
               :unsupported-arrow-list-buffer-layout)
+    ;; Preserve the original integer-list buffer rejection reason.
+    (when (= :integer kind)
+      (require! (= (* 8 child-count) (.limit ^ByteBuffer (nth buffers (+ start 3))))
+                :unsupported-arrow-list-buffer-layout))
     (let [xs (mapv #(.getInt offsets (* 4 %)) (range (inc n)))]
       (require! (and (zero? (first xs)) (= child-count (peek xs)) (apply <= xs))
                 :invalid-arrow-list-offsets)
       (require! (every? #(<= (- (second %) (first %)) 256) (partition 2 1 xs))
                 :arrow-list-element-limit)
-      (fn [row]
-        (mapv #(.getLong values (* 8 %)) (range (nth xs row) (nth xs (inc row))))))))
+      (let [read-child (scalar-reader! kind buffers (+ start 2) child-count)]
+        (fn [row]
+          (mapv read-child (range (nth xs row) (nth xs (inc row)))))))))
 
 (defn- scalar-rows! [bytes allowed]
   (if (nil? bytes)
@@ -307,9 +352,9 @@
         (require! (and (zero? (.remaining sb)) (= Endianness/Little (.endianness schema))
                        (zero? (.featuresLength schema)) (zero? (.customMetadataLength schema))
                        (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
-        (let [kinds (mapv #(scalar-kind! (.fields schema %) % allowed) (range columns))
-              starts (vec (reductions + 0 (map #(case % (:string :keyword) 3 :int64-list 4 2) kinds)))
-              node-starts (vec (reductions + 0 (map #(if (= :int64-list %) 2 1) kinds)))]
+        (let [kinds (mapv #(scalar-kind! (.fields schema %) (str "?_" %) allowed) (range columns))
+              starts (vec (reductions + 0 (map buffer-count kinds)))
+              node-starts (vec (reductions + 0 (map #(if (list-kind? %) 2 1) kinds)))]
           (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
                 ^RecordBatch batch (.header bm (RecordBatch.))
                 n (.length batch)]
@@ -327,37 +372,9 @@
                                 ^ByteBuffer values (nth buffers (inc start))]
                             (require! (and (= n (.length node)) (zero? (.nullCount node))
                                            (zero? (.limit validity))) :unsupported-integer-buffer-layout)
-                            (case kind
-                              :int64-list (int64-list-reader! batch node-index buffers start n)
-                              (:string :keyword)
-                              (let [^ByteBuffer data (nth buffers (+ start 2))
-                                    offsets (offsets! values data n)]
-                                (fn [row]
-                                  (let [s (str (.decode (.newDecoder StandardCharsets/UTF_8)
-                                                        (ByteBuffer/wrap (value-bytes! data offsets row))))]
-                                    (if (= :keyword kind) (keyword-value! s) s))))
-                              :boolean
-                              (do (require! (= (quot (+ n 7) 8) (.limit values))
-                                            :unsupported-integer-buffer-layout)
-                                  #(present? values %))
-                              :uuid
-                              (do (require! (= (* 16 n) (.limit values))
-                                            :unsupported-uuid-buffer-layout)
-                                  ;; Fixed binary is a byte string, not an Arrow
-                                  ;; little-endian numeric value.
-                                  (let [v (doto (.duplicate values) (.order ByteOrder/BIG_ENDIAN))]
-                                    (fn [row]
-                                      (let [offset (* 16 row)]
-                                        (UUID. (.getLong v offset) (.getLong v (+ offset 8)))))))
-                              (:timestamp :timestamp-utc)
-                              (do (require! (= (* 8 n) (.limit values))
-                                            :unsupported-arrow-timestamp-buffer-layout)
-                                  (let [zone (ZoneId/of (if (= :timestamp-utc kind) "UTC" "Z"))]
-                                    #(timestamp-value! (.getLong values (* 8 %)) zone)))
-                              :integer
-                              (do (require! (= (* 8 n) (.limit values))
-                                            :unsupported-integer-buffer-layout)
-                                  #(.getLong values (* 8 %))))))
+                            (if (list-kind? kind)
+                              (list-reader! (second kind) batch node-index buffers start n)
+                              (scalar-reader! kind buffers start n))))
                         (range columns))]
               (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
                         :unsupported-arrow-terminator)
@@ -567,3 +584,27 @@
    earlier scalar values. No heterogeneous, nested or nullable lists."
   [bytes]
   (expand-fixed-operations bytes int64-list-base int64-list-rows!))
+
+(def scalar-list-profile :xtdb-2.2.0-beta1/selected-homogeneous-scalar-list-arrow-operations-v1)
+(def ^:private scalar-list-base (assoc base :profile scalar-list-profile))
+
+(defn- scalar-list-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc :scalar-list}))
+
+(defn decode-scalar-list-arguments
+  "Decode bounded homogeneous nonnullable int64, Boolean, UTF-8, keyword
+   and UUID vectors alongside earlier scalar columns. No recursive lists."
+  [bytes]
+  (try
+    (assoc scalar-list-base :status :decoded :rows (scalar-list-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc scalar-list-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc scalar-list-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc scalar-list-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-scalar-list-operations
+  "Expand selected SQL groups with homogeneous non-temporal scalar vectors
+   and earlier scalar values. No heterogeneous or nullable list children."
+  [bytes]
+  (expand-fixed-operations bytes scalar-list-base scalar-list-rows!))
