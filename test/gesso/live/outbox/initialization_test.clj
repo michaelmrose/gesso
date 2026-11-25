@@ -9,7 +9,9 @@
             [xtdb.api :as xt]
             [xtdb.node :as xtn]))
 
-(defn- admission! []
+(defn- admission!
+  ([] (admission! :requests #{}))
+  ([table auxiliary]
   (let [id :example/initialize
         source {:subject {:kind :operation :id id :interface {:operation id}}
                 :state-types {:example/count {:type :integer}}
@@ -23,10 +25,10 @@
                  :declared-operation-ids #{id} :operations [{:id id :construction source}]}]
     (inductive/build-inductive-mapped-admission!
      {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
-      :target-map {:example/count [:document :requests "r1" :item_count]}
+      :target-map {:example/count [:document table "r1" :item_count]}
       :decode-outcome! identity
       :transaction-footprint! (fn [_] (throw (ex-info "Unexpected mapped operation" {})))
-      :auxiliary-tables #{} :document-effects {id {[:document :requests "r1"] {}}}})))
+      :auxiliary-tables auxiliary :document-effects {id {[:document table "r1"] {}}}}))))
 
 (defn- reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
@@ -104,3 +106,23 @@
       (is (= :invalid-mapped-writer-policy
              (reason #(policy/validate-config! {:admission admission :initializer [[:put-docs init/table marker]]
                                                 :observe! identity})))))))
+
+(deftest selected-writer-policy-reserves-infrastructure-tables
+  (let [config #(hash-map :admission % :initializer nil :observe! identity)
+        check #(reason (fn [] (policy/validate-config! (config %))))
+        canonical? (deref (ns-resolve 'gesso.live.outbox.writer-policy 'mapped-operations?))]
+    (doseq [table [:gesso_initializations :gesso_publication_manifests :gesso_live_outbox]]
+      (is (= :reserved-mapped-document-table (check (admission! table #{})))))
+    (doseq [table [:gesso_initializations :gesso_publication_manifests :other_effects]]
+      (is (= :unsupported-mapped-auxiliary-table (check (admission! :requests #{table})))))
+    (is (nil? (check (admission! :requests #{:gesso_live_outbox}))))
+    (let [base [["ASSERT TRUE"] [:put-docs :requests {:xt/id "r1"}]
+                [:put-docs :gesso_commands {:xt/id "c1"}]
+                [:put-docs :gesso_live_outbox {:xt/id "o1"}]]]
+      (is (canonical? base))
+      (doseq [table [:gesso_initializations :gesso_publication_manifests
+                     :gesso-initializations :public/gesso_initializations
+                     :public/gesso_publication_manifests :gesso-live-outbox
+                     :public/gesso_commands :Requests :public/requests]]
+        (is (not (canonical? (assoc-in base [1 1] table))) (str table)))
+      (is (not (canonical? (conj base [:delete-docs :requests "r1"])))))))

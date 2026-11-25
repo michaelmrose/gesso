@@ -249,7 +249,7 @@
     ;; Reject direct model commands targeting framework-owned tables before
     ;; adding the framework's own canonical command-record creation.
     (when (some (fn [{:model/keys [entity-type]}]
-                  (contains? #{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests"}
+                  (contains? #{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests" "gesso_initializations"}
                              (-> entity-type name str/lower-case (str/replace "-" "_"))))
                 (:commands fragment))
       (reject! :reserved-durable-model-table {}))
@@ -744,7 +744,7 @@
 (defn- require-distinct-physical-entities! [entity-topics]
   (reduce (fn [seen entity]
             (let [physical (physical-entity-name! entity)]
-              (when (#{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests"}
+              (when (#{"gesso_commands" "gesso_live_outbox" "gesso_publication_manifests" "gesso_initializations"}
                       (second physical))
                 (reject! :reserved-durable-model-table {:entity-type entity}))
               (when-let [previous (get seen physical)]

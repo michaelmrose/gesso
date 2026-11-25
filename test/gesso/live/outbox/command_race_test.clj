@@ -175,7 +175,8 @@
           (doseq [p [(assoc plan :emit :sync) (assoc plan :entry-fn identity)
                      (assoc plan :tx-options {:database "other"})]]
             (is (= :invalid-durable-model-plan (:reason (error #(run! "bad" p))))))
-          (doseq [table [:gesso_commands :public/gesso-live-outbox :gesso_publication_manifests]]
+          (doseq [table [:gesso_commands :public/gesso-live-outbox :gesso_publication_manifests
+                         :gesso_initializations :public/gesso-initializations]]
             (is (= :reserved-durable-model-table
                    (:reason (error #(run! "reserved" (assoc plan :commands
                                                             [(model-command/create table before version)])))))))
@@ -417,7 +418,8 @@
                      (:reason (error #(host/start! assembly identity
                                       (assoc-in config [:assembled-publication :model-entity-topics entity]
                                                 #{:request})))))))
-            (doseq [entity [:gesso-commands :public/gesso_live_outbox :gesso-publication-manifests]]
+            (doseq [entity [:gesso-commands :public/gesso_live_outbox :gesso-publication-manifests
+                            :gesso-initializations :public/gesso_initializations]]
               (is (= :reserved-durable-model-table
                      (:reason (error #(host/start! assembly identity
                                       (assoc-in config [:assembled-publication :model-entity-topics entity]

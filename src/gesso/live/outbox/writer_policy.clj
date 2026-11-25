@@ -7,12 +7,14 @@
   (:require [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.maintenance-policy :as maintenance]
             [gesso.live.outbox.initialization :as initialization]
-            [gesso.model.inductive-plan :as inductive]
-            [xtdb.util :as xt-util]))
+            [gesso.model.inductive-plan :as inductive]))
 
 (def ^:private maintenance-kinds
   {:gesso_publication_manifests :manifest
    :gesso_live_outbox :worker})
+
+(def ^:private reserved-tables
+  (into #{:gesso_commands initialization/table} (keys maintenance-kinds)))
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid mapped writer policy." {:reason reason})))
@@ -26,9 +28,7 @@
 (defn- initializer? [ops]
   (and (vector? ops) (seq ops)
        (every? #(and (put-op? %)
-                     (not= :gesso_commands (second %))
-                     (not= initialization/table (second %))
-                     (not (contains? maintenance-kinds (second %)))) ops)))
+                     (not (contains? reserved-tables (second %)))) ops)))
 
 (defn validate-config!
   "Validate the exact selected policy inputs before acquiring a node.
@@ -41,8 +41,27 @@
                  (or (nil? initializer) (initializer? initializer))
                  (fn? observe!))
     (reject! :invalid-mapped-writer-policy))
-  (inductive/describe-mapped-admission admission)
+  (let [{:keys [target-map auxiliary-tables]} (inductive/describe-mapped-admission admission)]
+    ;; Domain coordinates cannot declare infrastructure as application state.
+    ;; Only the canonical outbox is an auxiliary effect in this host profile;
+    ;; the command journal has its own checked journal-slot coordinates.
+    (when (some (fn [[kind table]]
+                  (and (#{:document :nullable-document} kind)
+                       (contains? reserved-tables table))) (vals target-map))
+      (reject! :reserved-mapped-document-table))
+    (when-not (every? #{:gesso_live_outbox} auxiliary-tables)
+      (reject! :unsupported-mapped-auxiliary-table)))
   config)
+
+(defn- mapped-operations? [ops]
+  ;; The issuer checks assertion/put order and the exact original envelope.
+  ;; At the installed boundary additionally require canonical table spellings
+  ;; and keep manifest and initialization writes out of the mapped path.
+  (let [[_ puts] (split-with #(and (vector? %) (string? (first %))) ops)]
+    (and (seq puts)
+         (every? #(and (put-op? %)
+                       (not (#{initialization/table :gesso_publication_manifests}
+                             (second %)))) puts))))
 
 (defn build-policy!
   "Bind admission to the owned connectable. Return the literal-boolean
@@ -61,10 +80,7 @@
        (when (and (= :execute-tx api) (empty? tx-options)
                   (vector? tx-ops) (seq tx-ops))
          (let [kind (or (when-let [{:keys [identity candidate]}
-                                  (when-not (some #(and (vector? %) (= :put-docs (first %))
-                                                        (keyword? (second %))
-                                                        (= (xt-util/kw->normal-form-kw initialization/table)
-                                                           (xt-util/kw->normal-form-kw (second %)))) tx-ops)
+                                  (when (mapped-operations? tx-ops)
                                     (publication/claim-framed-submission! admission connectable envelope))]
                           (assoc identity :kind :mapped-operation :candidate candidate))
                         (when (and seed-ops (= seed-ops tx-ops)
