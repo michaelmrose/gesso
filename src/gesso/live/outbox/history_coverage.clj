@@ -112,53 +112,121 @@
 
       :else (assoc base :classification :unclassified :reason :unexplained-observed-row-change))))
 
-(defn audit!
-  "Audit at most max-steps (1..128) following the exact active policy's
-   checked initialization through a pinned completed basis. Refuse an
-   oversized or ambiguous interval rather than returning a partial success.
-   Every ledger step is classified, including aborts and unexplained changes.
-   Stutters compare mapped and infrastructure rows at the step's valid
-   time. Worker replacements check the historical lease/receipt relation;
-   neither establishes actual writer footprints."
-  [connectable admission max-steps]
+(def ^:private open-obligations
+  #{:transaction-internal-read-basis-refinement
+    :valid-time-continuity-between-steps
+    :infrastructure-writer-footprint-coverage
+    :historical-worker-and-receipt-authentication
+    :unrestricted-physical-writer-closure
+    :principal-authentication-and-business-authorization
+    :complete-application-refinement})
+
+(defn- audit-scope! [connectable admission max-steps]
   (when-not (and (integer? max-steps) (<= 1 max-steps 128))
     (reject! :invalid-history-step-limit))
   (let [node (xtdb/connectable-from connectable)
         token (xtdb/current-submission-policy-token node)
         initial (correspondence/initialization-observation node admission)
-        _ (when-not initial (reject! :missing-history-initialization))
         tables (into #{} (keep (fn [[kind table]]
                                  (when (#{:document :nullable-document} kind) table)))
-                     (vals (:target-map (inductive/describe-mapped-admission admission))))
-        _ (when-not (every? #(and (simple-keyword? %) (re-matches #"[a-z][a-z0-9_]*" (name %))) tables)
-            (reject! :invalid-history-table))
-        {:keys [basis rows]} (frontier/q-with-basis!
+                     (vals (:target-map (inductive/describe-mapped-admission admission))))]
+    (when-not (and token initial) (reject! :missing-history-initialization))
+    (when-not (every? #(and (simple-keyword? %) (re-matches #"[a-z][a-z0-9_]*" (name %))) tables)
+      (reject! :invalid-history-table))
+    {:node node :token token :initial initial :tables tables :admission admission}))
+
+(defn- require-current-scope! [{:keys [node token initial admission]}]
+  (when-not (and (identical? token (xtdb/current-submission-policy-token node))
+                 (= initial (correspondence/initialization-observation node admission)))
+    (reject! :changed-history-policy)))
+
+(defn- observe-range! [{:keys [node initial]} anchor max-steps chunk?]
+  (let [{:keys [basis rows]} (frontier/q-with-basis!
                              node [(str "SELECT _id, committed, system_time FROM xt.txs WHERE system_time >= ? ORDER BY _id LIMIT " (+ 2 max-steps))
-                                   (:system-time initial)])
+                                   (if anchor (ledger-time anchor) (:system-time initial))])
         times (mapv ledger-time rows)
-        ids (mapv :xt/id rows)]
-    (when (> (count rows) (inc max-steps)) (reject! :history-step-limit-exceeded))
-    (when-not (and (vector? rows) (seq rows) (every? some? times)
-                   (every? integer? ids) (every? #(boolean? (:committed %)) rows)
-                   (true? (:committed (first rows))) (= (:system-time initial) (first times))
-                   (= (xtdb/basis-system-time basis) (peek times)) (= (xtdb/basis-tx-id basis) (peek ids))
+        ids (mapv :xt/id rows)
+        more? (> (count rows) (inc max-steps))
+        end-time (xtdb/basis-system-time basis)
+        end-id (xtdb/basis-tx-id basis)]
+    (when (and more? (not chunk?)) (reject! :history-step-limit-exceeded))
+    (when-not (and (vector? rows) (seq rows) (<= (count rows) (+ 2 max-steps))
+                   (every? some? times) (every? integer? ids)
+                   (every? #(boolean? (:committed %)) rows)
+                   (if anchor (= anchor (first rows))
+                     (and (true? (:committed (first rows))) (= (:system-time initial) (first times))))
+                   (if more?
+                     (and (<= (peek ids) end-id) (not (pos? (compare (peek times) end-time)))
+                          (= (= (peek ids) end-id) (= (peek times) end-time)))
+                     (and (= end-time (peek times)) (= end-id (peek ids))))
                    (every? (fn [[a b]] (< a b)) (partition 2 1 ids))
                    (every? (fn [[a b]] (neg? (compare a b))) (partition 2 1 times)))
       (reject! :ambiguous-history-ledger))
-    (let [opts (frontier/query-options! node)
-          steps (mapv (fn [[prior current]] (classify-step! node admission (:source-id initial) tables opts prior current))
-                      (partition 2 1 rows))
-          unresolved (filterv #(= :unclassified (:classification %)) steps)]
-      (when-not (and (identical? token (xtdb/current-submission-policy-token node))
-                     (= initial (correspondence/initialization-observation node admission)))
-        (reject! :changed-history-policy))
-      {:profile :selected-mapped-ledger-coverage-v1 :authority :none
-       :status (if (seq unresolved) :unclassified-steps :observed-interval-checked)
-       :initialization initial :through-basis basis :steps steps
-       :open-obligations #{:transaction-internal-read-basis-refinement
-                           :valid-time-continuity-between-steps
-                           :infrastructure-writer-footprint-coverage
-                           :historical-worker-and-receipt-authentication
-                           :unrestricted-physical-writer-closure
-                           :principal-authentication-and-business-authorization
-                           :complete-application-refinement}})))
+    {:basis basis :rows (if more? (pop rows) rows) :caught-up? (not more?)}))
+
+(defn- classify-range! [{:keys [node admission initial tables]} rows]
+  (let [opts (frontier/query-options! node)]
+    (mapv (fn [[prior current]] (classify-step! node admission (:source-id initial) tables opts prior current))
+          (partition 2 1 rows))))
+
+(defn audit!
+  "Audit at most max-steps (1..128) following verified initialization through
+   a pinned completed basis. Refuse oversized or ambiguous intervals."
+  [connectable admission max-steps]
+  (let [scope (audit-scope! connectable admission max-steps)
+        {:keys [basis rows]} (observe-range! scope nil max-steps false)
+        steps (classify-range! scope rows)]
+    (require-current-scope! scope)
+    {:profile :selected-mapped-ledger-coverage-v1 :authority :none
+     :status (if (some #(= :unclassified (:classification %)) steps)
+               :unclassified-steps :observed-interval-checked)
+     :initialization (:initial scope) :through-basis basis :steps steps
+     :open-obligations open-obligations}))
+
+;; Opaque, immutable cursors are issued only after a successful chunk read.
+;; A cursor is process-local and non-authoritative, not a durable certificate.
+(deftype HistoryCheckpoint [])
+(def ^:private checkpoints (java.util.WeakHashMap.))
+
+(defn- checkpoint-state! [scope checkpoint]
+  (when (some? checkpoint)
+    (let [prior (locking checkpoints (.get checkpoints checkpoint))]
+      (when-not (and prior (identical? (:token scope) (:token prior))
+                     (identical? (:admission scope) (:admission prior))
+                     (= (:initial scope) (:initial prior)))
+        (reject! :invalid-history-checkpoint))
+      prior)))
+
+(defn audit-chunk!
+  "Observe up to max-steps after initialization or an issued checkpoint.
+   Each call pins a new completed frontier. Its cursor anchors the next read
+   to the last checked ledger row (including aborts). Cumulative counts and
+   the first unresolved step cannot be reset by supplying a report as a
+   cursor. :caught-up? refers only to the observed frontier. Steps are local
+   to this chunk; the checkpoint retains only bounded summary data. A fresh
+   policy/restart requires a fresh audit. This remains diagnostic evidence."
+  ([connectable admission max-steps]
+   (audit-chunk! connectable admission max-steps nil))
+  ([connectable admission max-steps checkpoint]
+   (let [scope (audit-scope! connectable admission max-steps)
+         prior (checkpoint-state! scope checkpoint)
+         {:keys [basis rows caught-up?]} (observe-range! scope (:anchor prior) max-steps true)
+         steps (classify-range! scope rows)
+         counts (merge-with + (or (:counts prior) {}) (frequencies (map :classification steps)))
+         first-unclassified (or (:first-unclassified prior)
+                                (some #(when (= :unclassified (:classification %)) %) steps))
+         anchor (peek rows)
+         through (xtdb/basis (:xt/id anchor) (ledger-time anchor))
+         next-state (assoc (select-keys scope [:token :initial :admission])
+                           :anchor anchor :counts counts :first-unclassified first-unclassified)
+         next-checkpoint (HistoryCheckpoint.)]
+     (require-current-scope! scope)
+     (locking checkpoints (.put checkpoints next-checkpoint next-state))
+     {:profile :selected-mapped-ledger-chunk-v1 :authority :none
+      :status (cond first-unclassified :unclassified-steps
+                    caught-up? :observed-interval-checked
+                    :else :partial-interval)
+      :initialization (:initial scope) :through-basis through :target-basis basis
+      :caught-up? caught-up? :steps steps :counts counts
+      :first-unclassified first-unclassified :checkpoint next-checkpoint
+      :open-obligations open-obligations})))

@@ -395,3 +395,57 @@
               (is (= [:unclassified :unclassified]
                      (mapv :classification (take-last 2 (:steps (history/audit! handle admission 16))))))))
           (finally (release)))))))
+
+(deftest incremental-history-cursors-compose-without-dropping-findings
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)
+            checkpoint (atom nil)]
+        (try
+          (policy/activate-policy! writer)
+          (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :item-count 99}]])
+          (xt/execute-tx node seed)
+          (is (= :assert-failed (assert-result #(xt/execute-tx node [["ASSERT FALSE"]]))))
+          (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+          (let [handle (xtdb/adapter-connectable! node)
+                a (history/audit-chunk! handle admission 1)
+                b (history/audit-chunk! handle admission 2 (:checkpoint a))
+                c (history/audit-chunk! handle admission 1 (:checkpoint b))
+                whole (history/audit! handle admission 16)]
+            (is (= :unclassified-steps (:status a)))
+            (is (false? (:caught-up? a)))
+            (is (= {:unclassified 1} (:counts a)))
+            (is (= {:unclassified 2 :aborted-stutter 1} (:counts b)))
+            (is (= :unclassified-steps (:status c)))
+            (is (true? (:caught-up? c)))
+            (is (= (:target-basis c) (:through-basis c) (:through-basis whole)))
+            (is (= (:steps whole) (vec (concat (:steps a) (:steps b) (:steps c)))))
+            (is (= (frequencies (map :classification (:steps whole))) (:counts c)))
+            (is (= (first (:steps a)) (:first-unclassified a) (:first-unclassified c)))
+            (is (= :invalid-history-checkpoint (reason #(history/audit-chunk! handle admission 1 a))))
+            (is (= :invalid-history-checkpoint
+                   (reason #(history/audit-chunk! handle admission 1 (history/->HistoryCheckpoint)))))
+            (let [empty (history/audit-chunk! handle admission 1 (:checkpoint c))]
+              (is (= [] (:steps empty)))
+              (is (= (:counts c) (:counts empty)))
+              (is (= (:through-basis c) (:through-basis empty))))
+            ;; The next chunk may extend the target; it must start at the old
+            ;; anchor and retain all earlier unresolved observations.
+            (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 2}]])
+            (let [extended (history/audit-chunk! handle admission 1 (:checkpoint c))]
+              (is (= [:observed-mapped-stutter] (mapv :classification (:steps extended))))
+              (is (= {:unclassified 2 :aborted-stutter 1 :observed-mapped-stutter 2} (:counts extended)))
+              (is (= :unclassified-steps (:status extended)))
+              (is (true? (:caught-up? extended)))
+              (reset! checkpoint (:checkpoint extended))))
+          (finally (release)))
+        (let [another (policy/build-policy! node config {:source-id "s"})
+              release (xtdb/register-submission-policy! node another)]
+          (try
+            (policy/activate-policy! another)
+            (is (= :invalid-history-checkpoint
+                   (reason #(history/audit-chunk! node admission 1 @checkpoint))))
+            (finally (release))))))))

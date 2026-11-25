@@ -594,7 +594,20 @@
                    (is (= {:lease-acquisition 2 :dispatch-acknowledgment 2}
                           (frequencies (map :maintenance (:verified-infrastructure-transition groups)))))
                    (is (empty? (:observed-mapped-stutter groups)))
-                   (is (empty? (:unclassified groups))))
+                   (is (empty? (:unclassified groups)))
+                   (let [chunks (loop [cursor nil chunks []]
+                                  (let [chunk (history/audit-chunk! node (:issued preparations) 2 cursor)
+                                        accumulated (conj chunks chunk)]
+                                    (if (or (:caught-up? chunk) (= 8 (count accumulated)))
+                                      accumulated
+                                      (recur (:checkpoint chunk) accumulated))))
+                         final (peek chunks)]
+                     (is (= :partial-interval (:status (first chunks))))
+                     (is (true? (:caught-up? final)))
+                     (is (= :observed-interval-checked (:status final)))
+                     (is (= (:through-basis audit) (:through-basis final)))
+                     (is (= steps (vec (mapcat :steps chunks))))
+                     (is (= (frequencies (map :classification steps)) (:counts final)))))
                  (let [entries @writers
                        claims (filter #(= :claim (:kind %)) entries)
                        workers (filter #(= :worker (:kind %)) entries)
