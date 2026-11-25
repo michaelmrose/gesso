@@ -4,6 +4,8 @@
             [gesso.assurance.reference-transaction :as current]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
+            [gesso.live.outbox.read-frontier :as frontier]
+            [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox.publication-manifest :as manifest]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
@@ -708,3 +710,64 @@
                  (into {} (map (juxt :xt/id identity)) rows)))))
       (is (= (frequencies (coalesce-valid (:rectangles r)))
              (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) tables))))))))
+
+(defn- observed-at [r s v id]
+  (temporal/observe-outbox-at r (worker-time s) (worker-time v) id))
+
+(deftest independent-observed-lease-operands
+  (let [r (temporal/replay timestamp-transactions)
+        old (lease-guard :active intent-id (utc-time (worker-time 1)) (utc-time first-deadline))
+        new (lease-guard :expired intent-id (utc-time (worker-time 181)) (utc-time next-deadline))
+        check #(temporal/lease-fence-correspondence r (worker-time %1) (worker-time %2) %3)]
+    (is (= :predicted (:status (observed-at r 0 0 intent-id))))
+    (is (= pending-intent (dissoc (:row (observed-at r 0 0 intent-id)) :xt/system-from)))
+    (is (= (assoc first-lease :xt/system-from (utc-time (worker-time 1)))
+           (:row (observed-at r 183 180 intent-id))))
+    (is (= (assoc decoded-next-lease :xt/system-from (utc-time (worker-time 181)))
+           (:row (observed-at r 181 181 intent-id))))
+    (is (= :predicted (:status (observed-at r 1 1 other-intent-id))))
+    (is (nil? (:row (observed-at r 1 1 other-intent-id))))
+    (is (= :unsupported (:status (observed-at r 184 184 intent-id))))
+    (is (= :unsupported (:status (observed-at r 1 1 "id"))))
+    (is (= :matched (:status (check 1 1 old)) (:status (check 183 180 old))))
+    (is (= :matched (:status (check 181 181 new))))
+    (is (= :row-version (:reason (check 181 181 old))))
+    (is (= :lease-deadline (:reason (check 1 1 (assoc old 3 (utc-time next-deadline))))))
+    (is (= :not-leased (:reason (check 0 0 old)) (:reason (check 183 183 new))))
+    (is (= :none (:authority (check 1 1 old))))
+    (doseq [guard [(pop old) (assoc old 1 "id") (assoc old 2 (worker-time 1))
+                   (assoc old 3 nil) (version-guard intent-id (worker-time 1))]]
+      (is (= :unsupported (:status (check 1 1 guard)))))))
+
+(deftest independently-predicted-worker-observations-match-xtdb
+  (let [r (temporal/replay timestamp-transactions)
+        fence {:intent-id intent-id :lease-id other-intent-id :worker-id "worker-a"}]
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector timestamp-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (let [read-at (fn [s v id]
+                      (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? WHERE _id = ?"
+                                  (worker-time v) (worker-time s) id]))]
+        (doseq [s [0 1 3 181 182 183] v [0 1 180 181 182 183] id [intent-id other-intent-id]]
+          (let [predicted (observed-at r s v id)]
+            (is (= :predicted (:status predicted)))
+            (is (= (if-let [row (:row predicted)] [row] []) (read-at s v id)))))
+        ;; Real pinned provider read, not evidence of frontier acquisition.
+        (with-redefs [frontier/q-from! (fn [_ [_ id]] (read-at 3 3 id))]
+          (let [guard (first (acquisition/active-lease-guard-ops node fence))]
+            (is (= :matched (:status (temporal/lease-fence-correspondence
+                                      r (worker-time 3) (worker-time 3) guard))))))
+        ;; Capture reclamation operations, without claiming a real commit.
+        (let [captured (atom nil)
+              claim {:intent-id intent-id :lease-id intent-id :worker-id "worker-b"
+                     :now (worker-time 181) :lease-until next-deadline}]
+          (with-redefs [frontier/q-from! (fn [_ [_ id]] (read-at 3 3 id))
+                        live.xtdb/execute-tx! (fn [_ ops] (reset! captured ops) {})]
+            (acquisition/reclaim-expired! node claim))
+          (is (= 4 (count @captured)))
+          (is (= :matched (:status (temporal/lease-fence-correspondence
+                                    r (worker-time 3) (worker-time 3) (first @captured)))))
+          (is (= next-lease (nth (last @captured) 2))))))))

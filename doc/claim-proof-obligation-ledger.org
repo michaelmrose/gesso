@@ -2257,3 +2257,29 @@ lifetime absence or universal provider refinement. Observed lease metadata
 correspondence and composed worker execution remain open. No production
 assurance status changes and no CLM-R2 premise is retired. Full project,
 physical Claim, Chromium and independent proof gates were not rerun.
+
+* v2624 — model observed worker lease operand correspondence
+
+Add an independent pinned system/valid-time observation of decoded outbox
+rows including UTC issuing system-time metadata. Reject observations
+beyond the supplied replay history and selected mixed identity domains.
+Check exact decoded UUID, version and deadline operands of active and
+expired lease guards against an independently predicted leased row.
+Distinguish unsupported observations from mismatches; retain no authority
+or certificate. Observation profile v1; temporal v10, current-state v13
+and history v19 unchanged.
+
+Combined reference JVM: 41 tests / 5094 assertions, zero failures or
+errors. Compare 72 selected complete row observations with real embedded
+XTDB, including historical versions, absent identities and lease metadata.
+Exercise the public active guard and reclamation constructors with pinned
+provider reads; reclamation submission is stubbed solely to capture its
+operations. Pure regressions check stale versions, changed deadlines,
+non-leased rows, malformed operands and unsupported observation points.
+No observed provider row feeds the reference replay.
+
+This is finite observation/operand correspondence, not live frontier
+acquisition, lease ownership proof, complete worker lifecycle refinement
+or universal provider refinement. No production assurance status changes
+and no CLM-R2 premise is retired. Full project, physical Claim, Chromium
+and independent proof gates were not rerun.

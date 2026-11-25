@@ -1,7 +1,8 @@
 (ns gesso.assurance.reference-temporal
   "Independent finite bitemporal replay of selected document puts.
    System times are supplied as inputs, never inferred from provider results."
-  (:require [gesso.assurance.reference-transaction :as current])
+  (:require [clojure.string :as str]
+            [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZonedDateTime)))
 
 (def profile :selected-bitemporal-transaction-v10)
@@ -226,3 +227,56 @@
     (project-visible (:segments (last (take-while #(not (before? system-time (:system-time %)))
                                                 (:history report))))
                      valid-time)))
+
+(def observation-profile :selected-outbox-observation-v1)
+
+(defn observe-outbox-at
+  "Predict the decoded worker row at a pinned system/valid point.
+   No live frontier or authority is established."
+  [report system-time valid-time id]
+  (let [result {:profile observation-profile :authority :none :certificate :not-issued}]
+    (if-not (and (= profile (:profile report)) (= :predicted (:status report))
+                 (seq (:history report)) (uuid? id)
+                 (clock-instant? system-time) (clock-instant? valid-time)
+                 (not (before? (:system-time (peek (:history report))) system-time)))
+      (assoc result :status :unsupported)
+      (let [rows (get-in (last (take-while #(not (before? system-time (:system-time %)))
+                                          (:history report))) [:segments :gesso_live_outbox])
+            visible (fn [intervals]
+                      (first (filter (fn [[a b _ _]]
+                                       (and (not (before? valid-time a))
+                                            (before-end? valid-time b))) intervals)))]
+        (if (some (fn [[k intervals]] (and (not (uuid? k)) (visible intervals))) rows)
+          (assoc result :status :unsupported)
+          (assoc result :status :predicted
+                 :row (when-let [[_ _ doc origin] (visible (get rows id))]
+                        (assoc doc :xt/system-from (.atZone ^Instant origin (java.time.ZoneId/of "UTC"))))))))))
+
+(defn lease-fence-correspondence
+  "Check exact decoded observation operands for an active/expired guard.
+   Not later guard execution, lease ownership, or read freshness."
+  [report system-time valid-time guard]
+  (let [result {:profile observation-profile :authority :none :certificate :not-issued}]
+    (if-not (and (vector? guard) (nil? (meta guard)) (= 4 (count guard))
+                 (#{:active :expired} (get version-guards (first guard)))
+                 (uuid? (second guard))
+                 (every? #(and (instance? ZonedDateTime %)
+                               (clock-instant? (version-instant %))) (drop 2 guard)))
+      (assoc result :status :unsupported)
+      (let [{:keys [status row]} (observe-outbox-at report system-time valid-time (second guard))]
+        (cond
+          (not= :predicted status) (assoc result :status :unsupported)
+          (or (nil? row) (not= :leased (:gesso.live.outbox/status row)))
+          (assoc result :status :mismatch :reason :not-leased)
+          (not (and (= :gesso.live.outbox/publication-intent (:gesso.live.outbox/type row))
+                    (= 1 (:gesso.live.outbox/version row))
+                    (uuid? (:gesso.live.outbox/lease-id row))
+                    (string? (:gesso.live.outbox/lease-owner row))
+                    (not (str/blank? (:gesso.live.outbox/lease-owner row)))
+                    (instance? ZonedDateTime (:gesso.live.outbox/lease-until row))))
+          (assoc result :status :unsupported)
+          (not= (:xt/system-from row) (nth guard 2))
+          (assoc result :status :mismatch :reason :row-version)
+          (not= (:gesso.live.outbox/lease-until row) (nth guard 3))
+          (assoc result :status :mismatch :reason :lease-deadline)
+          :else (assoc result :status :matched))))))
