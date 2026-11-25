@@ -33,6 +33,7 @@
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.writer-policy :as writer-policy]
+            [gesso.live.outbox.initialization :as initialization]
             [xtdb.node :as xtn]))
 
 (def xtdb-module-id :gesso.live.outbox.host/xtdb)
@@ -170,6 +171,8 @@
         (reset! release (xtdb/register-submission-policy! node policy))))
     (manifest/require-compatible! node (get-in system [config-key :source-id])
                                   (::publication-manifest system))
+    (initialization/initialize! node (get-in system [config-key :source-id])
+                                (get-in system [config-key :mapped-writer-policy :initializer]))
     (assoc system :xtdb/connectable node ::close-node! close!)))
 
 (defn- stop-xtdb! [system]
@@ -311,7 +314,7 @@
    Optional :xtdb-submission-policy! is a trusted admission predicate installed
    on the owned node before manifest establishment and retained until close.
    Alternatively :mapped-writer-policy binds the selected framed executor
-   to the exact owned node, with one-use initialization and restricted
+   to the exact owned node, with durable one-time startup initialization and restricted
    framework-owned maintenance admission. The two selections are exclusive.
    Both cover adapter submit/execute calls, not direct or external XTDB writes.
    :live-options allows only owned :rules, :source-options, :dispatch-options.

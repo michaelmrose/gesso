@@ -338,7 +338,6 @@
                                            (protocol/wire->settlement (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))))})
                         (catch Exception e {:failure (ex-data e)})))]
          (try
-           (xtdb/execute-tx! node seed)
            (reset! initial-state (semantics/snapshot-at-frontier! node))
            (when (= :valid recovery-mode)
              ;; Actual network refusals must not reach either constructor.

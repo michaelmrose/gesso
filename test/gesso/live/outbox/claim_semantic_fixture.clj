@@ -233,7 +233,13 @@
         [head table row :as last-op] (peek ops)
         guards (pop ops)]
     (cond
-      (= seed ops) {:kind :initializer}
+      (= (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_initializations WHERE _id = ?)" source-id]
+                ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands)"]
+                ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox)"]
+                ["ASSERT 0 = (SELECT COUNT(*) FROM memberships)"]
+                ["ASSERT 0 = (SELECT COUNT(*) FROM requests)"]]
+               (conj seed [:put-docs :gesso_initializations {:xt/id source-id :profile-version 1}]))
+         ops) {:kind :initializer}
       (contains? tables :gesso_commands)
       (assoc (submitted-alternative! ops) :kind :claim)
       :else
