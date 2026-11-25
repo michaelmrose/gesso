@@ -1,0 +1,90 @@
+(ns gesso.assurance.reference-temporal-test
+  (:require [clojure.test :refer [deftest is]]
+            [gesso.assurance.reference-temporal :as temporal]
+            [xtdb.api :as xt]
+            [xtdb.db-catalog :as db]
+            [xtdb.node :as xtn])
+  (:import (java.time Duration Instant)))
+
+(defn- day [n] (.plusSeconds (Instant/parse "2020-01-01T00:00:00Z") (* 86400 n)))
+(defn- sys [n] (.plusSeconds (Instant/parse "2025-01-01T00:00:00Z") (* 86400 n)))
+(defn- put [table a b & docs]
+  (into [:put-docs {:into table :valid-from (day a) :valid-to (day b)}] docs))
+(def ^:private a {:xt/id "a" :value 1 :old true})
+(def ^:private b {:xt/id "a" :value 2})
+(def ^:private c {:xt/id "a" :value 3})
+(def ^:private d {:xt/id "b" :value 4})
+(def ^:private transactions
+  (mapv (fn [n ops] {:system-time (sys n) :ops ops}) (range 1 8)
+        [[(put :temporalprobe 1 9 a)]
+         [(put :temporalprobe 3 6 b) (put :temporalother 2 8 a)]
+         [(put :temporalprobe 0 4 c) (put :temporalprobe 5 7 c d)]
+         [(put :temporalprobe 0 10 b) ["ASSERT FALSE"] (put :temporalother 0 10 b)]
+         [(put :temporalprobe 8 10 c)]
+         [(put :temporalprobe 4 5 a) (put :temporalprobe 4 5 b)]
+         [["ASSERT TRUE"]]]))
+
+(deftest independent-bitemporal-overlay
+  (let [r (temporal/replay transactions)
+        at #(get-in (temporal/visible-at r (sys %1) (day %2)) [:temporalprobe "a"])]
+    (is (= :predicted (:status r)))
+    (is (= [true true true false true true true] (mapv :committed? (:history r))))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (nil? (at 0 1)))
+    (is (nil? (at 1 0)))
+    (is (= a (at 1 1)))
+    (is (= a (at 1 8)))
+    (is (nil? (at 1 9)))
+    (is (= a (at 2 2)))
+    (is (= b (at 2 3)))
+    (is (= b (at 2 5)))
+    (is (= a (at 2 6)))
+    (is (= c (at 3 0)))
+    (is (= b (at 3 4)))
+    (is (= c (at 3 5)))
+    (is (= a (at 3 7)))
+    (is (= (get-in r [:history 2 :segments]) (get-in r [:history 3 :segments])))
+    (is (= c (at 5 9)))
+    (is (nil? (at 5 10)))
+    (is (= b (at 6 4)))
+    (is (= a (get-in (temporal/visible-at r (sys 7) (day 5)) [:temporalother "a"])))
+    (is (= d (get-in (temporal/visible-at r (sys 7) (day 5)) [:temporalprobe "b"])))
+    (is (= b (at 2 4)))))
+
+(deftest rejects-unsupported-temporal-input
+  (doseq [txs [nil [] [(assoc (first transactions) :system-time nil)]
+               [(first transactions) (first transactions)]
+               [(second transactions) (first transactions)]
+               [{:system-time (sys 1) :ops [(put :temporalprobe 4 4 a)]}]
+               [{:system-time (sys 1) :ops [(put :temporalprobe 5 4 a)]}]
+               [{:system-time (sys 1) :ops [(assoc-in (put :temporalprobe 1 2 a) [1 :valid-from] (.plusNanos (day 1) 1))]}]
+               [{:system-time (sys 1) :ops [["ASSERT FALSE"] [:put-docs :temporalprobe a]]}]
+               [{:system-time (sys 1) :ops [(put :temporalprobe 1 2 a b)]}]
+               [{:system-time (sys 1) :ops [(put :temporalprobe 1 2 (assoc a :value nil))]}]]]
+    (let [r (temporal/replay txs)]
+      (is (= :unsupported (:status r)))
+      (is (not (contains? r :history))))))
+
+(defn- provider-at [node system-time valid-time]
+  (into {} (keep (fn [table]
+                   (let [rows (xt/q node [(str "SELECT * FROM " (name table)
+                                               " FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ?")
+                                         valid-time system-time])]
+                     (is (= (count rows) (count (set (map :xt/id rows)))))
+                     (when (seq rows) [table (into {} (map (juxt :xt/id identity)) rows)]))))
+        [:temporalprobe :temporalother]))
+
+(deftest independently-predicted-bitemporal-points-match-xtdb
+  (let [r (temporal/replay transactions)]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      ;; Compare old as well as new system snapshots after all writes.
+      (doseq [s (range 0 8) v (range -1 12)]
+        (is (= (temporal/visible-at r (sys s) (day v))
+               (provider-at node (sys s) (day v))) (str "system " s " valid " v))))))

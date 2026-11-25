@@ -1991,3 +1991,28 @@ This is finite empirical correspondence for selected journal vectors,
 not general SQL or universal provider refinement. No production assurance
 status changes and no CLM-R2 premise is retired. Full project, physical
 Claim, Chromium and independent proof gates were not rerun.
+
+* v2614 — introduce independent bounded bitemporal replay
+
+Add a separate reference temporal interpreter for explicit finite
+microsecond-aligned valid-time intervals and strictly increasing supplied
+system times. Overlay complete documents on half-open intervals, retaining
+unaffected left and right segments and earlier system snapshots. Ordered
+puts and literal assertions preserve atomic commit or abort; an abort
+retains the prior segments. Reject unsupported operations and malformed
+intervals before any replay. The current-state profile remains v9; the
+new selected bitemporal profile is v1 and history remains v19.
+
+Temporal JVM: 3 tests / 366 assertions, zero failures or errors. Seven
+embedded XTDB transactions with supplied system times compare outcomes
+and complete visible row maps at 104 system/valid-time point combinations,
+including old snapshots after later corrections, boundary instants,
+cross-table and multi-document writes, repeated replacement and rollback.
+No observed provider outcome or state feeds reference replay.
+
+This is selected finite point-query correspondence, not complete history
+rectangle correspondence, default or unbounded validity, temporal guard
+execution, or universal provider refinement. No production assurance
+status changes and no CLM-R2 premise is retired. Current-state regression,
+full project, physical Claim, Chromium and independent proof gates were
+not rerun in this revision.
