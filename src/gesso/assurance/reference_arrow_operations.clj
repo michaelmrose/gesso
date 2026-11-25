@@ -723,7 +723,7 @@
               :unsupported-arrow-union))
   (.children f 0))
 
-(defn- put-schema! [^Message m ^ByteBuffer body mixed-ids?]
+(defn- put-schema! [^Message m ^ByteBuffer body field-options]
   (let [^Schema schema (.header m (Schema.))]
     (require! (and schema (zero? (.remaining body)) (= Endianness/Little (.endianness schema))
                    (= 1 (.fieldsLength schema)) (zero? (.featuresLength schema))
@@ -744,9 +744,9 @@
           (require! (and t (= TimeUnit/MICROSECOND (.unit t)) (= "UTC" (.timezone t)))
                     :unsupported-arrow-put-bound-type)))
       (let [^Field doc (.children table 0)
-            kind (scalar-kind! doc "$data$" (cond-> #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
-                                                       :empty-list :recursive-list :struct-map :document-keys :empty-struct}
-                                               mixed-ids? (conj :mixed-document-ids)))]
+            kind (scalar-kind! doc "$data$" (into #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                                                :empty-list :recursive-list :struct-map :document-keys :empty-struct}
+                                              field-options))]
         (require! (struct-kind? kind) :unsupported-arrow-put-document)
         {:table (keyword table-name) :kind kind}))))
 
@@ -786,12 +786,12 @@
                               (.position copy (* 16 i)) (.get copy b) (.formatHex (HexFormat/of) b))) (range n))
          :bounds {}}))))
 
-(defn- decode-put-envelope* [bytes mixed-ids?]
+(defn- decode-put-envelope* [bytes field-options]
   (try
     (require! (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes)) :arrow-byte-limit)
     (let [stream (doto (ByteBuffer/wrap ^bytes bytes) (.order ByteOrder/LITTLE_ENDIAN))
           [sm sb] (message! stream MessageHeader/Schema)
-          schema (put-schema! sm sb mixed-ids?)
+          schema (put-schema! sm sb field-options)
           [bm bb] (message! stream MessageHeader/RecordBatch)
           group (put-batch! bm bb schema)]
       (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream))) :unsupported-arrow-terminator)
@@ -805,7 +805,7 @@
    Retain IID bytes without verifying their correspondence to document IDs.
    Nonnullable selected documents only; no execution or admission claim."
   [bytes]
-  (decode-put-envelope* bytes false))
+  (decode-put-envelope* bytes #{}))
 
 (defn- verify-put-iids [decoded profile derive-iid]
   (let [result-base (assoc base :profile profile)]
@@ -871,4 +871,16 @@
    Only outer _id fields admit the four-family dense union. This does not
    establish cross-family injectivity, authenticity or transaction admission."
   [bytes]
-  (verify-put-iids (decode-put-envelope* bytes true) mixed-id-put-profile iid/document-iid))
+  (verify-put-iids (decode-put-envelope* bytes #{:mixed-document-ids}) mixed-id-put-profile iid/document-iid))
+
+(def nullable-document-put-profile :xtdb-2.2.0-beta1/selected-nullable-document-verified-put-arrow-v1)
+
+(defn decode-nullable-document-put
+  "Verify selected put envelopes including nullable document fields. Omit
+   invalid fields according to the retained representation; preserve present
+   empty containers and exact ID/IID pairs. No submission identity or admission claim."
+  [bytes]
+  (verify-put-iids
+    (decode-put-envelope* bytes #{:mixed-document-ids :nullable-struct-fields :null-only-fields
+                                  :nullable-list-fields :nullable-map-fields})
+    nullable-document-put-profile iid/document-iid))

@@ -3865,3 +3865,30 @@ put fields, explicit valid-time bounds, multiple groups and aggregate
 document budgets remain open. No production wiring, certificate or
 CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2684 — verify selected nullable retained document puts
+
+Extend single-group put schema qualification through an explicit set of
+field options, preserving all prior profiles. Reuse the selected nullable
+scalar, null-only, list and map readers in a new verified put profile,
+including mixed document IDs. Physical put probes and provider observation
+confirm omission of invalid fields, including explicit nil and missing
+keys, while preserving false and present empty containers. Verify every
+retained IID independently. This is retained correspondence, not recovery
+of original submitted key presence or transaction admission.
+
+Focused JVM: 40 tests / 2496 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. Real
+persistent mixed-ID puts with nullable scalar, list, map and null-only
+fields match expected groups and provider observations before and after
+reopening. Exercise value and validity mutations, reject invalid list
+spans, non-padding hidden map values, inconsistent IIDs, arbitrary
+non-ID unions and truncated framing without partial groups. The initial
+run failed 32 assertions because mutation buffer indexes were shifted by
+one; correct the fixture and rerun all four namespaces. XTDB logged
+shutdown cancellation; the passing process exited zero.
+
+Selected nullable-document verified put profile v1. Explicit valid-time
+bounds, multiple put groups/tables, mixed operation sequences and aggregate
+document budgets remain open. No production wiring, certificate or CLM-R2
+premise retirement. Full project and independent formal gates were not rerun.

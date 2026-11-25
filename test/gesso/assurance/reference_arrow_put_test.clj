@@ -505,3 +505,69 @@
           (.awaitSourceBlocking (db/primary-db node) other-union-id (Duration/ofSeconds 10))
           (check-mixed-ids! node id homogeneous-id other-union-id)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-nullable-documents! [node id plain-id unsupported-id]
+  (let [data (#'fixture/retained-operation-bytes node id)
+        expected {:kind :put-docs :table :public/foo
+                  :documents [{:xt/id 1 :a 1 :b false :items [1 2] :nested {:ok true} :empty {}}
+                              {:xt/id "1"}
+                              {:xt/id 2 :items [] :nested {} :empty {}}]
+                  :iids ["4cd9b7672d7fbee8fb51fb1e049f6903" "e8bc163c82eee18733288c7d4ac636db"
+                         "420fce314175df402adbeae3cfbbb856"] :bounds {}}
+        buffers (#'fixture/buffer-starts data)
+        [iids a-valid a-values list-valid list-offsets nested-valid empty-valid]
+        (mapv #(nth buffers %) [6 19 20 23 24 27 30])
+        decode arrow/decode-nullable-document-put
+        r (decode data)]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+    (is (= arrow/nullable-document-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= [expected] (:groups r) (:operations (provider/observe-source-message! node id))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-mixed-id-put data))))
+    (is (= 1 (bit-and 255 (aget ^bytes data a-valid))))
+    (is (= [(assoc-in expected [:documents 0 :a] 99)]
+           (:groups (decode (#'fixture/edit-long data a-values 99)))))
+    (is (= [(assoc-in expected [:documents 1 :items] [])]
+           (:groups (decode (#'fixture/edit-byte data list-valid 7)))))
+    (is (= [(assoc-in expected [:documents 1 :empty] {})]
+           (:groups (decode (#'fixture/edit-byte data empty-valid 7)))))
+    (let [plain (#'fixture/retained-operation-bytes node plain-id)]
+      (is (= :matched (:iid-correspondence (decode plain))))
+      (is (= (:groups (arrow/decode-mixed-id-put plain)) (:groups (decode plain)))))
+    (doseq [[bad reason] [[(#'fixture/edit-byte data list-valid 4) :unsupported-arrow-nullable-list-extent]
+                          [(#'fixture/edit-int data (+ list-offsets 4) 1) :unsupported-arrow-nullable-list-extent]
+                          [(#'fixture/edit-byte data nested-valid 4) :unsupported-arrow-nullable-struct-padding]
+                          [(#'fixture/edit-byte data iids 0) :document-iid-mismatch]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]
+                          [(#'fixture/retained-operation-bytes node unsupported-id) :unsupported-arrow-field]]]
+      (let [r (decode bad)]
+        (is (= :unsupported (:status r)) (pr-str (dissoc r :groups)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :groups)))
+        (is (not (contains? r :iid-correspondence)))))))
+
+(deftest selected-nullable-documents-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-nullable-put-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        docs [{:xt/id 1 :a 1 :b false :items [1 2] :nested {:ok true} :empty {} :nullonly nil}
+              {:xt/id "1"}
+              {:xt/id 2 :a nil :b nil :items [] :nested {} :empty {}}]]
+    (try
+      (let [[id plain-id unsupported-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! [(into [:put-docs :foo] docs)])
+                    plain-id (submit! [[:put-docs :foo {:xt/id "plain" :a 1}]])
+                    unsupported-id (submit! [[:put-docs :foo {:xt/id 1 :value 1}
+                                              {:xt/id 2 :value "x"}]])]
+                (check-nullable-documents! node id plain-id unsupported-id)
+                [id plain-id unsupported-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) unsupported-id (Duration/ofSeconds 10))
+          (check-nullable-documents! node id plain-id unsupported-id)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
