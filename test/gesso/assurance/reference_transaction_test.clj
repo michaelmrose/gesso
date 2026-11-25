@@ -63,8 +63,55 @@
       (is (= :none (:authority predicted)))
       (is (= :not-issued (:certificate predicted))))))
 
+(defn- read-guard [table id field expected]
+  [(str "ASSERT EXISTS (SELECT 1 FROM \"" (name table)
+        "\" WHERE _id = ? AND \"" (name field) "\" = ?)") id expected])
+
+(def ^:private read-cases
+  ;; Each case establishes its own relevant starting value.
+  (let [reset-a [:put-docs :refprobe a]
+        g #(read-guard :refprobe "a" :value %)]
+    [[true [reset-a (g 1) put-a (g 3) put-other]]
+     [false [reset-a put-a (g 1) put-other]]
+     [true [reset-a put-a (g 3) reset-a (g 1)]]
+     [false [reset-a put-a (g 3) reset-a (g 3)]]
+     [true [put-b (read-guard :refprobe "b" :value 2) put-other]]
+     [false [put-a (read-guard :refprobe "absent" :value 3) put-other]]
+     [false [reset-a put-a (read-guard :refprobe "a" :old true)]]
+     [true [reset-a (read-guard :refprobe "a" :old true) put-a]]
+     [true [put-other put-a (read-guard :refother "a" :value 9) (g 3)]]
+     [false [put-other put-a (read-guard :refother "a" :value 3)]]
+     [true [[:put-docs :refprobe {:xt/id "a" :value "café"}] (g "café")]]
+     [false [[:put-docs :refprobe {:xt/id "a" :value "café"}] (g "cafe\u0301")]]
+     [true [[:put-docs :refprobe {:xt/id "a" :value false}] (g false)]]
+     [false [[:put-docs :refprobe {:xt/id "a" :value false}] (g true)]]]))
+
+(deftest independent-transaction-internal-reads
+  (doseq [[expected ops] read-cases]
+    (let [r (reference/execute initial ops)]
+      (is (= :predicted (:status r)) (pr-str ops))
+      (is (= expected (:committed? r)) (pr-str ops))
+      (if expected
+        (is (not (contains? r :failed-assertion-index)))
+        (do (is (= initial (:state r)))
+            (is (string? (first (nth ops (:failed-assertion-index r)))))))
+      (is (= :none (:authority r)))
+      (is (= :not-issued (:certificate r)))))
+  (let [r (reference/execute initial [put-a (read-guard :refprobe "a" :value 3)])]
+    (is (= replacement (get-in (:state r) [:refprobe "a"]))))
+  (let [r (reference/execute initial [put-a (read-guard :refprobe "a" :value 1)])]
+    (is (= 1 (:failed-assertion-index r)))))
+
 (deftest unsupported-reference-input-does-not-predict
-  (doseq [ops [[] [["ASSERT ? = ?" 1]] [["ASSERT ? = ?" 1 1 1]]
+  (doseq [ops [[] [(read-guard :refprobe "a" :value nil)]
+               [(read-guard :refprobe "a" :value "1")]
+               [(read-guard :refprobe "a" :value :open)]
+               [(read-guard :xt_txs "a" :value 1)]
+               [(read-guard :refprobe "a" :bad_field 1)]
+               [(read-guard :refprobe "" :value 1)]
+               [(pop (read-guard :refprobe "a" :value 1))]
+               [["ASSERT FALSE"] (read-guard :refprobe "a" :value nil)]
+               [["ASSERT ? = ?" 1]] [["ASSERT ? = ?" 1 1 1]]
                [["ASSERT ? = ?" 1 "1"]] [["ASSERT ? = ?" :open "open"]]
                [["ASSERT ? = ?" nil nil]] [["ASSERT ? = ?" 1.0 1.0]]
                [["ASSERT ? = ?" 1N 1N]] [["ASSERT ? = ?" [1] [1]]]
@@ -116,14 +163,16 @@
                     [[:put-docs :refprobe a b] ["ASSERT TRUE"]]
                     [put-a ["ASSERT FALSE"] [:put-docs :refother {:xt/id "z" :value 7}]]
                     [put-other ["ASSERT TRUE"] put-a]]
-                         (map-indexed
-                          (fn [i [left right _]]
-                            ;; Distinct writes around the assertion expose
-                            ;; wrong commits and incomplete rollback.
-                            [[:put-docs :refprobe {:xt/id "a" :value (+ 100 i)}]
-                             ["ASSERT ? = ?" left right]
-                             [:put-docs :refother {:xt/id "a" :value (+ 200 i)}]])
-                          equality-cases))]
+                         (concat
+                          (map-indexed
+                           (fn [i [left right _]]
+                             ;; Distinct writes around the assertion expose
+                             ;; wrong commits and incomplete rollback.
+                             [[:put-docs :refprobe {:xt/id "a" :value (+ 100 i)}]
+                              ["ASSERT ? = ?" left right]
+                              [:put-docs :refother {:xt/id "a" :value (+ 200 i)}]])
+                           equality-cases)
+                          (map second read-cases)))]
         (when-let [ops (first cases)]
           (let [predicted (reference/execute state ops)
                 id (:tx-id (xt/submit-tx node ops))

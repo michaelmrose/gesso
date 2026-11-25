@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v2)
+(def profile :selected-current-state-transaction-v3)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -58,6 +58,32 @@
                                           (and (document? doc) (= id (:xt/id doc)))) rows))) state))
     (reject! :unsupported-reference-prestate)))
 
+;; Exact selected row-read assertion, not a general SQL parser. Quoted
+;; identifiers avoid reserved-word ambiguity and have no escape syntax here.
+(def ^:private read-pattern
+  #"ASSERT EXISTS \(SELECT 1 FROM \"([a-z][a-z0-9_]*)\" WHERE _id = \? AND \"([a-z][a-z0-9]*)\" = \?\)")
+
+(defn- read-assertion! [op]
+  (let [[sql id expected] op
+        [_ table field] (re-matches read-pattern sql)
+        domain (equality-domain expected)]
+    (when-not (and (= 3 (count op)) table (table? (keyword table))
+                   (id? id) (= :string (equality-domain id))
+                   (#{:i64 :boolean :string} domain))
+      (reject! :unsupported-reference-read-assertion))
+    {:kind :assert-read :table (keyword table) :id id
+     :field (keyword field) :expected expected :domain domain}))
+
+(defn- read-matches! [working {:keys [table id field expected domain]}]
+  (let [row (get-in working [table id])]
+    (if (contains? row field)
+      (let [actual (get row field)]
+        ;; Do not infer SQL coercion rules from Clojure equality.
+        (when-not (= domain (equality-domain actual))
+          (reject! :unsupported-reference-read-domain))
+        (= expected actual))
+      false)))
+
 (defn- check-op! [op]
   (when-not (and (vector? op) (nil? (meta op)) (seq op))
     (reject! :unsupported-reference-operation))
@@ -65,6 +91,8 @@
     (= ["ASSERT TRUE"] op) :assert-true
     (= ["ASSERT FALSE"] op) :assert-false
     (= "ASSERT ? = ?" (first op)) (equality-kind! op)
+    (and (string? (first op)) (re-matches read-pattern (first op)))
+    (read-assertion! op)
     (= :put-docs (first op))
     (let [docs (subvec op (min 2 (count op)))]
       (when-not (and (table? (second op)) (<= 1 (count docs) 16384)
@@ -77,9 +105,11 @@
 (defn execute
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-id document}}. Puts replace entire documents in order;
-   literal or homogeneous parameter equality assertions can abort and return
-   the original state. The full vector is
-   validated before evaluation, including operations after a false guard.
+   literal, homogeneous parameter equality and selected row-read assertions
+   can abort and return the original state. Row reads see the tentative state
+   produced by preceding operations. The full vector is structurally validated
+   before evaluation, including operations after a false guard; reached reads
+   also check the stored operand domain.
    Unsupported input returns no predicted state or outcome. No arbitrary
    SQL, temporal bounds, callbacks, or observed outcomes are accepted."
   [state ops]
@@ -92,12 +122,17 @@
         (loop [working state i 0]
           (if (= i (count ops))
             (assoc report :status :predicted :committed? true :state working)
-            (case (nth kinds i)
-              :assert-true (recur working (inc i))
-              :assert-false (assoc report :status :predicted :committed? false :state state :failed-assertion-index i)
-              :put (let [[_ table & docs] (nth ops i)]
-                     (recur (reduce (fn [s doc] (assoc-in s [table (:xt/id doc)] doc)) working docs)
-                            (inc i)))))))
+            (let [kind (nth kinds i)]
+              (case (if (map? kind) (:kind kind) kind)
+                :assert-true (recur working (inc i))
+                :assert-false (assoc report :status :predicted :committed? false :state state :failed-assertion-index i)
+                :assert-read (if (read-matches! working kind)
+                               (recur working (inc i))
+                               (assoc report :status :predicted :committed? false
+                                      :state state :failed-assertion-index i))
+                :put (let [[_ table & docs] (nth ops i)]
+                       (recur (reduce (fn [s doc] (assoc-in s [table (:xt/id doc)] doc)) working docs)
+                              (inc i))))))))
       (catch clojure.lang.ExceptionInfo e
         (if (::unsupported (ex-data e))
           (assoc report :status :unsupported :reason (:reason (ex-data e)))

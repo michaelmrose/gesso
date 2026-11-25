@@ -1807,3 +1807,30 @@ transaction-internal reads, mapped value coverage or a provider refinement
 theorem. No production assurance status changes or CLM-R2 premise is
 retired. Full physical Claim, project, Chromium and separate proof gates
 were not rerun.
+
+* v2607 — model selected transaction-internal row reads
+
+Extend the independent reference interpreter to the exact quoted-identifier
+ASSERT EXISTS (SELECT 1 FROM table WHERE _id = ? AND field = ?) shape.
+The selected fragment uses string row identities and a single flat field
+with homogeneous signed long, boolean or well-formed string equality.
+The predicate reads the tentative state, not the transaction's original
+state or a provider observation. Missing rows or fields cannot satisfy
+this equality predicate. Reached mixed-domain comparisons are unsupported;
+the entire operation vector is structurally checked before evaluation.
+A false predicate restores the original modeled state. Reference profile
+v3; history v19 unchanged.
+
+Final reference JVM namespace: 5 tests / 543 assertions, zero failures or
+errors. Fourteen additional embedded XTDB differential cases cover reads
+before and after replacement, repeated replacements, new rows, absent rows,
+removed fields, cross-table isolation, strings and booleans. Continue
+comparing complete selected visible maps, retained envelopes and recorded
+outcomes while carrying forward only independent reference predictions.
+Pure regressions check commit and rollback plus unsupported read inputs.
+
+This is finite empirical evidence for one restricted read shape, not general
+SQL, COUNT/NOT EXISTS, mapped predicates, bitemporal semantics or universal
+provider refinement. No production assurance status changes and no CLM-R2
+premise is retired. Full physical Claim, project, Chromium and separate
+proof gates were not rerun.
