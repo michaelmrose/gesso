@@ -1914,3 +1914,28 @@ journal guard semantics, arbitrary decoded key coverage or a universal
 provider refinement theorem. No production assurance status changes
 and no CLM-R2 premise is retired. Full project, physical Claim, Chromium
 and separate proof gates were not rerun.
+
+* v2611 — model independent journal slot cardinality
+
+Recognize the exact zero- and one-match principal/operation COUNT guards
+emitted by command resolution and mapped framing. Independently select
+rows from tentative gesso_commands state by nested principal raw string
+and keyword operation, rather than command row identity or arguments.
+Reject unsupported operand domains and non-map intermediate paths; do
+not infer mixed-type SQL equality. Extend canonical document key names to
+restricted hyphenated segments for actual command records. Reference
+profile v7; history v19 unchanged.
+
+Final reference JVM namespace: 9 tests / 1275 assertions, zero failures
+or errors. Fifteen additional differential transactions exercise actual
+formatted selectors and constructor-generated records, absent and occupied
+slots, distinct principals and operations, duplicate slots, replacement,
+changed outcomes and atomic rollback. Pure regressions check expected
+outcomes and reject malformed selectors and unsupported stored domains.
+No provider readback feeds the next reference state.
+
+This is selected finite empirical slot correspondence, not complete
+recursive journal guard semantics, general SQL equality or universal
+provider refinement. No production assurance status changes and no
+CLM-R2 premise is retired. Full project, physical Claim, Chromium and
+independent proof gates were not rerun.

@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v6)
+(def profile :selected-current-state-transaction-v7)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -42,7 +42,7 @@
 
 (defn- value-key? [k]
   ;; Conservative canonical keys, including dotted journal namespaces.
-  (and (keyword? k) (re-matches #"[a-z][a-z0-9]*" (name k))
+  (and (keyword? k) (re-matches #"[a-z][a-z0-9]*(?:-[a-z0-9]+)*" (name k))
        (or (nil? (namespace k))
            (and (not= "xt" (namespace k))
                 (re-matches #"[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*" (namespace k))))))
@@ -196,6 +196,43 @@
                                :else (reject! :unsupported-reference-mapped-domain)))))
                        checks)))))
 
+;; Exact slot selectors emitted by command resolution and mapped framing.
+;; The slot is keyed by nested principal/operation, not command row identity.
+(def ^:private journal-slot-pattern
+  #"ASSERT ([01]) = \(SELECT COUNT\(\*\) FROM gesso_commands WHERE \(gesso\$command\$binding\)\.principal\.gesso\$choreo\$identity\$value = \? AND \(gesso\$command\$binding\)\.operation = \?\)")
+
+(defn- journal-slot-assertion! [op [_ n]]
+  (let [[_ principal operation] op]
+    (when-not (and (= 3 (count op)) (id? principal)
+                   (= :string (equality-domain principal))
+                   (= :keyword (equality-domain operation)))
+      (reject! :unsupported-reference-journal-slot))
+    {:kind :assert-journal-slot :principal principal :operation operation
+     :expected (Long/parseLong n)}))
+
+(defn- journal-path! [row path]
+  (reduce (fn [v field]
+            (cond
+              (nil? v) nil
+              (map? v) (get v field)
+              :else (reject! :unsupported-reference-journal-path)))
+          row path))
+
+(defn- journal-slot-matches? [working {:keys [principal operation expected]}]
+  (let [matches
+        (mapv (fn [row]
+                (let [p (journal-path! row [:gesso.command/binding :principal
+                                            :gesso.choreo.identity/value])
+                      o (journal-path! row [:gesso.command/binding :operation])]
+                  ;; The selector uses ordinary SQL equality. Unlike
+                  ;; non-null types may be coerced; do not guess.
+                  (when-not (and (or (nil? p) (= :string (equality-domain p)))
+                                 (or (nil? o) (= :keyword (equality-domain o))))
+                    (reject! :unsupported-reference-journal-slot-domain))
+                  (and (= principal p) (= operation o))))
+              (vals (get working :gesso_commands)))]
+    (= expected (count (filter true? matches)))))
+
 (defn- check-op! [op]
   (when-not (and (vector? op) (nil? (meta op)) (seq op))
     (reject! :unsupported-reference-operation))
@@ -211,6 +248,8 @@
     (count-assertion! op :assert-field-count (re-matches field-count-pattern (first op)))
     (and (string? (first op)) (re-matches mapped-pattern (first op)))
     (mapped-assertion! op (re-matches mapped-pattern (first op)))
+    (and (string? (first op)) (re-matches journal-slot-pattern (first op)))
+    (journal-slot-assertion! op (re-matches journal-slot-pattern (first op)))
     (= :put-docs (first op))
     (let [docs (subvec op (min 2 (count op)))]
       (when-not (and (table? (second op)) (<= 1 (count docs) 16384)
@@ -224,7 +263,8 @@
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-id document}}. Puts replace entire documents in order;
    literal, homogeneous parameter equality, selected row-read, count
-   and mapped scalar assertions can abort and return the original state. Reads see the tentative state
+   mapped scalar and selected journal slot assertions can abort and return
+   the original state. Reads see the tentative state
    produced by preceding operations. The full vector is structurally validated
    before evaluation, including operations after a false guard; reached reads
    also check the stored operand domain.
@@ -252,6 +292,11 @@
                                  (recur working (inc i))
                                  (assoc report :status :predicted :committed? false
                                         :state state :failed-assertion-index i))
+                :assert-journal-slot
+                (if (journal-slot-matches? working kind)
+                  (recur working (inc i))
+                  (assoc report :status :predicted :committed? false
+                         :state state :failed-assertion-index i))
                 (:assert-row-count :assert-field-count)
                 (if (count-matches? working kind)
                   (recur working (inc i))

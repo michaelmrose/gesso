@@ -4,6 +4,9 @@
             [gesso.assurance.reference-transaction :as reference]
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.model.tx :as tx]
+            [gesso.choreo.identity :as identity]
+            [gesso.model.command-resolution :as resolution]
+            [gesso.model.mapped-frame :as frame]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
@@ -256,6 +259,65 @@
       (is (not (contains? r :state)))
       (is (not (contains? r :committed?))))))
 
+(defn- journal-binding [id principal operation]
+  {:command-id (identity/command-id id) :principal (identity/principal principal)
+   :operation operation :arguments {:request-id "r"}})
+
+(def ^:private slot-binding (journal-binding "c1" "helper-a" :request/claim))
+(def ^:private slot-row (resolution/command-record slot-binding {:status :claimed} "t1"))
+(def ^:private slot-duplicate
+  (resolution/command-record (journal-binding "c2" "helper-a" :request/claim)
+                             {:status :claimed} "t2"))
+(def ^:private slot-other-principal
+  (resolution/command-record (journal-binding "c3" "helper-b" :request/claim)
+                             {:status :claimed} "t2"))
+(def ^:private slot-other-operation
+  (resolution/command-record (journal-binding "c4" "helper-a" :request/release)
+                             {:status :released} "t2"))
+(def ^:private slot-empty (resolution/principal-operation-slot-assertion slot-binding))
+(def ^:private slot-occupied
+  (first (frame/formatted-prestate-assertions!
+          {:target-map {:outcome [:journal-slot "helper-a" :request/claim]}}
+          {} [slot-row])))
+(defn- journal-put [row] [:put-docs :gesso_commands row])
+(def ^:private slot-cases
+  [[true [slot-empty]]
+   [false [slot-occupied]]
+   [true [(journal-put slot-other-principal) (journal-put slot-other-operation) slot-empty]]
+   [true [(journal-put slot-row) slot-occupied]]
+   [false [(journal-put slot-duplicate) slot-occupied put-other]]
+   [false [slot-empty put-other]]
+   [true [slot-occupied]]
+   [true [(journal-put (assoc slot-other-principal :xt/id "c1")) slot-empty]]
+   [false [slot-occupied]]
+   [true [(journal-put slot-row) slot-occupied]]
+   [true [(journal-put (assoc slot-row :gesso.command/outcome {:status :changed})) slot-occupied]]
+   [false [(journal-put slot-duplicate) slot-empty]]
+   [true [(journal-put slot-duplicate)]]
+   [false [slot-occupied]]
+   [false [slot-empty]]])
+
+(deftest independent-journal-slot-selection
+  (let [final (reduce (fn [state [expected ops]]
+                        (let [r (reference/execute state ops)]
+                          (is (= :predicted (:status r)) (pr-str ops))
+                          (is (= expected (:committed? r)) (pr-str ops))
+                          (when-not expected (is (= state (:state r))))
+                          (:state r))) initial slot-cases)]
+    (is (= #{"c1" "c2" "c3" "c4"} (set (keys (:gesso_commands final)))))
+    (is (= (:refother initial) (:refother final))))
+  (doseq [ops [[(assoc slot-empty 1 nil)] [(assoc slot-empty 2 "request/claim")]
+               [(conj slot-empty :extra)] [(pop slot-empty)]
+               [[(str/replace (first slot-empty) "ASSERT 0" "ASSERT 2") "helper-a" :request/claim]]
+               [[(str/replace (first slot-empty) " AND " " OR ") "helper-a" :request/claim]]
+               [["ASSERT FALSE"] (assoc slot-empty 2 1)]
+               [(journal-put (assoc-in slot-row [:gesso.command/binding :operation] "request/claim")) slot-empty]
+               [(journal-put (assoc-in slot-row [:gesso.command/binding :principal] "helper-a")) slot-empty]]]
+    (let [r (reference/execute initial ops)]
+      (is (= :unsupported (:status r)) (pr-str ops))
+      (is (not (contains? r :state)))
+      (is (not (contains? r :committed?))))))
+
 (deftest unsupported-reference-input-does-not-predict
   (doseq [ops [[] [(table-count -1)] [(table-count 16385)]
                [["ASSERT ? = (SELECT COUNT(*) FROM gesso_refcard)" nil]]
@@ -314,7 +376,7 @@
                        (let [indexed (into {} (map (juxt :xt/id identity)) rows)]
                          (is (= (count rows) (count indexed)) "No duplicate visible document IDs")
                          [table indexed])))))
-        [:refprobe :refother card-table mapped-table nested-table]))
+        [:refprobe :refother card-table mapped-table nested-table :gesso_commands]))
 
 (deftest reference-predictions-match-selected-real-xtdb-executions
   (with-open [node (xtn/start-node {})]
@@ -345,7 +407,8 @@
                           (map second read-cases)
                           (map second cardinality-cases)
                           (map second mapped-cases)
-                          (map second nested-cases)))]
+                          (map second nested-cases)
+                          (map second slot-cases)))]
         (when-let [ops (first cases)]
           (let [predicted (reference/execute state ops)
                 id (:tx-id (xt/submit-tx node ops))
