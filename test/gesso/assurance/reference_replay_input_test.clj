@@ -307,8 +307,41 @@
         reports (reduce (fn [rs [id requested]]
                           (conj rs (input/resolve-retained-clock (get micros id) requested (:system-time (peek rs)))))
                         [] (map vector ids requests))
+        clocked (reduce (fn [rs id]
+                          (conj rs (input/decode-clocked-replay-input
+                                    id (get bodies id) (get micros id)
+                                    (get-in (peek rs) [:transaction :system-time])))) [] ids)
         times [t t (.plusNanos t 1000) (.plusNanos t 2000)]
         ledger (#'reference/read-ledger! node)]
+    (is (every? #(= :decoded (:status %)) clocked))
+    (is (every? #(= input/clocked-input-profile (:profile %)) clocked))
+    (is (every? #(= :none (:authority %)) clocked))
+    (is (every? #(= :not-issued (:certificate %)) clocked))
+    (is (= reports (mapv :clock clocked)))
+    (is (= requests (mapv :requested-system-time clocked)))
+    (is (= (mapv micros ids) (mapv :frame-micros clocked)))
+    (is (= (mapv (fn [id time doc-id]
+                   {:tx-id id :system-time time :ops [[:put-docs :probe {:xt/id doc-id :value 1}]]})
+                 ids times ["a" "b" "c" "d"])
+           (mapv :transaction clocked)))
+    (let [id (nth ids 2)
+          body (get bodies id)
+          stamp (micros id)
+          decode! #(input/decode-clocked-replay-input id body %1 %2)
+          arrow! arrow/decode-bounded-operations
+          payload! payload/decode-payload
+          fail! (fn [r reason]
+                  (is (= :unsupported (:status r)))
+                  (is (= reason (:reason r)))
+                  (is (not-any? #(contains? r %) [:transaction :clock :requested-system-time :frame-micros])))]
+      (fail! (decode! nil t) :invalid-clock-frame)
+      (fail! (decode! stamp "bad") :invalid-prior-system-time)
+      (with-redefs [payload/decode-payload #(assoc-in (payload! %) [:message :user] "other")]
+        (fail! (decode! stamp t) :unsupported-replay-envelope-context))
+      (with-redefs [arrow/decode-bounded-operations #(assoc (arrow! %) :profile :wrong)]
+        (fail! (decode! stamp t) :unsupported-replay-operation-bytes))
+      (with-redefs [arrow/decode-bounded-operations #(assoc-in (arrow! %) [:operations 0 :bounds] {:unknown true})]
+        (fail! (decode! stamp t) :unsupported-replay-operation)))
     (is (= [t t (.minusSeconds t 1) nil] requests))
     (is (every? #(= :resolved (:status %)) reports))
     (is (every? #(= input/clock-profile (:profile %)) reports))

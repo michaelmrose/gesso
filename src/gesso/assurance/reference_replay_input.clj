@@ -95,43 +95,63 @@
                                     :else :smoothed)
                  :reason (if older? :invalid-system-time :clock-admitted)))))))
 
-(defn decode-replay-input
-  "Project one independently decoded transaction envelope to the selected
-   temporal input domain. Explicit time takes precedence. The four-argument
-   form may derive implicit time from the supplied framed microseconds and
-   preceding completed transaction time; the two-argument form cannot.
-   Require UTC default zone,
-   absent or default xtdb user, no user metadata, ordinary puts, row-level valid-time bounds and exact
-   literal/equality assertions.
-   The physical coordinate is supplied, not authenticated. No provider
-   observations or outcomes are consulted. Internal sensitive input only."
-  ([tx-id bytes] (decode-replay-input tx-id bytes nil nil))
-  ([tx-id bytes frame-micros prior-time]
-  (let [fail #(assoc base :status :unsupported :reason %)]
+(def clocked-input-profile :selected-retained-clocked-replay-input-v1)
+
+(defn- decode-input* [tx-id bytes frame-micros prior-time clocked?]
+  (let [report (if clocked? (assoc base :profile clocked-input-profile) base)
+        fail #(assoc report :status :unsupported :reason %)]
     (if-not (and (integer? tx-id) (<= 0 tx-id (dec Long/MAX_VALUE)))
       (fail :invalid-replay-transaction-id)
       (let [r (payload/decode-payload bytes)
-            {:keys [kind system-time default-tz tx-ops] :as message} (:message r)
-            system-time (if (nil? system-time) (implicit-system-time frame-micros prior-time) system-time)]
+            {:keys [kind system-time default-tz tx-ops] :as message} (:message r)]
         (cond
           (not= :decoded (:status r)) (fail :unsupported-replay-envelope)
-          (not (and (= :transaction kind) (instance? Instant system-time)
+          (not (and (= :transaction kind)
                     (#{(ZoneId/of "Z") (ZoneId/of "UTC") (ZoneId/of "Etc/UTC")} default-tz)
                     (or (not (contains? message :user)) (= "xtdb" (:user message)))
                     (not (contains? message :user-metadata))))
           (fail :unsupported-replay-envelope-context)
           :else
-          (let [decoded (arrow/decode-bounded-operations tx-ops)
-                ops (:operations decoded)]
-            (if-not (and (= :decoded (:status decoded))
-                         (= arrow/bounded-operation-profile (:profile decoded))
-                         (vector? ops) (<= 1 (count ops) 256)
-                         (= (if (some #(= :put-docs (:kind %)) ops) :matched :not-applicable)
-                            (:iid-correspondence decoded)))
-              (fail :unsupported-replay-operation-bytes)
-              (let [projected (mapv project-operation ops)
-                    tx {:system-time system-time :ops projected}]
-                (if (and (every? some? projected)
-                         (= :predicted (:status (temporal/replay [tx]))))
-                  (assoc base :status :decoded :transaction (assoc tx :tx-id tx-id))
-                  (fail :unsupported-replay-operation)))))))))))
+          (let [clock (when clocked? (resolve-retained-clock frame-micros system-time prior-time))
+                resolved (if clocked? (:system-time clock)
+                             (if (nil? system-time) (implicit-system-time frame-micros prior-time) system-time))]
+            (cond
+              (and clocked? (not= :resolved (:status clock))) (fail (:reason clock))
+              (not (instance? Instant resolved)) (fail :unsupported-replay-envelope-context)
+              :else
+              (let [decoded (arrow/decode-bounded-operations tx-ops)
+                    ops (:operations decoded)]
+                (if-not (and (= :decoded (:status decoded))
+                             (= arrow/bounded-operation-profile (:profile decoded))
+                             (vector? ops) (<= 1 (count ops) 256)
+                             (= (if (some #(= :put-docs (:kind %)) ops) :matched :not-applicable)
+                                (:iid-correspondence decoded)))
+                  (fail :unsupported-replay-operation-bytes)
+                  (let [projected (mapv project-operation ops)
+                        tx {:system-time resolved :ops projected}]
+                    (if (and (every? some? projected)
+                             (= :predicted (:status (temporal/replay [tx]))))
+                      (cond-> (assoc report :status :decoded :transaction (assoc tx :tx-id tx-id))
+                        clocked? (assoc :clock clock :requested-system-time system-time
+                                        :frame-micros frame-micros))
+                      (fail :unsupported-replay-operation))))))))))))
+
+(defn decode-replay-input
+  "Project selected retained operations with explicit time precedence.
+   The four-argument form resolves implicit times from the frame and prior
+   time; the two-argument form requires explicit time. Clock rejection
+   and equal-time history qualification are outside this legacy profile."
+  ([tx-id bytes] (decode-replay-input tx-id bytes nil nil))
+  ([tx-id bytes frame-micros prior-time]
+   (decode-input* tx-id bytes frame-micros prior-time false)))
+
+(defn decode-clocked-replay-input
+  "Project selected attempted operations and independently resolve their
+   clock decision from framed microseconds and the preceding completed time.
+   Keep the requested time distinct from the assigned time. A clock-rejected
+   attempt retains its actual operations; callers must not execute them.
+   Even rejected attempts must pass the selected operation grammar at the
+   assigned time. Internal sensitive sample only, not authenticated source
+   identity, history qualification or an execution prediction."
+  [tx-id bytes frame-micros prior-time]
+  (decode-input* tx-id bytes frame-micros prior-time true))

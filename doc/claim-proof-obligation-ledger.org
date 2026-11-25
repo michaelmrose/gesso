@@ -4670,3 +4670,28 @@ strict-clock assurance boundary over modeling unspecified merge ties;
 clock admission and retained rejection integration remain open. No
 certificate or CLM-R2 premise retirement. Other namespaces and formal
 gates were not rerun.
+
+* v2716 — project clock-qualified retained attempts
+
+Add a separate clocked replay input projection combining independently
+resolved frame/request/prior clock decisions with the actual retained
+operation group. Keep requested time and frame coordinate context distinct
+from assigned transaction time. A clock-rejected attempt retains all its
+operations, not a synthetic false assertion. Require the selected operation
+grammar even for rejected attempts and validate at the assigned time;
+no partial clock or operation sample on failure. Preserve legacy decoder
+and strictly increasing history contracts. Do not execute rejected inputs.
+
+Focused JVM: 24 tests / 1604 assertions, zero failures or errors across
+reference-replay-input-test, reference-provider-test and
+reference-retained-operation-test. Replay input suite initially passed
+6 tests / 347 assertions; a subsequent legacy nil-handling edit introduced
+a delimiter error, corrected before the combined run. Persistent equal,
+older and implicit requests preserve exact operations and match independent
+clock decisions and ledger times before and after reopening. Reject absent
+frame, invalid prior, unqualified envelope context, wrong Arrow profile
+and unsupported operation without exposing partial inputs. The projection
+is not yet acquired as a qualified complete clocked history or executed
+as a clock-aware replay. Equal-time state-dependent assertions remain
+unsupported. No production admission, certificate or CLM-R2 premise
+retirement. Other regression namespaces and formal gates not rerun.
