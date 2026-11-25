@@ -4181,3 +4181,30 @@ retained transaction correspondence integration remain open. No provider
 or reference-domain admission change, production wiring, certificate or
 CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2696 — compare independently reconstructed mixed operation bytes
+
+Extract the existing provider operation reader for reuse on supplied IPC
+bytes. Compare bounded independent mixed reconstruction and provider
+interpretation on copies of one byte sample, including complete ordered
+operations, argument values, documents, IIDs, bounds and invocation
+spans. Independent rejection prevents provider parsing; provider rejection
+or unavailability prevents a match. Return only diagnostic metadata,
+not operation contents or byte samples. Preserve existing retained-log
+observer behavior and provider admission restrictions.
+
+Focused JVM: 51 tests / 3378 assertions, zero failures or errors across
+six namespaces: reference Arrow operations, struct, put, mixed, source
+payload and operation correspondence. Real persistent mixed fixture
+matches before and after reopening. Perturb provider arguments, IIDs,
+operation order and spans; reject mismatches and unavailable reads. A
+nullable SQL argument accepted by independent decoding is still rejected
+by the provider. Malformed independent input never calls the provider.
+XTDB shutdown cancellation logged; final process exited zero.
+
+Selected mixed operation correspondence v1 compares one supplied byte
+sample, not independently acquired retained record identity, processed
+frontier or transaction execution. Full retained transaction integration,
+other operation-only layouts and production correspondence remain open.
+No admission change, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.

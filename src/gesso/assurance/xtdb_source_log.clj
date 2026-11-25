@@ -108,6 +108,28 @@
          :iids (mapv #(.formatHex (HexFormat/of) ^bytes %) iids)
          :bounds (document-value! (select-keys payload [:xt/valid-from :xt/valid-to]))}))))
 
+(defn- operation-bytes! [^Database database bytes]
+  (let [al (.getAllocator database)
+        groups (one-batch! al bytes
+                        (fn [^Relation rel]
+                          (when-not (= ["tx-ops"] (mapv #(.getName ^VectorReader %) (.getVectors rel)))
+                            (reject! :unexpected-transaction-relation))
+                          (mapv (fn [row]
+                                  (let [^TaggedValue op (:tx-ops row)]
+                                    (when-not (instance? TaggedValue op) (reject! :unexpected-operation))
+                                    (case (.getTag op)
+                                      :sql (let [{:keys [query args] :as payload} (.getValue op)]
+                                             (when-not (and (string? query)
+                                                            (every? #{:query :args} (keys payload)))
+                                               (reject! :invalid-sql))
+                                             (mapv (fn [row] {:kind :sql :query query :args row})
+                                                   (sql-argument-rows! al args)))
+                                      :put-docs [(put-documents! (.getValue op))]
+                                      (reject! :unsupported-operation-kind))))
+                                (.toMaps rel IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))))]
+    {:operations (into [] cat groups)
+     :logged-operation-spans (mapv count groups)}))
+
 (defn- observe! [node tx-id]
   (let [^Database database (db/primary-db node)
         ^Log log (.getSourceLog database)]
@@ -125,29 +147,11 @@
             (when-not (= tx-id (.getMsgId record)) (reject! :source-message-identity-mismatch))
             (if-not (instance? SourceMessage$Tx message)
               {:status :unsupported :reason :not-a-transaction-message}
-              (let [al (.getAllocator database)
-                    groups (one-batch! al (.getTxOps ^SourceMessage$Tx message)
-                                    (fn [^Relation rel]
-                                      (when-not (= ["tx-ops"] (mapv #(.getName ^VectorReader %) (.getVectors rel)))
-                                        (reject! :unexpected-transaction-relation))
-                                      (mapv (fn [row]
-                                              (let [^TaggedValue op (:tx-ops row)]
-                                                (when-not (instance? TaggedValue op) (reject! :unexpected-operation))
-                                                (case (.getTag op)
-                                                  :sql (let [{:keys [query args] :as payload} (.getValue op)]
-                                                         (when-not (and (string? query)
-                                                                        (every? #{:query :args} (keys payload)))
-                                                           (reject! :invalid-sql))
-                                                         (mapv (fn [row] {:kind :sql :query query :args row})
-                                                               (sql-argument-rows! al args)))
-                                                  :put-docs [(put-documents! (.getValue op))]
-                                                  (reject! :unsupported-operation-kind))))
-                                            (.toMaps rel IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))))]
-                {:status :source-message-observed :tx-id tx-id :operations (into [] cat groups)
-                 :logged-operation-spans (mapv count groups)
-                 :scope :retained-primary-source-log-decoded-sql-and-document-puts
-                 :provider-profile :xtdb-2.2.0-beta1/decoded-source-log-v1
-                 :authority :none :certificate :not-issued}))))))))
+              (merge (operation-bytes! database (.getTxOps ^SourceMessage$Tx message))
+                     {:status :source-message-observed :tx-id tx-id
+                      :scope :retained-primary-source-log-decoded-sql-and-document-puts
+                      :provider-profile :xtdb-2.2.0-beta1/decoded-source-log-v1
+                      :authority :none :certificate :not-issued}))))))))
 
 (defn observe-source-message!
   "Read exactly one retained primary source message by epoch-qualified id.
@@ -182,3 +186,31 @@
                {:status :unavailable :reason :provider-read-failed}))
            (catch Exception _
              {:status :unavailable :reason :provider-read-failed})))))))
+
+(def operation-bytes-profile :xtdb-2.2.0-beta1/decoded-operation-bytes-v1)
+
+(defn observe-operation-bytes!
+  "Decode supplied operation IPC bytes using the installed provider reader.
+   This does not read the log or establish provenance. Use only with bounded
+   independently qualified input; provider parsing is not sandboxed."
+  [node bytes]
+  (cond
+    (not (and (bytes? bytes) (<= 1 (alength ^bytes bytes) (:max-message-bytes ceilings))))
+    {:status :unsupported :reason :message-byte-limit}
+    (nil? (db/<-node node))
+    {:status :unsupported :reason :embedded-primary-log-required}
+    :else
+    (binding [*limits* ceilings *remaining* (volatile! (:max-values ceilings)) *depth* 0]
+      (try
+        (assoc (operation-bytes! (db/primary-db node) bytes)
+               :status :operation-bytes-observed :provider-profile operation-bytes-profile
+               :authority :none :certificate :not-issued)
+        (catch InterruptedException e
+          (.interrupt (Thread/currentThread))
+          (throw e))
+        (catch clojure.lang.ExceptionInfo e
+          (if (::unsupported (ex-data e))
+            {:status :unsupported :reason (:reason (ex-data e))}
+            {:status :unavailable :reason :provider-read-failed}))
+        (catch Exception _
+          {:status :unavailable :reason :provider-read-failed})))))
