@@ -3278,3 +3278,27 @@ label is not admitted by this profile. Arrow metadata accessors remain
 a library dependency. No production wiring, certificate or CLM-R2
 premise retirement. Full project and independent formal gates were
 not rerun.
+
+* v2660 — qualify UTC-labelled Arrow timestamp arguments
+
+Extend the selected temporal scalar profile to exact UTC-labelled
+microsecond columns while preserving the existing Z-only profile.
+Preserve the ZonedDateTime zone identity for both labels, even when
+values denote the same instant. Reuse the selected date bounds and
+signed microsecond conversion; reject other labels and units. This
+supports the representation required by reference outbox lease values
+without claiming independent document decoding or clock-guard execution.
+
+Focused JVM: 13 tests / 712 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Retained mixed
+UTC/Z rows, pre-epoch values, date boundaries and a UTC deadline
+operand in worker clock-guard SQL match expected operations and XTDB
+observations before and after reopening. Independent byte mutations
+preserve the respective zone labels. Reject out-of-range timestamps,
+other zones and UTC in the earlier Z-only profile. XTDB logged shutdown
+cancellation; the process exited zero.
+
+Selected Z/UTC microsecond scalar profile v1. No other timezone labels,
+nullable columns, composite or document operation interpretation,
+production wiring, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.

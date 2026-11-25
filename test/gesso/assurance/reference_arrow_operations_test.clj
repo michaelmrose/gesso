@@ -525,3 +525,63 @@
           (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
           (check-timestamp-retained! node id other-id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-utc-retained! [node id other-id rows deadline]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-utc-timestamp-operations data)
+        expected (conj (mapv (fn [row] {:kind :sql :query "ASSERT ($1 = $2 AND ($3 = 0))" :args row}) rows)
+                       {:kind :sql :query "ASSERT CURRENT_TIMESTAMP < $1" :args [deadline]})
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ values _ z-values] (buffer-starts args)
+        zone-id #(str (.getZone ^java.time.ZonedDateTime %))]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/utc-timestamp-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows) 1] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-utc-timestamp-arguments args))))
+    (is (= ["UTC" "Z"] (mapv zone-id (take 2 (first (:rows (arrow/decode-utc-timestamp-arguments args)))))))
+    (is (not= (ffirst rows) (second (first rows))))
+    (is (= (.toInstant ^java.time.ZonedDateTime (ffirst rows))
+           (.toInstant ^java.time.ZonedDateTime (second (first rows)))))
+    (is (= :unsupported-arrow-timestamp-type (:reason (arrow/decode-timestamp-operations data))))
+    (is (= :unsupported-arrow-timestamp-type (:reason (arrow/decode-utc-timestamp-operations
+                                                       (retained-operation-bytes node other-id)))))
+    (doseq [[offset col zone] [[values 0 "UTC"] [z-values 1 "Z"]]]
+      (is (= (assoc-in rows [0 col] (.atZone java.time.Instant/EPOCH (java.time.ZoneId/of zone)))
+             (:rows (arrow/decode-utc-timestamp-arguments (edit-long args offset 0))))))
+    (doseq [value [Long/MIN_VALUE Long/MAX_VALUE]]
+      (let [r (arrow/decode-utc-timestamp-arguments (edit-long args values value))]
+        (is (= :unsupported (:status r)))
+        (is (= :unsupported-arrow-timestamp-range (:reason r)))
+        (is (not (contains? r :rows)))))))
+
+(deftest selected-utc-timestamp-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-utc-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        instants (mapv #(java.time.Instant/parse %) ["1969-12-31T23:59:59.999999Z"
+                                                     "0001-01-01T00:00:00Z"
+                                                     "9998-12-31T23:59:59.999999Z"])
+        utc (java.time.ZoneId/of "UTC")
+        z (java.time.ZoneId/of "Z")
+        rows (mapv (fn [i] [(.atZone i utc) (.atZone i z) 0]) instants)
+        deadline (.atZone (java.time.Instant/parse "2026-01-01T00:00:00.000001Z") utc)]
+    (is (= [[]] (:rows (arrow/decode-utc-timestamp-arguments nil))))
+    (try
+      (let [[id other-id] (with-open [node (xtn/start-node config)]
+                            (let [database (db/primary-db node)
+                                  submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                                      (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                                  id (submit! (conj (mapv #(into ["ASSERT (? = ? AND (? = 0))"] %) rows)
+                                                    ["ASSERT CURRENT_TIMESTAMP < ?" deadline]))
+                                  other-zone (java.time.ZonedDateTime/parse "2026-01-01T00:00:00-08:00[America/Los_Angeles]")
+                                  other-id (submit! [["ASSERT ? = ?" other-zone other-zone]])]
+                              (check-utc-retained! node id other-id rows deadline)
+                              [id other-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
+          (check-utc-retained! node id other-id rows deadline)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

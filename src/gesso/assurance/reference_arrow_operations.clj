@@ -243,22 +243,25 @@
     (when (= :uuid kind)
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
         (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
-    (when (= :timestamp kind)
-      (let [^Timestamp t (.type f (Timestamp.))]
-        (require! (and t (= TimeUnit/MICROSECOND (.unit t)) (= "Z" (.timezone t)))
-                  :unsupported-arrow-timestamp-type)))
-    kind))
+    (if (= :timestamp kind)
+      (let [^Timestamp t (.type f (Timestamp.))
+            zone (when t (.timezone t))]
+        (require! (and t (= TimeUnit/MICROSECOND (.unit t))
+                       (or (= "Z" zone)
+                           (and (= "UTC" zone) (contains? allowed :timestamp-utc))))
+                  :unsupported-arrow-timestamp-type)
+        (if (= "UTC" zone) :timestamp-utc :timestamp))
+      kind)))
 
 (def ^:private timestamp-min (Instant/parse "0001-01-01T00:00:00Z"))
 (def ^:private timestamp-end (Instant/parse "9999-01-01T00:00:00Z"))
-(def ^:private timestamp-zone (ZoneId/of "Z"))
 
-(defn- timestamp-value! [micros]
+(defn- timestamp-value! [micros zone]
   (let [instant (Instant/ofEpochSecond (Math/floorDiv (long micros) (long 1000000))
                                        (* 1000 (Math/floorMod (long micros) (long 1000000))))]
     (require! (and (not (.isBefore instant timestamp-min)) (.isBefore instant timestamp-end))
               :unsupported-arrow-timestamp-range)
-    (.atZone instant timestamp-zone)))
+    (.atZone instant zone)))
 
 (defn- keyword-value! [s]
   ;; Match the selected reference transaction keyword domain. The retained
@@ -320,10 +323,11 @@
                                     (fn [row]
                                       (let [offset (* 16 row)]
                                         (UUID. (.getLong v offset) (.getLong v (+ offset 8)))))))
-                              :timestamp
+                              (:timestamp :timestamp-utc)
                               (do (require! (= (* 8 n) (.limit values))
                                             :unsupported-arrow-timestamp-buffer-layout)
-                                  #(timestamp-value! (.getLong values (* 8 %))))
+                                  (let [zone (ZoneId/of (if (= :timestamp-utc kind) "UTC" "Z"))]
+                                    #(timestamp-value! (.getLong values (* 8 %)) zone)))
                               :integer
                               (do (require! (= (* 8 n) (.limit values))
                                             :unsupported-integer-buffer-layout)
@@ -489,3 +493,27 @@
    No SQL temporal semantics, coercion or general timezone support."
   [bytes]
   (expand-fixed-operations bytes timestamp-base timestamp-rows!))
+
+(def utc-timestamp-profile :xtdb-2.2.0-beta1/selected-z-utc-micros-scalar-arrow-operations-v1)
+(def ^:private utc-timestamp-base (assoc base :profile utc-timestamp-profile))
+
+(defn- utc-timestamp-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc}))
+
+(defn decode-utc-timestamp-arguments
+  "Decode selected nonnullable epoch-microsecond columns with Z or UTC
+   timezone labels. Preserve exact zone identity, not merely the offset."
+  [bytes]
+  (try
+    (assoc utc-timestamp-base :status :decoded :rows (utc-timestamp-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc utc-timestamp-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc utc-timestamp-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc utc-timestamp-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-utc-timestamp-operations
+  "Expand selected SQL groups with Z and UTC timestamps and earlier scalars.
+   No other timezone, SQL temporal semantics or document decoding claim."
+  [bytes]
+  (expand-fixed-operations bytes utc-timestamp-base utc-timestamp-rows!))
