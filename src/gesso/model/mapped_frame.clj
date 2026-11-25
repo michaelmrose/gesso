@@ -112,9 +112,7 @@
                                    (reject! :unsupported-frame-field))
                                  [k v])
                                (sort-by (comp str key) (dissoc row :xt/id)))]
-              [(if (seq checks)
-                 (tx/assert-document-current table {:model/id id :model/checks checks})
-                 (tx/assert-document-exists table id))
+              [(tx/assert-document-decoded-current table id checks)
                (tx/assert-document-field-count table id (count row))]))
           (do
             (when required? (reject! :missing-required-frame-row))
@@ -142,6 +140,14 @@
       (reject! :unsupported-journal-frame-key))
     (if parent (str "(" parent ")." column) column)))
 
+(defn- scalar-tests [path value]
+  ;; Ordinary equality coerces some types. Scalar print distinguishes
+  ;; keyword/string and float/integer; singleton-array print also
+  ;; distinguishes integral decimals from integers in this provider.
+  [[(str path " = ?") value]
+   [(str "STR(" path ") = STR(?)") value]
+   [(str "STR(ARRAY[" path "]) = STR(ARRAY[?])") value]])
+
 (defn- journal-field-tests! [path value]
   ;; XTDB struct equality compares the union schema of field names. Use
   ;; visible field counts and scalar leaves for nonempty maps instead.
@@ -158,9 +164,14 @@
                 (sort-by (comp str key) value))
           [[(str "LENGTH(" path ") = ?") 0]
            [(str "STR(" path ") LIKE ?") "{%"]]))
-    (or (comparable-field? value) (uuid? value)
-        (and (vector? value) (every? #(or (comparable-field? %) (uuid? %)) value)))
-    [[(str path " = ?") value]]
+    (or (comparable-field? value) (uuid? value))
+    (scalar-tests path value)
+    (and (vector? value) (every? #(or (comparable-field? %) (uuid? %)) value))
+    ;; Keep whole-list equality for shape, but check each element because
+    ;; list equality and list printing can both conflate keywords/strings.
+    (into [[(str path " = ?") value]]
+          (mapcat (fn [[i v]] (scalar-tests (str "(" path ")[" (inc i) "]") v)))
+          (map-indexed vector value))
     :else (reject! :unsupported-journal-frame-value)))
 
 (defn- occupied-slot-assertions! [where principal operation row]

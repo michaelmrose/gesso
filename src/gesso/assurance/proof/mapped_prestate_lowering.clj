@@ -32,9 +32,7 @@
     (let [fields (columns! (dissoc row :xt/id) #"[a-z][a-z0-9_$]*")]
       (when-not (every? (comp scalar? last) fields) (reject! :unsupported-value))
       [(tx/format-assertion
-        (if (seq fields)
-          (tx/assert-document-current table {:model/id id :model/checks (mapv (fn [[k _ v]] [k v]) fields)})
-          (tx/assert-document-exists table id)))
+        (tx/assert-document-decoded-current table id (mapv (fn [[k _ v]] [k v]) fields)))
        (tx/format-assertion (tx/assert-document-field-count table id (count row)))])
     (reject! :unsupported-predicate)))
 
@@ -43,6 +41,11 @@
 
 (defn- path-sql [path]
   (reduce (fn [parent column] (str "(" parent ")." column)) path))
+
+(defn- scalar-constraints [p v]
+  [[(str p " = ?") v]
+   [(str "STR(" p ") = STR(?)") v]
+   [(str "STR(ARRAY[" p "]) = STR(ARRAY[?])") v]])
 
 (defn- journal-constraints [row]
   ;; A nonempty map requires visible cardinality and all child paths.
@@ -58,9 +61,12 @@
                 ;; shape; length alone accepts other empty value types.
                 [[(str "LENGTH(" p ") = ?") 0]
                  [(str "STR(" p ") LIKE ?") "{%"]]
-                (or (journal-leaf? v)
-                    (and (vector? v) (every? journal-leaf? v)))
-                [[(str p " = ?") v]]
+                (journal-leaf? v) (scalar-constraints p v)
+                (and (vector? v) (every? journal-leaf? v))
+                (into [[(str p " = ?") v]]
+                      (mapcat (fn [[i child]]
+                                (scalar-constraints (str "(" p ")[" (inc i) "]") child)))
+                      (map-indexed vector v))
                 :else (reject! :unsupported-value))))]
     (mapcat (fn [[_ col v]] (walk [col] v))
             (columns! row #"[a-z_][a-z0-9_$]*"))))
@@ -96,7 +102,7 @@
         expected (into [] (mapcat :assertions) groups)]
     (when-not (and (vector? prefix) (every? vector? prefix) (= expected prefix))
       (reject! :noncanonical-lowering-prefix))
-    {:type ::mapped-prestate-lowering :version 2
+    {:type ::mapped-prestate-lowering :version 3
      :mapping-fingerprint (:mapping-fingerprint description)
      :scope :source-relative-syntactic-prefix :status :checked-exact-prefix
      :groups groups :assertion-count (count expected)

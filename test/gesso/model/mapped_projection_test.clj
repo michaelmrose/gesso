@@ -1016,7 +1016,7 @@
                             :assert-failed (throw e)))))]
     (is (= :checked-exact-prefix
            (:status (lowering/check-prefix! source targets rows journal prefix))))
-    (is (= 2 (:version (lowering/check-prefix! source targets rows journal prefix))))
+    (is (= 3 (:version (lowering/check-prefix! source targets rows journal prefix))))
     (with-open [node (xtn/start-node {})]
       (xt/execute-tx node [[:put-docs :requests (first (:requests rows))]
                            [:put-docs :gesso_commands empty-args nested-empty]])
@@ -1045,5 +1045,52 @@
         ;; The supported predicate is equality of visible decoded entries.
         (xt/execute-tx node [[:put-docs :gesso_commands (assoc-in empty-args args-path {:extra nil})]])
         (is (= journal (actual)))
+        (is (= :committed (attempt! node ops)))
+        (is (= [marker] (written)))))))
+
+(deftest mapped-prefix-rejects-coercive-scalar-and-vector-equality
+  (let [mapping (plan/check-target-mapping! source targets)
+        request (assoc (first (:requests rows)) :status :open :label "open")
+        docs (assoc rows :requests [request])
+        occupied (record "old" "p2" {:numeric-value 2 :kw-value :open :text-value "open"
+                                      :vector-value [2 :open "open"] :empty-vector []})
+        journal [occupied]
+        prefix (frame/formatted-prestate-assertions! mapping docs journal)
+        description (prestate/describe! source targets docs journal)
+        args [:gesso.command/binding :arguments]
+        marker {:xt/id "probe" :written true}
+        attempt! (fn [node ops]
+                   (try (xt/execute-tx node ops) :committed
+                        (catch Exception e
+                          (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                            :assert-failed (throw e)))))]
+    (is (= :checked-exact-prefix (:status (lowering/check-prefix! source targets docs journal prefix))))
+    (with-open [node (xtn/start-node {})]
+      (let [restore [[:put-docs :requests request] [:put-docs :gesso_commands occupied]]
+            ops (conj prefix [:put-docs :guard_probe marker])
+            written #(xt/q node ["SELECT * FROM guard_probe WHERE _id = ?" "probe"])
+            observed #(prestate/observe! source targets docs journal description
+                                         {:requests (xt/q node "SELECT * FROM requests") :assignments []}
+                                         (xt/q node "SELECT * FROM gesso_commands"))]
+        (xt/execute-tx node restore)
+        (is (:matches? (observed)))
+        (is (= :committed (attempt! node prefix)))
+        (doseq [[table row path v]
+                (concat
+                 (for [[path v] [[[:item-count] 2.0] [[:item-count] 2M]
+                                 [[:status] "open"] [[:label] :open]]]
+                   [:requests request path v])
+                 (for [[k v] [[:numeric-value 2.0] [:numeric-value 2M] [:kw-value "open"]
+                              [:text-value :open] [:vector-value [2.0 :open "open"]]
+                              [:vector-value [2M :open "open"]] [:vector-value [2 "open" "open"]]
+                              [:vector-value [2 :open :open]] [:vector-value [2 :open]] [:empty-vector ""]]]
+                   [:gesso_commands occupied (conj args k) v]))]
+          (xt/execute-tx node [[:put-docs table (assoc-in row path v)]])
+          (is (false? (:matches? (observed))) (str path " " (pr-str v)))
+          (is (= :assert-failed (attempt! node ops)) (str path " " (pr-str v)))
+          (is (empty? (written)))
+          (xt/execute-tx node restore)
+          (is (:matches? (observed)))
+          (is (= :committed (attempt! node prefix))))
         (is (= :committed (attempt! node ops)))
         (is (= [marker] (written)))))))

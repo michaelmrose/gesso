@@ -306,6 +306,27 @@
       checks))))
 
 
+(defn assert-document-decoded-current
+  "Restricted mapped scalar guard. XTDB 2.2.0-beta1 SQL equality coerces
+   numbers and keyword/string pairs. Additionally compare scalar and
+   singleton-array print forms, including identity. This is a qualified
+   provider fragment, not a general type or value equality predicate."
+  [entity-type id checks]
+  (require-document-id! id)
+  (when (seq checks)
+    (require-expected-fields! entity-type
+                              (command/require-expected-version {:model/id id :model/checks checks})))
+  (assert-one
+   entity-type
+   (into [:and]
+         (mapcat (fn [[k v]]
+                   (let [param [:lift v]]
+                     [[:= k param]
+                      [:= [:str k] [:str param]]
+                      [:= [:str [:array [k]]] [:str [:array [param]]]]])))
+         (into [[:xt/id id]] checks))))
+
+
 (def ^:private maximum-asserted-document-fields 8192)
 
 (defn assert-document-field-count

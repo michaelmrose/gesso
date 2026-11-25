@@ -540,3 +540,38 @@ This is a version-specific codec qualification, not a portable SQL type
 predicate or a general refinement proof. A provider upgrade must requalify
 both LENGTH and STR semantics, including the exhaustive supported-type
 boundary. No CLM-R2 premise or certification authority is retired here.
+
+* v2564 — scalar and vector coercion at the mapped guard boundary
+
+The embedded XTDB probe shows that ordinary SQL equality and IS NOT
+DISTINCT FROM compare an integer equal to a numerically equal float or
+decimal, and a keyword equal to the corresponding unprefixed string.
+List equality inherits these element coercions. These are false matches
+relative to the independent decoded Clojure predicates, not merely the
+conservative refusals of the empty-struct problem. The internal strict
+equality operation is not exposed as a SQL function in this version.
+
+For the restricted mapped scalar fragment, conjoin ordinary equality
+with equality of STR(value) and STR(ARRAY[value]) against the same bound
+expected value. Scalar printing distinguishes the tested keyword/string
+and integer/float pairs; singleton-array printing preserves the decimal
+suffix that scalar printing omits. For supported vectors retain whole
+list equality and compare every element with the scalar conjunction,
+using one-based array indexing. Whole-list printing alone loses the
+keyword/string distinction. Apply the scalar conjunction to mapped
+required and present nullable document identities and fields and to
+journal record leaves. Ordinary model version guards remain unchanged.
+The independent mapped prefix checker reconstructs the journal constraints
+and uses the shared low-level document formatter (version 3).
+
+The physical regression mutates document and journal scalar fields and
+vector elements, checks independent decoded mismatch and atomic refusal
+without a marker, and requires a successful control after each restore.
+This addresses the reproduced coercion counterexamples, not every possible
+provider type, schema or read basis. The print forms and value comparison
+semantics are specific to XTDB 2.2.0-beta1; provider upgrades require
+requalification. No general codec theorem or CLM-R2 discharge follows.
+The initial regression also exposed the existing raw nested SQL identifier
+limitation for a field named keyword (a reserved token); the fixture uses
+non-reserved field names. Quoting or rejecting all reserved identifier
+spellings remains a separate lowering/availability issue.
