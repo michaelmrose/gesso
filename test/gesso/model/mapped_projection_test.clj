@@ -1230,6 +1230,9 @@
                                                     mapping (assoc-in docs [:requests 0 :hidden] "other") [])))]
     (doseq [[mode reason] [[:valid nil]
                            [:valid-outbox nil]
+                           [:residual-empty nil]
+                           [:residual-extra :historical-intended-residual-assertions-mismatch]
+                           [:residual-late :historical-intended-residual-assertions-mismatch]
                            [:declared-valid nil]
                            [:declared-missing :historical-publication-expectation-mismatch]
                            [:declared-wrong-subject :historical-publication-expectation-mismatch]
@@ -1265,6 +1268,9 @@
                                          :contributions [{:target [:document :requests "r1"]
                                                           :topic :example/request :field :xt/id}]})}))
                           admission)
+              residual? (.startsWith ^String (name mode) "residual-")
+              admission (if residual? (inductive/build-inductive-mapped-admission!
+                                        (assoc admission-source :residual-assertion-derivations {id nil})) admission)
               observations (atom [])
               writer (policy/build-policy! node {:admission admission :initializer seed :observe! #(swap! observations conj %)}
                                            {:source-id "guard-history"})
@@ -1297,6 +1303,9 @@
                   [guards puts] (split-with #(string? (first %)) framed-ops)
                   published (into (conj (vec guards) outbox-guard) (conj (vec puts) outbox-put))
                   actual-base (case mode
+                                :residual-empty (into [] (remove #{["ASSERT TRUE"]}) framed-ops)
+                                :residual-extra framed-ops
+                                :residual-late (conj (into [] (remove #{["ASSERT TRUE"]}) framed-ops) ["ASSERT TRUE"])
                                 (:declared-valid :declared-wrong-subject :declared-unexpected
                                  :valid-outbox :wrong-outbox-identity :wrong-outbox-slot
                                  :wrong-outbox-operation :extra-outbox-field) published
@@ -1321,7 +1330,8 @@
                                :late-outbox-guard :extra-outbox-guard)
                               (peek (peek (envelope/bind-transition-envelope!
                                           (conj actual-base [:put-docs :gesso_transition_evidence witness]))))
-                              (:self-bound-hidden-change :self-bound-duplicate-put
+                              (:residual-empty :residual-extra :residual-late
+                               :self-bound-hidden-change :self-bound-duplicate-put
                                :self-bound-missing-evidence-guard :self-bound-wrong-evidence-guard
                                :self-bound-duplicate-evidence)
                               (peek (peek (envelope/bind-transition-envelope!
@@ -1365,9 +1375,14 @@
                 (is (= (if reason :unclassified :verified-mapped-transition) (:classification step)) (name mode))
                 (is (= reason (:reason step)) (name mode))
                 (is (= (if declared? :declared :not-declared) (:publication-expectation-profile chunk)))
+                (is (= (if residual? :declared :not-declared) (:residual-assertion-profile chunk)))
+                (when-not reason
+                  (is (= (if residual? :matched :not-declared) (:residual-assertion-expectation step)))
+                  (is (= (if residual? :v12-declared-expectations-checked :open)
+                         (get-in report [:physical-induction :premises :residual-assertion-correspondence]))))
                 (when-not reason
                   (is (= (if declared? :matched :not-declared) (:publication-expectation step)))
-                  (is (= (if declared? :v11-declared-expectations-checked :open)
+                  (is (= (if declared? :v12-declared-expectations-checked :open)
                          (get-in report [:physical-induction :premises :publication-expectation-correspondence]))))
                 (is (= (if reason :unclassified-steps :observed-interval-checked) (:status chunk) (:status whole)))
                 (is (= (if reason :not-established :conditional-observed-prefix-argument)

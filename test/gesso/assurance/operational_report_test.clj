@@ -92,24 +92,29 @@
                   :all-declared-invariants-conditionally-inductive? true
                   :declared-invariant-ids #{:example/nonnegative}}
         snapshot (update sample :report assoc
-                         :profile :selected-mapped-ledger-chunk-v11
+                         :profile :selected-mapped-ledger-chunk-v12
                          :publication-expectation-profile :declared
+                         :residual-assertion-profile :declared
                          :initialization {:system-time time :catalog-fingerprint "catalog"
                                           :case-fingerprint "case" :initialization-fingerprint "initial"
                                           :physical-correspondence :checked-supplied-projection})
         joined (report/describe-application abstract snapshot)
         arg (:physical-induction joined)]
     (is (= :conditional-observed-prefix-argument (:status arg)))
-    (is (= :v11-prefix-checked (get-in arg [:premises :visible-valid-time-continuity])))
-    (is (= :v11-mapped-steps-checked (get-in arg [:premises :recorded-envelope-correspondence])))
-    (is (= :v11-mapped-steps-checked (get-in arg [:premises :intended-guard-prefix-correspondence])))
-    (is (= :v11-mapped-steps-checked (get-in arg [:premises :intended-mapped-write-correspondence])))
-    (is (= :v11-mapped-steps-checked (get-in arg [:premises :transition-evidence-write-correspondence])))
-    (is (= :v11-mapped-steps-checked (get-in arg [:premises :publication-outbox-correspondence])))
-    (is (= :v11-mapped-steps-checked (get-in arg [:premises :publication-record-correspondence])))
-    (is (= :v11-declared-expectations-checked (get-in arg [:premises :publication-expectation-correspondence])))
+    (is (= :v12-prefix-checked (get-in arg [:premises :visible-valid-time-continuity])))
+    (is (= :v12-mapped-steps-checked (get-in arg [:premises :recorded-envelope-correspondence])))
+    (is (= :v12-mapped-steps-checked (get-in arg [:premises :intended-guard-prefix-correspondence])))
+    (is (= :v12-mapped-steps-checked (get-in arg [:premises :intended-mapped-write-correspondence])))
+    (is (= :v12-mapped-steps-checked (get-in arg [:premises :transition-evidence-write-correspondence])))
+    (is (= :v12-mapped-steps-checked (get-in arg [:premises :publication-outbox-correspondence])))
+    (is (= :v12-mapped-steps-checked (get-in arg [:premises :publication-record-correspondence])))
+    (is (= :v12-declared-expectations-checked (get-in arg [:premises :publication-expectation-correspondence])))
     (is (= :open (get-in (report/describe-application abstract (assoc-in snapshot [:report :publication-expectation-profile] :not-declared))
                          [:physical-induction :premises :publication-expectation-correspondence])))
+    (is (= :v12-declared-expectations-checked (get-in arg [:premises :residual-assertion-correspondence])))
+    (doseq [profile [nil :not-declared]]
+      (is (= :open (get-in (report/describe-application abstract (assoc-in snapshot [:report :residual-assertion-profile] profile))
+                           [:physical-induction :premises :residual-assertion-correspondence]))))
     (is (= :not-established (get-in arg [:premises :historical-writer-provenance])))
     (is (contains? (:open-obligations joined) :historical-intended-envelope-provenance))
     (is (contains? (:open-obligations joined) :historical-mapped-writer-authentication))
@@ -130,6 +135,7 @@
                    [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v8)]
                    [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v9)]
                    [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v10)]
+                   [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v11)]
                    [abstract (assoc-in snapshot [:report :initialization :catalog-fingerprint] "different")]
                    [abstract (assoc-in snapshot [:report :initialization :system-time] (.plusSeconds time 1))]
                    [abstract (assoc-in snapshot [:report :counts] {:unknown 1})]

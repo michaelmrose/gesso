@@ -1391,3 +1391,31 @@ physical journal writes are not reconstruction candidates. Historical and
 preventive enforcement remain unchanged; the history profile is still v11.
 Full physical Claim, project, Chromium and separate proof gates were not
 rerun. No CLM-R2 premise is retired.
+
+* v2593 — enforce declared residual assertion history
+
+Reconstruct declared residual assertion expectations from the issued source,
+incorporated command and pinned prestate after mapped semantic and frame
+checks. Require the stronger six-argument retained-envelope comparator and
+its explicit matched residual status for declared admissions, including
+an empty vector. Missing declarations retain the earlier conditional
+classification but leave the residual assertion premise open. Expose only
+bounded status and mismatch reasons. Advance history, checkpoint and
+operational prefix profiles to v12; v11 and earlier must be rescanned.
+
+Focused JVM historical and operational regressions: 9 tests / 927 assertions,
+zero failures or errors. Actual embedded XTDB history accepts an explicit
+empty residual expectation and rejects extra or late SQL even with a
+self-consistent binding. Legacy status, authenticated v11 checkpoint refusal
+and sticky unclassified history are checked. Supplementary JVM derivation
+and retained residual comparator regressions: 2 tests / 58 assertions,
+zero failures or errors. These separately exercise nonempty expectations.
+The physical Claim fixture's history-profile assertion is updated, but its
+residual declaration is not installed yet and the full physical Claim,
+project, Chromium and independent proof gates were not rerun.
+
+This is declaration-relative historical correspondence, not preventive
+admission, proof of SQL equivalence or installed constructor refinement.
+Residual assertion order within the prewrite group, unselected writes,
+provider execution and writer authority remain open. No CLM-R2 premise
+is retired.

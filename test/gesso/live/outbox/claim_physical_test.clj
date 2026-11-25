@@ -718,7 +718,7 @@
                      (is (= (frequencies (map :classification steps)) (:counts report)))
                      (is (= report (:report (host/history-status started))))
                      (is (= :declared (:publication-expectation-profile report)))
-                     (is (= :v11-declared-expectations-checked
+                     (is (= :v12-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
                      (let [operational (host/assurance-status started)]
