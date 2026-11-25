@@ -411,3 +411,55 @@
           (.awaitSourceBlocking (db/primary-db node) invalid-id (Duration/ofSeconds 10))
           (check-keyword-retained! node id invalid-id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-uuid-retained! [node id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-uuid-operations data)
+        expected (mapv (fn [row] {:kind :sql :query "ASSERT ($1 = $2 AND ($3 = $4) AND ($5 = 0) AND $6 AND ($7 = $8))" :args row}) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ values] (buffer-starts args)
+        extension (find-byte-sequence args "uuid")]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/uuid-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-uuid-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-keyword-operations data))))
+    (is (= (vec (range 0 256 17))
+           (mapv #(bit-and 255 %) (take 16 (drop values args)))))
+    (is (= (assoc-in rows [0 0] #uuid "80112233-4455-6677-8899-aabbccddeeff")
+           (:rows (arrow/decode-uuid-arguments (edit-byte args values 128)))))
+    (is (= (assoc-in rows [0 0] #uuid "00112233-4455-6677-8899-aabbccddee00")
+           (:rows (arrow/decode-uuid-arguments (edit-byte args (+ values 15) 0)))))
+    (doseq [[bad reason] [[(edit-byte args extension 120) :unsupported-arrow-field]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]
+                          [(edit-byte args 0 0) :invalid-arrow-framing]]]
+      (let [r (arrow/decode-uuid-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))))
+
+(deftest selected-uuid-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-uuid-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        ids [#uuid "00112233-4455-6677-8899-aabbccddeeff"
+             #uuid "ffeeddcc-bbaa-9988-7766-554433221100"
+             #uuid "00000000-0000-0000-0000-000000000000"
+             #uuid "ffffffff-ffff-ffff-ffff-ffffffffffff"]
+        rows (mapv (fn [id] [id id :claim/status :claim/status 0 true (str id) (str id)]) ids)]
+    (is (= [[]] (:rows (arrow/decode-uuid-arguments nil))))
+    (try
+      (let [id (with-open [node (xtn/start-node config)]
+                 (let [database (db/primary-db node)
+                       id (:tx-id (xt/submit-tx node (mapv #(into ["ASSERT (? = ? AND (? = ?) AND (? = 0) AND ? AND (? = ?))"] %) rows)))]
+                   (.awaitTxBlocking database id (Duration/ofSeconds 10))
+                   (check-uuid-retained! node id rows)
+                   id))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (check-uuid-retained! node id rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

@@ -3227,3 +3227,27 @@ and composite values, document operations, SQL arity and execution
 semantics, and universal provider refinement remain open. No production
 wiring, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2658 — decode selected UUID Arrow extension arguments
+
+Qualify the installed uuid extension on fixed-size binary storage by
+requiring exact extension metadata and a 16-byte width. Independently
+interpret the big-endian UUID halves, rather than applying the Arrow
+numeric buffer byte order. Preserve all 128 bits, mixed scalar rows,
+coalesced invocation spans and earlier narrower profile restrictions.
+Bound extension metadata cardinality before reading it.
+
+Focused JVM: 11 tests / 622 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Persistent mixed
+UUID, keyword, UTF-8, int64 and Boolean rows match expected values and
+provider operations before and after reopening. Check known wire bytes,
+zero and all-one UUIDs, high-bit values, and first/last-byte mutations.
+Reject changed extension identity and malformed framing. Corrected a
+source delimiter before the passing run.
+
+Selected UUID scalar profile v1. Other extensions, nullable columns,
+temporal and composite values, document operations, SQL arity and
+execution semantics remain open. Arrow metadata accessors remain a
+library dependency. No production wiring, certificate or CLM-R2
+premise retirement. Full project and independent formal gates were
+not rerun.

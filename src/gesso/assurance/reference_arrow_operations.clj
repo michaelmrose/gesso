@@ -5,8 +5,9 @@
    SQL and nested argument bytes are sensitive internal observations."
   (:import (java.nio ByteBuffer ByteOrder)
            (java.nio.charset StandardCharsets CharacterCodingException)
+           (java.util UUID)
            (org.apache.arrow.flatbuf Message MessageHeader MetadataVersion
-                                    Schema RecordBatch Field Type Union UnionMode Endianness Int)))
+                                    Schema RecordBatch Field Type Union UnionMode Endianness Int FixedSizeBinary)))
 
 (def profile :xtdb-2.2.0-beta1/selected-sql-arrow-operations-v1)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
@@ -213,20 +214,23 @@
   (let [type (.typeType f)
         extension? (pos? (.customMetadataLength f))
         kind (if extension?
-               (do
-                 (require! (and (= Type/Utf8 type)
-                                (= 2 (.customMetadataLength f))
-                                (= {"ARROW:extension:name" "xt/clj-keyword"
-                                    "ARROW:extension:metadata" ""}
-                                   (into {} (map (fn [j]
-                                                   (let [kv (.customMetadata f j)]
-                                                     [(.key kv) (.value kv)]))
-                                                 (range 2)))))
+               (let [_ (require! (= 2 (.customMetadataLength f)) :unsupported-arrow-field)
+                     metadata (into {} (map (fn [j]
+                                             (let [kv (.customMetadata f j)]
+                                               [(.key kv) (.value kv)]))
+                                           (range (.customMetadataLength f))))
+                     name (get metadata "ARROW:extension:name")]
+                 (require! (and (= 2 (.customMetadataLength f))
+                                (= {"ARROW:extension:name" name
+                                    "ARROW:extension:metadata" ""} metadata))
                            :unsupported-arrow-field)
-                 :keyword)
+                 (cond
+                   (and (= Type/Utf8 type) (= "xt/clj-keyword" name)) :keyword
+                   (and (= Type/FixedSizeBinary type) (= "uuid" name)) :uuid
+                   :else (require! false :unsupported-arrow-field)))
                (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string} type))]
     (require! (contains? allowed kind) :unsupported-arrow-field)
-    (if (= :keyword kind)
+    (if (#{:keyword :uuid} kind)
       (require! (and (= (str "?_" i) (.name f)) (not (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
@@ -234,6 +238,9 @@
     (when (= :integer kind)
       (let [^Int t (.type f (Int.))]
         (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
+    (when (= :uuid kind)
+      (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
+        (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
     kind))
 
 (defn- keyword-value! [s]
@@ -287,6 +294,15 @@
                               (do (require! (= (quot (+ n 7) 8) (.limit values))
                                             :unsupported-integer-buffer-layout)
                                   #(present? values %))
+                              :uuid
+                              (do (require! (= (* 16 n) (.limit values))
+                                            :unsupported-uuid-buffer-layout)
+                                  ;; Fixed binary is a byte string, not an Arrow
+                                  ;; little-endian numeric value.
+                                  (let [v (doto (.duplicate values) (.order ByteOrder/BIG_ENDIAN))]
+                                    (fn [row]
+                                      (let [offset (* 16 row)]
+                                        (UUID. (.getLong v offset) (.getLong v (+ offset 8)))))))
                               :integer
                               (do (require! (= (* 8 n) (.limit values))
                                             :unsupported-integer-buffer-layout)
@@ -403,3 +419,27 @@
    rows. Other extensions, nullable columns and SQL semantics are excluded."
   [bytes]
   (expand-fixed-operations bytes keyword-base keyword-rows!))
+
+(def uuid-profile :xtdb-2.2.0-beta1/selected-int64-boolean-utf8-keyword-uuid-arrow-operations-v1)
+(def ^:private uuid-base (assoc base :profile uuid-profile))
+
+(defn- uuid-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid}))
+
+(defn decode-uuid-arguments
+  "Decode selected UUID extension columns and earlier scalar types.
+   Require exact extension metadata, fixed width and big-endian UUID bytes."
+  [bytes]
+  (try
+    (assoc uuid-base :status :decoded :rows (uuid-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc uuid-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc uuid-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc uuid-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-uuid-operations
+  "Expand selected SQL groups including UUIDs and earlier scalar rows.
+   Other extensions, nullable columns and SQL semantics are excluded."
+  [bytes]
+  (expand-fixed-operations bytes uuid-base uuid-rows!))
