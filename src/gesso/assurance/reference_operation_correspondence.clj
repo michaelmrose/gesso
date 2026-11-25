@@ -4,7 +4,7 @@
   (:require [gesso.assurance.reference-arrow-operations :as arrow]
             [gesso.assurance.xtdb-source-log :as provider]))
 
-(def profile :xtdb-2.2.0-beta1/selected-operation-correspondence-v3)
+(def profile :xtdb-2.2.0-beta1/selected-operation-correspondence-v4)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 (def ^:private max-bytes (* 16 1024 1024))
 

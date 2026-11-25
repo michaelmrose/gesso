@@ -8,7 +8,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v9)
+(def profile :selected-retained-replay-input-v10)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -66,9 +66,9 @@
       (when (= #{:gesso_commands} (current/operation-tables op)) op))))
 
 (defn- project-journal-value-assertion [query args]
-  ;; The physical argument relation is bounded to 64 columns. Invert
+  ;; Use the bounded physical argument-column ceiling. Invert
   ;; canonical parameters only, preserving dollar-bearing column names.
-  (when (and (string? query) (<= 3 (count args) 64)
+  (when (and (string? query) (<= 3 (count args) arrow/max-bounded-argument-columns)
              (str/starts-with? query "ASSERT 1 = (SELECT COUNT(*) FROM gesso_commands WHERE (gesso$command$binding).principal.gesso$choreo$identity$value = $1 AND (gesso$command$binding).operation = $2 AND "))
     (let [sql (str/replace query #"\$[0-9]+" "?")
           n (volatile! 0)

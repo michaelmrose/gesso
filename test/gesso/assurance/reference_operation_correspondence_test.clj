@@ -1,5 +1,6 @@
 (ns gesso.assurance.reference-operation-correspondence-test
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-arrow-operations :as arrow]
             [gesso.assurance.reference-arrow-operations-test :as fixture]
@@ -160,4 +161,49 @@
             (is (= :unsupported (:status (arrow/decode-mixed-bounded-sql-put bytes))))
             (is (= :unsupported (:status (arrow/decode-bounded-operations
                                           (java.util.Arrays/copyOf bytes (dec (alength bytes))))))))))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest selected-wide-argument-column-correspondence
+  (let [root (Files/createTempDirectory "gesso-operation-wide-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        limit arrow/max-bounded-argument-columns
+        sql (fn [n] (into [(str "ASSERT ? IN (" (str/join "," (repeat (dec n) "?")) ")")] (range n)))
+        check! (fn [node ids]
+                 (doseq [[n id] (map vector [64 65 limit (inc limit)] ids)]
+                   (let [bytes (#'fixture/retained-operation-bytes node id)
+                         r (arrow/decode-bounded-operations bytes)]
+                     (is (= (if (<= n limit) :decoded :unsupported) (:status r)))
+                     (if (<= n limit)
+                       (do
+                         (is (= (vec (range n)) (:args (peek (:operations r)))))
+                         (is (= :matched (:status (correspondence/compare-operation-bytes! node bytes))))
+                         (is (= r (with-redefs [values/max-value-slots n] (arrow/decode-bounded-operations bytes))))
+                         (let [failure (with-redefs [values/max-value-slots (dec n)] (arrow/decode-bounded-operations bytes))]
+                           (is (= :unsupported (:status failure)))
+                           (is (= :arrow-aggregate-value-limit (:reason failure)))
+                           (is (not (contains? failure :operations)))))
+                       (do
+                         (is (= :unsupported-integer-schema (:reason r)))
+                         (is (not (contains? r :operations)))
+                         (with-redefs [provider/observe-operation-bytes! (fn [& _] (throw (AssertionError. "provider must not run")))]
+                           (is (= :independent-operation-unsupported (:reason (correspondence/compare-operation-bytes! node bytes)))))))))
+                 (let [old-bytes (#'fixture/retained-operation-bytes node (nth ids 4))
+                       bytes (#'fixture/retained-operation-bytes node (peek ids))
+                       r (arrow/decode-bounded-operations bytes)]
+                   (is (= :decoded (:status (arrow/decode-mixed-bounded-sql-put old-bytes))))
+                   (is (= :unsupported-integer-schema (:reason (arrow/decode-mixed-bounded-sql-put bytes))))
+                   (is (= :decoded (:status r)))
+                   (is (= :matched (:status (correspondence/compare-operation-bytes! node bytes))))
+                   (is (= r (with-redefs [values/max-value-slots 67] (arrow/decode-bounded-operations bytes))))
+                   (let [failure (with-redefs [values/max-value-slots 66] (arrow/decode-bounded-operations bytes))]
+                     (is (= :arrow-aggregate-value-limit (:reason failure)))
+                     (is (not (contains? failure :operations))))))]
+    (try
+      (with-open [node (xtn/start-node config)]
+        (let [database (db/primary-db node)
+              ids (mapv (fn [ops] (:tx-id (xt/submit-tx node ops)))
+                        (into (mapv (fn [n] [["ASSERT FALSE"] (sql n)]) [64 65 limit (inc limit)])
+                              (map (fn [n] [["ASSERT FALSE"] [:put-docs :probe {:xt/id "a"}] (sql n)]) [64 65])))]
+          (.awaitSourceBlocking database (peek ids) (Duration/ofSeconds 30))
+          (check! node ids)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

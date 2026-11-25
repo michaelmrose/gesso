@@ -162,6 +162,7 @@
 (def integer-profile :xtdb-2.2.0-beta1/selected-int64-arrow-operations-v1)
 (def ^:private integer-base (assoc base :profile integer-profile))
 (def ^:private max-argument-columns 64)
+(def max-bounded-argument-columns 1024)
 
 (defn- argument-kind! [^Field field name allowed]
   (let [nullable-columns? (contains? allowed :nullable-sql-columns)
@@ -200,10 +201,12 @@
             columns (.fieldsLength schema)]
         (require! (and (zero? (.remaining sb)) (= Endianness/Little (.endianness schema))
                        (zero? (.featuresLength schema)) (zero? (.customMetadataLength schema))
-                       (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
+                       (<= 0 columns (if (contains? allowed :wide-sql-columns)
+                                      max-bounded-argument-columns max-argument-columns)))
+                  :unsupported-integer-schema)
         (let [reordered? (contains? allowed :reordered-sql-columns)
               order (if reordered? (argument-column-order! schema columns) (vec (range columns)))
-              allowed (disj allowed :reordered-sql-columns)
+              allowed (disj allowed :reordered-sql-columns :wide-sql-columns)
               kinds (mapv (fn [i]
                             (let [^Field field (.fields schema i)]
                               (argument-kind! field (if reordered? (.name field) (str "?_" i)) allowed)))
@@ -1052,17 +1055,18 @@
   (with-value-budget
     #(decode-mixed-sql-put* bytes mixed-bounded-sql-put-profile positional-sql-rows!)))
 
-(def bounded-operation-profile :xtdb-2.2.0-beta1/selected-bounded-sql-put-operations-arrow-v2)
+(def bounded-operation-profile :xtdb-2.2.0-beta1/selected-bounded-sql-put-operations-arrow-v3)
 
 (defn decode-bounded-operations
   "Interpret selected SQL-only, put-only or mixed streams with one shared
    recursive value budget. Select the layout from validated union metadata,
    never by retrying a rejected stream under another profile. Also admit
-   nonnullable top-level signed int32 SQL arguments (not document fields). SQL-only
+   nonnullable top-level signed int32 SQL arguments (not document fields),
+   and up to 1024 argument columns within the same aggregate value budget. SQL-only
    streams have no IID obligation. Diagnostic only; retain mixed limits."
   [bytes]
   (with-value-budget
     #(decode-mixed-sql-put* bytes bounded-operation-profile
                              (fn [args] (scalar-rows! args #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
-                                                            :empty-list :recursive-list :nullable-sql-columns :reordered-sql-columns :sql-int32}))
+                                                            :empty-list :recursive-list :nullable-sql-columns :reordered-sql-columns :sql-int32 :wide-sql-columns}))
                              true)))

@@ -4906,3 +4906,32 @@ secondary fixture error; corrected by qualifying actual int32 encoding,
 not by altering generated operands. Larger guards above 64 columns remain
 unsupported. No production admission, certificate or CLM-R2 premise
 retirement; full project and independent formal gates not rerun.
+
+* v2726 — expand bounded SQL argument-column capacity
+
+Raise only the shared bounded operation decoder's argument-column ceiling
+from 64 to 1024, and use that ceiling for selected recursive journal
+projection. Retain the legacy reader ceilings, 16 MiB stream limits,
+65536 aggregate logical value slots, row, group, depth and element bounds.
+Version bounded operation, operation correspondence and strict replay
+profiles. Do not expand the state-dependent clocked replay grammar.
+
+Focused JVM: 71 tests / 5520 assertions, zero failures or errors in two
+completed batches: replay input and operation correspondence 17 / 1224;
+Arrow mixed, Arrow operations, temporal, provider and retained operation
+54 / 4296. Preserve the original recursive journal fixture and add a
+wider generated predicate with six vector items, matching retained
+inputs, commits, aborts and historical rectangles before and after
+reopening. Physical-only retained SQL fixtures accept 64, 65 and 1024
+columns, reject 1025 before provider decoding, and enforce exact aggregate
+slot boundaries including a mixed put/SQL stream. Legacy mixed reader
+accepts 64 and rejects 65. The width probes deliberately place a false
+assertion before the wide SQL, so they do not qualify its execution.
+Initial 32-item vector journal fixture caused pinned XTDB ingestion to
+stop with generated JVM method code too large; smaller wider guard passed.
+Initial physical fixture had excess unbound arguments; corrected to real
+numbered parameters with prior abort. A subsequent test incorrectly used
+a mixed reader on SQL-only bytes; corrected to actual mixed streams.
+Physical capacity is not provider query compilation capacity. No production
+admission, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates not rerun.
