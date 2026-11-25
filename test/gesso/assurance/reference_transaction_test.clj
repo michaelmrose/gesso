@@ -36,8 +36,43 @@
     (is (= :none (:authority committed)))
     (is (= :not-issued (:certificate committed)))))
 
+(def ^:private uuid-a #uuid "00000000-0000-0000-0000-000000000001")
+(def ^:private uuid-b #uuid "00000000-0000-0000-0000-000000000002")
+
+(def ^:private equality-cases
+  [[0 0 true] [Long/MIN_VALUE Long/MAX_VALUE false]
+   [Long/MAX_VALUE Long/MAX_VALUE true] [-1 1 false]
+   [true true true] [false false true] [true false false]
+   ["" "" true] ["open" "Open" false] ["café" "café" true]
+   ["café" "cafe\u0301" false] ["a" "a " false]
+   [:open :open true] [:open :closed false]
+   [:claim/status :claim/status true] [:claim/status :other/status false]
+   [uuid-a uuid-a true] [uuid-a uuid-b false]])
+
+(deftest independent-parameterized-equality
+  (doseq [[left right expected] equality-cases]
+    (let [assertion ["ASSERT ? = ?" left right]
+          predicted (reference/execute initial [put-a assertion put-other])]
+      (is (= :predicted (:status predicted)) (pr-str assertion))
+      (is (= expected (:committed? predicted)) (pr-str assertion))
+      (is (= (if expected (-> initial
+                              (assoc-in [:refprobe "a"] replacement)
+                              (assoc-in [:refother "a"] {:xt/id "a" :value 9}))
+                 initial) (:state predicted)))
+      (is (= (when-not expected 1) (:failed-assertion-index predicted)))
+      (is (= :none (:authority predicted)))
+      (is (= :not-issued (:certificate predicted))))))
+
 (deftest unsupported-reference-input-does-not-predict
-  (doseq [ops [[] [["ASSERT ? = ?" 1 1]] [["ASSERT FALSE"] ["ASSERT arbitrary"]]
+  (doseq [ops [[] [["ASSERT ? = ?" 1]] [["ASSERT ? = ?" 1 1 1]]
+               [["ASSERT ? = ?" 1 "1"]] [["ASSERT ? = ?" :open "open"]]
+               [["ASSERT ? = ?" nil nil]] [["ASSERT ? = ?" 1.0 1.0]]
+               [["ASSERT ? = ?" 1N 1N]] [["ASSERT ? = ?" [1] [1]]]
+               [["ASSERT ? = ?" (apply str (repeat 4097 "a")) ""]]
+               [["ASSERT ? = ?" (str (char 0xd800)) "?"]]
+               [["ASSERT FALSE"] ["ASSERT ? = ?" 1 nil]]
+               [["ASSERT ? = ?" 1 2] ["ASSERT ? = ?" [] []]]
+               [["ASSERT FALSE"] ["ASSERT arbitrary"]]
                [[:delete-docs :refprobe "a"]]
                [[:put-docs {:into :refprobe :valid-from :now} a]]
                [[:put-docs :refprobe (assoc a :xt/valid-to 1)]]
@@ -73,14 +108,22 @@
       ;; Each reference prediction uses its OWN previous predicted state,
       ;; never a readback from the provider. Compare complete row maps.
       (loop [state (:state start)
-             cases [[["ASSERT TRUE"]]
+             cases (into [[["ASSERT TRUE"]]
                     [put-a put-b put-other]
                     [[:put-docs :refprobe a] put-a]
                     [["ASSERT FALSE"] put-a]
                     [[:put-docs :refprobe {:xt/id "c" :value 4}] put-other ["ASSERT FALSE"]]
                     [[:put-docs :refprobe a b] ["ASSERT TRUE"]]
                     [put-a ["ASSERT FALSE"] [:put-docs :refother {:xt/id "z" :value 7}]]
-                    [put-other ["ASSERT TRUE"] put-a]]]
+                    [put-other ["ASSERT TRUE"] put-a]]
+                         (map-indexed
+                          (fn [i [left right _]]
+                            ;; Distinct writes around the assertion expose
+                            ;; wrong commits and incomplete rollback.
+                            [[:put-docs :refprobe {:xt/id "a" :value (+ 100 i)}]
+                             ["ASSERT ? = ?" left right]
+                             [:put-docs :refother {:xt/id "a" :value (+ 200 i)}]])
+                          equality-cases))]
         (when-let [ops (first cases)]
           (let [predicted (reference/execute state ops)
                 id (:tx-id (xt/submit-tx node ops))

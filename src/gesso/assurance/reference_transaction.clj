@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v1)
+(def profile :selected-current-state-transaction-v2)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -19,6 +19,27 @@
 (defn- scalar? [x]
   (or (and (string? x) (<= (count x) 4096)) (boolean? x)
       (and (integer? x) (<= Long/MIN_VALUE x Long/MAX_VALUE))))
+
+(defn- equality-domain [v]
+  ;; Homogeneous closed domains only; no SQL coercion, null or composites.
+  (cond
+    (instance? Long v) :i64
+    (boolean? v) :boolean
+    (and (string? v) (<= (count v) 4096)
+         (.canEncode (.newEncoder java.nio.charset.StandardCharsets/UTF_8)
+                     ^CharSequence v)) :string
+    (and (keyword? v) (<= (count (str v)) 4096)
+         (re-matches #"[a-zA-Z][a-zA-Z0-9_-]*" (name v))
+         (or (nil? (namespace v))
+             (re-matches #"[a-zA-Z][a-zA-Z0-9_.-]*" (namespace v)))) :keyword
+    (uuid? v) :uuid))
+
+(defn- equality-kind! [op]
+  (let [[_ left right] op
+        domain (equality-domain left)]
+    (when-not (and (= 3 (count op)) domain (= domain (equality-domain right)))
+      (reject! :unsupported-reference-equality-operands))
+    (if (= left right) :assert-true :assert-false)))
 
 (defn- document? [doc]
   (and (map? doc) (nil? (meta doc)) (id? (:xt/id doc))
@@ -43,6 +64,7 @@
   (cond
     (= ["ASSERT TRUE"] op) :assert-true
     (= ["ASSERT FALSE"] op) :assert-false
+    (= "ASSERT ? = ?" (first op)) (equality-kind! op)
     (= :put-docs (first op))
     (let [docs (subvec op (min 2 (count op)))]
       (when-not (and (table? (second op)) (<= 1 (count docs) 16384)
@@ -55,7 +77,8 @@
 (defn execute
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-id document}}. Puts replace entire documents in order;
-   literal false aborts and returns the original state. The full vector is
+   literal or homogeneous parameter equality assertions can abort and return
+   the original state. The full vector is
    validated before evaluation, including operations after a false guard.
    Unsupported input returns no predicted state or outcome. No arbitrary
    SQL, temporal bounds, callbacks, or observed outcomes are accepted."

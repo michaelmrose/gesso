@@ -1780,3 +1780,30 @@ semantics, not a theorem of provider refinement or full mapped transaction
 coverage. No production assurance status changes; history remains v19.
 Full physical Claim, project, Chromium and separate proof gates not rerun.
 No CLM-R2 premise is retired.
+
+* v2606 — model homogeneous parameter equality assertions
+
+Extend the independent reference transaction language to the exact
+ASSERT ? = ? operation, with two operands of the same supported domain:
+JVM signed 64-bit integers, booleans, bounded well-formed Unicode strings,
+restricted simple or qualified keywords, and UUIDs. Equality is exact in
+each domain; reject mixed domains, null, floating-point and arbitrary
+precision numbers, composite values, malformed Unicode and wrong arity.
+The complete vector is still validated before execution, even after a
+failing assertion. A false equality rolls back preceding writes and
+prevents later writes. Bump the reference profile to v2; history remains
+v19.
+
+Final reference JVM namespace: 4 tests / 356 assertions, zero failures
+or errors. Eighteen new differential cases compare independently predicted
+outcomes, complete selected visible maps and retained envelopes with real
+embedded XTDB. Distinct writes on either side of each guard expose a
+wrong outcome or incomplete rollback; no provider readback feeds the
+next reference prediction. Pure regressions check exact outcomes and
+unsupported operands, including an unsupported suffix after a false guard.
+
+This is selected finite empirical evidence, not universal SQL equality,
+transaction-internal reads, mapped value coverage or a provider refinement
+theorem. No production assurance status changes or CLM-R2 premise is
+retired. Full physical Claim, project, Chromium and separate proof gates
+were not rerun.
