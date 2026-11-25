@@ -313,10 +313,38 @@
       (is (= 1 (count (remove #(= (:tx-ops base) %) @seen))))
       (is (not-any? #(= ops %) @seen)))))
 
+(deftest durable-witness-encoding-preserves-typed-scalar-valuations
+  (let [encode (deref (ns-resolve 'gesso.model.inductive-plan 'encode-valuation))
+        decode (deref (ns-resolve 'gesso.model.inductive-plan 'decode-valuation!))
+        valuation {:example/nil nil :example/false false :example/true true
+                   :example/integer 123456789012345678901234567890N
+                   :example/negative -7 :example/text "x\n:keyword"
+                   :example/keyword :example/value :example/unqualified :value}
+        encoded (encode valuation)
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= valuation (decode encoded)))
+    (is (= [] (encode {})))
+    (is (= {} (decode [])))
+    (is (not= (encode {}) (encode {:example/nil nil})))
+    (is (not= (encode {:example/nil nil}) (encode {:example/nil false})))
+    (is (= encoded (encode (into {} (reverse (seq valuation))))))
+    (is (= (encode {:example/number 1}) (encode {:example/number 1N})))
+    (doseq [bad [(conj encoded (first encoded)) (vec (reverse encoded))
+                 [["example" "value" "integer" "01"]]
+                 [["example" "value" "boolean" "maybe"]]
+                 [["example" "value" "nil" "extra"]]
+                 [["example" "value" "unknown"]]]]
+      (is (= :invalid-transition-witness (reason #(decode bad)))))
+    (is (= :invalid-transition-witness
+           (reason #(encode {(keyword "example" (apply str (repeat 2049 "x"))) 1}))))))
+
 (deftest selected-publication-executor-submits-the-framed-canonical-plan
   (let [id :example/projection
         operation :example/command
-        original (assoc source :writes #{:example/count :example/one :example/owner}
+        original (assoc source :input-types {:input/allowed {:type :boolean}}
+                        :guard {:readers #{:input/allowed} :expression [:read :input/allowed]}
+                        :reads #{:input/allowed}
+                        :writes #{:example/count :example/one :example/owner}
                         :replacements {:example/count [:literal 3] :example/one [:literal :accepted]
                                        :example/owner [:literal "p1"]}
                         :frame #{:example/enabled :example/two})
@@ -382,7 +410,8 @@
                                 (swap! constructs inc)
                                 (when-not (= :missing @mode)
                                   (admission :prepare! id (select-keys invocation [:command-id :principal :operation :arguments])
-                                             {:document-rows docs :records {} :state (project docs [])} {}))
+                                             {:document-rows docs :records {} :state (project docs [])}
+                                             {:input/allowed true}))
                                 (when (= :stale @mode)
                                   (xt/execute-tx node [[:put-docs :requests (assoc before :hidden "intervening")]]))
                                 {:spec {:purpose :gesso.live/refresh}
@@ -448,8 +477,27 @@
           (is (= [assignment] (xt/q node ["SELECT * FROM assignments"])))
           (is (= [{:xt/id "valid"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
           (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
-          (is (= [(inductive/mapped-transition-evidence! admission (last @claimed))]
-                 (xt/q node ["SELECT * FROM gesso_transition_evidence"])))
+          (let [witness (first (xt/q node ["SELECT * FROM gesso_transition_evidence"]))
+                checked (last @claimed)
+                journal (xt/q node ["SELECT * FROM gesso_commands"])
+                current-docs {:requests [after] :assignments [assignment]}
+                verify #(inductive/check-historical-mapped-poststate!
+                         admission (first journal) % current-docs journal)]
+            (is (= witness (inductive/mapped-transition-evidence! admission checked)))
+            (is (= 2 (:profile-version witness)))
+            (is (= [["input" "allowed" "boolean" "true"]] (:input-witness witness)))
+            (is (some #{["example" "owner" "nil"]} (:prestate-witness witness)))
+            (is (= :checked-supplied-witness (:abstract-relation (verify witness))))
+            (is (= :invalid-historical-mapped-evidence
+                   (reason #(verify (assoc witness :profile-version 1)))))
+            (is (= :invalid-transition-witness
+                   (reason #(verify (update witness :input-witness conj (first (:input-witness witness)))))))
+            (is (= :historical-mapped-poststate-mismatch
+                   (reason #(verify (assoc-in witness [:input-witness 0 3] "false")))))
+            ;; A self-consistent digest is not a semantic admission.
+            (let [forged (inductive/mapped-transition-evidence!
+                          admission (assoc-in checked [:candidate :inputs :input/allowed] false))]
+              (is (= :candidate-relation-mismatch (reason #(verify forged))))))
           (is (not (admission :pending? id "valid")))
           (is (= :replay (:status (exec (call "valid")))))
           (is (= 3 @constructs))

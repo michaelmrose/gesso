@@ -73,6 +73,19 @@
       (values/observe-state! (:state-types original) state)
       state)))
 
+(defn check-transition-relation!
+  "Check the typed guard, assignments and frame with both interpreters.
+   Supplied prestate and inputs have no physical authority."
+  [original before inputs after]
+  (let [transition (:transition (construction/build-guarded-replacement! original))
+        observed (abstract/observe-transition! transition before inputs after)
+        other (independent/observe-transition! transition before inputs after)
+        checks [:guard-holds? :assignments-hold? :frame-holds? :matches?]]
+    (when-not (= (select-keys observed checks) (select-keys other checks))
+      (reject! :candidate-interpreter-disagreement))
+    (when-not (:matches? observed) (reject! :candidate-relation-mismatch))
+    nil))
+
 (defn check-put-candidate!
   "Overlay actual put-docs on supplied prestate rows and check the declared
    relation. Exactly the mapped write targets must occur once; journal
@@ -106,15 +119,9 @@
                              docs)) document-rows entries)
             journal (into (vec journal-rows) (keep (fn [[[kind] row]] (when (= :journal-slot kind) row))) entries)
             after (project-state! original target-map docs journal decode-outcome!)
-            transition (:transition (construction/build-guarded-replacement! original))
-            observed (abstract/observe-transition! transition before inputs after)
-            other (independent/observe-transition! transition before inputs after)
-            checks [:guard-holds? :assignments-hold? :frame-holds? :matches?]]
-        (when-not (= (select-keys observed checks) (select-keys other checks))
-          (reject! :candidate-interpreter-disagreement))
-        (when-not (:matches? observed) (reject! :candidate-relation-mismatch))
+            _ (check-transition-relation! original before inputs after)]
         {:type ::checked-put-candidate :mapping-fingerprint (:fingerprint mapping)
          :transition-fingerprint (:transition-fingerprint mapping)
-         :write-targets expected :before before :after after
+         :write-targets expected :before before :inputs inputs :after after
          :scope :declared-projection-of-supplied-put-candidate
          :transaction-submitted? false :atomicity :not-established :authority :none}))))

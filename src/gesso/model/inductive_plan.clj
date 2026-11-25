@@ -24,6 +24,7 @@
             [gesso.assurance.inductive-report :as inductive]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.initial-constructor :as constructor]
+            [gesso.assurance.proof.typed-value-semantics :as values]
             [gesso.assurance.transition :as transition]
             [gesso.assurance.subject :as subject]
             [gesso.choreo.identity :as identity]
@@ -511,22 +512,71 @@
     {:state actual :initialization-fingerprint (:initialization-fingerprint checked)
      :authority :none :physical-correspondence :checked-supplied-projection}))
 
-(defn- transition-evidence [description alternative mapping command-id state]
-  {:xt/id command-id :profile-version 1
-     :catalog-fingerprint (:catalog-fingerprint description)
-     :induction-fingerprint (:induction-fingerprint description)
-     :mapping-fingerprint (:fingerprint mapping)
-     :transition-fingerprint (:transition-fingerprint mapping)
-     :alternative alternative
-     :poststate-fingerprint (:fingerprint
-                            (original-initial-identity
-                             {:kind :rule :id ::mapped-poststate
-                              :interface {:state state}}))})
+;; String-vector entries avoid XTDB document-key normalization and preserve
+;; absence, present nil, false and arbitrary admitted integral values.
+(defn- encode-valuation [valuation]
+  (when-not (and (map? valuation) (<= (count valuation) 64)
+                 (every? #(and (qualified-keyword? %)
+                               (<= (count (namespace %)) 2048)
+                               (<= (count (name %)) 2048)) (keys valuation)))
+    (reject! :invalid-transition-witness [] {}))
+  (mapv (fn [[k v]]
+          (into [(namespace k) (name k)]
+                (case (values/value-kind! v)
+                  :nil ["nil"]
+                  :boolean ["boolean" (str v)]
+                  :integer ["integer" (str v)]
+                  :string ["string" v]
+                  :keyword (if-let [ns (namespace v)]
+                             ["qualified-keyword" ns (name v)]
+                             ["keyword" (name v)]))))
+        (sort-by (comp (juxt namespace name) key) valuation)))
+
+(defn- decode-valuation! [encoded]
+  (when-not (and (vector? encoded) (<= (count encoded) 64)
+                 (every? #(and (vector? %) (<= 3 (count %) 5)
+                               (every? (fn [s] (and (string? s) (<= (count s) 2048))) %)) encoded))
+    (reject! :invalid-transition-witness [] {}))
+  (let [decoded (into {} (map (fn [[ns k tag a b]]
+                               [(keyword ns k)
+                                (case tag
+                                  "nil" nil
+                                  "boolean" (case a "true" true "false" false
+                                                    (reject! :invalid-transition-witness [] {}))
+                                  "integer" (try (bigint a)
+                                                 (catch Exception _ (reject! :invalid-transition-witness [] {})))
+                                  "string" a
+                                  "qualified-keyword" (keyword a b)
+                                  "keyword" (keyword nil a)
+                                  (reject! :invalid-transition-witness [] {}))])) encoded)]
+    (when-not (= encoded (encode-valuation decoded))
+      (reject! :invalid-transition-witness [] {}))
+    decoded))
+
+(def ^:private original-witness-relation projection/check-transition-relation!)
+
+(defn- transition-evidence [description alternative mapping command-id before inputs state]
+  {:xt/id command-id :profile-version 2
+   :catalog-fingerprint (:catalog-fingerprint description)
+   :induction-fingerprint (:induction-fingerprint description)
+   :mapping-fingerprint (:fingerprint mapping)
+   :transition-fingerprint (:transition-fingerprint mapping)
+   :alternative alternative
+   :prestate-witness (encode-valuation before)
+   :input-witness (encode-valuation inputs)
+   :witness-fingerprint (:fingerprint
+                         (original-initial-identity
+                          {:kind :rule :id ::mapped-transition-witness
+                           :interface {:before before :inputs inputs :after state}}))
+   :poststate-fingerprint (:fingerprint
+                          (original-initial-identity
+                           {:kind :rule :id ::mapped-poststate
+                            :interface {:state state}}))})
 
 (defn mapped-transition-evidence!
-  "Describe the expected poststate of an admitted framed candidate. This
-   record is an expectation, not proof of physical verification. The executor
-   must bind it to the same atomic transaction as the command journal."
+  "Describe the checked abstract witness of an admitted framed candidate.
+   Its prestate and inputs are supplied observations, not physical proof.
+   The executor must bind it to the same atomic transaction as the command journal."
   [admission {:keys [identity candidate]}]
   (let [description (describe-mapped-admission admission)
         alternative (:alternative identity)
@@ -535,15 +585,17 @@
                    (= :exact-generated-prefix (:frame-prefix candidate))
                    (= (:fingerprint mapping) (:mapping-fingerprint candidate))
                    (= (:transition-fingerprint mapping) (:transition-fingerprint candidate))
-                   (map? (:after candidate))
+                   (map? (:before candidate)) (map? (:inputs candidate)) (map? (:after candidate))
                    (identical? original-initial-identity subject/describe-subject))
       (reject! :invalid-mapped-transition-evidence [] {}))
-    (transition-evidence description alternative mapping (:command-id identity) (:after candidate))))
+    (transition-evidence description alternative mapping (:command-id identity)
+                         (:before candidate) (:inputs candidate) (:after candidate))))
 
 (defn check-historical-mapped-poststate!
   "Recompute the expected evidence from the original mapping and supplied
    historical rows. The caller must establish the exact command commit time
-   and same-transaction evidence. This grants no transaction authority."
+   and same-transaction evidence. Re-evaluate the relation over the saved
+   abstract prestate and inputs; their physical provenance is not established."
   [admission record evidence document-rows journal-rows]
   (let [{:keys [source description]} (registered-mapped! admission)
         alternative (:alternative evidence)
@@ -556,14 +608,20 @@
     (when-not (and original mapping (string? (:xt/id record))
                    (contains? (:write-targets mapping) slot)
                    (some #(= record %) journal-rows)
+                   (= 2 (:profile-version evidence))
+                   (identical? original-witness-relation projection/check-transition-relation!)
                    (identical? original-initial-projection projection/project-state!)
                    (identical? original-initial-identity subject/describe-subject))
       (reject! :invalid-historical-mapped-evidence [] {}))
     (let [actual (original-initial-projection original (:target-map source)
-                                               document-rows journal-rows (:decode-outcome! source))]
-      (when-not (= evidence (transition-evidence description alternative mapping (:xt/id record) actual))
+                                               document-rows journal-rows (:decode-outcome! source))
+          before (decode-valuation! (:prestate-witness evidence))
+          inputs (decode-valuation! (:input-witness evidence))]
+      (when-not (= evidence (transition-evidence description alternative mapping (:xt/id record) before inputs actual))
         (reject! :historical-mapped-poststate-mismatch [] {}))
-      {:authority :none :physical-correspondence :checked-historical-projection})))
+      (original-witness-relation original before inputs actual)
+      {:authority :none :physical-correspondence :checked-historical-projection
+       :abstract-relation :checked-supplied-witness})))
 
 (defn check-mapped-poststate!
   "Compare the complete supplied projection with the admitted transition's
