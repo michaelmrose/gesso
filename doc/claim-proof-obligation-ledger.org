@@ -2647,3 +2647,37 @@ physical commitment, deadline validity, JVM cancellation modeling or
 composition with independent physical execution. No production assurance
 status changes and no CLM-R2 premise is retired. Full project, physical
 Claim, Chromium and independent proof gates were not rerun.
+
+* v2638 — compose selected physical worker cycles
+
+Compose independent one-candidate discovery, pending acquisition, expired
+reclamation and receipt acknowledgment with the independent cycle control
+flow model. Explicit ordered clock and identity slots determine each
+reached attempt; independently predicted operations extend the physical
+prefix. Preserve budget, cursor and failure stopping conditions. The
+selected progression marker represents acquisition system time only, not
+provider token verification. Unsupported plans return no partial trace.
+Physical-cycle profile v1; other profiles and history v19 unchanged.
+
+Expanded focused JVM gate: 97 tests / 8155 assertions, zero failures or
+errors across six reference test namespaces and the production cycle suite.
+New focused suite: 2 tests / 99 assertions. Six differential histories
+compare the production cycle and sweep, discovery pages, exact submitted
+operations, cycle summaries or interruption envelopes, and complete
+selected history rectangles. Twenty-one actual XTDB submissions include
+nineteen commits and two assertion aborts. Cover expiry reclamation,
+pending acquisition, budget exhaustion, cursor resumption, acquisition
+contention, acknowledgment contention after a completed prefix and an
+empty page. Fresh discovery also matches after each cycle.
+
+The harness substitutes deterministic claim generation at the private
+worker attempt boundary, invokes the production acquisition validator,
+and substitutes trusted acceptance at the delivery boundary while using
+real acknowledgment and transaction execution. It projects progression
+from actual consistency system time and supplies pinned reads and clocks.
+This is finite selected physical/cycle composition, not actual delivery,
+progression token verification, live frontier acquisition, uncertain
+physical execution, arbitrary writer closure or universal refinement.
+No production assurance status changes and no CLM-R2 premise is retired.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.
