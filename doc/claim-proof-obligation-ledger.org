@@ -2372,3 +2372,21 @@ refinement. No production assurance status changes and no CLM-R2 premise
 is retired. Full project, physical Claim, Chromium and independent proof
 gates were not rerun. The temporal test namespace is now 977 lines;
 split worker coverage before extending it substantially.
+
+* v2628 — separate worker reference test coverage
+
+Split the 977-line temporal test namespace into general temporal and
+worker/publication suites, extracting shared deterministic fixtures and
+provider observation helpers into a test-only namespace. Preserve all
+existing test definitions, assertion bodies and comparison semantics.
+No production interpreter or reference profile changes.
+
+Combined reference JVM: 47 tests / 5283 assertions, zero failures or
+errors across all three reference test namespaces. Exact original test
+name inventory and aggregate assertion count preserved: 12 current-state,
+11 general temporal and 24 worker/publication tests. The resulting test
+files are 250 and 696 lines, with 48 lines of shared fixtures. This is a
+structural maintenance revision, not additional refinement evidence or
+premise retirement. No production assurance status changes; CLM-R2 and
+history v19 remain unchanged. Full project, physical Claim, Chromium and
+independent proof gates were not rerun.
