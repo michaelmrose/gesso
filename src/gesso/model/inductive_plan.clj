@@ -705,8 +705,9 @@
        :input-correspondence :checked-command-and-prestate-selectors
        :expected-envelope (envelope/binding-status evidence)})))
 
-(defn check-mapped-prestate!
-  "Compare the durable prestate witness with a supplied physical projection
+(defn reconstruct-mapped-prestate-prefix!
+  "Internal historical verifier: return the exact reconstructed guard vector.
+   Do not expose it through operational reports. Compare the durable prestate witness with a supplied physical projection
    and reconstruct the exact current-profile guard prefix from those rows.
    The caller must independently establish the preceding system-time basis
    at the committing transaction's valid time. This is not an attestation
@@ -727,12 +728,19 @@
                                               document-rows journal-rows (:decode-outcome! source))]
       (when-not (= (decode-valuation! (:prestate-witness evidence)) actual)
         (reject! :mapped-prestate-mismatch [] {}))
-      (when-not (= (select-keys evidence [:guard-profile :guard-prefix-fingerprint])
-                   (frame/prefix-evidence! (frame/formatted-prestate-assertions!
-                                            mapping document-rows journal-rows)))
-        (reject! :historical-guard-prefix-mismatch [] {}))
-      {:authority :none :physical-correspondence :checked-supplied-prestate
-       :guard-prefix-correspondence :checked-reconstructed-prefix})))
+      (let [prefix (frame/formatted-prestate-assertions! mapping document-rows journal-rows)]
+        (when-not (= (select-keys evidence [:guard-profile :guard-prefix-fingerprint])
+                     (frame/prefix-evidence! prefix))
+          (reject! :historical-guard-prefix-mismatch [] {}))
+        prefix))))
+
+(defn check-mapped-prestate!
+  "Check the supplied prestate and reconstructed guard identity without
+   returning the potentially sensitive SQL or bound values."
+  [admission evidence document-rows journal-rows]
+  (reconstruct-mapped-prestate-prefix! admission evidence document-rows journal-rows)
+  {:authority :none :physical-correspondence :checked-supplied-prestate
+   :guard-prefix-correspondence :checked-reconstructed-prefix})
 
 (defn check-mapped-poststate!
   "Compare the complete supplied projection with the admitted transition's

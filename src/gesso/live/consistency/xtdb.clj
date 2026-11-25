@@ -219,8 +219,10 @@
   "Compare one retained transaction with a supplied durable witness through
    the exact physical connectable. Never expose the node or raw log values.
    Revoked adapter handles are refused before provider acquisition."
-  [connectable tx-id witness]
-  (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness))
+  ([connectable tx-id witness]
+   (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness))
+  ([connectable tx-id witness prefix]
+   (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness prefix)))
 
 (defn current-submission-policy-token
   "Observe the current opaque policy generation through a live handle or

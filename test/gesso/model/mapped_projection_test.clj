@@ -1230,7 +1230,7 @@
                                                     mapping (assoc-in docs [:requests 0 :hidden] "other") [])))]
     (doseq [[mode reason] [[:valid nil]
                            [:unguarded :historical-envelope-mismatch]
-                           [:self-bound-unguarded nil]
+                           [:self-bound-unguarded :historical-intended-guard-prefix-mismatch]
                            [:unbound :historical-envelope-unsupported]
                            [:other-prestate :historical-guard-prefix-mismatch]
                            [:legacy :invalid-historical-mapped-evidence]
@@ -1266,8 +1266,8 @@
               (is (= :conditional-observed-prefix-argument (get-in (describe initial) [:physical-induction :status])))
               (is (not= other-fingerprint (:guard-prefix-fingerprint witness)))
               ;; A removed guard contradicts the recorded complete envelope.
-              ;; A self-bound raw unguarded writer can still match: this
-              ;; comparison does not independently authenticate intent.
+              ;; A self-bound raw unguarded writer now fails the independent
+              ;; reconstructed prefix check, not the recorded digest check.
               (let [ops (conj (if unguarded? unguarded-ops (:tx-ops framed))
                               [:put-docs :gesso_transition_evidence corrupted])
                     prior-observations @observations]

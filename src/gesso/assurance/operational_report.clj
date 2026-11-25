@@ -99,7 +99,7 @@
                       (:through-basis r)
                       (not (pos? (compare (:system-time initial)
                                          (xtdb/basis-system-time (:through-basis r))))))
-        clean? (and (= :selected-mapped-ledger-chunk-v5 (:profile r))
+        clean? (and (= :selected-mapped-ledger-chunk-v6 (:profile r))
                     (#{:observed-interval-checked :partial-interval} (:status history))
                     (= (:status r) (:status history))
                     (= (:caught-up? r) (= :observed-interval-checked (:status r)))
@@ -115,9 +115,10 @@
      :premises {:source-identity (if matching? :matched :open)
                 :abstract-induction (if abstract? :conditionally-checked :open)
                 :physical-initialization (if initial? :observed-projection-checked :open)
-                :historical-step-coverage (if clean? :clean-v5-prefix :open)
-                :visible-valid-time-continuity (if clean? :v5-prefix-checked :open)
-                :recorded-envelope-correspondence (if clean? :v5-mapped-steps-checked :open)
+                :historical-step-coverage (if clean? :clean-v6-prefix :open)
+                :visible-valid-time-continuity (if clean? :v6-prefix-checked :open)
+                :recorded-envelope-correspondence (if clean? :v6-mapped-steps-checked :open)
+                :intended-guard-prefix-correspondence (if clean? :v6-mapped-steps-checked :open)
                 ;; Matching a recorded binding is not evidence of intended writer authority.
                 :historical-writer-provenance :not-established}
      :invariant-ids (if eligible? invariants #{})

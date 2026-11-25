@@ -205,13 +205,13 @@
       (reject! :unsupported-observed-envelope))
     ops))
 
-(defn check-recorded-transition!
+(defn- check-recorded-transition*
   "Check a committed transition's decoded source-log envelope against its
    independently acquired, pinned durable v4 witness. No caller operation
    vector is required. The final logged witness must match exactly, its
    binding must recompute, and the ledger must independently show commit.
    This checks decoded correspondence, not writer authority or execution."
-  [node tx-id witness]
+  [node tx-id witness require-prefix? prefix]
   (let [report (fn [status reason]
                  (cond-> {:status status :profile binding-profile :authority :none :certificate :not-issued}
                    reason (assoc :reason reason)))]
@@ -221,8 +221,13 @@
         (report :unsupported :invalid-transition-envelope-witness)
         (not= :recorded-unchecked (binding-status witness))
         (report :unsupported :missing-or-invalid-envelope-binding)
+        (and require-prefix?
+             (not (and (vector? prefix) (seq prefix)
+                       (every? #(and (vector? %) (string? (first %))) prefix))))
+        (report :unsupported :invalid-intended-guard-prefix)
         :else
-        (let [observed (source-log/observe-source-message! node tx-id)]
+        (let [expected-prefix (when require-prefix? (expected-operations! prefix))
+              observed (source-log/observe-source-message! node tx-id)]
           (case (:status observed)
             :unavailable (report :unavailable (:reason observed))
             :unsupported (report :unsupported (:reason observed))
@@ -235,6 +240,10 @@
                 (cond
                   (not= witness (transition-witness! ops)) (report :mismatch :source-witness-mismatch)
                   (not (bound-transition-envelope? ops)) (report :mismatch :envelope-fingerprint-mismatch)
+                  (and require-prefix?
+                       (or (>= (count expected-prefix) (count ops))
+                           (not= expected-prefix (subvec (:operations observed) 0 (count expected-prefix)))))
+                  (report :mismatch :intended-guard-prefix-mismatch)
                   :else
                   (let [outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
                     (cond
@@ -242,8 +251,9 @@
                       (not (and (= 1 (count outcomes)) (boolean? (:committed (first outcomes)))))
                       (report :unsupported :invalid-transaction-outcome)
                       (not= [{:committed true}] outcomes) (report :mismatch :transaction-outcome-mismatch)
-                      :else (assoc (report :matched nil) :tx-id tx-id :operation-count (count ops)
-                                   :envelope-fingerprint (:envelope-fingerprint witness)))))))
+                      :else (cond-> (assoc (report :matched nil) :tx-id tx-id :operation-count (count ops)
+                                           :envelope-fingerprint (:envelope-fingerprint witness))
+                              require-prefix? (assoc :intended-guard-prefix :matched)))))))
             (report :unsupported :unexpected-source-observation))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -253,3 +263,13 @@
           (report :unsupported (:reason (ex-data e)))
           (report :unavailable :envelope-check-failed)))
       (catch Exception _ (report :unavailable :envelope-check-failed)))))
+
+(defn check-recorded-transition!
+  "Check a retained committed transition against its recorded binding.
+   The four-argument form additionally requires an independently derived,
+   nonempty ordered guard prefix at the start of the decoded transaction.
+   Neither form establishes intended writes or writer authority."
+  ([node tx-id witness]
+   (check-recorded-transition* node tx-id witness false nil))
+  ([node tx-id witness prefix]
+   (check-recorded-transition* node tx-id witness true prefix)))

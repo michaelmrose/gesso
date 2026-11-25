@@ -1036,3 +1036,32 @@ and full regression gates were not rerun for this revision.
 Intended-envelope provenance, source-log decoding/retention refinement,
 actual writer authority, transaction-internal reads and infrastructure
 writer qualification remain open. No CLM-R2 premise is retired.
+
+* v2581 — compare intended mapped guard prefix with retained source
+
+Reconstruct the ordered current-profile mapped prestate guard vector from
+admitted mappings and pinned preceding rows, checking the durable prestate
+and prefix fingerprint as before. Require this nonempty vector to match the
+initial decoded source-log operations exactly, in addition to the recorded
+complete-envelope binding, witness equality and committed outcome. Keep
+raw SQL and arguments out of operational reports. Preserve the diagnostic
+three-argument recorded-envelope API; historical classification requires the
+stronger four-argument form and its explicit matched prefix result.
+
+Advance history and checkpoint profiles to v6. Reject previously authenticated
+v5 checkpoints; they must be rescanned. Distinguish intended guard-prefix
+correspondence in the conditional operational argument. The self-bound
+unguarded raw-writer negative control now fails classification even though
+its complete envelope digest agrees with its own durable witness.
+
+Focused JVM validation: 8 tests / 311 assertions, zero failures or errors.
+This combines the recorded-source comparator regression, mapped adversarial
+history, selected history/checkpoint tests and operational report tests.
+The comparator rejects absent, empty, non-SQL, wrong-valued and overlong
+prefix expectations. Full Claim, Chromium, independent proof and the full
+regression suite were not rerun.
+
+This establishes conditional intended guard-prefix correspondence only.
+The remaining intended operation suffix, auxiliary and infrastructure writes,
+provider decoding/retention, transaction-internal read basis and actual
+writer authority are still open. No CLM-R2 premise is retired.

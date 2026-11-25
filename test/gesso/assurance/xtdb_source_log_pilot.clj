@@ -366,6 +366,15 @@
         (is (= {:status :matched :profile envelope/binding-profile :authority :none
                 :certificate :not-issued :tx-id id :operation-count 3
                 :envelope-fingerprint (:envelope-fingerprint durable)} (check durable)))
+        (is (= :matched (:intended-guard-prefix
+                         (envelope/check-recorded-transition! node id durable [(first bound)]))))
+        (doseq [prefix [nil [] [[:put-docs :probe {:xt/id "p"}]]]]
+          (is (= :invalid-intended-guard-prefix
+                 (:reason (envelope/check-recorded-transition! node id durable prefix)))))
+        (doseq [prefix [[["ASSERT ? = ?" 2 2]]
+                        [(first bound) (first bound)]]]
+          (is (= :intended-guard-prefix-mismatch
+                 (:reason (envelope/check-recorded-transition! node id durable prefix)))))
         (is (= :missing-or-invalid-envelope-binding (:reason (check witness))))
         (is (= :source-witness-mismatch (:reason (check (assoc durable :extra true)))))
         (doseq [[changed reason] [[(assoc observed :tx-id (inc id)) :source-transaction-identity-mismatch]
