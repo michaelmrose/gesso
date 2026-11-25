@@ -11,6 +11,7 @@
             [gesso.model.command :as command]
             [gesso.model.inductive-plan-test]
             [gesso.live.outbox :as outbox]
+            [gesso.live.consistency.xtdb :as live-xtdb]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.optimistic.resolved-operation :as adapter]
             [xtdb.api :as xt]
@@ -352,7 +353,9 @@
                     :auxiliary-tables #{:gesso_live_outbox} :document-effects effects})
         constructs (atom 0)
         reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
-    (with-open [node (xtn/start-node {})]
+    (let [release-policy (atom nil)]
+      (try
+        (with-open [node (xtn/start-node {})]
       (let [call (fn [command-id]
                    (let [binding {:command-id (identity/command-id command-id) :principal (identity/principal "p1")
                                   :operation operation :arguments {}}
@@ -389,6 +392,20 @@
                                  :outcome {:result :accepted} :now "t1"})
                   :project! (fn [& _] (throw (ex-info "Unexpected browser projection" {})))}
             exec (publication/build-executor opts)
+            claimed (atom [])
+            seen-envelopes (atom [])
+            policy (fn [envelope]
+                     (swap! seen-envelopes conj envelope)
+                     (is (nil? (publication/claim-framed-submission! (constantly true) node envelope)))
+                     (is (nil? (publication/claim-framed-submission! admission (Object.) envelope)))
+                     (is (nil? (publication/claim-framed-submission! admission node (assoc envelope :api :submit-tx))))
+                     (is (nil? (publication/claim-framed-submission! admission node (update envelope :tx-ops pop))))
+                     (is (nil? @(future (publication/claim-framed-submission! admission node envelope))))
+                     (when-let [checked (publication/claim-framed-submission! admission node envelope)]
+                       (swap! claimed conj checked)
+                       (is (nil? (publication/claim-framed-submission! admission node envelope)))
+                       true))
+            _ (reset! release-policy (live-xtdb/register-submission-policy! node policy))
             request-row #(first (xt/q node ["SELECT * FROM requests WHERE _id = ?" "r1"]))
             empty-writes? #(every? empty? (map (fn [table] (xt/q node [(str "SELECT _id FROM " table)]))
                                                ["assignments" "gesso_commands" "gesso_live_outbox"]))]
@@ -415,4 +432,17 @@
           (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
           (is (not (admission :pending? id "valid")))
           (is (= :replay (:status (exec (call "valid")))))
-          (is (= 3 @constructs)))))))
+          (is (= 3 @constructs))
+          (is (= 2 (count @claimed)))
+          (is (every? #(= :exact-generated-prefix (get-in % [:candidate :frame-prefix])) @claimed))
+          (let [envelope (last @seen-envelopes)]
+            (is (nil? (publication/claim-framed-submission! admission node envelope)))
+            (is (= :submission-policy-refused
+                   (reason #(live-xtdb/execute-tx! node (:tx-ops envelope)))))
+            (is (= :submission-policy-refused
+                   (reason #(live-xtdb/submit-tx! node (:tx-ops envelope)))))
+            (is (= 2 (count @claimed)))
+            (is (= after (request-row)))
+            (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
+            (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))))
+        (finally (when-let [release @release-policy] (release)))))))

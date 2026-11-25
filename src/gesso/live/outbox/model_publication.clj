@@ -291,14 +291,39 @@
               tx-op (conj tx-op))
        :intents intents :record record}))))
 
-(defn- execute-resolved-plan! [ctx {:keys [ops intents record]}]
+(def ^:private ^ThreadLocal framed-submission (ThreadLocal.))
+
+(defn claim-framed-submission!
+  "For a trusted installed adapter policy: claim the exact current framed
+   admission once, for its original issued registry and connectable. Return
+   the checked candidate and identity or nil. The scope is thread-local,
+   exists only during synchronous execution, and is cleared on every exit.
+   No caller-provided report or independently admitted vector creates a
+   scope. This is local handoff, not protection against raw XTDB writers."
+  [admission connectable submission]
+  (when-let [scope (.get framed-submission)]
+    (when (and (identical? admission (:admission scope))
+               (identical? connectable (:connectable scope))
+               (= submission (:submission scope))
+               (compare-and-set! (:available? scope) true false))
+      (:checked scope))))
+
+(defn- execute-resolved-plan! [ctx {:keys [ops intents record frame-handoff]}]
   ;; A constructor may finish after its request has been cancelled. Check
   ;; at the last shared boundary before the physical submission, without
   ;; consuming the interrupt flag. This is not atomic with provider entry.
   (when (.isInterrupted (Thread/currentThread))
     (throw (InterruptedException. "Durable model submission interrupted")))
-  (assoc (xtdb/execute-tx-from! ctx ops)
-         :outbox/intents intents :command/record record))
+  (let [prior (.get framed-submission)]
+    (when prior (reject! :nested-framed-submission {}))
+    (try
+      (when frame-handoff
+        (.set framed-submission
+              (assoc frame-handoff :connectable (xtdb/connectable-from ctx)
+                     :available? (atom true))))
+      (assoc (xtdb/execute-tx-from! ctx ops)
+             :outbox/intents intents :command/record record)
+      (finally (.remove framed-submission)))))
 
 (defn transact-resolved!
   "Commit the canonical model command-result record, domain operations and
@@ -386,13 +411,14 @@
 
 (defn- frame-resolved-plan! [plan admission]
   (if admission
-    (let [original {:api :execute-tx :tx-ops (:ops plan) :tx-options nil}
+    (let [original {:api :execute-tx :tx-ops (:ops plan) :tx-options (xtdb/tx-opts nil)}
           actual (admission :frame-submission! original)]
       ;; Consume the exact preparation before physical submission. This is
       ;; intentionally outside transaction recovery: a failed local admission
       ;; is not an XTDB abort or evidence of an uncertain commit.
-      (admission :admit-framed! original actual)
-      (assoc plan :ops (:tx-ops actual)))
+      (let [checked (admission :admit-framed! original actual)]
+        (assoc plan :ops (:tx-ops actual)
+               :frame-handoff {:admission admission :submission actual :checked checked})))
     plan))
 
 (defn- guarded-abort-outcome! [invocation may-disclose? construct! failure contract admission]
