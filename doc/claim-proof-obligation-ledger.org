@@ -3812,3 +3812,28 @@ interpretation, nullable actual puts, explicit bounds, multiple groups
 and aggregate document budgets remain open. No production wiring,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates were not rerun.
+
+* v2682 — unify independent document IID correspondence
+
+Dispatch exact document identifier families through the independently
+qualified integer, string, keyword and UUID derivations. Consolidate
+all verified put profiles behind one envelope correspondence reader,
+explicitly checking pair cardinality and preserving typed profiles and
+rejection reasons. The unified profile still accepts only the selected
+homogeneous ID columns; mixed-type ID schemas remain separate work.
+
+Focused JVM: 38 tests / 2294 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites.
+Exercise all four retained ID families with the unified profile before
+and after reopening, including mutated IIDs and truncated streams.
+Verify all 31 known-answer values through the dispatcher, typed-domain
+rejections, and an explicit cross-family collision: a raw UUID can equal
+the truncated hash of an integer ID. Correspondence does not establish
+injectivity, authenticity or transaction admission. XTDB logged shutdown
+cancellation; the test process exited zero.
+
+Selected unified verified-IID put profile v1. Mixed-ID column decoding,
+nullable actual puts, explicit bounds, multiple groups and aggregate
+document budgets remain open. No production wiring, certificate or
+CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.

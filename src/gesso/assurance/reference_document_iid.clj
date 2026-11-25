@@ -54,3 +54,14 @@
             (.putLong (.getMostSignificantBits id))
             (.putLong (.getLeastSignificantBits id)))]
     (.formatHex (HexFormat/of) (.array b))))
+
+(defn document-iid
+  "Derive a selected document IID by exact identifier family. Preserve each
+   family's restrictions; equality is not a proof of cross-family uniqueness."
+  [id]
+  (cond
+    (integer? id) (integer-iid id)
+    (string? id) (string-iid id)
+    (keyword? id) (keyword-iid id)
+    (uuid? id) (uuid-iid id)
+    :else (require! false :unsupported-reference-document-id)))

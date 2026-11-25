@@ -110,6 +110,25 @@
     (System/arraycopy replacement 0 copy offset 16)
     copy))
 
+(defn- check-unified-iids! [data expected iids]
+  (let [r (arrow/decode-verified-put data)]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+    (is (= arrow/verified-iid-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= [expected] (:groups r)))
+    (doseq [[bad reason] [[(#'fixture/edit-byte data iids
+                                          (bit-xor 1 (bit-and 255 (aget ^bytes data iids))))
+                           :document-iid-mismatch]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-verified-put bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)))
+        (is (= arrow/verified-iid-put-profile (:profile r)))
+        (is (not (contains? r :groups)))
+        (is (not (contains? r :iid-correspondence)))))))
+
 (defn- check-integer-iids! [node id other-id]
   (let [data (#'fixture/retained-operation-bytes node id)
         expected {:kind :put-docs :table :public/foo
@@ -124,6 +143,7 @@
     (is (= :matched (:iid-correspondence r)))
     (is (= [expected] (:groups r) (:operations (provider/observe-source-message! node id))))
     (is (= :unchecked (:iid-correspondence (arrow/decode-put-envelope data))))
+    (check-unified-iids! data expected iids)
     (let [changed-id (#'fixture/edit-long data ids 99)
           changed-iid (replace-iid data iids "b69e060cf32e96bdbfe841366924c30a")
           swapped (-> data (replace-iid iids (second (nth integer-iid-vectors 1)))
@@ -202,6 +222,7 @@
     (is (= :matched (:iid-correspondence r)))
     (is (= [expected] (:groups r) (:operations (provider/observe-source-message! node id))))
     (is (= :unchecked (:iid-correspondence (arrow/decode-put-envelope data))))
+    (check-unified-iids! data expected iids)
     (is (= :unsupported-reference-integer-id (:reason (arrow/decode-integer-iid-put data))))
     (let [changed-id (#'fixture/edit-byte data ids 98)
           changed-iid (replace-iid data iids "b831b33e0c05b45e15bbdd9b3bfa4382")
@@ -280,6 +301,7 @@
     (is (= :matched (:iid-correspondence r)))
     (is (= [expected] (:groups r) (:operations (provider/observe-source-message! node id))))
     (is (= :unchecked (:iid-correspondence (arrow/decode-put-envelope data))))
+    (check-unified-iids! data expected iids)
     (is (= :unsupported-reference-integer-id (:reason (arrow/decode-integer-iid-put data))))
     (is (= :unsupported-reference-string-id (:reason (arrow/decode-string-iid-put data))))
     (let [changed-id (#'fixture/edit-byte data ids 98)
@@ -358,6 +380,7 @@
     (is (= :matched (:iid-correspondence r)))
     (is (= [expected] (:groups r) (:operations (provider/observe-source-message! node id))))
     (is (= :unchecked (:iid-correspondence (arrow/decode-put-envelope data))))
+    (check-unified-iids! data expected iids)
     (doseq [[decoder reason] [[arrow/decode-integer-iid-put :unsupported-reference-integer-id]
                               [arrow/decode-string-iid-put :unsupported-reference-string-id]
                               [arrow/decode-keyword-iid-put :unsupported-reference-keyword-id]]]
@@ -395,3 +418,20 @@
           (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
           (check-uuid-iids! node id other-id)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest selected-unified-iid-dispatch
+  (doseq [[id expected] (concat integer-iid-vectors string-iid-vectors
+                                keyword-iid-vectors uuid-iid-vectors)]
+    (is (= expected (iid/document-iid id))))
+  (doseq [[id reason] [[nil :unsupported-reference-document-id]
+                       [true :unsupported-reference-document-id]
+                       [1.5 :unsupported-reference-document-id]
+                       [(inc (bigint Long/MAX_VALUE)) :unsupported-reference-integer-id]
+                       [(str (char 0xd800)) :unsupported-reference-string-id]
+                       [(keyword "1") :unsupported-reference-keyword-id]]]
+    (is (= reason (try (iid/document-iid id) :accepted
+                       (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))))
+  ;; A raw UUID may equal a truncated hash from another ID family.
+  ;; Correspondence does not establish cross-family injectivity.
+  (is (= (iid/document-iid 1)
+         (iid/document-iid #uuid "4cd9b767-2d7f-bee8-fb51-fb1e049f6903"))))
