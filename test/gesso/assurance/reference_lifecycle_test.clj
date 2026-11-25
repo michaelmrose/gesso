@@ -2,6 +2,8 @@
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-lifecycle :as lifecycle]
             [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.reference-reconciliation :as reference-reconciliation]
+            [gesso.live.outbox.reconciliation :as reconciliation]
             [gesso.assurance.reference-temporal-fixtures :refer [sys provider-rectangles coalesce-valid]]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
@@ -113,3 +115,94 @@
           (is (= (count rows) (count (set (map :xt/id rows)))))
           (is (= (get (temporal/visible-at (:replay prediction) (time-at s) (time-at v)) table {})
                  (into {} (map (juxt :xt/id identity)) rows))))))))
+
+(defn- interruption [intent lease owner receipt]
+  {:error/type :gesso.live.outbox/cycle-interrupted :rescan-required? true
+   :in-flight (cond-> {:intent-id (id intent) :lease-id (id lease) :worker-id owner}
+                receipt (assoc :receipt-id (id receipt)
+                               :receipt-evidence :unverified-post-dispatch-receipt))})
+
+(defn- pinned-read [node s v]
+  (fn [_ [_ id]]
+    (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? WHERE _id = ?" v s id])))
+
+(defn- submit-history! [node transactions]
+  (doseq [{:keys [system-time ops]} transactions]
+    (try (live.xtdb/execute-tx! node ops {:system-time system-time})
+         (catch Throwable e
+           (when-not (= :xtdb/assert-failed (:xtdb.error/code (ex-data e))) (throw e))))))
+
+(deftest independent-in-flight-reconciliation
+  (let [r (lifecycle/predict-lifecycle steps)
+        prior (:replay r)
+        cases [[0 (interruption 1 11 "a" nil) :pending-after-interruption]
+               [2 (interruption 1 11 "a" nil) :same-lease-active]
+               [9 (interruption 1 11 "a" 21) :same-lease-active]
+               [10 (interruption 1 11 "a" 21) :lease-replaced]
+               [12 (interruption 1 11 "a" 21) :other-lease-recorded]
+               [12 (interruption 1 12 "b" nil) :terminal-without-receipt-correlation]
+               [12 (interruption 1 12 "b" 22) :matching-acknowledgment-recorded]
+               [12 (interruption 1 12 "b" 21) :other-receipt-recorded]
+               [12 (interruption 1 12 "a" 22) :other-lease-recorded]
+               [15 (interruption 3 11 "a" nil) :missing]
+               [15 (dissoc (interruption 1 11 "a" nil) :in-flight) :unidentified]]]
+    (with-open [node (xtn/start-node {})]
+      (submit-history! node (:transactions r))
+      (doseq [[n failure expected] cases]
+        (let [s (time-at n)
+              p (reference-reconciliation/predict-inspection prior s s "lifecycle" failure)
+              actual (with-redefs [frontier/q-from! (pinned-read node s s)]
+                       (reconciliation/inspect! node "lifecycle" failure))]
+          (is (= :predicted (:status p)))
+          (is (= expected (:status actual)))
+          (is (= (:observation p) actual))
+          (is (true? (:rescan-required? actual)))
+          (is (= :none (:authority p)))
+          (is (= :not-issued (:certificate p)))
+          (is (not (contains? actual :may-replay?)))))
+      (doseq [[source failure] [["foreign" (interruption 1 12 "b" 22)]
+                               ["lifecycle" (assoc (interruption 1 12 "b" 22) :completed [])]
+                               ["lifecycle" (assoc (interruption 1 12 "b" 22) :rescan-required? false)]
+                               ["lifecycle" (update (interruption 1 12 "b" 22) :in-flight dissoc :receipt-evidence)]]]
+        (let [p (reference-reconciliation/predict-inspection prior (time-at 15) (time-at 15) source failure)]
+          (is (= :unsupported (:status p)))
+          (is (not (contains? p :observation))))))))
+
+(deftest lost-acknowledgment-reply-does-not-establish-noncommit
+  ;; Three physical hypotheses with indistinguishable caller exceptions:
+  ;; no submission, committed submission, and expired assertion abort.
+  (doseq [[mode n expected] [[:not-submitted 3 :same-lease-active]
+                            [:committed 3 :matching-acknowledgment-recorded]
+                            [:aborted 10 :same-lease-active]]]
+    (let [prefix (subvec steps 0 3)
+          attempt (ack n 2 1 11 "a" 21)
+          history (lifecycle/predict-lifecycle (cond-> prefix (not= :not-submitted mode) (conj attempt)))
+          s (time-at (if (= :not-submitted mode) 2 n))
+          failure (interruption 1 11 "a" 21)
+          predicted (reference-reconciliation/predict-inspection (:replay history) s s "lifecycle" failure)
+          lost (ex-info "Lost acknowledgment response" {:test/outcome :unknown})]
+      (is (= :predicted (:status history)))
+      (is (= expected (get-in predicted [:observation :status])))
+      (with-open [node (xtn/start-node {})]
+        (submit-history! node (:transactions (lifecycle/predict-lifecycle prefix)))
+        (let [execute! live.xtdb/execute-tx!
+              observed (time-at 2)
+              actual-error
+              (with-redefs [frontier/q-from! (pinned-read node observed observed)
+                            live.xtdb/execute-tx! (fn [connectable ops]
+                                                    (when-not (= :not-submitted mode)
+                                                      (let [outcome (try (execute! connectable ops {:system-time (time-at n)}) :committed
+                                                                         (catch Throwable e
+                                                                           (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e))) :aborted (throw e))))]
+                                                        (is (= mode outcome))))
+                                                    (throw lost))]
+                (try (acknowledgment/acknowledge-dispatch! node (:submission attempt))
+                     (catch Throwable e e)))]
+          (is (identical? lost actual-error)))
+        (let [actual (with-redefs [frontier/q-from! (pinned-read node s s)]
+                       (reconciliation/inspect! node "lifecycle" failure))]
+          (is (= (:observation predicted) actual))
+          (is (true? (:rescan-required? actual)))
+          (is (not (contains? actual :may-replay?))))
+        (is (= (frequencies (coalesce-valid (get-in history [:replay :rectangles])))
+               (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) [:gesso_live_outbox :lifecycleprobe])))))))))

@@ -2451,3 +2451,32 @@ Domain puts, explicit identities, observation points, clocks and trusted
 receipts are supplied inputs. No production assurance status changes and
 no CLM-R2 premise is retired. Full project, physical Claim, Chromium and
 independent proof gates were not rerun.
+
+* v2631 — model selected in-flight reconciliation
+
+Add independent read-only inspection of an interrupted in-flight lease
+and optional unverified receipt at a pinned system/valid-time point.
+Predict the production disposition and observed issuing system time
+without granting restart, replay, delivery or noncommit authority.
+The same-lease-active label denotes matching observed lease identity,
+not a proof that the lease deadline is still in the future. Restrict
+inputs to selected in-flight envelopes without completed prefixes.
+Reconciliation profile v1; existing reference profiles unchanged.
+
+Combined reference JVM: 53 tests / 6559 assertions, zero failures or
+errors. Eleven inspection cases compare complete responses with the
+production reconciliation function and real pinned XTDB reads. Three
+additional fault-injection histories expose the same caller exception
+for an unsubmitted acknowledgment, a committed acknowledgment and an
+expired assertion abort. The submitted cases use the real transaction
+adapter; compare reconciliation dispositions and complete history
+rectangles against independently predicted physical hypotheses.
+Unsupported envelopes and source mismatch yield no prediction.
+
+This is finite selected reconciliation correspondence, not a means of
+inferring the physical outcome from an exception alone. Completed
+prefixes, live frontier acquisition, unresolved in-flight execution,
+restart authorization and external delivery remain outside this fragment.
+No production assurance status changes and no CLM-R2 premise is retired.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.
