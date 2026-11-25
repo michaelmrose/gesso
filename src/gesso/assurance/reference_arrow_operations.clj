@@ -209,7 +209,7 @@
 (def ^:private integer-base (assoc base :profile integer-profile))
 (def ^:private max-argument-columns 64)
 
-(defn- integer-rows! [bytes]
+(defn- fixed-rows! [bytes allow-boolean?]
   (if (nil? bytes)
     [[]]
     (do
@@ -222,31 +222,46 @@
         (require! (and (zero? (.remaining sb)) (= Endianness/Little (.endianness schema))
                        (zero? (.featuresLength schema)) (zero? (.customMetadataLength schema))
                        (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
-        (doseq [i (range columns)]
-          (let [^Field f (field! (.fields schema i) (str "?_" i) Type/Int false 0)
-                ^Int t (.type f (Int.))]
-            (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
-        (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
-              ^RecordBatch batch (.header bm (RecordBatch.))
-              n (.length batch)]
-          (require! (<= 1 n max-rows) :arrow-argument-row-limit)
-          (require! (and (= columns (.nodesLength batch)) (nil? (.compression batch))
-                         (zero? (.variadicBufferCountsLength batch))) :unsupported-integer-batch)
-          (let [buffers (buffers! batch bb (* 2 columns))]
-            (doseq [i (range columns)]
-              (let [node (.nodes batch i)
-                    ^ByteBuffer validity (nth buffers (* 2 i))
-                    ^ByteBuffer values (nth buffers (inc (* 2 i)))]
-                (require! (and (= n (.length node)) (zero? (.nullCount node))
-                               (zero? (.limit validity)) (= (* 8 n) (.limit values)))
-                          :unsupported-integer-buffer-layout)))
-            (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
-                      :unsupported-arrow-terminator)
-            (mapv (fn [row]
-                    (mapv (fn [i]
-                            (.getLong ^ByteBuffer (nth buffers (inc (* 2 i))) (* 8 row)))
-                          (range columns)))
-                  (range n))))))))
+        (let [kinds (mapv (fn [i]
+                            (let [^Field f (.fields schema i)
+                                  kind (if (and allow-boolean? (= Type/Bool (.typeType f)))
+                                         Type/Bool Type/Int)]
+                              (field! f (str "?_" i) kind false 0)
+                              (if (= Type/Bool kind)
+                                :boolean
+                                (let [^Int t (.type f (Int.))]
+                                  (require! (and t (= 64 (.bitWidth t)) (.isSigned t))
+                                            :unsupported-integer-type)
+                                  :integer))))
+                          (range columns))]
+          (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
+                ^RecordBatch batch (.header bm (RecordBatch.))
+                n (.length batch)]
+            (require! (<= 1 n max-rows) :arrow-argument-row-limit)
+            (require! (and (= columns (.nodesLength batch)) (nil? (.compression batch))
+                           (zero? (.variadicBufferCountsLength batch))) :unsupported-integer-batch)
+            (let [buffers (buffers! batch bb (* 2 columns))]
+              (doseq [i (range columns)]
+                (let [node (.nodes batch i)
+                      ^ByteBuffer validity (nth buffers (* 2 i))
+                      ^ByteBuffer values (nth buffers (inc (* 2 i)))]
+                  (require! (and (= n (.length node)) (zero? (.nullCount node))
+                                 (zero? (.limit validity))
+                                 (= (if (= :boolean (nth kinds i)) (quot (+ n 7) 8) (* 8 n))
+                                    (.limit values)))
+                            :unsupported-integer-buffer-layout)))
+              (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
+                        :unsupported-arrow-terminator)
+              (mapv (fn [row]
+                      (mapv (fn [i]
+                              (let [^ByteBuffer values (nth buffers (inc (* 2 i)))]
+                                (if (= :boolean (nth kinds i))
+                                  (present? values row)
+                                  (.getLong values (* 8 row)))))
+                            (range columns)))
+                    (range n)))))))))
+
+(defn- integer-rows! [bytes] (fixed-rows! bytes false))
 
 (defn decode-integer-arguments
   "Decode selected nonnullable signed int64 columns in positional order,
@@ -258,23 +273,45 @@
       (assoc integer-base :status :unsupported :reason (:reason (ex-data e))))
     (catch Exception _ (assoc integer-base :status :unsupported :reason :invalid-arrow-stream))))
 
-(defn decode-integer-operations
-  "Expand selected SQL groups with int64 or empty argument rows. Fail
-   closed on unsupported types, layouts or excess total invocations."
-  [bytes]
+(defn- expand-fixed-operations [bytes result-base rows!]
   (let [decoded (decode-operations bytes)]
     (if-not (= :decoded (:status decoded))
-      (assoc integer-base :status :unsupported :reason (:reason decoded))
+      (assoc result-base :status :unsupported :reason (:reason decoded))
       (try
         (let [{:keys [operations spans]}
               (reduce (fn [{:keys [operations spans]} {:keys [query argument-bytes]}]
-                        (let [rows (integer-rows! argument-bytes)]
+                        (let [rows (rows! argument-bytes)]
                           (require! (<= (+ (count operations) (count rows)) max-rows)
                                     :arrow-expanded-row-limit)
                           {:operations (into operations (map #(hash-map :kind :sql :query query :args %) rows))
                            :spans (conj spans (count rows))}))
                       {:operations [] :spans []} (:groups decoded))]
-          (assoc integer-base :status :decoded :operations operations :logged-operation-spans spans))
+          (assoc result-base :status :decoded :operations operations :logged-operation-spans spans))
         (catch clojure.lang.ExceptionInfo e
-          (assoc integer-base :status :unsupported :reason (:reason (ex-data e))))
-        (catch Exception _ (assoc integer-base :status :unsupported :reason :invalid-arrow-stream))))))
+          (assoc result-base :status :unsupported :reason (:reason (ex-data e))))
+        (catch Exception _ (assoc result-base :status :unsupported :reason :invalid-arrow-stream))))))
+
+(defn decode-integer-operations
+  "Expand selected SQL groups with int64 or empty argument rows. Fail
+   closed on unsupported types, layouts or excess total invocations."
+  [bytes]
+  (expand-fixed-operations bytes integer-base integer-rows!))
+
+(def boolean-profile :xtdb-2.2.0-beta1/selected-int64-boolean-arrow-operations-v1)
+(def ^:private boolean-base (assoc base :profile boolean-profile))
+
+(defn decode-boolean-arguments
+  "Decode selected nonnullable int64 and bit-packed Boolean positional
+   columns, including mixed columns and zero-column relations."
+  [bytes]
+  (try
+    (assoc boolean-base :status :decoded :rows (fixed-rows! bytes true))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc boolean-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch Exception _ (assoc boolean-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-boolean-operations
+  "Expand selected SQL groups with Boolean, int64 or empty argument rows.
+   No nullable columns, SQL arity or execution semantics claim."
+  [bytes]
+  (expand-fixed-operations bytes boolean-base #(fixed-rows! % true)))

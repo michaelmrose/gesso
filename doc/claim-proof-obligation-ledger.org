@@ -3150,3 +3150,28 @@ nullable columns, other scalar or composite types, document operations
 or universal provider refinement. Arrow metadata accessors remain a
 dependency. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2655 — decode selected Boolean Arrow arguments
+
+Extend the selected fixed-width relation interpreter with nonnullable
+bit-packed Boolean columns. Read each Boolean from its positional data
+bit, not a validity flag; require the exact ceiling-of-rows-over-eight
+buffer length and no nulls or validity buffer. Preserve int64 columns,
+parameterless rows and coalesced invocation order. Share expansion
+between profiles without admitting Boolean columns in the int64 profile.
+
+Focused JVM: 8 tests / 461 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. A retained ten-row
+Boolean/int64/Boolean relation matches independently specified rows and
+provider operations and spans before and after reopening. Mutate bits on
+opposite sides of the byte boundary and compare exact reconstructed rows.
+Also check pure Boolean, int64 and parameterless compatibility, reject
+strings in the new profile and Boolean columns in the integer profile,
+and reject malformed framing without partial rows.
+
+Selected int64/Boolean profile v1. Arrow metadata accessors remain a
+library dependency. Nullable columns, other scalar and composite types,
+SQL arity and execution semantics, document operations and universal
+provider refinement remain open. No production wiring, certificate or
+CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.

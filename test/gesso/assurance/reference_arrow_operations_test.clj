@@ -197,6 +197,15 @@
                   (is (= (:logged-operation-spans expanded) (:logged-operation-spans observed)))
                   (when (some #{"ASSERT $1 = $2"} queries)
                     (check-integer-arguments! (:groups decoded))))))
+            (let [expanded (arrow/decode-boolean-operations (get-in envelope [:message :tx-ops]))
+                  args (cond
+                         (some #{"ASSERT $1"} queries) [[true]]
+                         (some #{"ASSERT $1 = $2"} queries) [[42 42] [Long/MIN_VALUE Long/MAX_VALUE] [-1 0] []]
+                         :else (repeat (count queries) []))]
+              (is (= :decoded (:status expanded)))
+              (is (= (mapv (fn [q row] {:kind :sql :query q :args row}) queries args)
+                     (:operations expanded) (:operations observed)))
+              (is (= (:logged-operation-spans expanded) (:logged-operation-spans observed))))
             (is (every? #(and (bytes? %) (pos? (alength ^bytes %))) (map :argument-bytes (:groups decoded)))))))
       (is (= (set (keys expected)) (set (map first (:frames (#'coverage/local-frames file)))))))))
 
@@ -221,4 +230,66 @@
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (apply max (keys expected)) (Duration/ofSeconds 10))
           (check-retained! node expected)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- retained-operation-bytes [node id]
+  (let [log (.getSourceLog (db/primary-db node))
+        path (#'coverage/local-log-path log)]
+    (with-open [file (RandomAccessFile. (.toFile path) "r")]
+      (let [[offset _ length] (some #(when (= id (first %)) %) (:frames (#'coverage/local-frames file)))
+            bytes (byte-array length)]
+        (.seek file (+ offset 13))
+        (.readFully file bytes)
+        (get-in (payload/decode-payload bytes) [:message :tx-ops])))))
+
+(defn- check-boolean-retained! [node id string-id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-boolean-operations data)
+        expected (mapv (fn [row] {:kind :sql :query "ASSERT ($1 AND ($2 = 0) AND $3)" :args row}) rows)
+        groups (:groups (arrow/decode-operations data))
+        args (:argument-bytes (first groups))
+        [_ bool-values _ _ _ other-bool-values] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/boolean-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-boolean-arguments args))))
+    ;; Change one bit on each side of the byte boundary, without changing
+    ;; any metadata, column positions or integer values.
+    (doseq [[row col offset mask] [[0 0 bool-values 1] [8 2 (inc other-bool-values) 1]]]
+      (let [mutated (edit-byte args offset (bit-xor mask (aget ^bytes args offset)))]
+        (is (= (update-in rows [row col] not)
+               (:rows (arrow/decode-boolean-arguments mutated))))))
+    (is (= :unsupported (:status (arrow/decode-integer-operations data))))
+    (let [r (arrow/decode-boolean-operations (retained-operation-bytes node string-id))]
+      (is (= :unsupported (:status r)))
+      (is (= :unsupported-arrow-field (:reason r)))
+      (is (not (contains? r :operations))))
+    (doseq [bad [(edit-byte args 0 0)
+                 (Arrays/copyOf args (dec (alength args)))
+                 (Arrays/copyOf args (inc (alength args)))]]
+      (let [r (arrow/decode-boolean-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (not (contains? r :rows)))))))
+
+(deftest selected-boolean-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-bool-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows (mapv (fn [i] [(even? i) (long (- i 4)) (zero? (mod i 3))]) (range 10))]
+    (try
+      (let [[id string-id] (with-open [node (xtn/start-node config)]
+                             (let [database (db/primary-db node)
+                                   submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                                       (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                                   id (submit! (mapv #(into ["ASSERT (? AND (? = 0) AND ?)"] %) rows))
+                                   string-id (submit! [["ASSERT ? = 'x'" "x"]])]
+                               (check-boolean-retained! node id string-id rows)
+                               [id string-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) string-id (Duration/ofSeconds 10))
+          (check-boolean-retained! node id string-id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
