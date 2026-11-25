@@ -6,7 +6,7 @@
   (:import (java.nio ByteBuffer ByteOrder)
            (java.nio.charset StandardCharsets CharacterCodingException)
            (org.apache.arrow.flatbuf Message MessageHeader MetadataVersion
-                                    Schema RecordBatch Field Type Union UnionMode Endianness)))
+                                    Schema RecordBatch Field Type Union UnionMode Endianness Int)))
 
 (def profile :xtdb-2.2.0-beta1/selected-sql-arrow-operations-v1)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
@@ -56,10 +56,10 @@
         (field! args "args" Type/Binary nullable? 0)
         nullable?))))
 
-(defn- buffers! [^RecordBatch batch ^ByteBuffer body]
-  (require! (= 9 (.buffersLength batch)) :unsupported-arrow-buffer-count)
+(defn- buffers! [^RecordBatch batch ^ByteBuffer body expected-count]
+  (require! (= expected-count (.buffersLength batch)) :unsupported-arrow-buffer-count)
   (loop [i 0 end 0 out []]
-    (if (= i 9)
+    (if (= i expected-count)
       (do (require! (= (.limit body) (+ end (mod (- end) 8))) :invalid-arrow-body-extent) out)
       (let [b (.buffers batch i) offset (.offset b) length (.length b)]
         (require! (and (= offset (+ end (mod (- end) 8)))
@@ -97,7 +97,7 @@
                            (= [-1 0 0] (mapv second (subvec nodes 0 3)))
                            (<= -1 (second (peek nodes)) n)) :unsupported-arrow-nodes)
           [^ByteBuffer tags ^ByteBuffer indexes ^ByteBuffer struct-valid ^ByteBuffer query-valid
-           query-offsets queries ^ByteBuffer arg-valid arg-offsets args] (buffers! batch body)]
+           query-offsets queries ^ByteBuffer arg-valid arg-offsets args] (buffers! batch body 9)]
       (require! (and (= n (.limit tags)) (= (* 4 n) (.limit indexes))
                      (zero? (.limit struct-valid)) (zero? (.limit query-valid))
                      (or (zero? (.limit arg-valid)) (= (quot (+ n 7) 8) (.limit arg-valid))))
@@ -204,3 +204,77 @@
           (assoc parameterless-base :status :unsupported :reason (:reason (ex-data e))))
         (catch Exception _
           (assoc parameterless-base :status :unsupported :reason :invalid-arrow-stream))))))
+
+(def integer-profile :xtdb-2.2.0-beta1/selected-int64-arrow-operations-v1)
+(def ^:private integer-base (assoc base :profile integer-profile))
+(def ^:private max-argument-columns 64)
+
+(defn- integer-rows! [bytes]
+  (if (nil? bytes)
+    [[]]
+    (do
+      (require! (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes))
+                :arrow-argument-byte-limit)
+      (let [stream (doto (ByteBuffer/wrap ^bytes bytes) (.order ByteOrder/LITTLE_ENDIAN))
+            [^Message sm ^ByteBuffer sb] (message! stream MessageHeader/Schema)
+            ^Schema schema (.header sm (Schema.))
+            columns (.fieldsLength schema)]
+        (require! (and (zero? (.remaining sb)) (= Endianness/Little (.endianness schema))
+                       (zero? (.featuresLength schema)) (zero? (.customMetadataLength schema))
+                       (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
+        (doseq [i (range columns)]
+          (let [^Field f (field! (.fields schema i) (str "?_" i) Type/Int false 0)
+                ^Int t (.type f (Int.))]
+            (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
+        (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
+              ^RecordBatch batch (.header bm (RecordBatch.))
+              n (.length batch)]
+          (require! (<= 1 n max-rows) :arrow-argument-row-limit)
+          (require! (and (= columns (.nodesLength batch)) (nil? (.compression batch))
+                         (zero? (.variadicBufferCountsLength batch))) :unsupported-integer-batch)
+          (let [buffers (buffers! batch bb (* 2 columns))]
+            (doseq [i (range columns)]
+              (let [node (.nodes batch i)
+                    ^ByteBuffer validity (nth buffers (* 2 i))
+                    ^ByteBuffer values (nth buffers (inc (* 2 i)))]
+                (require! (and (= n (.length node)) (zero? (.nullCount node))
+                               (zero? (.limit validity)) (= (* 8 n) (.limit values)))
+                          :unsupported-integer-buffer-layout)))
+            (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
+                      :unsupported-arrow-terminator)
+            (mapv (fn [row]
+                    (mapv (fn [i]
+                            (.getLong ^ByteBuffer (nth buffers (inc (* 2 i))) (* 8 row)))
+                          (range columns)))
+                  (range n))))))))
+
+(defn decode-integer-arguments
+  "Decode selected nonnullable signed int64 columns in positional order,
+   or a parameterless relation. No numeric coercion or SQL arity claim."
+  [bytes]
+  (try
+    (assoc integer-base :status :decoded :rows (integer-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc integer-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch Exception _ (assoc integer-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-integer-operations
+  "Expand selected SQL groups with int64 or empty argument rows. Fail
+   closed on unsupported types, layouts or excess total invocations."
+  [bytes]
+  (let [decoded (decode-operations bytes)]
+    (if-not (= :decoded (:status decoded))
+      (assoc integer-base :status :unsupported :reason (:reason decoded))
+      (try
+        (let [{:keys [operations spans]}
+              (reduce (fn [{:keys [operations spans]} {:keys [query argument-bytes]}]
+                        (let [rows (integer-rows! argument-bytes)]
+                          (require! (<= (+ (count operations) (count rows)) max-rows)
+                                    :arrow-expanded-row-limit)
+                          {:operations (into operations (map #(hash-map :kind :sql :query query :args %) rows))
+                           :spans (conj spans (count rows))}))
+                      {:operations [] :spans []} (:groups decoded))]
+          (assoc integer-base :status :decoded :operations operations :logged-operation-spans spans))
+        (catch clojure.lang.ExceptionInfo e
+          (assoc integer-base :status :unsupported :reason (:reason (ex-data e))))
+        (catch Exception _ (assoc integer-base :status :unsupported :reason :invalid-arrow-stream))))))

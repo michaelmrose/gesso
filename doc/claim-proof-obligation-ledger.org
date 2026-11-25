@@ -3126,3 +3126,27 @@ decoding and full provider correspondence remain open. Arrow metadata
 accessors remain a dependency. No production wiring, certificate or
 CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2654 — decode selected signed int64 Arrow arguments
+
+Read selected nonnullable signed 64-bit positional argument columns
+in little-endian order without XTDB's relation decoder. Check field
+names, scalar type, bit width, signedness, row/node counts, exact buffer
+extents and absence of validity buffers. Bound columns and expanded
+invocations. Preserve parameterless rows and operation spans in the new
+profile; the earlier parameterless and opaque group APIs remain unchanged.
+
+Focused JVM: 7 tests / 405 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Physical retained
+SQL includes coalesced integer rows with both signed extrema, negative
+and zero values, and a parameterless operation. Compare independently
+specified rows, operations and spans with provider observations before
+and after reopening. A changed value byte changes the decoded integer;
+malformed framing, noninteger arguments and excessive expansion reject.
+XTDB logged a shutdown cancellation; the test process exited zero.
+
+Selected int64 profile v1. No SQL arity checking, numeric coercion,
+nullable columns, other scalar or composite types, document operations
+or universal provider refinement. Arrow metadata accessors remain a
+dependency. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.

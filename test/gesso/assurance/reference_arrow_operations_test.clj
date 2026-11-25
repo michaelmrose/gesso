@@ -118,6 +118,42 @@
         (is (= :arrow-expanded-row-limit (:reason r)))
         (is (not (contains? r :operations)))))))
 
+(defn- check-integer-arguments! [groups]
+  (let [data (:argument-bytes (first groups))
+        expected [[42 42] [Long/MIN_VALUE Long/MAX_VALUE] [-1 0]]
+        r (arrow/decode-integer-arguments data)
+        [_ values] (buffer-starts data)]
+    (is (= :decoded (:status r)))
+    (is (= arrow/integer-profile (:profile r)))
+    (is (= expected (:rows r)))
+    (is (= (assoc-in expected [0 0] 43)
+           (:rows (arrow/decode-integer-arguments (edit-byte data values 43)))))
+    (doseq [[bad reason] [[(edit-byte data 0 0) :invalid-arrow-framing]
+                          [(edit-int data 4 7) :invalid-arrow-metadata-length]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]
+                          [(Arrays/copyOf data (inc (alength data))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-integer-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)))
+        (is (not (contains? r :rows)))))))
+
+(deftest integer-profile-parameterless-and-bounds
+  (is (= [[]] (:rows (arrow/decode-integer-arguments nil))))
+  (with-open [al (RootAllocator. (* 16 1024 1024))]
+    (is (= [[] []] (:rows (arrow/decode-integer-arguments (zero-column-bytes al 2)))))
+    (is (= :arrow-argument-row-limit
+           (:reason (arrow/decode-integer-arguments (zero-column-bytes al 0)))))
+    (is (= :arrow-argument-row-limit
+           (:reason (arrow/decode-integer-arguments (zero-column-bytes al 16385)))))
+    (with-open [args (Relation. al)]
+      (.setRowCount args 16384)
+      (let [r (arrow/decode-integer-operations
+                (TxWriter/toArrowBytes [(TxOp$Sql. "ASSERT TRUE" args)
+                                        (TxOp$Sql. "ASSERT FALSE" nil)] al))]
+        (is (= :unsupported (:status r)))
+        (is (= :arrow-expanded-row-limit (:reason r)))
+        (is (not (contains? r :operations)))))))
+
 (defn- check-retained! [node expected]
   (let [log (.getSourceLog (db/primary-db node))
         path (#'coverage/local-log-path log)]
@@ -138,7 +174,7 @@
             (is (= (mapv first (partition-by identity queries)) (mapv :query (:groups decoded))))
             (is (= queries (mapv :query (:operations observed))))
             (let [expanded (arrow/decode-parameterless-operations (get-in envelope [:message :tx-ops]))]
-              (if (some #{"ASSERT $1 = $2"} queries)
+              (if (some #{"ASSERT $1 = $2" "ASSERT $1"} queries)
                 (do (is (= :unsupported (:status expanded)))
                     (is (= :unsupported-parameterless-schema (:reason expanded)))
                     (is (not (contains? expanded :operations))))
@@ -147,6 +183,20 @@
                            (:operations expanded) (:operations observed)))
                     (is (= (mapv count (partition-by identity queries))
                            (:logged-operation-spans expanded) (:logged-operation-spans observed))))))
+            (let [expanded (arrow/decode-integer-operations (get-in envelope [:message :tx-ops]))]
+              (if (some #{"ASSERT $1"} queries)
+                (do (is (= :unsupported (:status expanded)))
+                    (is (= :unsupported-arrow-field (:reason expanded)))
+                    (is (not (contains? expanded :operations))))
+                (let [args (if (some #{"ASSERT $1 = $2"} queries)
+                             [[42 42] [Long/MIN_VALUE Long/MAX_VALUE] [-1 0] []]
+                             (repeat (count queries) []))]
+                  (is (= :decoded (:status expanded)) (pr-str (dissoc expanded :operations)))
+                  (is (= (mapv (fn [q row] {:kind :sql :query q :args row}) queries args)
+                         (:operations expanded) (:operations observed)))
+                  (is (= (:logged-operation-spans expanded) (:logged-operation-spans observed)))
+                  (when (some #{"ASSERT $1 = $2"} queries)
+                    (check-integer-arguments! (:groups decoded))))))
             (is (every? #(and (bytes? %) (pos? (alength ^bytes %))) (map :argument-bytes (:groups decoded)))))))
       (is (= (set (keys expected)) (set (map first (:frames (#'coverage/local-frames file)))))))))
 
@@ -160,9 +210,13 @@
                              submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
                                                  (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
                              a (submit! [["ASSERT TRUE"] ["ASSERT TRUE"] ["ASSERT FALSE"]])
-                             b (submit! [["ASSERT ? = ?" 42 42]])
+                             b (submit! [["ASSERT ? = ?" 42 42]
+                                         ["ASSERT ? = ?" Long/MIN_VALUE Long/MAX_VALUE]
+                                         ["ASSERT ? = ?" -1 0] ["ASSERT TRUE"]])
+                             c (submit! [["ASSERT ?" true]])
                              ;; XTDB rewrites positional placeholders on submission.
-                             expected {a ["ASSERT TRUE" "ASSERT TRUE" "ASSERT FALSE"] b ["ASSERT $1 = $2"]}]
+                             expected {a ["ASSERT TRUE" "ASSERT TRUE" "ASSERT FALSE"] b ["ASSERT $1 = $2" "ASSERT $1 = $2" "ASSERT $1 = $2" "ASSERT TRUE"]
+                                       c ["ASSERT $1"]}]
                          (check-retained! node expected) expected))]
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (apply max (keys expected)) (Duration/ofSeconds 10))
