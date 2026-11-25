@@ -8,12 +8,10 @@
 (def ^:private union-leg-kinds
   {"i64" :integer "utf8" :string "bool" :boolean "keyword" :keyword "uuid" :uuid})
 
-(defn- union-kind! [^Field f temporal?]
-  (let [leg-kinds (cond-> union-leg-kinds
-                    temporal? (assoc "timestamp-tz-micro-utc" :timestamp-utc))
-        n (.childrenLength f)
+(defn- selected-union-kind! [^Field f field-name leg-kinds]
+  (let [n (.childrenLength f)
         ^Union u (.type f (Union.))]
-    (field! f "$data$" Type/Union false n)
+    (field! f field-name Type/Union false n)
     (require! (and (<= 2 n (count leg-kinds)) u
                    (= UnionMode/Dense (.mode u)) (zero? (.typeIdsLength u)))
               :unsupported-arrow-list-union)
@@ -29,6 +27,14 @@
                       (range n))]
       (require! (= n (count (distinct kinds))) :unsupported-arrow-list-union-leg)
       [:union kinds])))
+
+(defn- union-kind! [f temporal?]
+  (selected-union-kind! f "$data$"
+                        (cond-> union-leg-kinds
+                          temporal? (assoc "timestamp-tz-micro-utc" :timestamp-utc))))
+
+(defn- document-id-union-kind! [f]
+  (selected-union-kind! f "_id" (dissoc union-leg-kinds "bool")))
 
 (defn- struct-key! [name allowed depth]
   (require! (and name (<= 1 (count name) 4095)) :unsupported-arrow-struct-key)
@@ -110,10 +116,15 @@
                                      null-only? (and nullable-field?
                                                      (contains? allowed :null-only-fields)
                                                      (= Type/Null (.typeType child)))
-                                     child-kind (if null-only?
+                                     child-kind (cond
+                                                  (and (= "xt/id" key)
+                                                       (contains? allowed :mixed-document-ids)
+                                                       (= Type/Union (.typeType child)))
+                                                  (document-id-union-kind! child)
+                                                  null-only?
                                                   (do (field! child name Type/Null true 0)
                                                       :null-only-field)
-                                                  (scalar-kind-at! child name
+                                                  :else (scalar-kind-at! child name
                                                                    (cond-> allowed nullable-field?
                                                                      (conj :nullable-field))
                                                                    (inc depth)))]

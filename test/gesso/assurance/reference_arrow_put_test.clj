@@ -435,3 +435,73 @@
   ;; Correspondence does not establish cross-family injectivity.
   (is (= (iid/document-iid 1)
          (iid/document-iid #uuid "4cd9b767-2d7f-bee8-fb51-fb1e049f6903"))))
+
+(def ^:private mixed-id-vectors
+  [[1 "4cd9b7672d7fbee8fb51fb1e049f6903"]
+   ["1" "e8bc163c82eee18733288c7d4ac636db"]
+   [:claim/open "54f1c47257f82fcbee523fbd0d4d1287"]
+   [#uuid "00112233-4455-6677-8899-aabbccddeeff" "00112233445566778899aabbccddeeff"]
+   [-2 "b49a40f47ff38b672a86e70156a7a8c1"]])
+
+(defn- check-mixed-ids! [node id homogeneous-id other-union-id]
+  (let [data (#'fixture/retained-operation-bytes node id)
+        expected {:kind :put-docs :table :public/foo
+                  :documents (mapv (fn [[id _]] {:xt/id id}) mixed-id-vectors)
+                  :iids (mapv second mixed-id-vectors) :bounds {}}
+        [_ _ _ _ _ _ iids _ _ _ _ _ tags indexes _ integers _ _ strings]
+        (#'fixture/buffer-starts data)
+        r (arrow/decode-mixed-id-put data)]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+    (is (= arrow/mixed-id-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= [expected] (:groups r) (:operations (provider/observe-source-message! node id))))
+    (doseq [decoder [arrow/decode-put-envelope arrow/decode-verified-put
+                     arrow/decode-integer-iid-put arrow/decode-string-iid-put
+                     arrow/decode-keyword-iid-put arrow/decode-uuid-iid-put]]
+      (let [r (decoder data)]
+        (is (= :unsupported-arrow-field (:reason r)))
+        (is (not (contains? r :groups)))))
+    (let [homogeneous (#'fixture/retained-operation-bytes node homogeneous-id)]
+      (is (= :matched (:iid-correspondence (arrow/decode-mixed-id-put homogeneous))))
+      (is (= (:groups (arrow/decode-verified-put homogeneous))
+             (:groups (arrow/decode-mixed-id-put homogeneous)))))
+    (doseq [[bad reason] [[(#'fixture/edit-byte data tags 4) :unsupported-arrow-list-union-selection]
+                          [(#'fixture/edit-byte data tags 255) :unsupported-arrow-list-union-selection]
+                          [(#'fixture/edit-int data indexes -1) :unsupported-arrow-list-union-selection]
+                          [(#'fixture/edit-int data indexes 1) :unsupported-arrow-list-union-selection]
+                          [(#'fixture/edit-int data (+ indexes 16) 0) :unsupported-arrow-list-union-selection]
+                          [(#'fixture/edit-long data integers 99) :document-iid-mismatch]
+                          [(#'fixture/edit-byte data strings 50) :document-iid-mismatch]
+                          [(#'fixture/edit-byte data strings 255) :invalid-arrow-utf8]
+                          [(replace-iid data iids (second (nth mixed-id-vectors 1))) :document-iid-mismatch]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]
+                          [(#'fixture/retained-operation-bytes node other-union-id) :unsupported-arrow-field]]]
+      (let [r (arrow/decode-mixed-id-put bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :groups)))
+        (is (not (contains? r :iid-correspondence)))))))
+
+(deftest selected-mixed-document-iids-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-mixed-iid-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        docs (mapv (fn [[id _]] {:xt/id id}) mixed-id-vectors)]
+    (try
+      (let [[id homogeneous-id other-union-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! [(into [:put-docs :foo] docs)])
+                    homogeneous-id (submit! [[:put-docs :foo {:xt/id "other"}]])
+                    other-union-id (submit! [[:put-docs :foo {:xt/id 1 :value 1}
+                                             {:xt/id "1" :value "x"}]])]
+                (check-mixed-ids! node id homogeneous-id other-union-id)
+                [id homogeneous-id other-union-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) other-union-id (Duration/ofSeconds 10))
+          (check-mixed-ids! node id homogeneous-id other-union-id)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

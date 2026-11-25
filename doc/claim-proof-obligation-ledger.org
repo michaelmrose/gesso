@@ -3837,3 +3837,31 @@ nullable actual puts, explicit bounds, multiple groups and aggregate
 document budgets remain open. No production wiring, certificate or
 CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2683 — verify heterogeneous retained document ID columns
+
+Qualify the observed nonnullable outer _id dense union with implicit
+zero-based tags and distinct integer, UTF-8, keyword and UUID legs.
+Reuse the independent scalar union reader, requiring exact child node
+counts, sequential indexes and complete child consumption. Restrict the
+new schema admission to the mixed-ID put profile; other struct unions
+and earlier homogeneous put profiles retain their restrictions. Verify
+all reconstructed identifier/IID pairs through the common dispatcher.
+
+Focused JVM: 39 tests / 2422 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. A
+persistent five-document fixture exercises all four ID families and a
+repeated integer leg, including integer 1 versus string "1". Match
+independently specified groups and provider observations before and
+after reopening. Reject invalid tags, negative, skipped or repeated
+indexes, mutated IDs and IIDs, malformed UTF-8, truncation and non-ID
+union fields without partial groups. Confirm earlier profile rejection
+and homogeneous compatibility. XTDB logged shutdown cancellation;
+the test process exited zero.
+
+Selected mixed-ID verified put profile v1. IID correspondence is not
+injectivity, authenticity or transaction admission. Nullable actual
+put fields, explicit valid-time bounds, multiple groups and aggregate
+document budgets remain open. No production wiring, certificate or
+CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.

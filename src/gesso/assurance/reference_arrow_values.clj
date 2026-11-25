@@ -202,6 +202,11 @@
       (constantly absent-field))
     (nullable-kind? kind)
     (nullable-reader! (second kind) batch node-index buffers start n)
+    (union-kind? kind)
+    (let [node (.nodes batch node-index)]
+      (require! (and (= n (.length node)) (= -1 (.nullCount node)))
+                :unsupported-arrow-list-union-layout)
+      (union-reader! (second kind) batch node-index buffers start n))
     :else
     (let [node (.nodes batch node-index)
           ^ByteBuffer validity (nth buffers start)]

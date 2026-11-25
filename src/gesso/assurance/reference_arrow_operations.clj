@@ -723,7 +723,7 @@
               :unsupported-arrow-union))
   (.children f 0))
 
-(defn- put-schema! [^Message m ^ByteBuffer body]
+(defn- put-schema! [^Message m ^ByteBuffer body mixed-ids?]
   (let [^Schema schema (.header m (Schema.))]
     (require! (and schema (zero? (.remaining body)) (= Endianness/Little (.endianness schema))
                    (= 1 (.fieldsLength schema)) (zero? (.featuresLength schema))
@@ -744,8 +744,9 @@
           (require! (and t (= TimeUnit/MICROSECOND (.unit t)) (= "UTC" (.timezone t)))
                     :unsupported-arrow-put-bound-type)))
       (let [^Field doc (.children table 0)
-            kind (scalar-kind! doc "$data$" #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
-                                               :empty-list :recursive-list :struct-map :document-keys :empty-struct})]
+            kind (scalar-kind! doc "$data$" (cond-> #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                                                       :empty-list :recursive-list :struct-map :document-keys :empty-struct}
+                                               mixed-ids? (conj :mixed-document-ids)))]
         (require! (struct-kind? kind) :unsupported-arrow-put-document)
         {:table (keyword table-name) :kind kind}))))
 
@@ -785,16 +786,12 @@
                               (.position copy (* 16 i)) (.get copy b) (.formatHex (HexFormat/of) b))) (range n))
          :bounds {}}))))
 
-(defn decode-put-envelope
-  "Decode a single selected put group and table with absent outer bounds.
-   Retain IID bytes without verifying their correspondence to document IDs.
-   Nonnullable selected documents only; no execution or admission claim."
-  [bytes]
+(defn- decode-put-envelope* [bytes mixed-ids?]
   (try
     (require! (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes)) :arrow-byte-limit)
     (let [stream (doto (ByteBuffer/wrap ^bytes bytes) (.order ByteOrder/LITTLE_ENDIAN))
           [sm sb] (message! stream MessageHeader/Schema)
-          schema (put-schema! sm sb)
+          schema (put-schema! sm sb mixed-ids?)
           [bm bb] (message! stream MessageHeader/RecordBatch)
           group (put-batch! bm bb schema)]
       (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream))) :unsupported-arrow-terminator)
@@ -803,9 +800,15 @@
     (catch CharacterCodingException _ (assoc put-envelope-base :status :unsupported :reason :invalid-arrow-utf8))
     (catch Exception _ (assoc put-envelope-base :status :unsupported :reason :invalid-arrow-stream))))
 
-(defn- decode-verified-iid-put [bytes profile derive-iid]
-  (let [decoded (decode-put-envelope bytes)
-        result-base (assoc base :profile profile)]
+(defn decode-put-envelope
+  "Decode a single selected put group and table with absent outer bounds.
+   Retain IID bytes without verifying their correspondence to document IDs.
+   Nonnullable selected documents only; no execution or admission claim."
+  [bytes]
+  (decode-put-envelope* bytes false))
+
+(defn- verify-put-iids [decoded profile derive-iid]
+  (let [result-base (assoc base :profile profile)]
     (if-not (= :decoded (:status decoded))
       (assoc result-base :status :unsupported :reason (:reason decoded))
       (try
@@ -816,6 +819,9 @@
         (assoc decoded :profile profile :iid-correspondence :matched)
         (catch clojure.lang.ExceptionInfo e
           (assoc result-base :status :unsupported :reason (:reason (ex-data e))))))))
+
+(defn- decode-verified-iid-put [bytes profile derive-iid]
+  (verify-put-iids (decode-put-envelope bytes) profile derive-iid))
 
 (def integer-iid-put-profile :xtdb-2.2.0-beta1/selected-integer-iid-put-arrow-v1)
 
@@ -857,3 +863,12 @@
    The existing envelope schema still excludes heterogeneous ID columns."
   [bytes]
   (decode-verified-iid-put bytes verified-iid-put-profile iid/document-iid))
+
+(def mixed-id-put-profile :xtdb-2.2.0-beta1/selected-mixed-id-verified-put-arrow-v1)
+
+(defn decode-mixed-id-put
+  "Verify selected put envelopes with homogeneous or mixed scalar ID columns.
+   Only outer _id fields admit the four-family dense union. This does not
+   establish cross-family injectivity, authenticity or transaction admission."
+  [bytes]
+  (verify-put-iids (decode-put-envelope* bytes true) mixed-id-put-profile iid/document-iid))
