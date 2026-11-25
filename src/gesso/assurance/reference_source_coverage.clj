@@ -62,3 +62,48 @@
         (.interrupt (Thread/currentThread))
         (throw e))
       (catch Exception _ (result :unavailable :source-log-read-failed)))))
+
+(def processed-profile :selected-processed-source-frontier-v1)
+
+(defn- read-frontier! [node]
+  (let [^Database database (db/primary-db node)
+        log (.getSourceLog database)]
+    (when (and (instance? InMemoryLog log) (zero? (.getEpoch ^InMemoryLog log)))
+      {:submitted (.getLatestSubmittedOffset ^InMemoryLog log)
+       :processed (.getLatestProcessedMsgId database)
+       :ingestion-failed? (some? (.getIngestionError database))})))
+
+(defn- frontier-correspondence [before coverage after]
+  (let [tag #(assoc % :processed-profile processed-profile)
+        fail #(tag (result %1 %2))]
+    (cond
+      (or (nil? before) (nil? after)) (fail :unsupported :unsupported-source-log)
+      (or (:ingestion-failed? before) (:ingestion-failed? after))
+      (fail :unavailable :source-ingestion-failed)
+      (not= :observed (:status coverage)) (tag coverage)
+      (not= before after) (fail :unavailable :source-frontier-changed-during-observation)
+      (not= (:submitted before) (:last-message-id coverage))
+      (fail :unavailable :source-frontier-coverage-mismatch)
+      (< (:processed before) (:submitted before)) (fail :unavailable :source-processing-incomplete)
+      (> (:processed before) (:submitted before)) (fail :unavailable :source-frontier-contradiction)
+      :else (tag (assoc coverage :processed-message-id (:processed before))))))
+
+(defn observe-processed-coverage!
+  "Require the selected source coverage and stable submitted/processed
+   coordinates, including maintenance messages. Read only: do not wait for
+   processing, silently advance the expected frontier, or establish atomic
+   observation or absence of future writes. Provider watcher semantics and
+   complete retention remain premises."
+  [node]
+  (if-not (db/<-node node)
+    (assoc (result :unsupported :embedded-primary-log-required) :processed-profile processed-profile)
+    (try
+      (let [before (read-frontier! node)
+            coverage (observe-coverage! node)
+            after (read-frontier! node)]
+        (frontier-correspondence before coverage after))
+      (catch InterruptedException e
+        (.interrupt (Thread/currentThread))
+        (throw e))
+      (catch Exception _
+        (assoc (result :unavailable :source-frontier-read-failed) :processed-profile processed-profile)))))

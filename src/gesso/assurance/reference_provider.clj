@@ -202,25 +202,38 @@
       (bound (compare-quiescent* node (mapv #(dissoc % :tx-id) expectations) tables
                                  (mapv :tx-id expectations))))))
 
-(defn compare-source-covered-execution!
-  "Require bounded source-log transaction coverage as well as the existing
-   source-bound quiescent execution comparison. Maintenance records do not
-   consume expected transaction slots. Reobserve coverage afterward; no
-   processed frontier, authentication or refinement authority is implied."
-  [node expectations tables]
-  (let [tag #(assoc % :source-coverage-profile coverage/profile)
-        fail #(tag (acquisition-result %1 %2))]
+(defn- compare-source-coverage* [node expectations tables observe! tag]
+  (let [fail #(tag (acquisition-result %1 %2))]
     (if-not (source-expectations? expectations)
       (fail :unsupported :unsupported-source-expectation)
-      (let [before (coverage/observe-coverage! node)]
+      (let [before (observe! node)]
         (cond
           (not= :observed (:status before)) (fail (:status before) (:reason before))
           (not= (mapv :tx-id expectations) (:transaction-ids before))
           (fail :mismatch :source-transaction-coverage-mismatch)
           :else
           (let [comparison (compare-source-bound-execution! node expectations tables)
-                after (coverage/observe-coverage! node)]
+                after (observe! node)]
             (cond
               (not= :observed (:status after)) (fail (:status after) (:reason after))
               (not= before after) (fail :unavailable :source-log-changed-during-comparison)
               :else (tag (assoc comparison :source-coverage :matched)))))))))
+
+(defn compare-source-covered-execution!
+  "Require bounded source-log transaction coverage as well as the existing
+   source-bound quiescent execution comparison. Maintenance records do not
+   consume expected transaction slots. Reobserve coverage afterward; no
+   processed frontier, authentication or refinement authority is implied."
+  [node expectations tables]
+  (compare-source-coverage* node expectations tables coverage/observe-coverage!
+                            #(assoc % :source-coverage-profile coverage/profile)))
+
+(defn compare-processed-source-execution!
+  "Additionally require the captured submitted end to have been processed,
+   before and after the quiescent execution comparison. No wait, live
+   snapshot, authenticated source provenance or refinement authority."
+  [node expectations tables]
+  (let [r (compare-source-coverage* node expectations tables coverage/observe-processed-coverage!
+                                    #(assoc % :source-coverage-profile coverage/profile
+                                              :processed-profile coverage/processed-profile))]
+    (cond-> r (= :matched (:source-coverage r)) (assoc :processed-frontier :matched))))

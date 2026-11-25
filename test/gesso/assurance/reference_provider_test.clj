@@ -216,3 +216,52 @@
     (is (= :unsupported-source-message-kind
            (:reason (classify [(Log$Record. 0 0 (time-at 0) nil)] 0))))
     (is (= :embedded-primary-log-required (:reason (coverage/observe-coverage! nil))))))
+
+(deftest selected-processed-source-frontier-correspondence
+  (let [txs (transactions)]
+    (with-open [node (xtn/start-node {})]
+      (let [database (db/primary-db node)
+            ^Log log (.getSourceLog database)
+            bound (mapv (fn [{:keys [system-time ops] :as tx}]
+                          (let [id (:tx-id (xt/submit-tx node ops {:system-time system-time}))]
+                            (.awaitTxBlocking database id (Duration/ofSeconds 10))
+                            (assoc tx :tx-id id))) txs)
+            flush! (fn []
+                     (let [id (.getMsgId (.appendMessageBlocking log (SourceMessage$FlushBlock. Long/MAX_VALUE)))]
+                       (.awaitSourceBlocking database id (Duration/ofSeconds 10)) id))
+            end (flush!)
+            actual (coverage/observe-processed-coverage! node)
+            r (reference/compare-processed-source-execution! node bound tables)]
+        (is (> end (:tx-id (peek bound))))
+        (is (= :observed (:status actual)) (pr-str actual))
+        (is (= end (:last-message-id actual) (:processed-message-id actual)))
+        (is (= :matched (:status r)) (pr-str r))
+        (is (= :matched (:processed-frontier r)))
+        (is (= coverage/processed-profile (:processed-profile r)))
+        (is (= :not-established (:provider-refinement r)))
+        (is (= :none (:authority r)))
+        (is (= :not-issued (:certificate r)))
+        ;; Simulate a delayed or failed watcher without racing actual indexing.
+        (let [sample {:submitted end :processed end :ingestion-failed? false}]
+          (doseq [[a b reason]
+                  [[(update sample :processed dec) (update sample :processed dec) :source-processing-incomplete]
+                   [(update sample :processed inc) (update sample :processed inc) :source-frontier-contradiction]
+                   [(assoc sample :ingestion-failed? true) sample :source-ingestion-failed]
+                   [sample (assoc sample :ingestion-failed? true) :source-ingestion-failed]
+                   [(update sample :processed dec) sample :source-frontier-changed-during-observation]
+                   [(update sample :submitted inc) (update sample :submitted inc) :source-frontier-coverage-mismatch]]]
+            (let [samples (atom [a b])]
+              (with-redefs-fn {#'coverage/read-frontier! (fn [_] (let [s (first @samples)] (swap! samples subvec 1) s))
+                                #'reference/compare-source-bound-execution! (fn [& _] (throw (AssertionError. "unavailable frontier must not compare")))}
+                (fn []
+                  (let [r (reference/compare-processed-source-execution! node bound tables)]
+                    (is (= :unavailable (:status r)))
+                    (is (= reason (:reason r)))
+                    (is (not (contains? r :processed-frontier)))))))))
+        (let [compare! reference/compare-source-bound-execution!]
+          (with-redefs [reference/compare-source-bound-execution!
+                        (fn [& args] (let [r (apply compare! args)] (flush!) r))]
+            (let [r (reference/compare-processed-source-execution! node bound tables)]
+              (is (= :unavailable (:status r)))
+              (is (= :source-log-changed-during-comparison (:reason r)))
+              (is (not (contains? r :processed-frontier))))))))))

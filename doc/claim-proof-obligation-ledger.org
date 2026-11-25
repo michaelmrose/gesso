@@ -2881,3 +2881,33 @@ outside this profile; quiescence, correct provider read semantics and
 complete history from empty state remain premises. No production assurance
 status changes, no certificate or CLM-R2 premise retirement. Full project,
 physical Claim, Chromium and independent proof gates were not rerun.
+
+* v2645 — compare bounded processed source frontiers
+
+Add a read-only processed source coverage observer for the selected
+embedded epoch-zero in-memory log. Sample submitted and processed message
+identities and ingestion error state around retained coverage acquisition.
+Require stable coordinates matching the complete retained end, including
+maintenance messages after the last transaction. Reject processing lag,
+contradictory coordinates, ingestion failure and visible frontier change
+without waiting or substituting another end. Compose the new observer
+before and after source-bound execution comparison while preserving the
+previous source-covered interface. Processed-frontier profile v1; other
+reference and assurance profiles unchanged.
+
+Expanded focused JVM gate: 110 tests / 8688 assertions, zero failures or
+errors across seven reference namespaces, the production cycle suite and
+operational report suite. Focused provider suite: 6 tests / 137 assertions.
+Five real transactions and a processed maintenance suffix establish the
+selected matching observation. Simulated watcher lag, ahead coordinates,
+ingestion failures and changing or inconsistent samples are rejected before
+execution comparison. A real maintenance append during comparison rejects
+the previously matching result. No implicit catch-up wait is introduced.
+
+This is finite processed-frontier correspondence under the installed
+provider watcher semantics, not an atomic snapshot, proof of retention,
+writer closure or live frontier acquisition. Persistent log coverage and
+proof of the provider observation semantics remain open. No production
+assurance status changes, no certificate or CLM-R2 premise retirement.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.
