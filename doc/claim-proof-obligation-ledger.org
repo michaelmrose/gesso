@@ -835,3 +835,34 @@ crash recovery, indefinite retention, truncation, Kafka, remote access
 or database/log identity authentication. Production history and ordinary
 test gates remain unchanged. The full Claim, Ansatz, Chromium and
 project suites were not rerun. No CLM-R2 premise is retired.
+
+* v2575 — independent JVM source-log restart qualification
+
+Add a separate opt-in process pilot with seed and verify entry points.
+Run seed against an existing empty directory, close its persistent local
+XTDB node, serialize only decoded observations, exact transaction ids and
+process identity to an EDN manifest, and exit. Run verify in a fresh JVM
+using the same directories. It reconstructs the expected restricted
+operations from its own fixture, checks the original observations and
+provider outcomes, and verifies that a later committed update does not
+change the original evidence. It also checks the process identity differs
+and a missing future record cannot produce an observation.
+
+Reproduction (run the commands sequentially; use a fresh directory):
+#+begin_src sh
+root=$(mktemp -d)
+clojure -M:test -m gesso.assurance.xtdb-source-log-process-pilot seed "$root" &&
+clojure -M:test -m gesso.assurance.xtdb-source-log-process-pilot verify "$root"
+#+end_src
+
+The two actual JVM invocations passed: seed 1 test / 9 assertions and
+verify 1 test / 21 assertions, no failures or errors, both exit status 0.
+The execution used the supplied dependency classpath and embedded XTDB
+2.2.0-beta1. The manifest is an experimental comparison reference, not
+an authenticated receipt or production history checkpoint. The test
+requires intact local directories and clean process termination; no
+crash durability, retention policy, log identity authentication, Kafka
+or provider refinement theorem follows. Production and the ordinary
+regression gate are unchanged. The earlier source-log pilot, full Claim,
+Ansatz, Chromium and full project suites were not rerun. No CLM-R2 premise
+is retired.
