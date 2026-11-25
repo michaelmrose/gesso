@@ -1475,3 +1475,30 @@ at the production framing boundary, not yet a mandatory residual marker at
 the final writer-policy boundary. Residual order within the prewrite group,
 complete write-table closure, SQL equivalence, provider execution refinement
 and writer authority remain open. No CLM-R2 premise is retired.
+
+* v2596 — require declared residual assurance at the installed writer
+
+Capture both declaration profiles from the installed issued admission.
+For a genuine one-use framed handoff, require a matched residual assertion
+expectation when its admission declares residual assertions, independently
+of the existing source-bound publication requirement. Require both when
+both catalogs are present. An insufficient claimed mapped handoff remains
+refused without initialization or maintenance fallback or observer
+notification. Preserve undeclared legacy behavior and profile v12.
+
+Focused JVM validation: 4 tests / 215 assertions, zero failures or errors.
+The installed-policy matrix isolates the handoff to exercise all four
+combinations of declaration presence, missing/open/undeclared/matched
+residual statuses and missing or wrong-source publication checks. Refusals
+are also exercised through the actual XTDB adapter, with no observer
+notification. The framing, publication writer and activation regressions
+also pass. This matrix is not itself a genuine-handoff proof.
+Full opt-in physical Claim with source-log observation: 3 tests / 1116
+assertions, zero failures or errors. The genuine production framing and
+writer handoff pass the stronger requirement. Full project, Chromium and
+separate proof gates were not rerun.
+
+The selected adapter now requires both declared preventive expectations;
+this is not raw writer closure or provider execution refinement. Complete
+write-table closure, residual ordering within the prewrite group and
+writer authority remain open. No CLM-R2 premise is retired.

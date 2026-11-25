@@ -134,7 +134,9 @@
         initialized? (atom false)
         phase (atom :pending)
         source-id (:source-id infrastructure)
-        declared-publication? (contains? (inductive/describe-mapped-admission admission) :publication-derivations)
+        description (inductive/describe-mapped-admission admission)
+        declared-publication? (contains? description :publication-derivations)
+        declared-residual? (contains? description :residual-assertion-derivations)
         checked-init (inductive/check-mapped-initialization! admission initializer)
         seed-ops (initialization/transaction source-id initializer (mapped-tables admission) checked-init)]
     (when-not connectable (reject! :missing-mapped-writer-connectable))
@@ -148,9 +150,11 @@
                                (publication/claim-framed-submission! admission connectable envelope))]
                       ;; Only the genuine, consumed handoff can carry this check.
                       ;; A failed mapped handoff cannot fall through to maintenance.
-                      (when (or (not declared-publication?)
-                                (and (= :matched (:publication-expectation candidate))
-                                     (= source-id (:publication-source-id candidate))))
+                      (when (and (or (not declared-publication?)
+                                     (and (= :matched (:publication-expectation candidate))
+                                          (= source-id (:publication-source-id candidate))))
+                                 (or (not declared-residual?)
+                                     (= :matched (:residual-assertion-expectation candidate))))
                         (assoc identity :kind :mapped-operation :candidate candidate))
                       (or (when (and seed-ops (= seed-ops tx-ops)
                                      (not @initialized?)

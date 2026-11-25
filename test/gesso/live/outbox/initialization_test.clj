@@ -23,6 +23,8 @@
   ([table auxiliary catalog-id nullable-table]
    (admission! table auxiliary catalog-id nullable-table false))
   ([table auxiliary catalog-id nullable-table declared?]
+   (admission! table auxiliary catalog-id nullable-table declared? false))
+  ([table auxiliary catalog-id nullable-table declared? residual?]
   (let [id :example/initialize
         source {:subject {:kind :operation :id id :interface {:operation id}}
                 :state-types {:example/count {:type :integer}
@@ -42,7 +44,8 @@
       :decode-outcome! identity
       :transaction-footprint! (fn [_] (throw (ex-info "Unexpected mapped operation" {})))
       :auxiliary-tables auxiliary :document-effects {id {[:document table "r1"] {}}}}
-       declared? (assoc :publication-derivations {id nil}))))))
+       declared? (assoc :publication-derivations {id nil})
+       residual? (assoc :residual-assertion-derivations {id nil}))))))
 
 (defn- reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
@@ -821,3 +824,39 @@
             (is (= [{:kind :mapped-operation :alternative :example/initialize
                      :candidate @candidate}] @observed)))
           (finally (release)))))))
+
+(deftest declared-writer-requires-matched-residual-assertions
+  (doseq [[publication? residual?] [[true true] [false true] [true false] [false false]]]
+    (let [admission (admission! :requests #{} :example/initialization :assignments publication? residual?)
+          seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+          observed (atom [])
+          config {:admission admission :initializer seed :observe! #(swap! observed conj %)}
+          envelope {:api :execute-tx :tx-options {} :tx-ops seed}
+          candidate (atom {})
+          claim (fn [& _] {:identity {:alternative :example/initialize}
+                           :candidate @candidate})
+          valid-publication {:publication-expectation :matched :publication-source-id "s"}
+          valid-residual {:residual-assertion-expectation :matched}]
+      (with-open [node (xtn/start-node {})]
+        (let [writer (policy/build-policy! node config {:source-id "s"})
+              release (xtdb/register-submission-policy! node writer)]
+          (try
+            (policy/activate-policy! writer)
+            (reset! observed [])
+            ;; Isolate the gate: the real one-use handoff is exercised by
+            ;; the physical Claim suite, not manufactured by this test.
+            (with-redefs [publication/claim-framed-submission! claim]
+              (doseq [pub [{} valid-publication (assoc valid-publication :publication-source-id "other")]
+                      residual [{} valid-residual {:residual-assertion-expectation :open}
+                                {:residual-assertion-expectation :not-declared}]]
+                (let [c (merge pub residual)
+                      allowed? (and (or (not publication?) (= pub valid-publication))
+                                    (or (not residual?) (= residual valid-residual)))]
+                  (reset! observed [])
+                  (reset! candidate c)
+                  (is (= allowed? (writer envelope)))
+                  (if allowed?
+                    (is (= [{:kind :mapped-operation :alternative :example/initialize :candidate c}] @observed))
+                    (do (is (= :submission-policy-refused (reason #(xtdb/execute-tx! node seed))))
+                        (is (empty? @observed)))))))
+            (finally (release))))))))
