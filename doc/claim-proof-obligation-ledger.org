@@ -2973,3 +2973,29 @@ snapshot acquisition, retention or writer closure. No implicit catch-up
 wait, production assurance upgrade, certificate or CLM-R2 premise
 retirement. Full project, physical Claim, Chromium and independent proof
 gates were not rerun.
+
+* v2648 — independently decode selected source envelopes
+
+Add a bounded independent wire decoder for the installed XTDB
+2.2.0-beta1 source-message header and selected protobuf envelopes. Read
+canonical 64-bit varints and length-delimited fields without XTDB or
+protobuf-generated decoding. Decode transaction operation bytes, optional
+system time, timezone, user and nonempty metadata; decode flush-block
+with an explicit expected index. Reject unknown or duplicate fields,
+ambiguous message variants, invalid lengths, malformed UTF-8 and
+unsupported external tokens. Preserve raw Arrow operation bytes rather
+than claiming independent Arrow or SQL semantics. No production wiring.
+
+Focused JVM: 2 tests / 120 assertions, zero failures or errors. Fixed
+wire fixtures cover signed boundaries, missing and explicit fields, and
+malformed input. Two actual transaction records (commit and abort) and
+two flush records are decoded directly from persistent log frame payloads
+and compared with the installed provider's observations, before and after
+reopening. The expanded regression attempt timed out; no full gate pass
+is claimed. Selected source-payload profile v1; other profiles unchanged.
+
+This is bounded envelope decoding, not independent Arrow operation
+interpretation, complete source coverage, atomic acquisition, writer
+closure or universal provider refinement. Tries-added, block-uploaded,
+legacy messages and external tokens remain outside the selected decoder.
+No certificate, production assurance upgrade or CLM-R2 premise retirement.
