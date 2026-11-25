@@ -4610,3 +4610,28 @@ other storage layouts or arbitrary assertion queries. Equal-time
 state-dependent replay remains unsupported. No production admission,
 certificate or CLM-R2 premise retirement. Other regression namespaces
 and formal gates were not rerun.
+
+* v2714 — characterize repeated tentative equal-time writes
+
+Extend the provider characterization to seven arrangements of multiple
+prior temporal segments and two tentative writes, with assertions after
+each write. Include older and same-time prior segments, gaps, fresh IDs,
+overlapping and disjoint writes. A counterexample prevents generalizing
+the v2713 precedence hypothesis: prior same-time writes of value 1 over
+[-10,10) and value 2 over [1,10), then tentative value 3 over [-2,2)
+and value 4 over [1,5), produce assertion values 3 then 1 at point zero.
+The second tentative write does not cover zero, yet changes visibility.
+The final committed state at zero is value 3. Preserve characterization
+rather than introduce a speculative independent tie-breaking rule.
+
+Focused JVM: 15 tests / 2611 assertions, zero failures or errors across
+reference-temporal-test and reference-equal-time-visibility-test. New
+536 assertions cover every alternative value or absence, exact failing
+second assertion index, successful interleaved assertions and cardinality,
+and fifteen point snapshots before attempts, after aborts and after
+commits, in memory and across persistent reopening. Initial regression
+had 54 failures including a nil-exclusion test error and the incorrect
+first-read hypothesis; corrected and rerun. Equal-time state-dependent
+replay remains unsupported; physical scan/merge ordering needs further
+investigation. No production admission, certificate or CLM-R2 premise
+retirement. Other regression namespaces and formal gates were not rerun.

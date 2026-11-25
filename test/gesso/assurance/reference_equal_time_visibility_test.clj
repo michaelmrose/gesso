@@ -17,7 +17,7 @@
 (defn- count-guard [id n]
   ["ASSERT ? = (SELECT COUNT(*) FROM \"probe\" WHERE _id = ?)" n id])
 
-(defn- attempt! [node time ops committed?]
+(defn- attempt! [node time ops committed? & [failed-index]]
   (let [id (:tx-id (xt/submit-tx node ops {:system-time time}))]
     (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 15))
     (let [rows (xt/q node ["SELECT committed, error FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ?" id])]
@@ -25,7 +25,10 @@
       (is (= committed? (:committed (first rows))) (pr-str ops))
       (if committed?
         (is (nil? (:error (first rows))))
-        (is (= :xtdb/assert-failed (:xtdb.error/code (ex-data (:error (first rows))))))))
+        (do
+          (is (= :xtdb/assert-failed (:xtdb.error/code (ex-data (:error (first rows))))))
+          (when (some? failed-index)
+            (is (= failed-index (:tx-op-idx (ex-data (:error (first rows))))) (pr-str ops))))))
     id))
 
 (defn- values-at [node time]
@@ -157,4 +160,72 @@
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) end (Duration/ofSeconds 15))
           (check-interval-snapshots! node true)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(def ^:private multi-write-cases
+  ;; Prior [system offset, value, interval], tentative [value, interval],
+  ;; observed values after the first and second tentative writes.
+  [[[[0 1 [-10 10]] [0 2 [-5 5]]] [[3 [-2 2]] [4 [-1 1]]] [2 2]]
+   [[[0 1 [-10 0]] [0 2 [1 10]]] [[3 [-2 2]] [4 [-1 1]]] [3 4]]
+   [[[-1 1 [-10 10]] [0 2 [1 10]]] [[3 [-2 2]] [4 [-1 1]]] [3 4]]
+   [[] [[3 [-2 2]] [4 [-1 1]]] [3 4]]
+   [[] [[3 [-2 2]] [4 [1 5]]] [3 3]]
+   [[[0 1 [-10 10]] [0 2 [1 10]]] [[3 [-2 2]] [4 [1 5]]] [3 1]]
+   [[[0 1 [-10 -5]] [0 2 [5 10]]] [[3 [-5 0]] [4 [1 5]]] [nil nil]]])
+
+(defn- multi-id [i] (str "multi-" i))
+
+(defn- multi-values [point committed?]
+  (into {} (keep-indexed
+            (fn [i [priors writes _]]
+              (let [rows (concat (map #(subvec % 1) priors) (when committed? writes))]
+                (when-let [[v _] (last (filter #(covers? (second %) point) rows))]
+                  [(multi-id i) v]))) multi-write-cases)))
+
+(defn- check-multi-snapshots! [node committed?]
+  (doseq [point [-11 -10 -6 -5 -3 -2 -1 0 1 2 4 5 9 10 11]]
+    (let [rows (xt/q node ["SELECT _id, value FROM probe FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ?"
+                           (.plusSeconds t point) t])
+          expected (multi-values point committed?)]
+      (is (= (count expected) (count rows)) (str "point " point))
+      (is (= expected (into {} (map (juxt :xt/id :value)) rows))
+          (str "point " point " committed? " committed?)))))
+
+(defn- seed-multi! [node]
+  (last (for [offset [-1 0]
+              [i [priors]] (map-indexed vector multi-write-cases)
+              [s v bounds] priors :when (= offset s)]
+          (attempt! node (.plusSeconds t s) [(bounded-put (multi-id i) v bounds)] true))))
+
+(defn- characterize-multi! [node]
+  (check-multi-snapshots! node false)
+  (doseq [[i [_ [[a ab] [b bb]] [first-visible last-visible]]] (map-indexed vector multi-write-cases)
+          opposite (remove #(= last-visible %) [nil 1 2 3 4])]
+    (let [id (multi-id i)]
+      (attempt! node t [(bounded-put id a ab) (interval-guard id first-visible)
+                        (bounded-put id b bb) (interval-guard id opposite)] false 3)))
+  (check-multi-snapshots! node false)
+  (let [end (last (mapv (fn [[i [_ [[a ab] [b bb]] [first-visible last-visible]]]]
+                          (let [id (multi-id i)]
+                            (attempt! node t [(bounded-put id a ab) (interval-guard id first-visible)
+                                              (bounded-put id b bb) (interval-guard id last-visible)
+                                              (count-guard id (if (nil? last-visible) 0 1))] true)))
+                        (map-indexed vector multi-write-cases)))]
+    (check-multi-snapshots! node true)
+    end))
+
+(deftest equal-time-assertion-visibility-with-multiple-segments-and-writes
+  (let [root (Files/createTempDirectory "gesso-equal-time-multi-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        run! (fn [node] (seed-multi! node) (characterize-multi! node))]
+    (try
+      (with-open [node (xtn/start-node {})] (run! node))
+      (let [id (with-open [node (xtn/start-node config)] (seed-multi! node))
+            end (with-open [node (xtn/start-node config)]
+                  (.awaitSourceBlocking (db/primary-db node) id (Duration/ofSeconds 15))
+                  (characterize-multi! node))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) end (Duration/ofSeconds 15))
+          (check-multi-snapshots! node true)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
