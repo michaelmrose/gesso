@@ -576,3 +576,63 @@
                        (is (not (contains? r :clock-correspondence)))))))
           (is (= report (compare!)))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-state-assertion-inputs! [node expected]
+  (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
+        prediction (temporal/replay (mapv #(dissoc % :tx-id) expected))
+        compare! #(reference/compare-local-processed-retained-replay-execution! node #{:probe})
+        report (compare!)
+        id (:tx-id (second expected))
+        body (get (read-bytes node) id)
+        arrow! arrow/decode-bounded-operations]
+    (is (= :observed (:status sample)) (pr-str (dissoc sample :replay-inputs :payload-fingerprint)))
+    (is (= expected (:replay-inputs sample)))
+    (is (= :predicted (:status prediction)))
+    (is (= [true true false true] (mapv :committed? (:history prediction))))
+    (is (= 1 (:failed-assertion-index (nth (:history prediction) 2))))
+    (is (= :matched (:status report)) (pr-str report))
+    (is (= :matched (:outcome-correspondence report)))
+    (is (= 4 (:transaction-count report)))
+    (is (= :none (:authority report)))
+    (is (= :not-issued (:certificate report)))
+    (is (= :unsupported (:status (coverage/observe-local-processed-retained-clocked-inputs! node))))
+    (doseq [bad [{:kind :sql :query "ASSERT EXISTS (SELECT 1 FROM \"probe\" WHERE _id = $2 AND \"value\" = $1)" :args ["a" 1]}
+                 {:kind :sql :query "ASSERT EXISTS (SELECT 1 FROM \"probe\" WHERE _id = $1 AND \"value\" = $1)" :args ["a" 1]}
+                 {:kind :sql :query "ASSERT EXISTS (SELECT 1 FROM \"probe\" WHERE _id = $1 AND \"value\" = $2)" :args [1 1]}
+                 {:kind :sql :query "ASSERT EXISTS (SELECT 1 FROM \"probe\" WHERE _id = $1 AND \"value\" = $2)" :args ["a" :other]}
+                 {:kind :sql :query "ASSERT $1 = (SELECT COUNT(*) FROM \"probe\" WHERE _id = $2)" :args [1]}
+                 {:kind :sql :query "ASSERT $1 = (SELECT COUNT(*) FROM \"probe\")" :args [16385]}
+                 {:kind :sql :query "ASSERT 0 = (SELECT COUNT(*) FROM \"probe\" WHERE _id = $01)" :args ["a"]}
+                 {:kind :sql :query "ASSERT 0 = (SELECT COUNT(*) FROM \"probe\" WHERE _id = $1) -- comment" :args ["a"]}]]
+      (with-redefs [arrow/decode-bounded-operations #(assoc-in (arrow! %) [:operations 0] bad)]
+        (let [r (input/decode-replay-input id body)]
+          (is (= :unsupported (:status r)) (pr-str bad))
+          (is (not (contains? r :transaction))))))
+    (is (= report (compare!)))))
+
+(deftest strict-retained-state-dependent-assertions
+  (let [root (Files/createTempDirectory "gesso-retained-state-assertions-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        put (fn [v] [:put-docs :probe {:xt/id "a" :value v}])
+        guard (fn [v] ["ASSERT EXISTS (SELECT 1 FROM \"probe\" WHERE _id = ? AND \"value\" = ?)" "a" v])
+        txs [[(put 1) ["ASSERT 1 = (SELECT COUNT(*) FROM \"probe\")"]]
+             [(guard 1) (put 2) (guard 2) ["ASSERT ? = (SELECT COUNT(*) FROM \"probe\" WHERE _id = ?)" 1 "a"]]
+             [(put 3) (guard 2)]
+             [(guard 2) ["ASSERT ? = (SELECT COUNT(*) FROM \"probe\")" 1]
+              ["ASSERT 0 = (SELECT COUNT(*) FROM \"probe\" WHERE _id = ?)" "missing"]]]]
+    (try
+      (let [expected (with-open [node (xtn/start-node config)]
+                       (let [database (db/primary-db node)
+                             expected (mapv (fn [i ops]
+                                              (let [time (.plusSeconds t i)
+                                                    id (:tx-id (xt/submit-tx node ops {:system-time time}))]
+                                                (.awaitTxBlocking database id (Duration/ofSeconds 15))
+                                                {:tx-id id :system-time time :ops ops})) (range) txs)]
+                         (.awaitSourceBlocking database (:tx-id (peek expected)) (Duration/ofSeconds 15))
+                         (check-state-assertion-inputs! node expected)
+                         expected))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
+          (check-state-assertion-inputs! node expected)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

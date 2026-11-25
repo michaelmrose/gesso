@@ -4767,3 +4767,24 @@ corrected the exact expectation and reran. State-dependent equal-time
 assertions remain unqualified. Quiescence and authenticated provenance
 remain premises. No production admission, certificate or CLM-R2 premise
 retirement. Other regression namespaces and formal gates not rerun.
+
+* v2720 — project selected strict-clock state-dependent assertions
+
+Recognize exact retained numbered-parameter forms of quoted-table scalar
+row-read and row-count assertions, including bound and literal counts
+with optional string identity filters. Preserve argument order and validate
+the existing independent temporal operand domain; do not rewrite arbitrary
+SQL. Expand only strict replay projection, acquisition and direct execution
+profiles. Clocked projection still rejects the new state-dependent forms.
+
+Focused JVM: 38 tests / 3605 assertions, zero failures or errors across
+four namespaces in two completed batches: replay input 8 / 700; temporal,
+provider and retained operation 30 / 2905. Persistent strict history
+matches exact projected inputs, prior and tentative row assertions,
+counts, rollback and selected historical rectangles before and after
+reopening. Reject reordered, repeated or noncanonical placeholders,
+wrong argument arity, unqualified scalar domains and excessive counts.
+Read-only assertion table coverage and broader mapped Gesso guards remain
+open; selected table scope and quiescence premises unchanged. No production
+admission, certificate or CLM-R2 premise retirement. Other regression
+namespaces and independent formal gates were not rerun.
