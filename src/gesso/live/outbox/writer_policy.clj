@@ -134,6 +134,7 @@
         initialized? (atom false)
         phase (atom :pending)
         source-id (:source-id infrastructure)
+        declared-publication? (contains? (inductive/describe-mapped-admission admission) :publication-derivations)
         checked-init (inductive/check-mapped-initialization! admission initializer)
         seed-ops (initialization/transaction source-id initializer (mapped-tables admission) checked-init)]
     (when-not connectable (reject! :missing-mapped-writer-connectable))
@@ -141,17 +142,22 @@
       (boolean
        (when (and (= :execute-tx api) (empty? tx-options)
                   (vector? tx-ops) (seq tx-ops))
-         (let [kind (or (when-let [{:keys [identity candidate]}
-                                  (when (and (xtdb/submission-policy-current? connectable (:registration @phase))
-                                             (mapped-operations? tx-ops))
-                                    (publication/claim-framed-submission! admission connectable envelope))]
-                          (assoc identity :kind :mapped-operation :candidate candidate))
-                        (when (and seed-ops (= seed-ops tx-ops)
-                                   (not @initialized?)
-                                   (not (initialization/initialized? connectable source-id checked-init))
-                                   (compare-and-set! initialized? false true))
-                          {:kind :initializer})
-                        (maintenance/admit connectable infrastructure tx-ops))]
+         (let [kind (if-let [{:keys [identity candidate]}
+                             (when (and (xtdb/submission-policy-current? connectable (:registration @phase))
+                                        (mapped-operations? tx-ops))
+                               (publication/claim-framed-submission! admission connectable envelope))]
+                      ;; Only the genuine, consumed handoff can carry this check.
+                      ;; A failed mapped handoff cannot fall through to maintenance.
+                      (when (or (not declared-publication?)
+                                (and (= :matched (:publication-expectation candidate))
+                                     (= source-id (:publication-source-id candidate))))
+                        (assoc identity :kind :mapped-operation :candidate candidate))
+                      (or (when (and seed-ops (= seed-ops tx-ops)
+                                     (not @initialized?)
+                                     (not (initialization/initialized? connectable source-id checked-init))
+                                     (compare-and-set! initialized? false true))
+                            {:kind :initializer})
+                          (maintenance/admit connectable infrastructure tx-ops)))]
            (when kind
              (observe! kind)
              true)))))]

@@ -539,11 +539,14 @@
                       (let [[original actual source-id] args]
                         (when-not (= 3 (count args))
                           (reject! :invalid-publication-admission-arguments [] {}))
-                        (admit-framed-transaction! registry footprint! auxiliary original actual
-                          (when (contains? checked :publication-derivations)
-                            (fn [identity ops before puts record]
-                              (check-candidate-publication! admission source-id (:alternative identity)
-                                                            ops before puts record)))))
+                        (let [declared? (contains? checked :publication-derivations)
+                              admitted (admit-framed-transaction! registry footprint! auxiliary original actual
+                                         (when declared?
+                                           (fn [identity ops before puts record]
+                                             (check-candidate-publication! admission source-id (:alternative identity)
+                                                                           ops before puts record))))]
+                          (cond-> admitted
+                            declared? (assoc-in [:candidate :publication-source-id] source-id))))
                       :prepare! (apply prepare! args)
                       (:discard! :pending?) (apply (get registry action) args)
                       (reject! :unknown-mapped-admission-action [action] {})))]

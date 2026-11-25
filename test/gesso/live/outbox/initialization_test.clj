@@ -21,6 +21,8 @@
   ([] (admission! :requests #{}))
   ([table auxiliary] (admission! table auxiliary :example/initialization :assignments))
   ([table auxiliary catalog-id nullable-table]
+   (admission! table auxiliary catalog-id nullable-table false))
+  ([table auxiliary catalog-id nullable-table declared?]
   (let [id :example/initialize
         source {:subject {:kind :operation :id id :interface {:operation id}}
                 :state-types {:example/count {:type :integer}
@@ -34,12 +36,13 @@
                  :invariants {:example/nonnegative invariant}
                  :declared-operation-ids #{id} :operations [{:id id :construction source}]}]
     (inductive/build-inductive-mapped-admission!
-     {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
+     (cond-> {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
       :target-map {:example/count [:document table "r1" :item_count]
                    :example/assignee [:nullable-document nullable-table "a1" :helper]}
       :decode-outcome! identity
       :transaction-footprint! (fn [_] (throw (ex-info "Unexpected mapped operation" {})))
-      :auxiliary-tables auxiliary :document-effects {id {[:document table "r1"] {}}}}))))
+      :auxiliary-tables auxiliary :document-effects {id {[:document table "r1"] {}}}}
+       declared? (assoc :publication-derivations {id nil}))))))
 
 (defn- reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
@@ -783,4 +786,36 @@
                   (is (= :unclassified-steps (:status (history/audit-chunk! handle admission 8 (:checkpoint extended)))))
                   (is (= :none (:authority extended)))
                   (is (contains? (:open-obligations extended) :historical-intended-envelope-provenance))))))
+          (finally (release)))))))
+
+(deftest declared-writer-requires-matched-publication-for-installed-source
+  (let [admission (admission! :requests #{} :example/initialization :assignments true)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        observed (atom [])
+        config {:admission admission :initializer seed :observe! #(swap! observed conj %)}
+        envelope {:api :execute-tx :tx-options {} :tx-ops seed}
+        candidate (atom {})
+        claim (fn [& _] {:identity {:alternative :example/initialize}
+                         :candidate @candidate})]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (reset! observed [])
+          ;; Isolate the installed policy from the genuine one-use handoff.
+          ;; Claim's physical suite exercises both boundaries together.
+          (with-redefs [publication/claim-framed-submission! claim]
+            (doseq [bad [{} {:publication-expectation :not-declared}
+                         {:publication-expectation :matched}
+                         {:publication-expectation :matched :publication-source-id "other"}
+                         {:publication-expectation :open :publication-source-id "s"}]]
+              (reset! candidate bad)
+              (is (false? (writer envelope)))
+              (is (= :submission-policy-refused (reason #(xtdb/execute-tx! node seed))))
+              (is (empty? @observed)))
+            (reset! candidate {:publication-expectation :matched :publication-source-id "s"})
+            (is (true? (writer envelope)))
+            (is (= [{:kind :mapped-operation :alternative :example/initialize
+                     :candidate @candidate}] @observed)))
           (finally (release)))))))

@@ -1310,3 +1310,29 @@ The expectation is relative to the admitted selectors, trusted preparation,
 source binder and the shared derivation. This does not establish physical
 execution, full assertion equivalence, arbitrary writer closure or general
 installed-executor refinement. No CLM-R2 premise is retired.
+
+* v2590 — require source-bound publication checks at the installed writer
+
+Carry the checked publication source identity in the admitted candidate
+only after declared publication validation succeeds. The selected writer
+policy captures whether its issued admission declares publication and
+requires both :matched and its exact installed source identity in the
+consumed framed handoff. A claimed but insufficient mapped handoff is
+refused without falling through to initialization or maintenance, and
+without notifying the writer observer. Undeclared legacy admissions retain
+their previous behavior. No caller-supplied report creates a handoff.
+
+Focused JVM validation: 3 tests / 73 assertions, zero failures or errors.
+The installed-policy regression isolates the handoff and exercises missing,
+open, undeclared and wrong-source checks through the real adapter refusal
+path. The legacy activation and production framing regressions also pass.
+Full opt-in physical Claim with source-log observation: 3 tests / 1096
+assertions, zero failures or errors. Every observed mapped candidate has
+the exact installed source identity and a matched publication expectation.
+Full project, Chromium and separate proof gates were not rerun.
+
+History and checkpoint profiles remain v11. This is preventive admission
+within the installed local adapter boundary, not closure over arbitrary
+raw writers or proof of provider execution. Remaining assertion intent,
+complete envelope correspondence and physical writer authority are open.
+No CLM-R2 premise is retired.
