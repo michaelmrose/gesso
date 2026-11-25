@@ -3,6 +3,7 @@
    Completeness and freshness of acquired rows remain trusted."
   (:require [clojure.string :as str]
             [clojure.set :as set]
+            [gesso.model.tx :as tx]
             [xtdb.util :as xt-util]))
 
 (defn- reject! [reason]
@@ -66,3 +67,64 @@
                      (into (conj (target-fields (:target-map mapping) target) :xt/id) (keys extras)))
           (reject! :created-document-field-mismatch)))))
   true)
+
+
+(defn- comparable-field? [value]
+  ;; Keep the initial lowering inside the scalar SQL equality fragment. In
+  ;; particular, do not treat an explicit nil as proof of column absence, or
+  ;; infer recursive equality for arbitrary payloads.
+  (or (string? value) (boolean? value) (keyword? value) (int? value)))
+
+(defn prestate-assertions!
+  "Derive canonical atomic pre-write assertions for every mapped document
+   write target from a checked mapping and its supplied complete rows. An
+   existing row requires equality of every non-ID field AND exact field
+   count; an absent nullable target requires document absence. Only non-null
+   scalar fields and canonical SQL column identities are supported here.
+   The caller must have checked projection and complete row acquisition and
+   must insert these assertions before any write in the same transaction.
+   This is restricted predicate lowering, not general SQL refinement,
+   authenticated acquisition, or enforcement at the installed gateway."
+  [mapping document-rows]
+  (vec
+   (mapcat
+    (fn [[_ table id]]
+      (let [rows (get document-rows table)
+            _ (when-not (and (sequential? rows) (every? map? rows))
+                (reject! :invalid-frame-row-collection))
+            matches (filterv #(= id (:xt/id %)) rows)
+            _ (when (> (count matches) 1) (reject! :duplicate-frame-row))
+            row (first matches)
+            required? (some (fn [[kind t i]]
+                              (and (= :document kind) (= table t) (= id i)))
+                            (vals (:target-map mapping)))]
+        (if row
+          (do
+            (safe-keys! (keys row))
+            (let [checks (mapv (fn [[k v]]
+                                 (when-not (and (re-matches #"[a-z][a-z0-9_$]*"
+                                                           (name (xt-util/kw->normal-form-kw k)))
+                                                (comparable-field? v))
+                                   (reject! :unsupported-frame-field))
+                                 [k v])
+                               (sort-by (comp str key) (dissoc row :xt/id)))]
+              [(if (seq checks)
+                 (tx/assert-document-current table {:model/id id :model/checks checks})
+                 (tx/assert-document-exists table id))
+               (tx/assert-document-field-count table id (count row))]))
+          (do
+            (when required? (reject! :missing-required-frame-row))
+            [(tx/assert-document-absent table id)]))))
+    (sort-by pr-str (filter #(= :document (first %)) (:write-targets mapping))))))
+
+(defn require-prestate-assertions!
+  "Check that the exact lowered frame assertions occur in a supplied
+   pre-write SQL prefix. Other predicates still need their own footprint
+   checks. This alone cannot attest that a transaction was submitted."
+  [mapping document-rows formatted-guards]
+  (let [required (frequencies (map tx/format-assertion
+                                  (prestate-assertions! mapping document-rows)))
+        supplied (frequencies formatted-guards)]
+    (when-not (every? (fn [[guard n]] (<= n (get supplied guard 0))) required)
+      (reject! :missing-frame-prestate-assertion))
+    true))
