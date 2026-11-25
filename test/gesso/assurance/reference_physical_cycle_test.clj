@@ -226,3 +226,66 @@
       (is (= :unsupported (:status (reference/predict-interrupted-inspection ordinary source (time-at 18) (time-at 40))))))
     (is (= :unsupported (:status (reference/predict-physical-cycle prefix source opts
                                     (assoc-in ordinary-slots [1 :ack-response] :invalid)))))))
+
+(deftest interrupted-physical-cycle-followed-by-fresh-recovery
+  (let [prefix (:transactions (lifecycle/predict-lifecycle seed))
+        recovery-opts (assoc opts :worker-id "new-worker")]
+    (doseq [[response ack-time inspect scan expected-ids remaining]
+            [[:lost-before-submit 15 40 41 [(id 2) (id 3)] []]
+             [:lost-after-submit 15 40 41 [(id 3)] []]
+             [:lost-after-submit 23 40 41 [(id 2) (id 3)] []]
+             [:lost-before-submit 15 16 17 [(id 3)] [(id 2)]]]]
+      (let [initial-slots [(first ordinary-slots)
+                           (assoc (slot 13 14 ack-time 2) :ack-response response)
+                           (slot 24 25 26 3)]
+            recovery-slots [(slot scan (inc scan) (+ scan 2) 11)
+                            (slot (+ scan 3) (+ scan 4) (+ scan 5) 12)]
+            p (reference/predict-recovery-trajectory prefix source opts initial-slots
+                (time-at inspect) recovery-opts recovery-slots)
+            initial (:initial p) recovery (:recovery p)
+            s (:system-time (peek (:transactions initial))) v (time-at inspect)]
+        (is (= :predicted (:status p)))
+        (is (= :none (:authority p)))
+        (is (= :not-issued (:certificate p)))
+        (is (= expected-ids (mapv :intent-id (get-in recovery [:cycle :result :results]))))
+        (is (= (count expected-ids) (get-in recovery [:cycle :result :dispatch-accepted])))
+        (is (= :observed-end (get-in recovery [:cycle :result :halt-reason])))
+        (is (= (* 2 (count expected-ids)) (- (count (:transactions p)) (count (:transactions initial)))))
+        (with-open [node (xtn/start-node {})]
+          (doseq [{:keys [system-time ops]} prefix]
+            (live.xtdb/execute-tx! node ops {:system-time system-time}))
+          (let [actual (run-physical-cycle! node prefix opts initial-slots)
+                actual-prefix (into prefix (:transactions actual))
+                reads (atom [])
+                observed (with-redefs [frontier/q-from! (fn [node [_ id]]
+                                                         (swap! reads conj id)
+                                                         (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? WHERE _id = ?" v s id]))]
+                           (reconciliation/inspect! node source (:failure actual)))
+                recovered (run-physical-cycle! node actual-prefix recovery-opts recovery-slots)]
+            (is (= (select-keys (:cycle initial) [:failure :calls]) (select-keys actual [:failure :calls])))
+            (is (= (:transactions initial) actual-prefix))
+            (is (= (:inspection p) observed))
+            (is (= [(id 1) (id 2)] @reads))
+            (is (= (select-keys (:cycle recovery) [:result :calls]) (select-keys recovered [:result :calls])))
+            (is (= (:pages recovery) (:pages recovered)))
+            (is (not (contains? (second (first (:calls recovered))) :after)))
+            (is (= (:transactions p) (into actual-prefix (:transactions recovered))))
+            (is (= (frequencies (coalesce-valid (get-in p [:replay :rectangles])))
+                   (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) [:gesso_live_outbox :cycleprobe])))))
+            (let [clock (time-at 60) request {:source-id source :limit 8}
+                  page (with-redefs [frontier/q-from! (fn [node query] (xt/q node query {:current-time clock}))]
+                         (discovery/discover-eligible! node request))]
+              (is (= remaining (mapv :intent-id (:candidates page))))
+              (is (= page (:page (reference-discovery/predict-page (:replay p) clock request)))))))))
+    (let [initial-slots (assoc-in ordinary-slots [1 :ack-response] :lost-before-submit)
+          recovery-slots [(slot 41 42 43 11) (slot 44 45 46 12)]]
+      (doseq [[initial clock options slots]
+              [[ordinary-slots 40 recovery-opts recovery-slots]
+               [initial-slots 14 recovery-opts recovery-slots]
+               [initial-slots 41 recovery-opts recovery-slots]
+               [initial-slots 40 (assoc recovery-opts :after (id 1)) recovery-slots]
+               [initial-slots 40 recovery-opts (assoc-in recovery-slots [0 :lease-id] (id 101))]
+               [initial-slots 40 recovery-opts (assoc-in recovery-slots [0 :ack-response] :lost-after-submit)]]]
+        (let [p (reference/predict-recovery-trajectory prefix source opts initial (time-at clock) options slots)]
+          (is (= :unsupported (:status p)))
+          (is (not-any? #(contains? p %) [:initial :inspection :recovery :transactions :replay])))))))

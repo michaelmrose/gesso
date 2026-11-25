@@ -2715,3 +2715,38 @@ arbitrary writer closure or universal refinement is established. No
 production assurance status changes and no CLM-R2 premise is retired.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2640 — compose interrupted physical cycles with fresh recovery
+
+Compose a selected interrupted physical cycle, pinned reconciliation and
+an explicitly requested fresh recovery cycle. Derive the second cycle's
+physical prefix from the first prediction, discard the old cursor, and
+require distinct supplied lease identities across cycle plans. Reject
+inspection before the interrupted acknowledgment attempt, recovery before
+inspection, ordinary completion and unsupported recovery plans without
+returning partial trajectories. Physical-cycle profile v3; other reference
+profiles and history v19 unchanged.
+
+Expanded focused JVM gate: 99 tests / 8322 assertions, zero failures or
+errors across six reference namespaces and the production cycle suite.
+Focused physical-cycle suite: 4 tests / 266 assertions. Four new differential
+trajectories exercise unsubmitted, committed and aborted acknowledgment
+hypotheses, plus recovery before lease expiry. Compare both cycle reports,
+ordered reconciliation reads, recovery discovery pages, exact submitted
+operations and complete selected history rectangles on the same XTDB node.
+Twenty-six submissions across the two cycles (excluding seed transactions)
+include one assertion abort. The committed receipt is not redispatched;
+expired unacknowledged intents can be reclaimed with new credentials, and
+an unexpired lease remains eligible only in a later sweep after expiry.
+Six unsupported trajectory plans yield no partial result.
+
+The reference uses predicted history only; the production harness passes
+captured actual operations between cycles without reseeding the database.
+Restart is an explicit hypothetical caller decision, not authorization
+from reconciliation. Deterministic clocks and identities, pinned reads,
+controlled acceptance and progression projection remain harness inputs.
+This is finite selected recovery correspondence, not still-outstanding
+transaction resolution, live frontier acquisition, external delivery,
+arbitrary writer closure or universal refinement. No production assurance
+status changes and no CLM-R2 premise is retired. Full project, physical
+Claim, Chromium and independent proof gates were not rerun.

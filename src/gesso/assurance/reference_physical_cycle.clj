@@ -7,7 +7,7 @@
             [gesso.assurance.reference-temporal :as temporal])
   (:import (java.time Instant)))
 
-(def profile :selected-physical-cycle-v2)
+(def profile :selected-physical-cycle-v3)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 (def ^:private unsupported (assoc base :status :unsupported))
 (defn- time? [x] (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -119,3 +119,27 @@
                                 :completed-count :last-completed-cursor :in-flight])
            (update :in-flight dissoc :acquisition-status)))
       unsupported)))
+
+(defn predict-recovery-trajectory
+  "Compose one interrupted cycle, pinned inspection and a fresh cycle.
+   Restart is an explicit hypothetical caller choice, not derived authority.
+   The recovery scan starts without a cursor and uses distinct supplied lease
+   identities. Its physical prefix comes only from the first prediction."
+  [prefix source initial-opts initial-slots inspection-time recovery-opts recovery-slots]
+  (let [initial (predict-physical-cycle prefix source initial-opts initial-slots)
+        reached (count (:pages initial))]
+    (if-not (and (= :predicted (:status initial)) (pos? reached)
+                 (time? inspection-time)
+                 (not (before? inspection-time (:ack-time (nth initial-slots (dec reached)))))
+                 (map? recovery-opts) (not (contains? recovery-opts :after))
+                 (vector? recovery-slots) (seq recovery-slots) (every? slot? recovery-slots)
+                 (every? #(= :observed (get % :ack-response :observed)) recovery-slots)
+                 (before? inspection-time (:scan-time (first recovery-slots)))
+                 (not-any? (set (map :lease-id initial-slots)) (map :lease-id recovery-slots)))
+      unsupported
+      (let [inspection (predict-interrupted-inspection initial source (latest (:replay initial)) inspection-time)
+            recovery (predict-physical-cycle (:transactions initial) source recovery-opts recovery-slots)]
+        (if (and (= :predicted (:status inspection)) (= :predicted (:status recovery)))
+          (assoc base :status :predicted :initial initial :inspection (:observation inspection)
+                 :recovery recovery :transactions (:transactions recovery) :replay (:replay recovery))
+          unsupported)))))
