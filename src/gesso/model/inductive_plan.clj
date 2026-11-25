@@ -35,6 +35,7 @@
             [gesso.model.command-resolution :as resolution]
             [gesso.model.mapped-preparation :as preparation]
             [gesso.model.mapped-frame :as frame]
+            [gesso.model.mapped-residual :as residual]
             [gesso.model.mapped-projection :as projection]
             [xtdb.util :as xt-util])
   (:import (java.util WeakHashMap)))
@@ -313,7 +314,8 @@
 (defn- mapped-source-keys! [source]
   (exact-map! source (cond-> mapped-source-keys
                        (contains? source :input-derivations) (conj :input-derivations)
-                       (contains? source :publication-derivations) (conj :publication-derivations)) []))
+                       (contains? source :publication-derivations) (conj :publication-derivations)
+                       (contains? source :residual-assertion-derivations) (conj :residual-assertion-derivations)) []))
 
 (defn- check-input-derivations! [catalog source]
   (let [operations (:operations catalog)
@@ -407,7 +409,11 @@
       (cond-> (assoc checked :auxiliary-tables auxiliary :document-effects effects
                      :input-derivations (check-input-derivations! (get-in source [:inductive-source :catalog]) source))
         (contains? source :publication-derivations)
-        (assoc :publication-derivations (check-publication-derivations! mappings source))))))
+        (assoc :publication-derivations (check-publication-derivations! mappings source))
+        (contains? source :residual-assertion-derivations)
+        (assoc :residual-assertion-derivations
+               (residual/check-catalog! mappings (get-in source [:inductive-source :catalog :operations])
+                                        (:residual-assertion-derivations source)))))))
 
 (defn- inspect-transaction!
   [footprint! auxiliary {:keys [api tx-ops tx-options] :as submission}]
@@ -864,6 +870,24 @@
                                    :source-id source-id :operation operation :purpose (:purpose declaration)
                                    :command-id command-id} changes))}))))))
 
+(defn reconstruct-mapped-residual-assertions!
+  "Derive residual assertions from the issued source, checked prestate and
+   incorporated command. Missing declaration is distinct from explicit empty.
+   Internal expectation builder; does not authorize or submit a transaction."
+  [admission alternative record document-rows]
+  (let [{:keys [source description]} (registered-mapped! admission)
+        mapping (get-in description [:operation-mappings alternative])
+        declarations (:residual-assertion-derivations description)
+        original (some (fn [{:keys [id construction]}] (when (= id alternative) construction))
+                       (get-in source [:inductive-source :catalog :operations]))]
+    (when-not (and original mapping) (reject! :unknown-operation [alternative] {}))
+    (if-not (contains? declarations alternative)
+      {:status :not-declared}
+      {:status :derived
+       :assertions (residual/reconstruct! original mapping (get declarations alternative)
+                                         (:gesso.command/binding (resolution/require-record record))
+                                         document-rows)})))
+
 (defn reconstruct-mapped-prestate-prefix!
   "Internal historical verifier: return the exact reconstructed guard vector.
    Do not expose it through operational reports. Compare the durable prestate witness with a supplied physical projection
@@ -944,6 +968,7 @@
                    (= (:document-effects original) (:document-effects current-source))
                    (= (:input-derivations original) (:input-derivations current-source))
                    (= (:publication-derivations original) (:publication-derivations current-source))
+                   (= (:residual-assertion-derivations original) (:residual-assertion-derivations current-source))
                    (identical? (:transaction-footprint! original) (:transaction-footprint! current-source)))
       (reject! :changed-mapped-admission-registration [:current-source] {}))
     (let [fresh (mapped-description (checked-mapped-source! current-source))]

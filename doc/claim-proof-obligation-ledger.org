@@ -1364,3 +1364,30 @@ derive one from admitted semantics. Historical and preventive admission
 remain unchanged, with history/checkpoint profile v11. Source-bound
 assertion derivation, complete write-table closure, provider execution
 refinement and writer authority remain open. No CLM-R2 premise is retired.
+
+* v2592 — reconstruct admitted residual assertion expectations
+
+Add an optional complete residual-assertion-derivations catalog to mapped
+admission, including explicit nil expectations. A nonempty declaration
+selects the original typed guard's ordered document layout, supplemental
+version fields and subject checks over required read documents. Reuse the
+restricted mapped guard lowerer, checking layout coverage at issuance.
+Reconstruct actual supplemental scalar arguments from the supplied checked
+prestate, and command-slot assertions from the incorporated binding. Refuse
+missing or duplicate rows, unsupported values and mismatched command slots.
+No candidate SQL, constructor callback or observed outbox enters derivation.
+Bind the declaration to source rechecks and authenticated checkpoint scope.
+
+Focused JVM validation: 2 tests / 31 assertions, zero failures or errors.
+The Claim semantic fixture tests acceptance and refusal, changing prestate
+version and subject values, explicit empty versus undeclared expectations,
+invalid selectors, incomplete coverage and source drift. The prior declared
+publication reconstruction regression also passes.
+
+This is a declaration-relative expectation builder for journal-writing
+alternatives, not an independent SQL equivalence theorem. The existing
+lowerer is shared with the selected fixture. Replay alternatives without
+physical journal writes are not reconstruction candidates. Historical and
+preventive enforcement remain unchanged; the history profile is still v11.
+Full physical Claim, project, Chromium and separate proof gates were not
+rerun. No CLM-R2 premise is retired.

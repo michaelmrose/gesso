@@ -5,6 +5,8 @@
             [gesso.live.outbox.claim-semantic-fixture :as claim]
             [gesso.assurance.proof.induction :as induction]
             [gesso.model.certified-plan :as plan]
+            [gesso.model.mapped-guard :as guard]
+            [gesso.model.tx :as model-tx]
             [gesso.model.inductive-plan :as mapped]
             [gesso.model.command-resolution :as resolution]
             [gesso.choreo.identity :as identity]
@@ -415,3 +417,70 @@
     (is (= :candidate-publication-expectation-mismatch (reason #(frame! no-publication ctx ops))))
     (is (= :matched (marker (frame! no-publication ctx (into [["ASSERT TRUE"]] writes)))))
     (is (not (no-publication :pending? accept "c1")))))
+
+(deftest mapped-residual-assertions-derive-from-admitted-prestate
+  (let [source (claim/publication-mapped-admission-source (claim/bound-inductive-source!))
+        accept (claim/alternative-id "helper-1" :accept)
+        refuse (claim/alternative-id "helper-1" :refuse)
+        declarations (into {} (for [[helper [_ membership]] claim/helpers
+                                    alternative claim/alternatives]
+                                [(claim/alternative-id helper alternative)
+                                 (when (#{:accept :refuse} alternative)
+                                   {:document-layout
+                                    (cond-> {[:requests "r1"] [[:state :request/revision]
+                                                                 [:prestate :updated-at]
+                                                                 [:state :request/status]]}
+                                      (= :accept alternative)
+                                      (assoc [:memberships helper] [[:prestate :revision]
+                                                                    [:prestate :updated-at]
+                                                                    [:state membership]]))
+                                    :subject-checks (if (= :accept alternative)
+                                                      [[:requests "r1" :request/location-id]] [])})]))
+        source* (assoc source :residual-assertion-derivations declarations)
+        issue mapped/build-inductive-mapped-admission!
+        admission (issue source*)
+        binding {:principal (identity/principal "helper-1") :command-id (identity/command-id "c1")
+                 :operation :request/claim :arguments {:request-id "r1"}}
+        record (resolution/command-record binding {:outcome :request/claimed :helper "helper-1"} "t1")
+        docs {:requests [{:xt/id "r1" :status :open :revision 0 :updated-at "t0" :request/location-id "l1"}]
+              :memberships [{:xt/id "helper-1" :active true :revision 0 :updated-at "t0"}]
+              :request_assignments []}
+        derive #(mapped/reconstruct-mapped-residual-assertions! admission % record %2)
+        expected (fn [alternative layout subject]
+                   {:status :derived
+                    :assertions (cond-> (guard/lower-assertions! (claim/source "helper-1" alternative)
+                                                               claim/target-map binding layout)
+                                  subject (conj (model-tx/format-assertion
+                                                 (model-tx/assert-one :requests [:and [:= :xt/id [:lift "r1"]]
+                                                                                      [:= :request/location-id [:lift subject]]]))))})
+        layout {[:requests "r1"] [[:state :request/revision] [:extra :updated-at "t0"] [:state :request/status]]
+                [:memberships "helper-1"] [[:extra :revision 0] [:extra :updated-at "t0"] [:state :membership/one]]}
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= declarations (:residual-assertion-derivations (mapped/describe-mapped-admission admission))))
+    (is (= (expected :accept layout "l1") (derive accept docs)))
+    (is (= (expected :accept (assoc-in layout [[:memberships "helper-1"] 0 2] 9) "l2")
+           (derive accept (-> docs (assoc-in [:memberships 0 :revision] 9)
+                              (assoc-in [:requests 0 :request/location-id] "l2")))))
+    (is (= (expected :refuse {[:requests "r1"] [[:state :request/revision] [:extra :updated-at "t1"]
+                                                  [:state :request/status]]} nil)
+           (derive refuse (assoc-in docs [:requests 0 :updated-at] "t1"))))
+    (is (= {:status :not-declared}
+           (mapped/reconstruct-mapped-residual-assertions! (issue source) accept record docs)))
+    (is (= {:status :derived :assertions []}
+           (mapped/reconstruct-mapped-residual-assertions!
+            (issue (assoc-in source* [:residual-assertion-derivations accept] nil)) accept record docs)))
+    (is (= :invalid-residual-prestate-value
+           (reason #(derive accept (update-in docs [:requests 0] dissoc :updated-at)))))
+    (is (= :invalid-residual-prestate-rows (reason #(derive accept (assoc docs :memberships [])))))
+    (is (= :invalid-residual-prestate-rows
+           (reason #(derive accept (update docs :requests conj (first (:requests docs)))))))
+    (is (= :residual-command-slot-mismatch (reason #(derive (claim/alternative-id "helper-2" :accept) docs))))
+    (is (= :changed-mapped-admission-registration
+           (reason #(mapped/require-current-mapped-admission! admission (assoc-in source* [:residual-assertion-derivations accept] nil)))))
+    (doseq [bad [(dissoc declarations refuse)
+                 (assoc-in declarations [accept :subject-checks] [[:memberships "helper-2" :active]])
+                 (assoc-in declarations [accept :subject-checks] [[:requests "r1" :xt/id]])
+                 (assoc-in declarations [accept :document-layout [:requests "r1"] 1] [:literal :updated-at])
+                 (update-in declarations [accept :document-layout [:requests "r1"]] pop)
+                 (assoc-in declarations [accept :document-layout [:requests "r1"] 1] [:prestate :revision])]]
+      (is (thrown? clojure.lang.ExceptionInfo (issue (assoc source* :residual-assertion-derivations bad)))))))
