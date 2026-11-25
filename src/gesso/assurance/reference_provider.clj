@@ -2,6 +2,7 @@
   "Bounded comparison of independently expected execution and supplied observations."
   (:require [clojure.string :as str]
             [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.xtdb-envelope :as envelope]
             [xtdb.api :as xt])
   (:import (java.time Instant ZonedDateTime)))
@@ -178,6 +179,14 @@
 
 (def source-binding-profile :selected-source-bound-execution-v1)
 
+(defn- source-expectations? [expectations]
+  (and (vector? expectations) (nil? (meta expectations))
+                 (<= 1 (count expectations) 256)
+                 (every? #(and (map? %) (nil? (meta %))
+                               (= #{:tx-id :system-time :ops} (set (keys %)))
+                               (integer? (:tx-id %)) (<= 0 (:tx-id %) (dec Long/MAX_VALUE))) expectations)
+                 (every? (fn [[a b]] (< (:tx-id a) (:tx-id b))) (partition 2 1 expectations))))
+
 (defn compare-source-bound-execution!
   "Compare a complete selected quiescent history from empty state against
    explicit ordered source transaction identities. Each expectation is
@@ -188,12 +197,30 @@
    source log traversal, a live frontier or a refinement certificate."
   [node expectations tables]
   (let [bound #(assoc % :source-binding-profile source-binding-profile)]
-    (if-not (and (vector? expectations) (nil? (meta expectations))
-                 (<= 1 (count expectations) 256)
-                 (every? #(and (map? %) (nil? (meta %))
-                               (= #{:tx-id :system-time :ops} (set (keys %)))
-                               (integer? (:tx-id %)) (<= 0 (:tx-id %) (dec Long/MAX_VALUE))) expectations)
-                 (every? (fn [[a b]] (< (:tx-id a) (:tx-id b))) (partition 2 1 expectations)))
+    (if-not (source-expectations? expectations)
       (bound (acquisition-result :unsupported :unsupported-source-expectation))
       (bound (compare-quiescent* node (mapv #(dissoc % :tx-id) expectations) tables
                                  (mapv :tx-id expectations))))))
+
+(defn compare-source-covered-execution!
+  "Require bounded source-log transaction coverage as well as the existing
+   source-bound quiescent execution comparison. Maintenance records do not
+   consume expected transaction slots. Reobserve coverage afterward; no
+   processed frontier, authentication or refinement authority is implied."
+  [node expectations tables]
+  (let [tag #(assoc % :source-coverage-profile coverage/profile)
+        fail #(tag (acquisition-result %1 %2))]
+    (if-not (source-expectations? expectations)
+      (fail :unsupported :unsupported-source-expectation)
+      (let [before (coverage/observe-coverage! node)]
+        (cond
+          (not= :observed (:status before)) (fail (:status before) (:reason before))
+          (not= (mapv :tx-id expectations) (:transaction-ids before))
+          (fail :mismatch :source-transaction-coverage-mismatch)
+          :else
+          (let [comparison (compare-source-bound-execution! node expectations tables)
+                after (coverage/observe-coverage! node)]
+            (cond
+              (not= :observed (:status after)) (fail (:status after) (:reason after))
+              (not= before after) (fail :unavailable :source-log-changed-during-comparison)
+              :else (tag (assoc comparison :source-coverage :matched)))))))))

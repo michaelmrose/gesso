@@ -2850,3 +2850,34 @@ refinement. Quiescence and complete history from empty state remain
 premises. No production assurance status changes, no certificate or
 CLM-R2 premise retirement. Full project, physical Claim, Chromium and
 independent proof gates were not rerun.
+
+* v2644 — compare bounded in-memory source-log coverage
+
+Add a separate bounded traversal of the embedded epoch-zero in-memory
+source log from offset zero through its captured submitted end. Check
+contiguous record identities, classify transaction and selected maintenance
+messages, reject unknown message kinds and unavailable coverage, and
+recheck the submitted end. Require exact correspondence of the resulting
+transaction identity sequence with independently supplied expectations
+before source-bound execution comparison. Reobserve source coverage after
+comparison to detect even maintenance-only appends. Source-coverage
+profile v1; existing comparison and assurance profiles unchanged.
+
+Expanded focused JVM gate: 109 tests / 8657 assertions, zero failures or
+errors across seven reference namespaces, the production cycle suite and
+operational report suite. Focused provider suite: 5 tests / 106 assertions.
+Five real transaction messages interleaved with six real nonmatching
+flush-block maintenance messages compare successfully. Missing expected
+transactions, maintenance IDs substituted for transaction IDs, record
+gaps, duplicates, unknown records and a maintenance append during the
+comparison exercise conservative rejection. The selected maintenance
+classification also recognizes tries-added and block-uploaded messages;
+these two forms were not exercised by the new integration fixture.
+
+This is finite source-record identity coverage, not a retention theorem,
+processed frontier, atomic snapshot, authenticated source identity or
+universal provider refinement. Persistent logs use byte offsets and are
+outside this profile; quiescence, correct provider read semantics and
+complete history from empty state remain premises. No production assurance
+status changes, no certificate or CLM-R2 premise retirement. Full project,
+physical Claim, Chromium and independent proof gates were not rerun.

@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-provider-test
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-provider :as reference]
+            [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.reference-temporal-fixtures :refer [sys provider-rectangles]]
             [gesso.assurance.xtdb-envelope :as envelope]
@@ -8,7 +9,8 @@
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
-  (:import (java.time Duration ZonedDateTime)))
+  (:import (java.time Duration ZonedDateTime)
+           (xtdb.api.log Log Log$Record SourceMessage$FlushBlock)))
 
 (defn- id [n] (java.util.UUID. 0 n))
 (defn- time-at [n] (.plusSeconds (sys 1) n))
@@ -162,3 +164,55 @@
               (is (= :unsupported (:status r)))
               (is (= :unsupported-source-expectation (:reason r)))
               (is (not (contains? r :checks))))))))))
+
+(deftest bounded-source-coverage-distinguishes-maintenance-from-transactions
+  (let [txs (transactions)]
+    (with-open [node (xtn/start-node {})]
+      (let [database (db/primary-db node)
+            ^Log log (.getSourceLog database)
+            flush! (fn []
+                     ;; A deliberately nonmatching expected block index is a
+                     ;; maintenance message, not a request to commit a tx.
+                     (let [id (.getMsgId (.appendMessageBlocking log (SourceMessage$FlushBlock. Long/MAX_VALUE)))]
+                       (.awaitSourceBlocking database id (Duration/ofSeconds 10))
+                       id))
+            first-maintenance (flush!)
+            bound (mapv (fn [{:keys [system-time ops] :as tx}]
+                          (let [id (:tx-id (xt/submit-tx node ops {:system-time system-time}))]
+                            (.awaitTxBlocking database id (Duration/ofSeconds 10))
+                            (flush!)
+                            (assoc tx :tx-id id))) txs)
+            observed (coverage/observe-coverage! node)
+            report (reference/compare-source-covered-execution! node bound tables)]
+        (is (= 0 first-maintenance))
+        (is (= :observed (:status observed)) (pr-str observed))
+        (is (= (mapv :tx-id bound) (:transaction-ids observed)))
+        (is (= 6 (:maintenance-count observed)))
+        (is (= 10 (:last-message-id observed)))
+        (is (= :matched (:status report)) (pr-str report))
+        (is (= :matched (:source-coverage report)))
+        (is (= :none (:authority report)))
+        (is (= :not-issued (:certificate report)))
+        (is (= :not-established (:provider-refinement report)))
+        (is (= :source-transaction-coverage-mismatch
+               (:reason (reference/compare-source-covered-execution! node (pop bound) tables))))
+        (is (= :source-transaction-coverage-mismatch
+               (:reason (reference/compare-source-covered-execution! node (update-in bound [0 :tx-id] dec) tables))))
+        (let [compare! reference/compare-source-bound-execution!]
+          (with-redefs [reference/compare-source-bound-execution!
+                        (fn [& args] (let [r (apply compare! args)] (flush!) r))]
+            (is (= :source-log-changed-during-comparison
+                   (:reason (reference/compare-source-covered-execution! node bound tables))))))
+        (with-redefs [coverage/observe-coverage! (fn [_] (throw (AssertionError. "invalid binding must not read")))]
+          (is (= :unsupported-source-expectation
+                 (:reason (reference/compare-source-covered-execution! node [] tables)))))))))
+
+(deftest bounded-source-coverage-rejects-gaps-and-unknown-records
+  (let [record #(Log$Record. 0 % (time-at 0) (SourceMessage$FlushBlock. Long/MAX_VALUE))
+        classify #'coverage/classify-records]
+    (is (= :source-record-coverage-gap (:reason (classify [(record 1)] 1))))
+    (is (= :source-record-coverage-gap (:reason (classify [(record 0) (record 0)] 1))))
+    (is (= :source-record-coverage-gap (:reason (classify [(record 0)] 1))))
+    (is (= :unsupported-source-message-kind
+           (:reason (classify [(Log$Record. 0 0 (time-at 0) nil)] 0))))
+    (is (= :embedded-primary-log-required (:reason (coverage/observe-coverage! nil))))))
