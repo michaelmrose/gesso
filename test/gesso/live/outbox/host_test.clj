@@ -109,6 +109,7 @@
            worker (get started managed/handle-key)]
        (try
          (is (nil? (host/history-status started)))
+         (is (= :not-selected (:status (host/assurance-status started))))
          (is (= :history-audit-not-selected (:reason (problem #(host/audit-history! started)))))
          (is (some? node))
          (is (some? live-system))

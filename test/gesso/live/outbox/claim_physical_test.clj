@@ -363,6 +363,7 @@
          (try
            (is (= :observed-interval-checked (get-in (host/history-status started) [:report :status])))
            (is (map? @history-store))
+           (is (= :observed-interval-checked (:status (host/assurance-status started))))
            (reset! initial-state (semantics/snapshot-at-frontier! node))
            (when (= :valid recovery-mode)
              ;; Actual network refusals must not reach either constructor.
@@ -606,7 +607,13 @@
                      (is (= :observed-interval-checked (:status report)))
                      (is (= (:through-basis audit) (:through-basis report)))
                      (is (= (frequencies (map :classification steps)) (:counts report)))
-                     (is (= report (:report (host/history-status started)))))
+                     (is (= report (:report (host/history-status started))))
+                     (let [operational (host/assurance-status started)]
+                       (is (= :observed-interval-checked (:status operational)))
+                       (is (= (:counts report) (get-in operational [:coverage :classification-counts])))
+                       (is (= "0" (get-in operational [:coverage :tx-id-distance])))
+                       (is (= :none (:authority operational)))
+                       (is (= operational (edn/read-string (pr-str operational))))))
                    (let [chunks (loop [cursor nil chunks []]
                                   (let [chunk (history/audit-chunk! node (:issued preparations) 2 cursor)
                                         accumulated (conj chunks chunk)]
@@ -752,6 +759,7 @@
              (when-let [opened @observer] (browser/close! opened))
              (doseq [input @streams] (.close input))
              (host/stop! started)
+             (is (= :inactive (:status (host/assurance-status started))))
              (is (= :closed (:phase (host/history-status started))))))))))))))))
 
 (deftest claim-semantic-snapshot-does-not-mix-completed-bases

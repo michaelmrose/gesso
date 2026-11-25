@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is]]
+            [gesso.assurance.operational-report :as operational-report]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
             [gesso.live.outbox.history-coverage :as history]
@@ -543,6 +544,10 @@
             (is (= initial (:report (status))))
             (is (= initial-sealed @sealed))
             (is (= :history-advance-failed (:last-error (status))))
+            (let [report (operational-report/describe-history (status))]
+              (is (= :audit-failed (:status report)))
+              (is (= {} (get-in report [:coverage :classification-counts])))
+              (is (string? (get-in report [:controller :last-failure-at]))))
             (reset! fail? false)
             (is (= {:unclassified 1} (:counts (advance))))
             (is (nil? (:last-error (status))))
@@ -560,6 +565,8 @@
                   (is (= :history-controller-busy (reason advance)))
                   (is (= :history-controller-not-drained (reason #(close 0))))
                   (is (= :closing (:phase (status))))
+                  (is (true? (get-in (operational-report/describe-history (status))
+                                     [:controller :advance-in-progress?])))
                   (finally (deliver proceed true)))
                 (is (= {:unclassified 2} (:counts (deref task 5000 :timeout))))
                 (close 1000)
@@ -592,6 +599,11 @@
               (finally ((:close! c) 10000)))
             (let [status ((:status c))]
               (is (= :closed (:phase status)))
+              (let [r (operational-report/describe-history status)]
+                (is (= :inactive (:status r)))
+                (is (= :stopped (get-in r [:schedule :phase])))
+                (is (= {:unclassified 2} (get-in r [:coverage :classification-counts])))
+                (is (= r (edn/read-string (pr-str r)))))
               (is (= :stopped (get-in status [:schedule :phase])))
               (is (= :success (get-in status [:schedule :last-outcome])))
               (is (= {:unclassified 2} (get-in status [:report :counts])))

@@ -5,8 +5,10 @@
    No request-path authority or certification is introduced."
   (:require [clojure.string :as str]
             [gesso.live.outbox.history-coverage :as history]
-            [gesso.live.outbox.history-scheduler :as scheduler])
-  (:import [java.util.concurrent TimeUnit]
+            [gesso.live.outbox.history-scheduler :as scheduler]
+            [gesso.model.inductive-plan :as inductive])
+  (:import [java.time Instant]
+           [java.util.concurrent TimeUnit]
            [java.util.concurrent.locks ReentrantLock]))
 
 (defn- reject! [reason]
@@ -38,7 +40,10 @@
         sealed (load!)
         cursor (atom (when (some? sealed)
                        (history/restore-checkpoint! node admission sealed key deployment-id)))
-        state (atom {:phase :open :report nil :last-error nil})
+        state (atom {:phase :open :report nil :last-error nil
+                     :source (select-keys (inductive/describe-mapped-admission admission)
+                                          [:catalog-fingerprint :induction-fingerprint])
+                     :advance-in-progress? false :last-success-at nil :last-failure-at nil})
         lock (ReentrantLock.)
         scheduled (atom nil)
         advance! (fn []
@@ -47,20 +52,24 @@
                    (try
                      (when-not (= :open (:phase @state))
                        (reject! :history-controller-closed))
+                     (swap! state assoc :advance-in-progress? true)
                      (try
                        (let [result (history/audit-chunk! node admission max-steps @cursor)
                              next-cursor (:checkpoint result)
                              report (dissoc result :checkpoint)]
                          (save! (history/seal-checkpoint! node admission next-cursor key deployment-id))
                          (reset! cursor next-cursor)
-                         (swap! state assoc :report report :last-error nil)
+                         (swap! state assoc :report report :last-error nil
+                                :last-success-at (str (Instant/now)))
                          report)
                        (catch Exception e
                          (when (instance? InterruptedException e)
                            (.interrupt (Thread/currentThread)))
                          ;; Do not retain callback exceptions, secrets or raw values.
-                         (swap! state assoc :last-error :history-advance-failed)
-                         (throw e)))
+                         (swap! state assoc :last-error :history-advance-failed
+                                :last-failure-at (str (Instant/now)))
+                         (throw e))
+                       (finally (swap! state assoc :advance-in-progress? false)))
                      (finally (.unlock lock))))
         close! (fn [timeout-ms]
                  (when (.isHeldByCurrentThread lock)

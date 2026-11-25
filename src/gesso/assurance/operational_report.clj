@@ -1,0 +1,81 @@
+(ns gesso.assurance.operational-report
+  "Portable, nonauthoritative operational assurance observations. Format the
+   host-owned history controller's last persisted report, not a live database
+   query or a replacement for source-bound abstract assurance reports."
+  (:require [gesso.live.consistency.xtdb :as xtdb])
+  (:import [java.time Duration]))
+
+(def ^:private permanent-obligations
+  #{:history-coverage-beyond-sampled-frontier
+    :complete-application-refinement})
+
+(defn- basis-summary [basis]
+  {:database (xtdb/basis-database basis)
+   :tx-id (:tx-id basis)
+   :system-time (str (xtdb/basis-system-time basis))})
+
+(defn- coverage [report]
+  (let [through (:through-basis report)
+        target (:target-basis report)
+        checked-time (xtdb/basis-system-time through)
+        target-time (xtdb/basis-system-time target)]
+    {:status (:status report)
+     :through (basis-summary through)
+     :sampled-target (basis-summary target)
+     ;; IDs are log coordinates, not a count of pending transactions.
+     :tx-id-distance (str (- (xtdb/basis-tx-id target) (xtdb/basis-tx-id through)))
+     :system-time-distance-ms (.toMillis (Duration/between checked-time target-time))
+     :caught-up-to-sampled-target? (:caught-up? report)
+     :current-frontier :not-observed
+     :classification-counts (:counts report)
+     :first-unclassified (when-let [step (:first-unclassified report)]
+                           (-> (select-keys step [:committed? :classification :reason])
+                               (assoc :tx-id (str (:tx-id step)) :system-time (str (:system-time step)))))}))
+
+(defn describe-history
+  "Build an EDN-portable diagnostic summary of one controller observation.
+   The owner-facing host API obtains that observation from the installed
+   controller; a supplied map is merely descriptive data, never evidence of
+   a live installation. No keys, cursors, callbacks, witness values or command
+   identifiers are exported. Lag is relative to the last persisted sample."
+  [snapshot]
+  (let [{:keys [phase report last-error schedule source advance-in-progress?
+                last-success-at last-failure-at]} snapshot
+        base {:type :gesso.assurance/operational-history-report
+              :version 1 :authority :none :certificate :not-issued
+              :full-success? false :scope :last-persisted-history-observation}]
+    (if-not snapshot
+      (assoc base :status :not-selected :coverage nil
+             :open-obligations (conj permanent-obligations :history-audit-not-selected))
+      (let [unclassified? (pos? (get-in report [:counts :unclassified] 0))
+            partial? (and report (not (:caught-up? report)))
+            retired? (not= :open phase)
+            scheduler-stopped? (and (= :open phase) (= :stopped (:phase schedule)))]
+        (assoc base
+               :status (cond retired? :inactive
+                             last-error :audit-failed
+                             scheduler-stopped? :scheduler-stopped
+                             (nil? report) :not-observed
+                             unclassified? :unclassified-steps
+                             partial? :partial-interval
+                             :else :observed-interval-checked)
+               :source source
+               :initialization (when-let [initial (:initialization report)]
+                                 (-> (select-keys initial [:catalog-fingerprint :case-fingerprint
+                                                          :initialization-fingerprint :physical-correspondence])
+                                     (assoc :system-time (str (:system-time initial)))))
+               :coverage (when report (coverage report))
+               :controller {:phase phase :advance-in-progress? (boolean advance-in-progress?)
+                            :last-error last-error :last-success-at last-success-at
+                            :last-failure-at last-failure-at}
+               :schedule (if schedule
+                           (select-keys schedule [:phase :last-outcome :consecutive-failures
+                                                  :failure-delay-ms :next-delay-ms])
+                           :owner-driven)
+               :open-obligations (cond-> (into permanent-obligations (:open-obligations report))
+                                   (nil? report) (conj :history-coverage-not-observed)
+                                   partial? (conj :sampled-history-coverage-incomplete)
+                                   unclassified? (conj :unclassified-historical-steps)
+                                   last-error (conj :history-audit-recovery)
+                                   retired? (conj :history-controller-inactive)
+                                   scheduler-stopped? (conj :history-scheduler-recovery)))))))

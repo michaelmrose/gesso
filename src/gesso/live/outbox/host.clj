@@ -18,6 +18,7 @@
    restarts require a caller-provided persistent XTDB configuration."
   (:require [clojure.string :as str]
             [com.biffweb.core :as biff]
+            [gesso.assurance.operational-report :as operational-report]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.affordance :as affordance]
             [gesso.live.core :as live]
@@ -489,6 +490,13 @@
    Nil means the owner did not select historical auditing. No cursor or key."
   [system]
   (when-let [controller (::history-controller system)] ((:status controller))))
+
+(defn assurance-status
+  "Portable owner-facing operational assurance report. No provider query,
+   transaction authority or certification. Coverage is relative to the last
+   persisted audit sample, including after host shutdown."
+  [system]
+  (operational-report/describe-history (history-status system)))
 
 (defn audit-history!
   "Advance one bounded chunk on the exact owner system, not a Ring context."
