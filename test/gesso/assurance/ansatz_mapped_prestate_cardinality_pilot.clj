@@ -11,6 +11,7 @@
             [clojure.test :refer [deftest is run-tests]]
             [gesso.assurance.ansatz-reservation-pilot]
             [gesso.assurance.proof.mapped-prestate-rules :as rules]
+            [gesso.assurance.proof.mapped-prestate-semantics :as semantics]
             [gesso.assurance.proof.mapped-prestate-partition :as partition]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-frame :as frame]
@@ -457,6 +458,152 @@
         (is (kernel/verifies? env goal proof))))
     (is (thrown? Exception (compose-child-list! constructor [0 1] [0 2])))
     (is (thrown? clojure.lang.ExceptionInfo (compose-child-list! constructor [0] [])))))
+
+(defn- bridge-reject! [reason site]
+  (throw (ex-info "Decoded prestate correspondence failed."
+                  (assoc site :error/type ::decoded-correspondence :reason reason))))
+
+(defn- check-decoded-node! [target path expected actual node]
+  (let [site {:target target :path path}]
+    (when-not (= site (select-keys node [:target :path]))
+      (bridge-reject! :node-identity-mismatch site))
+    (if (and (map? expected) (seq expected))
+      (do
+        (when-not (and (= :composed-map-equality-checked (:status node))
+                       (map? actual) (every? keyword? (keys actual)))
+          (bridge-reject! :map-evidence-open site))
+        (let [ks (sort-by str (keys expected))
+              children (:children node)
+              dictionary (mapv (fn [[k v]] [k v]) (sort-by (comp str key) actual))
+              ;; Look up entire entries, not merely their field names. Both
+              ;; encodings must be faithful in this finite observation.
+              codes (into {} (map-indexed (fn [i entry] [entry i]) dictionary))
+              expected-entries (mapv (fn [k] [k (get expected k)]) ks)
+              actual-entries (into (mapv (fn [k] [k (get actual k)]) ks)
+                                   (remove (fn [[k _]] (contains? expected k))) dictionary)
+              encode (fn [entries]
+                       (mapv (fn [entry]
+                               (if (contains? codes entry) (get codes entry)
+                                   (bridge-reject! :entry-not-encoded site))) entries))]
+          (when-not (and (vector? children) (= (count ks) (count children))
+                         (every? #(contains? actual %) ks))
+            (bridge-reject! :child-coverage-mismatch site))
+          (let [child-results (mapv (fn [k child]
+                                      (check-decoded-node! target (conj path k)
+                                                           (get expected k) (get actual k) child))
+                                    ks children)
+                expected-codes (encode expected-entries)
+                actual-codes (encode actual-entries)
+                known (encode (subvec actual-entries 0 (count ks)))
+                residual (subvec actual-codes (count ks))
+                expected-witness {:dictionary dictionary :known known
+                                  :residual residual :actual actual-codes}
+                {:keys [goal proof]} (get-in node [:encoded-composition :parent])
+                required-goal (closed-goal (list '= '(List Int) (list-form actual-codes)
+                                                 (list-form expected-codes)))]
+            (when-not (and (= (count dictionary) (count codes) (count actual))
+                           (= expected-entries (mapv dictionary expected-codes))
+                           (= actual-entries (mapv dictionary actual-codes))
+                           (= expected (into {} expected-entries))
+                           (= actual (into {} actual-entries))
+                           (= (count actual-codes) (count (set actual-codes)))
+                           (= (set actual-codes) (set (range (count dictionary))))
+                           (= (:cardinality node) (count expected))
+                           (= expected-witness (:partition node)))
+              (bridge-reject! :entry-encoding-mismatch site))
+            (when-not (and proof (= required-goal goal))
+              (bridge-reject! :parent-goal-mismatch site))
+            ;; Recheck the term and dependency policy, not the saved status
+            ;; or the saved dependency report. The decoded bridge is checked
+            ;; by Clojure, not by this kernel application.
+            (checked-application! required-goal proof)
+            (into [(assoc site :kind :map :expected-codes expected-codes
+                          :actual-codes actual-codes)] cat child-results))))
+      (if (and (= :decoded-leaf-equality-checked (:status node))
+               (= expected actual) (not (contains? node :children)))
+        [(assoc site :kind :leaf)]
+        (bridge-reject! :leaf-evidence-mismatch site)))))
+
+(defn check-decoded-correspondence!
+  "Independently audit a successful concrete composition against its source,
+   actual selected bags and exact encoded proof goals. Reconstruct both
+   entry encodings by full entry value, recheck every parent proof and
+   compare the resulting closed rows with the independent row predicate.
+   This is an executable instance audit, not a universal codec theorem."
+  [original targets docs journal prefix actual report]
+  (let [description (semantics/describe! original targets docs journal)
+        groups (:groups (rules/derive! original targets docs journal prefix))
+        selected (set (keys (:predicates description)))
+        roots (:roots report)]
+    (when-not (and (= :all-concrete-structures-composed (:status report))
+                   (map? actual) (= selected (set (keys actual)))
+                   (every? #(and (vector? %) (every? map? %)) (vals actual))
+                   (vector? roots) (= (mapv :target groups) (mapv :target roots)))
+      (bridge-reject! :incomplete-structure {}))
+    (let [checked (into [] cat
+                        (mapv (fn [{:keys [target predicate]} root]
+                                (let [[kind expected] predicate bag (get actual target)]
+                                  (case kind
+                                    :absent (if (and (empty? bag) (= :empty-bag-checked (:status root)))
+                                              [{:target target :kind :absent}]
+                                              (bridge-reject! :absence-evidence-mismatch {:target target}))
+                                    :exact-row (if (= 1 (count bag))
+                                                 (check-decoded-node! target [] expected (first bag) root)
+                                                 (bridge-reject! :row-count-mismatch {:target target})))))
+                              groups roots))
+          actual-docs (reduce (fn [m [[kind table] bag]]
+                                (if (= :document kind) (update m table into bag) m))
+                              (zipmap (keys docs) (repeat [])) actual)
+          actual-journal (into [] (mapcat val) (filter #(= :journal-slot (ffirst %)) actual))
+          observed (semantics/observe! original targets docs journal description actual-docs actual-journal)]
+      (when-not (:matches? observed)
+        (bridge-reject! :independent-predicate-mismatch {}))
+      {:type ::decoded-correspondence :status :decoded-instance-correspondence-checked
+       :checked-sites checked :predicate-observation observed
+       :scope :supplied-closed-decoded-rows :authority :none :certificate :not-issued
+       :sql-refinement :not-established
+       :open-obligations #{:general-decoded-map-encoding-refinement
+                           :general-recursive-composition-soundness
+                           :faithful-row-acquisition :transaction-internal-read-basis
+                           :sql-value-and-struct-semantics :decoder-congruence}})))
+
+(deftest concrete-decoded-correspondence-rechecks-entries-and-proof-goals
+  (let [[_ _ docs journal _ :as args] (fixture!)
+        request [:document :requests "r1"]
+        slot [:journal-slot "p2" :example/command]
+        bags {request (:requests docs) [:document :assignments "a1"] []
+              [:journal-slot "p1" :example/command] [] slot journal}
+        report (apply check-structure! (conj args bags))
+        audit #(apply check-decoded-correspondence! (conj args %1 %2))
+        checked (audit bags report)
+        ri (first (keep-indexed (fn [i root] (when (= request (:target root)) i)) (:roots report)))
+        si (first (keep-indexed (fn [i root] (when (= slot (:target root)) i)) (:roots report)))
+        root [:roots ri]
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= :decoded-instance-correspondence-checked (:status checked)))
+    (is (:matches? (:predicate-observation checked)))
+    (is (= 8 (count (filter #(= :map (:kind %)) (:checked-sites checked)))))
+    (is (= 2 (count (filter #(= :absent (:kind %)) (:checked-sites checked)))))
+    (is (= :none (:authority checked)))
+    (is (= :not-issued (:certificate checked)))
+    (is (= :not-established (:sql-refinement checked)))
+    (doseq [site (filter #(= :map (:kind %)) (:checked-sites checked))]
+      (is (= (:actual-codes site) (:expected-codes site))))
+    (is (= :incomplete-structure (reason #(audit bags (update report :roots pop)))))
+    (is (= :child-coverage-mismatch (reason #(audit bags (update-in report (conj root :children) pop)))))
+    (is (= :entry-encoding-mismatch
+           (reason #(audit bags (assoc-in report (into root [:partition :known]) [0 0 0])))))
+    (is (= :entry-encoding-mismatch
+           (reason #(audit bags (update-in report (into root [:partition :dictionary]) (fn [entries] (vec (reverse entries))))))))
+    (is (= :parent-goal-mismatch
+           (reason #(audit bags (assoc-in report (into root [:encoded-composition :parent])
+                                          (get-in report [:roots si :encoded-composition :parent]))))))
+    (is (thrown? Exception
+                 (audit bags (assoc-in report (into root [:encoded-composition :parent :proof])
+                                       (get-in report [:roots si :encoded-composition :parent :proof])))))
+    (is (= :leaf-evidence-mismatch (reason #(audit (assoc-in bags [request 0 :item-count] 999) report))))
+    (is (= :row-count-mismatch (reason #(audit (assoc bags slot []) report))))
+    (is (= :incomplete-structure (reason #(audit (dissoc bags slot) report))))))
 
 (defn -main [& _]
   (binding [ansatz/*verbose* false] (ansatz/load-init!))
