@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.reference-source-coverage :as coverage]
+            [gesso.assurance.reference-operation-correspondence :as operation]
             [gesso.assurance.xtdb-envelope :as envelope]
             [xtdb.api :as xt])
   (:import (java.time Instant ZonedDateTime)))
@@ -311,3 +312,53 @@
                                               :processed-payload-profile coverage/local-processed-payload-profile))]
     (cond-> r (= :matched (:source-coverage r))
       (assoc :payload-correspondence :matched :processed-frontier :matched))))
+
+(def retained-execution-profile :selected-processed-retained-execution-v1)
+
+(defn- observe-bound-history! [node]
+  (let [sample (coverage/observe-local-processed-retained-history-bound! node)
+        ids (:transaction-ids sample)
+        end (:processed-message-id sample)]
+    (if (and (= :observed (:status sample))
+             (not (and (valid-payload-binding? sample)
+                       (= coverage/local-processed-profile (:processed-profile sample))
+                       (= coverage/retained-history-profile (:retained-history-profile sample))
+                       (= coverage/local-processed-retained-history-profile (:processed-retained-history-profile sample))
+                       (= coverage/processed-retained-history-binding-profile (:processed-retained-history-binding-profile sample))
+                       (= operation/profile (:operation-profile sample))
+                       (= :none (:authority sample)) (= :not-issued (:certificate sample))
+                       (vector? ids) (= ids (:operation-message-ids sample))
+                       (= (if (seq ids) :matched :not-applicable) (:operation-correspondence sample))
+                       (integer? end) (<= -1 end)
+                       (vector? (:record-offsets sample))
+                       (= end (:last-message-id sample) (or (peek (:record-offsets sample)) -1))
+                       (= (count ids) (count (distinct ids)))
+                       (= ids (filterv (set ids) (:record-offsets sample)))
+                       (every? #(and (integer? %) (<= 0 % end)) ids))))
+      {:status :unavailable :reason :invalid-processed-retained-history-binding}
+      sample)))
+
+(defn compare-local-processed-retained-execution!
+  "Compare independent temporal replay with the provider ledger, expected
+   operation envelopes and selected rectangles, bracketed by identical
+   qualified whole-history operation and payload samples. Expectations
+   must be independently supplied from empty state. No atomic snapshot,
+   authenticated provenance, or universal refinement claim."
+  [node expectations tables]
+  (let [r (compare-source-coverage* node expectations tables observe-bound-history!
+                                    #(assoc % :retained-execution-profile retained-execution-profile))]
+    (if (and (= :matched (:status r)) (= :matched (:source-coverage r))
+             (= profile (:profile r)) (= acquisition-profile (:acquisition-profile r))
+             (= source-binding-profile (:source-binding-profile r))
+             (= {:ledger true :retained-envelopes true :selected-history true} (:checks r))
+             (= (count expectations) (:transaction-count r))
+             (= :none (:authority r)) (= :not-issued (:certificate r))
+             (= :not-established (:provider-refinement r)))
+      (assoc r :operation-correspondence :matched :payload-correspondence :matched
+             :processed-frontier :matched :outcome-correspondence :matched
+             :operation-profile operation/profile
+             :processed-retained-history-binding-profile coverage/processed-retained-history-binding-profile)
+      (if (= :matched (:status r))
+        (assoc (acquisition-result :unsupported :invalid-retained-execution-comparison)
+               :retained-execution-profile retained-execution-profile)
+        (dissoc r :source-coverage)))))

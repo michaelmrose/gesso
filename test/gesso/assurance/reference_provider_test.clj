@@ -520,3 +520,60 @@
   (with-open [node (xtn/start-node {})]
     (is (= :unsupported-source-log (:reason (coverage/observe-local-processed-coverage! node))))
     (is (= :unsupported-source-log (:reason (coverage/observe-local-processed-payload-bound-coverage! node))))))
+
+(defn- check-retained-execution! [node bound]
+  (let [compare! reference/compare-local-processed-retained-execution!
+        observe! coverage/observe-local-processed-retained-history-bound!
+        sample (observe! node)
+        table-set #{:providerprobe}
+        report (compare! node bound table-set)]
+    (is (= :observed (:status sample)) (pr-str (dissoc sample :payload-fingerprint)))
+    (is (= :matched (:status report)) (pr-str report))
+    (is (= :matched (:source-coverage report) (:operation-correspondence report)
+           (:outcome-correspondence report) (:processed-frontier report) (:payload-correspondence report)))
+    (is (= {:ledger true :retained-envelopes true :selected-history true} (:checks report)))
+    (is (= :none (:authority report)))
+    (is (= :not-issued (:certificate report)))
+    (is (= :not-established (:provider-refinement report)))
+    (is (not (contains? report :payload-fingerprint)))
+    (let [bad (assoc-in bound [1 :ops 1] ["ASSERT TRUE"])
+          r (compare! node bad table-set)]
+      (is (= :mismatch (:status r)))
+      (is (= :ledger-sequence-mismatch (:reason r)))
+      (is (not (contains? r :outcome-correspondence))))
+    (is (= :source-transaction-coverage-mismatch (:reason (compare! node (pop bound) table-set))))
+    (doseq [[a b reason] [[(dissoc sample :operation-correspondence) sample :invalid-processed-retained-history-binding]
+                         [(assoc sample :operation-message-ids []) sample :invalid-processed-retained-history-binding]
+                         [sample (update sample :payload-fingerprint #(str (if (= \0 (first %)) "1" "0") (subs % 1))) :source-log-changed-during-comparison]
+                         [sample {:status :unsupported :reason :retained-operation-not-matched} :retained-operation-not-matched]]]
+      (let [samples (atom [a b])]
+        (with-redefs [coverage/observe-local-processed-retained-history-bound!
+                      (fn [_] (let [s (first @samples)] (swap! samples subvec 1) s))]
+          (let [r (compare! node bound table-set)]
+            (is (= reason (:reason r)) (pr-str r))
+            (is (not-any? #(contains? r %) [:source-coverage :operation-correspondence :outcome-correspondence :payload-fingerprint]))))))
+    (with-redefs [reference/compare-source-bound-execution! (constantly {:status :matched})]
+      (is (= :invalid-retained-execution-comparison (:reason (compare! node bound table-set)))))
+    (is (= report (compare! node bound table-set)))))
+
+(deftest retained-operation-history-bound-to-independent-outcomes
+  (let [root (Files/createTempDirectory "gesso-retained-execution-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        txs [{:system-time (time-at 0) :ops [[:put-docs :providerprobe {:xt/id "a" :value 1}]]}
+             {:system-time (time-at 1) :ops [[:put-docs :providerprobe {:xt/id "a" :value 2}] ["ASSERT FALSE"]]}
+             {:system-time (time-at 2) :ops [["ASSERT TRUE"]]}]]
+    (try
+      (let [bound (with-open [node (xtn/start-node config)]
+                    (let [database (db/primary-db node)
+                          bound (mapv (fn [{:keys [system-time ops] :as tx}]
+                                        (let [id (:tx-id (xt/submit-tx node ops {:system-time system-time}))]
+                                          (.awaitTxBlocking database id (Duration/ofSeconds 10))
+                                          (assoc tx :tx-id id))) txs)]
+                      (.awaitSourceBlocking database (:tx-id (peek bound)) (Duration/ofSeconds 10))
+                      (check-retained-execution! node bound)
+                      bound))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek bound)) (Duration/ofSeconds 10))
+          (check-retained-execution! node bound)))
+      (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))

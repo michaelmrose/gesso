@@ -4299,3 +4299,25 @@ whole-log ceilings retained. XTDB shutdown cancellation logged; process
 exited zero. No execution outcomes, authenticated provenance, production
 admission, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2701 — compose retained operation history with execution outcomes
+
+Bind qualified whole-history operation comparison and ordered framed
+payload fingerprint in one processed local observation. Bracket existing
+source-bound independent temporal execution comparison with identical
+qualified samples. Require exact independently supplied transaction IDs,
+predicted ledger outcomes, expected operation envelopes and selected
+bitemporal rectangles. No combined match on any failed check; no raw
+payload or fingerprint in the combined report. Preserve earlier APIs.
+
+Focused JVM: 66 tests / 4414 assertions, zero failures or errors across
+all eight prior namespaces; provider-only 11 tests / 484 assertions.
+Real persistent put-only, mixed rejected put/assertion and SQL-only
+history matches before and after reopening. Reject changed predicted
+outcome, missing transaction, missing operation match, missing compared
+IDs, changed fingerprint, unsupported subsequent sample and incomplete
+execution report. Existing selected replay and observation limits remain.
+Independent expectations are still caller-supplied, not reconstructed
+from retained bytes. Quiescence, authenticated provenance and universal
+refinement remain unestablished. No admission, certificate or CLM-R2
+premise retirement. Full project and independent formal gates not rerun.

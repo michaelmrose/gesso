@@ -466,12 +466,8 @@
 (def local-processed-retained-history-profile
   :xtdb-2.2.0-beta1/selected-local-processed-retained-history-v1)
 
-(defn observe-local-processed-retained-history!
-  "Bracket complete selected retained operation history correspondence
-   with stable fully processed source frontiers. No execution outcome or
-   independent watcher semantics."
-  [node]
-  (let [sample (observe-local-processed* node observe-local-retained-history!)
+(defn- observe-processed-retained-history* [node observe!]
+  (let [sample (observe-local-processed* node observe!)
         ids (:transaction-ids sample)
         sample (if (and (= :observed (:status sample))
                         (not (and (= local-profile (:profile sample))
@@ -493,3 +489,26 @@
            :processed-profile local-processed-profile
            :retained-history-profile retained-history-profile
            :payload-profile local-payload-profile :decoder-profile payload/profile)))
+
+(defn observe-local-processed-retained-history!
+  "Bracket complete selected retained operation history correspondence
+   with stable fully processed source frontiers. No execution outcome or
+   independent watcher semantics."
+  [node]
+  (observe-processed-retained-history* node observe-local-retained-history!))
+
+(def processed-retained-history-binding-profile
+  :xtdb-2.2.0-beta1/selected-processed-retained-history-binding-v1)
+
+(defn observe-local-processed-retained-history-bound!
+  "Internal equality sample: bind all qualified operation comparisons to
+   the exact framed content within the same processed observation. Never
+   use the fingerprint as an authenticated receipt."
+  [node]
+  (let [sample (observe-processed-retained-history*
+                node #(assoc (observe-local* % true true :all)
+                             :retained-history-profile retained-history-profile
+                             :payload-profile local-payload-profile
+                             :decoder-profile payload/profile))]
+    (assoc sample :payload-binding-profile payload-binding-profile
+           :processed-retained-history-binding-profile processed-retained-history-binding-profile)))
