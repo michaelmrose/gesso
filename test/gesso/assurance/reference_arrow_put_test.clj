@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-arrow-operations :as arrow]
+            [gesso.assurance.reference-document-iid :as iid]
             [gesso.assurance.reference-arrow-operations-test :as fixture]
             [gesso.assurance.xtdb-source-log :as provider]
             [xtdb.api :as xt]
@@ -82,4 +83,84 @@
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (peek rejected) (Duration/ofSeconds 10))
           (check-put! node id nested-id rejected)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(def ^:private integer-iid-vectors
+  [[Long/MIN_VALUE "2df43a3eaece5bb912a43ce16ebdf392"]
+   [-42 "1f0370ed2a176aa73868570d90204370"]
+   [-1 "f105b11df43d5d321f5c773ef904af97"]
+   [0 "a4e167a76a05add8a8654c169b07b044"]
+   [1 "4cd9b7672d7fbee8fb51fb1e049f6903"]
+   [2 "420fce314175df402adbeae3cfbbb856"]
+   [42 "ebc35dc1b8e2602b72beb8d8e5bcdb2b"]
+   [Long/MAX_VALUE "eda7a99bc44462f5181f63a88e2ab9d8"]])
+
+(deftest selected-integer-iid-known-answers
+  (doseq [[id expected] integer-iid-vectors]
+    (is (= expected (iid/integer-iid id))))
+  (doseq [id [nil true "1" :one #uuid "00112233-4455-6677-8899-aabbccddeeff"
+              1.0 (inc (bigint Long/MAX_VALUE)) (dec (bigint Long/MIN_VALUE))]]
+    (is (= :unsupported-reference-integer-id
+           (try (iid/integer-iid id) :accepted
+                (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))))
+
+(defn- replace-iid [^bytes data offset hex]
+  (let [copy (aclone data)
+        replacement (.parseHex (java.util.HexFormat/of) ^String hex)]
+    (System/arraycopy replacement 0 copy offset 16)
+    copy))
+
+(defn- check-integer-iids! [node id other-id]
+  (let [data (#'fixture/retained-operation-bytes node id)
+        expected {:kind :put-docs :table :public/foo
+                  :documents (mapv (fn [[id _]] {:xt/id id}) integer-iid-vectors)
+                  :iids (mapv second integer-iid-vectors) :bounds {}}
+        [_ _ _ _ _ _ iids _ _ _ _ _ _ ids] (#'fixture/buffer-starts data)
+        r (arrow/decode-integer-iid-put data)]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+    (is (= arrow/integer-iid-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= [expected] (:groups r) (:operations (provider/observe-source-message! node id))))
+    (is (= :unchecked (:iid-correspondence (arrow/decode-put-envelope data))))
+    (let [changed-id (#'fixture/edit-long data ids 99)
+          changed-iid (replace-iid data iids "b69e060cf32e96bdbfe841366924c30a")
+          swapped (-> data (replace-iid iids (second (nth integer-iid-vectors 1)))
+                      (replace-iid (+ iids 16) (second (first integer-iid-vectors))))
+          matching (replace-iid changed-id iids "b69e060cf32e96bdbfe841366924c30a")]
+      (doseq [[bad reason] [[changed-id :document-iid-mismatch]
+                            [changed-iid :document-iid-mismatch]
+                            [swapped :document-iid-mismatch]
+                            [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]
+                            [(#'fixture/retained-operation-bytes node other-id) :unsupported-reference-integer-id]]]
+        (let [r (arrow/decode-integer-iid-put bad)]
+          (is (= :unsupported (:status r)))
+          (is (= reason (:reason r)) (pr-str r))
+          (is (not (contains? r :groups)))
+          (is (not (contains? r :iid-correspondence)))))
+      (is (= [(-> expected (assoc-in [:documents 0 :xt/id] 99)
+                  (assoc-in [:iids 0] "b69e060cf32e96bdbfe841366924c30a"))]
+             (:groups (arrow/decode-integer-iid-put matching))))
+      (is (= :decoded (:status (arrow/decode-put-envelope changed-id))))
+      (is (= :decoded (:status (arrow/decode-put-envelope changed-iid)))))))
+
+(deftest selected-integer-iids-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-integer-iid-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        docs (mapv (fn [[id _]] {:xt/id id}) integer-iid-vectors)]
+    (try
+      (let [[id other-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! [(into [:put-docs :foo] docs)])
+                    other-id (submit! [[:put-docs :foo {:xt/id "1"}]])]
+                (check-integer-iids! node id other-id)
+                [id other-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
+          (check-integer-iids! node id other-id)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

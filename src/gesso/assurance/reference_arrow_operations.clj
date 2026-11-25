@@ -5,7 +5,8 @@
    SQL and nested argument bytes are sensitive internal observations."
   (:require [gesso.assurance.reference-arrow-framing :refer [max-bytes max-rows require! message! field! buffers! offsets! value-bytes! present?]]
             [gesso.assurance.reference-arrow-schema :refer [scalar-kind!]]
-            [gesso.assurance.reference-arrow-values :refer [struct-kind? node-count buffer-count value-reader!]])
+            [gesso.assurance.reference-arrow-values :refer [struct-kind? node-count buffer-count value-reader!]]
+            [gesso.assurance.reference-document-iid :as iid])
   (:import (java.nio ByteBuffer ByteOrder)
            (java.nio.charset StandardCharsets CharacterCodingException)
            (java.util HexFormat)
@@ -801,3 +802,22 @@
     (catch clojure.lang.ExceptionInfo e (assoc put-envelope-base :status :unsupported :reason (:reason (ex-data e))))
     (catch CharacterCodingException _ (assoc put-envelope-base :status :unsupported :reason :invalid-arrow-utf8))
     (catch Exception _ (assoc put-envelope-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(def integer-iid-put-profile :xtdb-2.2.0-beta1/selected-integer-iid-put-arrow-v1)
+
+(defn decode-integer-iid-put
+  "Decode the selected single put envelope and independently verify each
+   retained IID against its signed int64 document ID. Other ID families
+   reject. This is retained identity correspondence, not execution proof."
+  [bytes]
+  (let [decoded (decode-put-envelope bytes)
+        result-base (assoc base :profile integer-iid-put-profile)]
+    (if-not (= :decoded (:status decoded))
+      (assoc result-base :status :unsupported :reason (:reason decoded))
+      (try
+        (doseq [{:keys [documents iids]} (:groups decoded)
+                [doc retained] (map vector documents iids)]
+          (require! (= retained (iid/integer-iid (:xt/id doc))) :document-iid-mismatch))
+        (assoc decoded :profile integer-iid-put-profile :iid-correspondence :matched)
+        (catch clojure.lang.ExceptionInfo e
+          (assoc result-base :status :unsupported :reason (:reason (ex-data e))))))))

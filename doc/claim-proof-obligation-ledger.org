@@ -3708,3 +3708,29 @@ correspondence, actual nullable put documents, explicit valid-time bounds,
 multiple groups and aggregate document budgets remain open. No production
 wiring, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2678 — independently verify retained integer document IIDs
+
+Inspect the installed XTDB 2.2.0-beta1 IID implementation and independently
+encode signed int64 IDs as UTF-8 i followed by signed decimal text. Derive
+lowercase hex of the first 16 SHA-256 digest bytes with Java primitives,
+without calling the provider IID helper. The new selected single-put
+profile requires equality of every derived IID and its retained pair;
+reject mismatches and other ID families without partial groups. Preserve
+the earlier unchecked envelope profile.
+
+Focused JVM: 31 tests / 1872 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. Eight
+known-answer vectors independently computed with Python hashlib include
+both int64 bounds, negative, zero and positive IDs. Persistent retained
+puts match those vectors and provider observations before and after
+reopening. Reject individual ID or IID changes, swapped IIDs, unsupported
+ID families and truncated streams. A consistently modified pair passes:
+this is identity correspondence, not authenticity or execution evidence.
+XTDB logged shutdown cancellation; the test process exited zero.
+
+Selected integer-IID put profile v1. String, keyword and UUID IID
+verification, nullable actual puts, explicit bounds, multiple groups and
+aggregate document budgets remain open. No production wiring, certificate
+or CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.
