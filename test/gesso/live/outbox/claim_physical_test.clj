@@ -19,6 +19,9 @@
             [gesso.live.outbox.claim-semantic-fixture :as semantics]
             [gesso.assurance.observed-correspondence :as correspondence]
             [gesso.model.inductive-plan :as inductive-plan]
+            [gesso.model.certified-plan :as plan]
+            [gesso.model.mapped-frame :as frame]
+            [gesso.model.tx :as tx]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.read-frontier :as frontier]
@@ -65,6 +68,28 @@
         policy-admissions (atom [])
         preparations (semantics/build-prepared-admission! bound)
         checked-candidates (atom {})
+        installed-node (atom nil)
+        ;; Independent diagnostic: acceptance writes have the same mapped
+        ;; document targets for either helper. Refusal writes only a journal
+        ;; row and therefore has no document-frame prefix. Keep the exact
+        ;; original footprint checker unchanged.
+        base-ops! (fn [ops]
+                    (let [prefix (mapv tx/format-assertion
+                                       (frame/prestate-assertions!
+                                        (plan/check-target-mapping! (semantics/source "helper-1" :accept)
+                                                                    semantics/target-map)
+                                        (:document-rows @initial-state)))
+                          accepting? (some #(and (= :put-docs (first %)) (= :requests (second %))) ops)]
+                      (if accepting?
+                        (do (when-not (and (<= (count prefix) (count ops))
+                                           (= prefix (subvec ops 0 (count prefix))))
+                              (throw (ex-info "Incorrect observed Claim frame prefix" {})))
+                            (subvec ops (count prefix)))
+                        ops)))
+        classify! (fn [seed ops]
+                    (semantics/writer-kind! seed "v2480-claim" "v2480"
+                     (if (some #(and (= :put-docs (first %)) (= :gesso_commands (second %))) ops)
+                       (base-ops! ops) ops)))
         execute-adapter xtdb/execute-tx!
         execute xtdb/execute-tx-from!
         observed (atom [])
@@ -111,6 +136,7 @@
                          [:requests "r1" :revision 1]
                          [:requests "r1" :updated-at "t1"]}
         opts {:operation :request/claim :submission-mode! (constantly :submit)
+                   :mapped-admission (:issued preparations)
                    :single-command-per-principal? true
                    :may-disclose? (fn [binding record] (= binding (:gesso.command/binding record)))
                    :construction-contract {:required-guard-tables #{:memberships} :allowed-guard-tables #{:memberships}
@@ -192,8 +218,10 @@
                   (when (and (= :execute-tx api) (empty? tx-options))
                     (let [kind (try
                                  (if (some #(and (= :put-docs (first %)) (= :gesso_commands (second %))) tx-ops)
-                                   (let [{:keys [identity candidate]} ((:admit! preparations)
-                                                                      {:api api :tx-ops tx-ops :tx-options tx-options})]
+                                   (when-let [{:keys [identity candidate]}
+                                              (publication/claim-framed-submission!
+                                               (:issued preparations) @installed-node
+                                               {:api api :tx-ops tx-ops :tx-options tx-options})]
                                      (swap! checked-candidates assoc identity candidate)
                                      (assoc identity :kind :claim))
                                    (semantics/writer-kind! seed "v2480-claim" "v2480" tx-ops))
@@ -220,7 +248,7 @@
                                #{:requests :gesso_commands})))))
     (with-redefs [xtdb/execute-tx!
                   (fn [node ops & [options]]
-                    (let [kind (try (semantics/writer-kind! seed "v2480-claim" "v2480" ops)
+                    (let [kind (try (classify! seed ops)
                                     (catch Exception e
                                       (swap! writers conj {:kind :unclassified :ops ops})
                                       (throw e)))]
@@ -234,7 +262,8 @@
                   xtdb/execute-tx-from!
                   (fn [ctx ops & [options]]
                     (if (contains? ctx publication/preparation-key)
-                      (let [entry {:ops ops :identity (semantics/submitted-alternative! ops)}]
+                      (let [base (base-ops! ops)
+                            entry {:ops base :framed-ops ops :identity (semantics/submitted-alternative! base)}]
                         (try
                           (let [result (execute ctx ops options)]
                             (swap! submissions conj (assoc entry :result :committed
@@ -283,6 +312,7 @@
                          (fn [_] (g/html-response [:div "fallback"])))
               started (host/start! assembly delegate config)
              node (:xtdb/connectable started)
+             _ (reset! installed-node node)
              fragment! (fn [path headers]
                          (let [builder (HttpRequest/newBuilder
                                         (URI/create (str (get-in started [host/listener-key :base-url]) path)))]
@@ -508,9 +538,14 @@
                        refused? (fn [ops] (try (semantics/submitted-alternative! ops) false
                                                (catch clojure.lang.ExceptionInfo _ true)))]
                    (is (= (count expected) (count @submissions)))
-                   (is (= expected (set (map #(dissoc % :ops :commit-basis) @submissions))))
+                   (is (= expected (set (map #(dissoc % :ops :framed-ops :commit-basis) @submissions))))
                    (is (= (set (map :identity expected)) (set (keys @checked-candidates))))
                    (is (every? #(= :checked-supplied-complete-rows (:document-frame %)) (vals @checked-candidates)))
+                   (is (every? #(= :exact-generated-prefix (:frame-prefix %)) (vals @checked-candidates)))
+                   (doseq [{:keys [identity ops framed-ops]} @submissions]
+                     (is (= ops (base-ops! framed-ops)))
+                     (is (= (if (= :accept (keyword (name (:alternative identity)))) 3 0)
+                            (- (count framed-ops) (count ops)))))
                    (doseq [{:keys [identity]} expected]
                      (is (= (:state (if (= :accept (keyword (name (:alternative identity))))
                                      @initial-state @recovery-state))
@@ -568,21 +603,28 @@
                            binding (:gesso.command/binding (get-in before [:records id]))
                            original-admissions @policy-admissions
                            original-checks @checked-candidates]
-                       ;; Even the original valid vector needs an unused preparation.
+                       ;; Even the original valid vector needs a live handoff.
                        (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
-                       ;; A genuine current snapshot is not an acceptable open-state preparation.
+                       ;; Direct callers cannot consume even a genuine preparation.
                        ((:prepare! preparations) alternative binding before {})
-                       ;; Malformed complete envelopes fail before consuming the preparation.
+                       ;; Neither malformed nor exact envelopes may consume it.
                        (is (= :submission-policy-refused (denied #(execute-adapter node (into puts guards) nil))))
                        (is ((:pending? preparations) alternative id))
                        (is (= :submission-policy-refused (denied #(execute-adapter node (pop accepted) nil))))
                        (is ((:pending? preparations) alternative id))
                        (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
-                       (is (not ((:pending? preparations) alternative id)))
+                       (is ((:pending? preparations) alternative id))
+                       ((:discard! preparations) alternative id)
                        (is (= original-admissions @policy-admissions))
                        (is (= original-checks @checked-candidates))
-                       ;; Direct adapter calls with the genuine original preparation
-                       ;; cannot introduce a hidden field or remove a framed field.
+                       ;; Even the original open preparation cannot grant a direct
+                       ;; submission, whether the vector is framed or unframed.
+                       ((:prepare! preparations) alternative binding @initial-state {})
+                       (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
+                       (is (= :submission-policy-refused (denied #(execute-adapter node (base-ops! accepted) nil))))
+                       (is (= :submission-policy-refused (denied #(xtdb/submit-tx! node accepted))))
+                       (is ((:pending? preparations) alternative id))
+                       ((:discard! preparations) alternative id)
                        (doseq [mutate [(fn [doc] (assoc doc :unexpected true))
                                        (fn [doc] (dissoc doc :created-at))]]
                          ((:prepare! preparations) alternative binding @initial-state {})
@@ -590,7 +632,8 @@
                                 (denied #(execute-adapter node
                                           (mapv (fn [op] (if (= :requests (second op))
                                                           (update op 2 mutate) op)) accepted) nil))))
-                         (is (not ((:pending? preparations) alternative id))))
+                         (is ((:pending? preparations) alternative id))
+                         ((:discard! preparations) alternative id))
                        (is (= original-admissions @policy-admissions))
                        ;; A well-shaped write is not enough without every source-derived predicate.
                        (doseq [guard guards]
