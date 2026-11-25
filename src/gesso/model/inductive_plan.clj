@@ -758,3 +758,17 @@
       (when-not (= prior fresh)
         (reject! :stale-mapped-admission [:current-source] {}))
       fresh)))
+
+(defn recheck-mapped-induction!
+  "Rebuild the conditional abstract report from the original source and
+   live handles retained by this issued admission. This does not recheck
+   the installed physical writer or establish current provider coverage."
+  [admission]
+  (let [{:keys [source description]} (registered-mapped! admission)
+        {:keys [induction]} (checked-report! (:inductive-source source))]
+    (when-not (and (= (select-keys description [:catalog-fingerprint :induction-fingerprint])
+                     (select-keys (:identity induction) [:catalog-fingerprint :induction-fingerprint]))
+                   (= (:original-open-obligations description)
+                      (get-in induction [:classification :original-obligations :by-operation])))
+      (reject! :stale-mapped-induction [:admission] {}))
+    induction))

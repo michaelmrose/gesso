@@ -35,6 +35,7 @@
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.writer-policy :as writer-policy]
+            [gesso.model.inductive-plan :as inductive]
             [xtdb.node :as xtn]))
 
 (def xtdb-module-id :gesso.live.outbox.host/xtdb)
@@ -184,6 +185,8 @@
       (when-let [options (:history-audit config)]
         (reset! audit (history-controller/start! node (get-in config [:mapped-writer-policy :admission]) options))))
     (cond-> (assoc system :xtdb/connectable node ::close-node! close!)
+      (get-in system [config-key :mapped-writer-policy :admission])
+      (assoc ::mapped-admission (get-in system [config-key :mapped-writer-policy :admission]))
       @audit (assoc ::history-controller @audit))))
 
 (defn- stop-xtdb! [system]
@@ -497,6 +500,16 @@
    persisted audit sample, including after host shutdown."
   [system]
   (operational-report/describe-history (history-status system)))
+
+(defn combined-assurance-status
+  "Owner-facing static/operational diagnostic. Recheck the original abstract
+   source and live handles of the admission captured at startup, then compare
+   with one history-controller snapshot. No provider query or certification."
+  [system]
+  (operational-report/describe-application
+   (when-let [admission (::mapped-admission system)]
+     (inductive/recheck-mapped-induction! admission))
+   (history-status system)))
 
 (defn audit-history!
   "Advance one bounded chunk on the exact owner system, not a Ring context."

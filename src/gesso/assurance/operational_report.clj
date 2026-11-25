@@ -79,3 +79,42 @@
                                    last-error (conj :history-audit-recovery)
                                    retired? (conj :history-controller-inactive)
                                    scheduler-stopped? (conj :history-scheduler-recovery)))))))
+
+(defn describe-application
+  "Join source-relative abstract and operational descriptions by exact
+   catalog and induction fingerprints. A matching description is not a
+   proof of current installation, writer coverage or physical induction.
+   The host supplies a rechecked abstract report; this pure formatter
+   cannot authenticate arbitrary supplied report maps."
+  [abstract snapshot]
+  (let [history (describe-history snapshot)
+        identity-keys [:catalog-fingerprint :induction-fingerprint]
+        static-source (select-keys (:identity abstract) identity-keys)
+        history-source (select-keys (:source history) identity-keys)
+        matching? (and abstract snapshot
+                       (every? #(and (string? %) (not (empty? %)))
+                               (map static-source identity-keys))
+                       (= static-source history-source))
+        assumptions (get-in abstract [:classification :open :assumptions])
+        premises (get-in abstract [:classification :certificate :open-premises])
+        original (get-in abstract [:classification :original-obligations :by-operation])]
+    {:type :gesso.assurance/operational-application-report
+     :version 1 :authority :none :certificate :not-issued :full-success? false
+     :scope :conditional-abstract-and-last-persisted-history-descriptions
+     :source-join (cond matching? :matching-source-descriptions
+                        (and abstract snapshot) :source-mismatch
+                        abstract :static-only
+                        snapshot :history-only
+                        :else :not-selected)
+     :abstract (when abstract
+                 (assoc (select-keys abstract [:identity :fingerprint :checking :verdict
+                                               :declared-operation-ids :declared-invariant-ids
+                                               :all-declared-invariants-conditionally-inductive?])
+                        :open-assumptions assumptions :open-premises premises
+                        :original-open-obligations original))
+     :history history
+     :open-obligations (cond-> (into (into (into (:open-obligations history) assumptions)
+                                            premises) (mapcat val original))
+                         (not abstract) (conj :abstract-induction-not-selected)
+                         (not matching?) (conj :static-history-source-join-open)
+                         true (conj :complete-physical-induction-correspondence))}))

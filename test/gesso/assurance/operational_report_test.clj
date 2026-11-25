@@ -59,3 +59,28 @@
       (is (= "6" (get-in r [:coverage :first-unclassified :tx-id])))
       (is (not (contains? (get-in r [:coverage :first-unclassified]) :command-id)))
       (is (contains? (:open-obligations r) :unclassified-historical-steps)))))
+
+(deftest combined-report-retains-both-sides-without-granting-authority
+  (let [abstract {:identity (:source sample) :fingerprint "report"
+                  :verdict :source-bound-conditional-abstract-safety
+                  :classification {:open {:assumptions #{:checker-meta-soundness}}
+                                   :certificate {:open-premises #{:abstract-premise}}
+                                   :original-obligations {:by-operation {:example/op #{:original-premise}}}}}
+        joined (report/describe-application abstract sample)
+        mismatch (report/describe-application abstract (assoc-in sample [:source :induction-fingerprint] "other"))]
+    (is (= :matching-source-descriptions (:source-join joined)))
+    (is (= :source-mismatch (:source-join mismatch)))
+    (is (= :static-only (:source-join (report/describe-application abstract nil))))
+    (is (= :history-only (:source-join (report/describe-application nil sample))))
+    (is (= :not-selected (:source-join (report/describe-application nil nil))))
+    (is (= :source-mismatch (:source-join (report/describe-application {} {:phase :open}))))
+    (doseq [r [joined mismatch]]
+      (is (= :none (:authority r)))
+      (is (= :not-issued (:certificate r)))
+      (is (false? (:full-success? r)))
+      (is (= (:coverage (report/describe-history sample)) (get-in r [:history :coverage])))
+      (is (every? (:open-obligations r) [:checker-meta-soundness :abstract-premise
+                                         :original-premise :sampled-history-coverage-incomplete
+                                         :complete-physical-induction-correspondence]))
+      (is (= r (edn/read-string (pr-str r)))))
+    (is (contains? (:open-obligations mismatch) :static-history-source-join-open))))

@@ -611,3 +611,19 @@
               (is (= {:unclassified 2} (get-in @sealed [:payload :counts])))
               (is (= :history-controller-closed (reason (:advance! c))))))
           (finally (release)))))))
+
+(deftest mapped-induction-report-rechecks-issued-source
+  (let [issued (admission!)
+        description (inductive/describe-mapped-admission issued)
+        abstract (inductive/recheck-mapped-induction! issued)
+        source (select-keys description [:catalog-fingerprint :induction-fingerprint])
+        joined (operational-report/describe-application abstract {:phase :open :source source})]
+    (is (= source (select-keys (:identity abstract) (keys source))))
+    (is (= :source-bound-conditional-abstract-safety (:verdict abstract)))
+    (is (= #{:example/initialize} (:declared-operation-ids abstract)))
+    (is (= :matching-source-descriptions (:source-join joined)))
+    (is (= :not-observed (get-in joined [:history :status])))
+    (is (contains? (:open-obligations joined) :history-coverage-not-observed))
+    (is (= :unregistered-mapped-admission
+           (reason #(inductive/recheck-mapped-induction! description))))
+    (is (= joined (edn/read-string (pr-str joined))))))

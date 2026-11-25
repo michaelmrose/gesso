@@ -364,6 +364,13 @@
            (is (= :observed-interval-checked (get-in (host/history-status started) [:report :status])))
            (is (map? @history-store))
            (is (= :observed-interval-checked (:status (host/assurance-status started))))
+           (let [joined (host/combined-assurance-status started)]
+             (is (= :matching-source-descriptions (:source-join joined)))
+             (is (= :source-bound-conditional-abstract-safety (get-in joined [:abstract :verdict])))
+             (is (= 8 (count (get-in joined [:abstract :declared-operation-ids]))))
+             (is (= :observed-interval-checked (get-in joined [:history :status])))
+             (is (= :not-issued (:certificate joined)))
+             (is (= joined (edn/read-string (pr-str joined)))))
            (reset! initial-state (semantics/snapshot-at-frontier! node))
            (when (= :valid recovery-mode)
              ;; Actual network refusals must not reach either constructor.
