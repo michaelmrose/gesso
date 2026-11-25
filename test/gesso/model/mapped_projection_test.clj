@@ -8,6 +8,7 @@
             [gesso.assurance.proof.mapped-prestate-semantics :as prestate]
             [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.assurance.proof.mapped-prestate-rules :as rules]
+            [gesso.assurance.proof.mapped-prestate-partition :as partition]
             [gesso.model.certified-plan :as plan]
             [gesso.model.inductive-plan :as inductive]
             [gesso.model.tx :as tx]
@@ -864,3 +865,69 @@
             r (observe (assoc expected slot [candidate]))]
         (is (= (= occupied candidate) (:rules-pass? r)))
         (is (:instance-correspondence? r))))))
+
+(deftest decoded-map-partitions-account-for-known-and-residual-entries
+  (let [expected {:z {:value false} :a []}
+        actual (assoc expected :m nil)
+        witness (partition/partition-map expected actual)
+        decode #(mapv (:dictionary witness) %)]
+    (is (= :partition-constructed (:status witness)))
+    (is (= [0 2] (:known witness)))
+    (is (= [1] (:residual witness)))
+    (is (= (:actual witness) (into (:known witness) (:residual witness))))
+    (is (= expected (into {} (decode (:known witness)))))
+    (is (= actual (into {} (decode (:actual witness)))))
+    (is (= 2 (:expected-cardinality witness)))
+    (is (= 3 (:actual-cardinality witness)))
+    (is (false? (:cardinality-premises-satisfied? witness)))
+    (let [exact (partition/partition-map expected expected)]
+      (is (:cardinality-premises-satisfied? exact))
+      (is (empty? (:residual exact)))
+      (is (= (:known exact) (:actual exact))))
+    (is (= {:status :not-established :reason :unmatched-child-values
+            :missing-fields #{:a} :different-fields #{:z}}
+           (partition/partition-map expected {:z {:value true} :m []})))
+    (doseq [v [nil [] "map" {"z" {:value false} :a []}]]
+      (is (= :unsupported-map-shape (:reason (partition/partition-map expected v)))))
+    (is (:cardinality-premises-satisfied? (partition/partition-map {} {})))
+    (is (false? (:cardinality-premises-satisfied? (partition/partition-map {} {:x nil}))))))
+
+(deftest map-partition-observations-cover-original-rule-sites
+  (let [mapping (plan/check-target-mapping! source targets)
+        occupied (record "old" "p2" {:nested {:value "original" :flags [true false] :empty {}}})
+        journal [occupied]
+        prefix (frame/formatted-prestate-assertions! mapping rows journal)
+        request [:document :requests "r1"]
+        slot [:journal-slot "p2" :example/command]
+        bags {request (:requests rows) [:document :assignments "a1"] []
+              [:journal-slot "p1" :example/command] [] slot journal}
+        observe #(partition/observe! source targets rows journal prefix %)
+        report (observe bags)
+        sites (fn [r] (into {} (map (juxt (juxt :target :path) :partition)) (:sites r)))
+        expected-sites (set (for [{:keys [target rules]} (:groups (rules/derive! source targets rows journal prefix))
+                                  [kind path n] rules :when (= :map-size kind)]
+                              {:target target :path path :cardinality n}))
+        nested [:gesso.command/binding :arguments :nested]]
+    (is (= expected-sites (set (map #(dissoc % :partition) (:sites report)))))
+    (is (= :all-map-cardinality-premises-observed (:status report)))
+    (doseq [{:keys [cardinality partition]} (:sites report)]
+      (is (= cardinality (count (:known partition)) (count (:actual partition))))
+      (is (empty? (:residual partition)))
+      (is (= (:known partition) (:actual partition))))
+    (let [r (observe (assoc-in bags [request 0 :extra] true))
+          p (get (sites r) [request []])]
+      (is (= :map-cardinality-premises-open (:status r)))
+      (is (= :partition-constructed (:status p)))
+      (is (= 1 (count (:residual p))))
+      (is (false? (:cardinality-premises-satisfied? p))))
+    (let [r (observe (assoc-in bags (into [slot 0] (conj nested :extra)) true))]
+      (is (= :partition-constructed (get-in (sites r) [[slot nested] :status])))
+      (is (= 1 (count (get-in (sites r) [[slot nested] :residual]))))
+      (is (= :unmatched-child-values (get-in (sites r) [[slot []] :reason]))))
+    (is (= :non-singleton-row-bag (get-in (sites (observe (assoc bags slot []))) [[slot nested] :reason])))
+    (is (thrown? clojure.lang.ExceptionInfo (observe (dissoc bags slot))))
+    (is (= :none (:authority report)))
+    (is (= :not-issued (:certificate report)))
+    (is (= :not-established (:sql-refinement report)))
+    (is (contains? (:open-obligations report) :recursive-child-equality-correspondence))
+    (is (contains? (:open-obligations report) :kernel-checked-partition-instance-composition))))
