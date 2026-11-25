@@ -198,6 +198,117 @@
         (is (empty? (:unresolved dependencies)))
         (is (empty? (:non-safe dependencies)))))))
 
+(defn- established? [node]
+  (#{:decoded-leaf-equality-checked :composed-map-equality-checked
+     :empty-bag-checked} (:status node)))
+
+(defn- compose-value! [lemmas target path expected actual present?]
+  (let [site {:target target :path path}]
+    (cond
+      (not present?) (assoc site :status :premises-open :reason :missing-field)
+      (and (map? expected) (seq expected))
+      (if-not (and (map? actual) (every? keyword? (keys actual)))
+        (assoc site :status :premises-open :reason :unsupported-map-shape)
+        (let [ks (sort-by str (keys expected))
+              children (mapv (fn [k] (compose-value! lemmas target (conj path k)
+                                                     (get expected k) (get actual k)
+                                                     (contains? actual k))) ks)
+              parent (assoc site :children children :cardinality (count expected))]
+          (if-not (every? established? children)
+            (assoc parent :status :premises-open :reason :child-equality-open)
+            ;; Encode the actual entries only. The known entries are selected
+            ;; by the already established child results, not map equality.
+            (let [dictionary (mapv (fn [[k v]] [k v]) (sort-by (comp str key) actual))
+                  codes (into {} (map-indexed (fn [i [k _]] [k i]) dictionary))
+                  known (mapv codes ks)
+                  residual (into [] (keep-indexed (fn [i [k _]]
+                                                    (when-not (contains? expected k) i))) dictionary)
+                  ordered (into known residual)
+                  witness {:dictionary dictionary :known known :residual residual :actual ordered}
+                  parent (assoc parent :partition witness)]
+              (when-not (and (= (count dictionary) (count codes) (count actual) (count ordered))
+                             (= (set ordered) (set (range (count dictionary))))
+                             (= actual (into {} (mapv dictionary ordered))))
+                (throw (ex-info "Invalid recursive entry encoding." site)))
+              (if-not (= (count expected) (count actual))
+                (assoc parent :status :premises-open :reason :cardinality-mismatch)
+                (assoc parent :status :composed-map-equality-checked
+                       :application (check-instance! (get lemmas (count expected)) parent)))))))
+      (= expected actual) (assoc site :status :decoded-leaf-equality-checked)
+      :else (assoc site :status :premises-open :reason :leaf-equality-open))))
+
+(defn check-structure!
+  "Compose concrete decoded child equalities bottom-up with the checked
+   cardinality lemma. Leaf comparisons and the map encoding bridge are
+   executable premises; the kernel proves the encoded parent equality.
+   No parent comparison against the expected map is used as a premise."
+  [original targets docs journal prefix actual]
+  (let [abstract (check! original targets docs journal prefix)
+        groups (get-in abstract [:rule-description :groups])
+        lemmas (into {} (map (juxt #(get-in % [:description :expected-cardinality]) identity))
+                     (:checked abstract))]
+    (when-not (and (map? actual) (= (set (keys actual)) (set (map :target groups)))
+                   (every? #(and (vector? %) (every? map? %)) (vals actual)))
+      (throw (ex-info "Expected complete selected decoded row bags." {})))
+    (let [roots (mapv (fn [{:keys [target predicate]}]
+                        (let [bag (get actual target) [kind expected] predicate]
+                          (case kind
+                            :absent (if (empty? bag)
+                                      {:target target :status :empty-bag-checked}
+                                      {:target target :status :premises-open :reason :unexpected-row})
+                            :exact-row (if (= 1 (count bag))
+                                         (compose-value! lemmas target [] expected (first bag) true)
+                                         {:target target :status :premises-open :reason :row-cardinality-mismatch}))))
+                      groups)]
+      {:type ::recursive-cardinality-pilot :roots roots
+       :status (if (and (seq roots) (every? established? roots))
+                 :all-concrete-structures-composed :structural-premises-open)
+       :scope :source-derived-concrete-decoded-structure-composition
+       :open-obligations (into (:open-obligations abstract)
+                               #{:general-decoded-map-encoding-refinement
+                                 :decoded-leaf-equality-refinement
+                                 :general-recursive-composition-soundness})
+       :authority :none :certificate :not-issued :sql-refinement :not-established})))
+
+(deftest recursive-structure-composes-child-results-before-parent-cardinality
+  (let [[_ _ docs journal _ :as args] (fixture!)
+        request [:document :requests "r1"]
+        slot [:journal-slot "p2" :example/command]
+        bags {request (:requests docs) [:document :assignments "a1"] []
+              [:journal-slot "p1" :example/command] [] slot journal}
+        run #(apply check-structure! (conj args %))
+        report (with-redefs [partition/partition-map (fn [& _] (throw (ex-info "Unexpected whole-map partition" {})))]
+                 (run bags))
+        nodes #(mapcat (fn [root] (tree-seq (comp seq :children) :children root)) (:roots %))
+        maps (filter #(= :composed-map-equality-checked (:status %)) (nodes report))
+        nested [:gesso.command/binding :arguments :nested]
+        leaf (conj nested :value)]
+    (is (= :all-concrete-structures-composed (:status report)))
+    (is (= 8 (count maps)))
+    (is (= :not-issued (:certificate report)))
+    (is (= :not-established (:sql-refinement report)))
+    (is (contains? (:open-obligations report) :general-recursive-composition-soundness))
+    (doseq [{:keys [children application]} maps]
+      (is (every? established? children))
+      (is (kernel/verifies? (ansatz/env) (:goal application) (:proof application))))
+    (let [bad (run (assoc-in bags (into [slot 0] leaf) "changed"))
+          by-path (into {} (map (juxt (juxt :target :path) identity)) (nodes bad))]
+      (is (= :structural-premises-open (:status bad)))
+      (is (= :leaf-equality-open (get-in by-path [[slot leaf] :reason])))
+      (doseq [path [[] nested]]
+        (is (= :child-equality-open (get-in by-path [[slot path] :reason])))
+        (is (nil? (get-in by-path [[slot path] :application])))))
+    (let [bad (run (assoc-in bags (into [slot 0] (conj nested :extra)) true))
+          by-path (into {} (map (juxt (juxt :target :path) identity)) (nodes bad))]
+      (is (= :structural-premises-open (:status bad)))
+      (is (= :cardinality-mismatch (get-in by-path [[slot nested] :reason])))
+      (is (= 1 (count (get-in by-path [[slot nested] :partition :residual]))))
+      (is (every? established? (get-in by-path [[slot nested] :children])))
+      (is (nil? (get-in by-path [[slot nested] :application])))
+      (is (= :child-equality-open (get-in by-path [[slot []] :reason]))))
+    (is (= :structural-premises-open (:status (run (assoc bags slot [])))))
+    (is (thrown? clojure.lang.ExceptionInfo (run (dissoc bags slot))))))
+
 (defn -main [& _]
   (binding [ansatz/*verbose* false] (ansatz/load-init!))
   (let [{:keys [fail error]} (run-tests 'gesso.assurance.ansatz-mapped-prestate-cardinality-pilot)]
