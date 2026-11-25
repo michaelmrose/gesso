@@ -170,7 +170,7 @@
                                          (apply dissoc witness binding-keys)))))))
 
 (defn- check-envelope*
-  [node tx-id ops committed? expected! normalize-observed]
+  [node tx-id ops committed? expected! normalize-observed & [all-time?]]
   (let [report (fn [status reason]
                  (cond-> {:status status :profile profile :authority :none :certificate :not-issued}
                    reason (assoc :reason reason)))]
@@ -188,7 +188,10 @@
               (not= tx-id (:tx-id observed)) (report :mismatch :source-transaction-identity-mismatch)
               (not= expected (normalize-observed (:operations observed))) (report :mismatch :operation-sequence-mismatch)
               :else
-              (let [outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
+              (let [query (if all-time?
+                            "SELECT committed FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ? LIMIT 2"
+                            "SELECT committed FROM xt.txs WHERE _id = ?")
+                    outcomes (xt/q node [query tx-id])]
                 (cond
                   (empty? outcomes) (report :unavailable :transaction-outcome-unavailable)
                   (not (and (= 1 (count outcomes)) (boolean? (:committed (first outcomes)))))
@@ -283,6 +286,24 @@
    The existing committed-worker comparison is unchanged."
   [node tx-id ops committed?]
   (check-envelope* node tx-id ops committed? expected-worker-attempt-operations! normalize-worker-operations))
+
+(def diagnostic-outcome-profile
+  :xtdb-2.2.0-beta1/selected-all-time-envelope-outcome-v1)
+
+(defn check-diagnostic-envelope!
+  "Use the selected envelope grammar but observe the ledger outcome across
+   all valid and system times. Duplicate outcome rows reject. This is an
+   acquisition diagnostic, not a production or worker witness."
+  [node tx-id ops committed? kind]
+  (let [r (case kind
+            :ordinary (check-envelope* node tx-id ops committed? expected-operations! identity true)
+            :temporal (assoc (check-envelope* node tx-id ops committed? #(expected-operations* % true) identity true)
+                             :profile temporal-profile)
+            :worker (check-envelope* node tx-id ops committed? expected-worker-attempt-operations!
+                                     normalize-worker-operations true)
+            {:status :unsupported :reason :unsupported-diagnostic-envelope-kind
+             :profile profile :authority :none :certificate :not-issued})]
+    (assoc r :outcome-observation-profile diagnostic-outcome-profile)))
 
 (defn- observed-caller-operations! [operations]
   ;; Recover caller shape without dropping operation order. The caller must

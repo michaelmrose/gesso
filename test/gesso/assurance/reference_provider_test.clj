@@ -110,13 +110,13 @@
       (let [q xt/q calls (atom 0)]
         (with-redefs [xt/q (fn [node query & opts]
                             (let [rows (q node query (or (first opts) {}))]
-                              (if (= ["SELECT _id, committed, system_time FROM xt.txs ORDER BY _id LIMIT 257"] query)
+                              (if (= ["SELECT _id, committed, system_time FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL ORDER BY _id LIMIT 257"] query)
                                 (if (= 2 (swap! calls inc)) (pop rows) rows)
                                 rows)))]
           (is (= :ledger-changed-during-observation
                  (:reason (reference/compare-quiescent-execution! node txs tables))))
           (is (= 2 @calls))))
-      (with-redefs [envelope/check-worker-attempt-envelope!
+      (with-redefs [envelope/check-diagnostic-envelope!
                     (fn [& _] {:status :unavailable :profile envelope/profile})]
         (is (= :unavailable (:status (reference/compare-quiescent-execution! node txs tables)))))
       (with-redefs [xt/q (fn [& _] (throw (AssertionError. "invalid expectation must not query")))]
@@ -145,8 +145,7 @@
         ;; Every unbound physical expectation still matches. Wrong identities
         ;; must fail before any retained envelope or historical table query.
         (is (= :matched (:status (reference/compare-quiescent-execution! node txs tables))))
-        (with-redefs [envelope/check-envelope! (fn [& _] (throw (AssertionError. "unexpected envelope read")))
-                      envelope/check-worker-attempt-envelope! (fn [& _] (throw (AssertionError. "unexpected worker read")))]
+        (with-redefs [envelope/check-diagnostic-envelope! (fn [& _] (throw (AssertionError. "unexpected diagnostic envelope read")))]
           (doseq [wrong [(mapv #(update % :tx-id + 100) bound)
                          (update-in bound [(dec (count bound)) :tx-id] inc)
                          (pop bound)]]
@@ -810,3 +809,66 @@
           (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
           (check-row-temporal-execution! node expected)))
       (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
+
+(defn- check-future-ledger! [node bound]
+  (let [ids (mapv :tx-id bound)
+        ledger (#'reference/read-ledger! node)
+        compare! #(reference/compare-local-processed-retained-replay-execution! node #{:providerprobe})
+        r (compare!)
+        q xt/q
+        outcome-query "SELECT committed FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ? LIMIT 2"
+        check! (fn [i committed? kind]
+                 (let [tx (nth bound i)]
+                   (envelope/check-diagnostic-envelope! node (:tx-id tx) (:ops tx) committed? kind)))]
+    (is (= ids (mapv :tx-id ledger)))
+    (is (= (mapv :system-time bound) (mapv :system-time ledger)))
+    (is (= [true true false] (mapv :committed? ledger)))
+    (is (= [(:tx-id (first bound))]
+           (mapv :xt/id (xt/q node ["SELECT _id FROM xt.txs ORDER BY _id"]))))
+    (is (= :matched (:status r)) (pr-str r))
+    (is (= :matched (:outcome-correspondence r)))
+    (is (= 3 (:transaction-count r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:status (reference/compare-source-bound-execution! node bound #{:providerprobe}))))
+    (doseq [[i committed? kind] [[0 true :ordinary] [1 true :temporal] [2 false :ordinary]]]
+      (let [e (check! i committed? kind)]
+        (is (= :matched (:status e)) (pr-str e))
+        (is (= envelope/diagnostic-outcome-profile (:outcome-observation-profile e)))
+        (is (= :transaction-outcome-mismatch (:reason (check! i (not committed?) kind))))))
+    (is (= :transaction-outcome-unavailable
+           (:reason (envelope/check-envelope! node (peek ids) (:ops (peek bound)) false))))
+    (doseq [[rows reason] [[[] :transaction-outcome-unavailable]
+                           [[{:committed false} {:committed false}] :invalid-transaction-outcome]
+                           [[{:committed nil}] :invalid-transaction-outcome]]]
+      (with-redefs [xt/q (fn [node query & opts]
+                          (if (= outcome-query (first query)) rows (apply q node query opts)))]
+        (is (= reason (:reason (check! 2 false :ordinary))))
+        (is (not= :matched (:status (compare!))))))
+    (let [check envelope/check-diagnostic-envelope!]
+      (with-redefs [envelope/check-diagnostic-envelope! #(dissoc (apply check %&) :outcome-observation-profile)]
+        (is (= :unsupported (:status (compare!))))))
+    (is (= r (compare!)))))
+
+(deftest all-time-ledger-includes-future-dated-transactions
+  (let [root (Files/createTempDirectory "gesso-all-time-ledger-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        future (java.time.Instant/parse "2100-01-01T00:00:00Z")
+        txs [{:system-time (time-at 0) :ops [[:put-docs :providerprobe {:xt/id "a" :value 1}]]}
+             {:system-time future :ops [[:put-docs {:into :providerprobe :valid-from future} {:xt/id "a" :value 2}]]}
+             {:system-time (.plusSeconds future 1) :ops [[:put-docs :providerprobe {:xt/id "a" :value 3}] ["ASSERT FALSE"]]}]]
+    (try
+      (let [bound (with-open [node (xtn/start-node config)]
+                    (let [database (db/primary-db node)
+                          bound (mapv (fn [{:keys [ops system-time] :as tx}]
+                                        (let [id (:tx-id (xt/submit-tx node ops {:system-time system-time}))]
+                                          (.awaitTxBlocking database id (Duration/ofSeconds 15))
+                                          (assoc tx :tx-id id))) txs)]
+                      (.awaitSourceBlocking database (:tx-id (peek bound)) (Duration/ofSeconds 15))
+                      (check-future-ledger! node bound)
+                      bound))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek bound)) (Duration/ofSeconds 15))
+          (check-future-ledger! node bound)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

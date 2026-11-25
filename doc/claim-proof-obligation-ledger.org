@@ -4489,3 +4489,28 @@ smoothing without changing provider observation contracts. Future-dated
 ledger coverage, non-increasing explicit system-time semantics and broader
 SQL remain open. No production admission, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2709 — qualify all-time transaction ledger observation
+
+Read the bounded diagnostic transaction ledger across all valid and
+system times. Preserve exact ordered identities, timestamp and outcome
+validation, row ceilings and final ledger reread. Add a separately
+qualified diagnostic envelope outcome observation using all-time scope
+and a two-row limit to detect duplicate outcomes. Select the existing
+ordinary, temporal or worker grammar from expected operations; require
+the diagnostic outcome profile before accepting a match. Existing
+production and worker witness queries remain unchanged. Version the
+expanded acquisition, source-bound and retained execution profiles.
+
+Focused JVM: 95 tests / 6408 assertions, zero failures or errors across
+all eleven prior namespaces; provider suite 15 tests / 779 assertions.
+Persistent past and year-2100 commit/abort history matches independently
+predicted ledger, retained operations and selected all-time rectangles
+before and after reopening. The default-time ledger omits future rows;
+the original restricted envelope reports a future outcome unavailable.
+Reject missing, duplicate or malformed outcome rows, incorrect expected
+outcomes and unqualified diagnostic matches. No arbitrary-history,
+atomic acquisition, production admission, certificate or CLM-R2 premise
+retirement. Non-increasing explicit system-time semantics and broader
+state-dependent assertion coverage remain open. Full project and
+independent formal gates were not rerun.

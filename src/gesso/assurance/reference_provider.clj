@@ -84,7 +84,7 @@
                          :else :mismatch)]
         (assoc base :status status :checks checks :transaction-count (count history))))))
 
-(def acquisition-profile :selected-quiescent-provider-observation-v3)
+(def acquisition-profile :selected-quiescent-provider-observation-v4)
 
 (defn- acquisition-result [status reason]
   (assoc base :acquisition-profile acquisition-profile :status status :reason reason))
@@ -102,7 +102,7 @@
         :else (observation-reject! :invalid-observed-timestamp)))
 
 (defn- read-ledger! [node]
-  (let [rows (xt/q node ["SELECT _id, committed, system_time FROM xt.txs ORDER BY _id LIMIT 257"])]
+  (let [rows (xt/q node ["SELECT _id, committed, system_time FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL ORDER BY _id LIMIT 257"])]
     (when (> (count rows) 256) (observation-reject! :ledger-limit))
     (let [ledger (mapv (fn [{:keys [xt/id committed system-time] :as row}]
                          (when-not (and (= #{:xt/id :committed :system-time} (set (keys row)))
@@ -120,11 +120,16 @@
     "ASSERT CURRENT_TIMESTAMP < ?" "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?"})
 
 (defn- read-envelope! [node row tx entry]
-  ((cond
-     (some #(contains? worker-assertions (first %)) (:ops tx)) envelope/check-worker-attempt-envelope!
-     (temporal-put? tx) envelope/check-temporal-envelope!
-     :else envelope/check-envelope!)
-   node (:tx-id row) (:ops tx) (:committed? entry)))
+  (let [kind (cond
+               (some #(contains? worker-assertions (first %)) (:ops tx)) :worker
+               (temporal-put? tx) :temporal
+               :else :ordinary)
+        r (envelope/check-diagnostic-envelope! node (:tx-id row) (:ops tx) (:committed? entry) kind)]
+    (if (and (= :matched (:status r))
+             (not= envelope/diagnostic-outcome-profile (:outcome-observation-profile r)))
+      {:status :unsupported :reason :unqualified-outcome-observation
+       :profile (expected-envelope-profile tx)}
+      r)))
 
 (defn- read-rectangles! [node tables]
   (reduce (fn [acc table]
@@ -142,7 +147,7 @@
           [] (sort tables)))
 
 (defn- compare-quiescent*
-  "Acquire ledger, retained envelopes and all-time selected table history
+  "Acquire all-time ledger, retained envelopes and all-time selected table history
    directly from an embedded node. Caller must supply a quiescent node with
    a complete history from empty state, no outstanding transactions and
    the expected transaction sequence. Re-read the bounded ledger to detect
@@ -189,7 +194,7 @@
   [node transactions tables]
   (compare-quiescent* node transactions tables nil))
 
-(def source-binding-profile :selected-source-bound-execution-v3)
+(def source-binding-profile :selected-source-bound-execution-v4)
 
 (defn- source-expectations? [expectations]
   (and (vector? expectations) (nil? (meta expectations))
@@ -324,7 +329,7 @@
     (cond-> r (= :matched (:source-coverage r))
       (assoc :payload-correspondence :matched :processed-frontier :matched))))
 
-(def retained-execution-profile :selected-processed-retained-execution-v3)
+(def retained-execution-profile :selected-processed-retained-execution-v4)
 
 (defn- valid-bound-history? [sample]
   (let [ids (:transaction-ids sample)
@@ -376,7 +381,7 @@
                :retained-execution-profile retained-execution-profile)
         (dissoc r :source-coverage)))))
 
-(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v4)
+(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v5)
 
 (defn- valid-replay-history? [sample]
   (let [inputs (:replay-inputs sample)]
