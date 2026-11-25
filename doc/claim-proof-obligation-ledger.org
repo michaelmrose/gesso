@@ -3478,3 +3478,26 @@ Recursive union legs, document maps and puts, nullable values and
 aggregate reference document budgets remain open. No production wiring,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates were not rerun.
+
+* v2668 — decode selected structured Arrow maps
+
+Qualify nonnullable nonempty Struct fields with distinct simple lowercase
+field names, bounded field count and nesting depth. Recursively interpret
+selected scalar, list and struct children using exact node and buffer
+extents. Preserve all earlier profile restrictions. This is diagnostic
+physical interpretation; it does not admit map-valued SQL arguments to
+the provider observer or reference transaction semantics.
+
+Focused JVM: 21 tests / 1252 assertions, zero failures or errors across
+reference Arrow operations, struct and source payload suites. Persistent
+retained nested maps with scalar and heterogeneous vector children match
+independently specified values before and after reopening. Mutate child
+values and field names; reject malformed UTF-8, unsupported namespaced
+keys, excessive depth and truncated framing. Confirm that the provider
+observer still rejects map-valued SQL arguments. XTDB logged shutdown
+cancellation; the passing process exited zero.
+
+Selected struct-map profile v1. Empty structs, namespaced and hyphenated
+keys, nullable fields, document puts and aggregate document budgets
+remain open. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.

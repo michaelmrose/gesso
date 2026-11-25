@@ -257,7 +257,7 @@
                    (and (= Type/FixedSizeBinary type) (= "uuid" name)) :uuid
                    :else (require! false :unsupported-arrow-field)))
                (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
-                     Type/Timestamp :timestamp Type/List (cond
+                     Type/Timestamp :timestamp Type/Struct_ :struct-map Type/List (cond
                                                            (contains? allowed :empty-list) :empty-list
                                                            (contains? allowed :temporal-union-list) :temporal-union-list
                                                            (contains? allowed :union-list) :union-list
@@ -269,7 +269,10 @@
       (require! (and (= field-name (.name f)) (not (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
-      (field! f field-name type false (if (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind) 1 0)))
+      (field! f field-name type false (cond
+                                      (= :struct-map kind) (.childrenLength f)
+                                      (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind) 1
+                                      :else 0)))
     (when (= :integer kind)
       (let [^Int t (.type f (Int.))]
         (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
@@ -277,6 +280,20 @@
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
         (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
     (cond
+      (= :struct-map kind)
+      (let [n (.childrenLength f)]
+        (require! (< depth 8) :arrow-struct-depth-limit)
+        (require! (<= 1 n 256) :unsupported-arrow-struct-field-count)
+        (let [fields (mapv (fn [i]
+                             (let [^Field child (.children f i)
+                                   name (.name child)]
+                               (require! (and name (<= 1 (count name) 4095)
+                                              (re-matches #"[a-z][a-z0-9]*" name))
+                                         :unsupported-arrow-struct-key)
+                               [name (scalar-kind-at! child name allowed (inc depth))]))
+                           (range n))]
+          (require! (= n (count (distinct (map first fields)))) :duplicate-arrow-struct-key)
+          [:struct fields]))
       (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind)
       (let [^Field child (.children f 0)]
         (require! (< depth 8) :arrow-list-depth-limit)
@@ -326,16 +343,19 @@
 
 (defn- list-kind? [kind] (and (vector? kind) (= :list (first kind))))
 (defn- union-kind? [kind] (and (vector? kind) (= :union (first kind))))
+(defn- struct-kind? [kind] (and (vector? kind) (= :struct (first kind))))
 
 (defn- node-count [kind]
   (cond (list-kind? kind) (inc (node-count (second kind)))
         (union-kind? kind) (inc (count (second kind)))
+        (struct-kind? kind) (inc (reduce + 0 (map (comp node-count second) (second kind))))
         :else 1))
 
 (defn- buffer-count [kind]
   (cond (= :empty-child kind) 0
         (list-kind? kind) (+ 2 (buffer-count (second kind)))
         (union-kind? kind) (+ 2 (reduce + (map buffer-count (second kind))))
+        (struct-kind? kind) (inc (reduce + 0 (map (comp buffer-count second) (second kind))))
         :else (if (#{:string :keyword} kind) 3 2)))
 
 (defn- scalar-reader! [kind buffers start n]
@@ -427,6 +447,28 @@
         (fn [row]
           (mapv read-child (range (nth xs row) (nth xs (inc row)))))))))
 
+(declare value-reader!)
+
+(defn- struct-reader! [fields ^RecordBatch batch node-index buffers start n]
+  (let [kinds (mapv second fields)
+        node-starts (vec (reductions + (inc node-index) (map node-count kinds)))
+        starts (vec (reductions + (inc start) (map buffer-count kinds)))
+        readers (mapv (fn [i kind]
+                        (value-reader! kind batch (nth node-starts i) buffers (nth starts i) n))
+                      (range (count fields)) kinds)
+        keys (mapv (comp keyword first) fields)]
+    (fn [row]
+      (into {} (map (fn [k reader] [k (reader row)]) keys readers)))))
+
+(defn- value-reader! [kind ^RecordBatch batch node-index buffers start n]
+  (let [node (.nodes batch node-index)
+        ^ByteBuffer validity (nth buffers start)]
+    (require! (and (= n (.length node)) (zero? (.nullCount node))
+                   (zero? (.limit validity))) :unsupported-integer-buffer-layout)
+    (cond (list-kind? kind) (list-reader! (second kind) batch node-index buffers start n)
+          (struct-kind? kind) (struct-reader! (second kind) batch node-index buffers start n)
+          :else (scalar-reader! kind buffers start n))))
+
 (defn- scalar-rows! [bytes allowed]
   (if (nil? bytes)
     [[]]
@@ -452,17 +494,8 @@
             (let [buffers (buffers! batch bb (peek starts))
                   readers
                   (mapv (fn [i]
-                          (let [node-index (nth node-starts i)
-                                node (.nodes batch node-index)
-                                start (nth starts i)
-                                kind (nth kinds i)
-                                ^ByteBuffer validity (nth buffers start)
-                                ^ByteBuffer values (nth buffers (inc start))]
-                            (require! (and (= n (.length node)) (zero? (.nullCount node))
-                                           (zero? (.limit validity))) :unsupported-integer-buffer-layout)
-                            (if (list-kind? kind)
-                              (list-reader! (second kind) batch node-index buffers start n)
-                              (scalar-reader! kind buffers start n))))
+                          (value-reader! (nth kinds i) batch (nth node-starts i)
+                                         buffers (nth starts i) n))
                         (range columns))]
               (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
                         :unsupported-arrow-terminator)
@@ -816,3 +849,28 @@
    No union leg containing a list or map, or reference document admission."
   [bytes]
   (expand-fixed-operations bytes recursive-list-base recursive-list-rows!))
+
+(def struct-map-profile :xtdb-2.2.0-beta1/selected-struct-map-arrow-operations-v1)
+(def ^:private struct-map-base (assoc base :profile struct-map-profile))
+
+(defn- struct-map-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :struct-map}))
+
+(defn decode-struct-map-arguments
+  "Decode selected nonnullable nonempty structs with distinct simple lowercase
+   field names and recursively qualified children. Diagnostic only; does not
+   admit map-valued SQL parameters to the reference or provider semantics."
+  [bytes]
+  (try
+    (assoc struct-map-base :status :decoded :rows (struct-map-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc struct-map-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc struct-map-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc struct-map-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-struct-map-operations
+  "Expand selected SQL groups including diagnostic struct-map values."
+  [bytes]
+  (expand-fixed-operations bytes struct-map-base struct-map-rows!))
