@@ -4008,3 +4008,21 @@ and aggregate recursive value budgets remain open. No production wiring,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates were not rerun. The operations namespace is now 992 lines;
 extract put envelope interpretation before further substantial expansion.
+
+* v2689 — extract physical put-envelope interpretation
+
+Move selected put schema qualification, table-local and global span
+accounting, physical document/IID reconstruction and stream framing
+into reference-arrow-put. Keep profile selection, exception-to-result
+translation, independent IID verification and public entry points in
+reference-arrow-operations. The operations namespace falls from 992 to
+865 lines; the extracted namespace has 143 lines. No intended change
+to supported representations, count ceilings or rejection reasons.
+
+Focused JVM: 44 tests / 2926 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. XTDB
+logged shutdown cancellation; the test process exited zero. This is a
+behavior-preserving extraction, not expanded assurance coverage. Mixed
+operation sequences and aggregate recursive value budgets remain open.
+No production wiring, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.
