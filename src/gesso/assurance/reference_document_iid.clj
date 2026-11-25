@@ -42,3 +42,15 @@
   (let [input (.getBytes (str "k" id) StandardCharsets/UTF_8)
         digest (.digest (MessageDigest/getInstance "SHA-256") input)]
     (.formatHex (HexFormat/of) digest 0 16)))
+
+(defn uuid-iid
+  "Derive the selected UUID IID directly from its 128 bits in network byte
+   order, without hashing, type prefixes or provider helpers."
+  [id]
+  (require! (uuid? id) :unsupported-reference-uuid-id)
+  (let [^java.util.UUID id id
+        b (doto (java.nio.ByteBuffer/allocate 16)
+            (.order java.nio.ByteOrder/BIG_ENDIAN)
+            (.putLong (.getMostSignificantBits id))
+            (.putLong (.getLeastSignificantBits id)))]
+    (.formatHex (HexFormat/of) (.array b))))

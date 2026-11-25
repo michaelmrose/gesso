@@ -322,3 +322,76 @@
           (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
           (check-keyword-iids! node id other-id)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(def ^:private uuid-iid-vectors
+  [[#uuid "00000000-0000-0000-0000-000000000000" "00000000000000000000000000000000"]
+   [#uuid "00112233-4455-6677-8899-aabbccddeeff" "00112233445566778899aabbccddeeff"]
+   [#uuid "ffffffff-ffff-ffff-ffff-ffffffffffff" "ffffffffffffffffffffffffffffffff"]
+   [#uuid "80000000-0000-0000-0000-000000000001" "80000000000000000000000000000001"]
+   [#uuid "00000000-0000-0001-8000-000000000000" "00000000000000018000000000000000"]
+   [#uuid "01234567-89ab-cdef-fedc-ba9876543210" "0123456789abcdeffedcba9876543210"]])
+
+(deftest selected-uuid-iid-known-answers
+  (doseq [[id expected] uuid-iid-vectors]
+    (is (= expected (iid/uuid-iid id))))
+  (doseq [id [nil 1 true :one "00112233-4455-6677-8899-aabbccddeeff" (byte-array 16)]]
+    (is (= :unsupported-reference-uuid-id
+           (try (iid/uuid-iid id) :accepted
+                (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))))
+
+(defn- check-uuid-iids! [node id other-id]
+  (let [data (#'fixture/retained-operation-bytes node id)
+        expected {:kind :put-docs :table :public/foo
+                  :documents (mapv (fn [[id _]] {:xt/id id}) uuid-iid-vectors)
+                  :iids (mapv second uuid-iid-vectors) :bounds {}}
+        [_ _ _ _ _ _ iids _ _ _ _ _ _ ids] (#'fixture/buffer-starts data)
+        r (arrow/decode-uuid-iid-put data)
+        changed-hex "ff000000000000000000000000000000"
+        changed-id (#'fixture/edit-byte data ids 255)
+        changed-iid (replace-iid data iids changed-hex)
+        swapped (-> data (replace-iid iids (second (nth uuid-iid-vectors 1)))
+                    (replace-iid (+ iids 16) (second (first uuid-iid-vectors))))]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+    (is (= arrow/uuid-iid-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= [expected] (:groups r) (:operations (provider/observe-source-message! node id))))
+    (is (= :unchecked (:iid-correspondence (arrow/decode-put-envelope data))))
+    (doseq [[decoder reason] [[arrow/decode-integer-iid-put :unsupported-reference-integer-id]
+                              [arrow/decode-string-iid-put :unsupported-reference-string-id]
+                              [arrow/decode-keyword-iid-put :unsupported-reference-keyword-id]]]
+      (is (= reason (:reason (decoder data)))))
+    (doseq [[bad reason] [[changed-id :document-iid-mismatch]
+                          [changed-iid :document-iid-mismatch]
+                          [swapped :document-iid-mismatch]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]
+                          [(#'fixture/retained-operation-bytes node other-id) :unsupported-reference-uuid-id]]]
+      (let [r (arrow/decode-uuid-iid-put bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :groups)))
+        (is (not (contains? r :iid-correspondence)))))
+    (is (= [(-> expected (assoc-in [:documents 0 :xt/id] #uuid "ff000000-0000-0000-0000-000000000000")
+                (assoc-in [:iids 0] changed-hex))]
+           (:groups (arrow/decode-uuid-iid-put (replace-iid changed-id iids changed-hex)))))))
+
+(deftest selected-uuid-iids-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-uuid-iid-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        docs (mapv (fn [[id _]] {:xt/id id}) uuid-iid-vectors)]
+    (try
+      (let [[id other-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! [(into [:put-docs :foo] docs)])
+                    other-id (submit! [[:put-docs :foo {:xt/id 1}]])]
+                (check-uuid-iids! node id other-id)
+                [id other-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
+          (check-uuid-iids! node id other-id)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

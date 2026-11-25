@@ -857,3 +857,21 @@
         (assoc decoded :profile keyword-iid-put-profile :iid-correspondence :matched)
         (catch clojure.lang.ExceptionInfo e
           (assoc result-base :status :unsupported :reason (:reason (ex-data e))))))))
+
+(def uuid-iid-put-profile :xtdb-2.2.0-beta1/selected-uuid-iid-put-arrow-v1)
+
+(defn decode-uuid-iid-put
+  "Decode the selected single put envelope and independently verify every
+   retained IID against its exact UUID document ID. Other families reject."
+  [bytes]
+  (let [decoded (decode-put-envelope bytes)
+        result-base (assoc base :profile uuid-iid-put-profile)]
+    (if-not (= :decoded (:status decoded))
+      (assoc result-base :status :unsupported :reason (:reason decoded))
+      (try
+        (doseq [{:keys [documents iids]} (:groups decoded)
+                [doc retained] (map vector documents iids)]
+          (require! (= retained (iid/uuid-iid (:xt/id doc))) :document-iid-mismatch))
+        (assoc decoded :profile uuid-iid-put-profile :iid-correspondence :matched)
+        (catch clojure.lang.ExceptionInfo e
+          (assoc result-base :status :unsupported :reason (:reason (ex-data e))))))))

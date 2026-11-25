@@ -3786,3 +3786,29 @@ actual puts, explicit bounds, multiple groups and aggregate document
 budgets remain open. Correspondence is not authenticity or admission.
 No production wiring, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2681 — independently verify retained UUID document IIDs
+
+Inspect the installed XTDB IID UUID path and its byte conversion helper.
+Independently encode the most-significant and least-significant 64-bit
+halves in big-endian order; UUID IIDs are the original 128 bits, not a
+hash or prefixed string. Require every retained IID to match its UUID
+document ID, rejecting other ID families without partial groups. Preserve
+all earlier selected and unchecked profiles.
+
+Focused JVM: 37 tests / 2128 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. Six
+explicit known-answer bit patterns include zero, all ones, asymmetric
+halves and sign-bit boundaries. Persistent retained puts match expected
+values and provider observations before and after reopening. Reject
+individual ID or IID changes, swapped IIDs, other identifier families
+and truncated streams. A consistently changed pair remains valid
+correspondence, not authenticity evidence. XTDB logged shutdown
+cancellation; the test process exited zero.
+
+Selected UUID-IID put profile v1. All four selected homogeneous ID
+families now have separate verification profiles. Unified and mixed-ID
+interpretation, nullable actual puts, explicit bounds, multiple groups
+and aggregate document budgets remain open. No production wiring,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates were not rerun.
