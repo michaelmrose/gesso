@@ -11,6 +11,7 @@
             [gesso.live.outbox.delivery :as delivery]
             [gesso.live.outbox.discovery :as discovery]
             [gesso.live.outbox.read-frontier :as frontier]
+            [gesso.live.outbox.reconciliation :as reconciliation]
             [gesso.live.outbox.worker :as worker]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
@@ -46,6 +47,7 @@
         slots (atom (seq slots)) current (atom nil) phase (atom :discovery)
         last-system (atom (:system-time (peek prefix)))
         calls (atom []) pages (atom []) transactions (atom [])
+        lost (ex-info "Lost physical acknowledgment response" {:test/outcome :unknown})
         attempt! (fn [node worker-id source-id lease-millis {:keys [intent-id action]}]
                    (reset! phase :acquisition)
                    (let [{:keys [scan-time lease-id]} @current
@@ -65,9 +67,16 @@
                      (swap! calls conj [:dispatch a])
                      (reset! phase :acknowledgment)
                      (let [ids (assoc (select-keys a [:intent-id :lease-id]) :receipt-id (:receipt-id @current))
-                           ack (acknowledgment/acknowledge-dispatch! node
-                                 (assoc (select-keys a [:intent-id :lease-id :worker-id])
-                                        :receipt {:receipt-id (:receipt-id @current) :adapter :test/adapter :result :accepted}))]
+                           ack (try
+                                 (acknowledgment/acknowledge-dispatch! node
+                                   (assoc (select-keys a [:intent-id :lease-id :worker-id])
+                                          :receipt {:receipt-id (:receipt-id @current) :adapter :test/adapter :result :accepted}))
+                                 (catch Throwable e
+                                   (if (identical? lost e)
+                                     (throw (ex-info "Controlled post-dispatch response loss"
+                                                     (assoc ids :error/type :gesso.live.outbox/post-dispatch-ack-unknown
+                                                            :dispatch/status :accepted :acknowledgment/status :unknown) e))
+                                     (throw e))))]
                        (if (= :acknowledged (:status ack))
                          (assoc ids :status :dispatch-accepted :progression (:progression a)
                                 :source-result {:status :emitted-many :count 1 :results [{:status :emitted}]}
@@ -93,10 +102,18 @@
                                                      (if (= :acquisition @phase) (:scan-time @current) (:ack-time @current))
                                                      @last-system (second query)])))
                   #'live.xtdb/execute-tx! (fn [node ops]
-                                           (let [time (if (= :acquisition @phase) (:acquire-time @current) (:ack-time @current))]
+                                           (let [time (if (= :acquisition @phase) (:acquire-time @current) (:ack-time @current))
+                                                 response (when (= :acknowledgment @phase) (:ack-response @current))]
+                                             (when (= :lost-before-submit response) (throw lost))
                                              (swap! transactions conj {:system-time time :ops ops})
                                              (reset! last-system time)
-                                             (execute! node ops {:system-time time})))}
+                                             (if (= :lost-after-submit response)
+                                               (do (try (execute! node ops {:system-time time})
+                                                        (catch Throwable e
+                                                          (when-not (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                                                            (throw e))))
+                                                   (throw lost))
+                                               (execute! node ops {:system-time time}))))}
                  (fn []
                    (try {:result (cycle/process-cycle! node {:source :controlled} {} source options)}
                         (catch clojure.lang.ExceptionInfo e
@@ -155,3 +172,57 @@
       (let [p (reference/predict-physical-cycle prefix source options slots)]
         (is (= :unsupported (:status p)))
         (is (not-any? #(contains? p %) [:pages :cycle :transactions :replay]))))))
+
+(deftest uncertain-physical-cycle-and-reconciliation
+  (let [prefix (:transactions (lifecycle/predict-lifecycle seed))
+        failures (atom [])]
+    (doseq [[response ack-time expected-submissions expected-disposition eligible]
+            [[:lost-before-submit 15 3 :same-lease-active [(id 2) (id 3)]]
+             [:lost-after-submit 15 4 :matching-acknowledgment-recorded [(id 3)]]
+             [:lost-after-submit 23 4 :same-lease-active [(id 2) (id 3)]]]]
+      (let [slots [(first ordinary-slots)
+                   (assoc (slot 13 14 ack-time 2) :ack-response response)
+                   (slot 24 25 26 3)]
+            p (reference/predict-physical-cycle prefix source opts slots)
+            c (:cycle p) failure (:failure c)
+            s (:system-time (peek (:transactions p))) v (time-at 40)
+            inspection (reference/predict-interrupted-inspection p source s v)]
+        (is (= :predicted (:status p)))
+        (is (= :delivery (:phase failure)))
+        (is (= 1 (:completed-count failure)))
+        (is (= (id 1) (:last-completed-cursor failure)))
+        (is (= (id 202) (get-in failure [:in-flight :receipt-id])))
+        (is (= :unverified-post-dispatch-receipt (get-in failure [:in-flight :receipt-evidence])))
+        (is (= expected-submissions (- (count (:transactions p)) (count prefix))))
+        (is (= :predicted (:status inspection)))
+        (is (= :none (:authority inspection)))
+        (is (= expected-disposition (get-in inspection [:observation :status])))
+        (is (= [:matching-acknowledgment-recorded] (mapv :status (get-in inspection [:observation :completed-observations]))))
+        (swap! failures conj failure)
+        (with-open [node (xtn/start-node {})]
+          (doseq [{:keys [system-time ops]} prefix]
+            (live.xtdb/execute-tx! node ops {:system-time system-time}))
+          (let [actual (run-physical-cycle! node prefix opts slots)
+                reads (atom [])
+                observed (with-redefs [frontier/q-from! (fn [node [_ id]]
+                                                         (swap! reads conj id)
+                                                         (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? WHERE _id = ?" v s id]))]
+                           (reconciliation/inspect! node source (:failure actual)))
+                page (with-redefs [frontier/q-from! (fn [node query] (xt/q node query {:current-time v}))]
+                       (discovery/discover-eligible! node {:source-id source :limit 8}))]
+            (is (= (select-keys c [:failure :calls]) (select-keys actual [:failure :calls])))
+            (is (= (:pages p) (:pages actual)))
+            (is (= (subvec (:transactions p) (count prefix)) (:transactions actual)))
+            (is (= (:observation inspection) observed))
+            (is (= [(id 1) (id 2)] @reads))
+            (is (true? (:rescan-required? observed)))
+            (is (= eligible (mapv :intent-id (:candidates page))))
+            (is (= page (:page (reference-discovery/predict-page (:replay p) v {:source-id source :limit 8}))))
+            (is (= (frequencies (coalesce-valid (get-in p [:replay :rectangles])))
+                   (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) [:gesso_live_outbox :cycleprobe])))))))))
+    ;; Identical interruption evidence is compatible with distinct physical outcomes.
+    (is (apply = @failures))
+    (let [ordinary (reference/predict-physical-cycle prefix source opts ordinary-slots)]
+      (is (= :unsupported (:status (reference/predict-interrupted-inspection ordinary source (time-at 18) (time-at 40))))))
+    (is (= :unsupported (:status (reference/predict-physical-cycle prefix source opts
+                                    (assoc-in ordinary-slots [1 :ack-response] :invalid)))))))

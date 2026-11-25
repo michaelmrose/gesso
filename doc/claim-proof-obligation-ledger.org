@@ -2681,3 +2681,37 @@ physical execution, arbitrary writer closure or universal refinement.
 No production assurance status changes and no CLM-R2 premise is retired.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2639 — compose physical cycle interruption and reconciliation
+
+Extend selected physical cycles with acknowledgment response loss before
+submission or after actual execution. Derive commit or abort independently
+from the physical interpreter, while producing the same interrupted cycle
+report for either lost response. Preserve completed prefix, last cursor
+and unverified receipt; do not attempt later candidates. Compose that
+predicted envelope with independent pinned reconciliation, projecting
+only reconciliation-relevant fields. Physical-cycle profile v2; other
+reference profiles and history v19 unchanged.
+
+Expanded focused JVM gate: 98 tests / 8224 assertions, zero failures or
+errors across six reference namespaces and the production cycle suite.
+Focused physical-cycle suite: 3 tests / 168 assertions. Three additional
+histories compare exact interruption envelopes, completed-prefix and
+in-flight reconciliation, ordered reads, fresh discovery, submitted
+operations and complete selected history rectangles. Eleven additional
+physical submissions comprise ten commits and one assertion abort.
+The unsubmitted, committed and aborted acknowledgment hypotheses have
+identical caller-visible interruption evidence, but only the committed
+receipt is durably recorded. The other two remain eligible for recovery
+after expiry; no later candidate is attempted in the interrupted cycle.
+
+The harness injects response loss at the transaction adapter boundary
+and wraps it at the controlled delivery boundary; actual cycle and sweep
+orchestration, physical acknowledgment, XTDB execution and reconciliation
+are used. Pinned points, explicit clocks, deterministic identities and
+trusted acceptance remain harness inputs. No still-outstanding transaction,
+live frontier acquisition, actual external delivery, authorized replay,
+arbitrary writer closure or universal refinement is established. No
+production assurance status changes and no CLM-R2 premise is retired.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.

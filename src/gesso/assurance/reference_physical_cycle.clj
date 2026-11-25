@@ -3,10 +3,11 @@
   (:require [clojure.string :as str]
             [gesso.assurance.reference-cycle :as cycle]
             [gesso.assurance.reference-discovery :as discovery]
+            [gesso.assurance.reference-reconciliation :as reconciliation]
             [gesso.assurance.reference-temporal :as temporal])
   (:import (java.time Instant)))
 
-(def profile :selected-physical-cycle-v1)
+(def profile :selected-physical-cycle-v2)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 (def ^:private unsupported (assoc base :status :unsupported))
 (defn- time? [x] (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -14,7 +15,8 @@
 (defn- latest [r] (:system-time (peek (:history r))))
 (defn- slot? [s]
   (and (map? s) (nil? (meta s))
-       (= #{:scan-time :acquire-time :ack-time :lease-id :receipt-id} (set (keys s)))
+       (= #{:scan-time :acquire-time :ack-time :lease-id :receipt-id} (disj (set (keys s)) :ack-response))
+       (#{:observed :lost-before-submit :lost-after-submit} (get s :ack-response :observed))
        (every? time? (map s [:scan-time :acquire-time :ack-time]))
        (before? (:scan-time s) (:acquire-time s)) (before? (:acquire-time s) (:ack-time s))
        (uuid? (:lease-id s)) (uuid? (:receipt-id s))))
@@ -23,7 +25,7 @@
 
 (defn- attempt [prefix prior source opts slot page]
   (let [{:keys [intent-id action]} (first (:candidates page))
-        {:keys [scan-time acquire-time ack-time lease-id receipt-id]} slot
+        {:keys [scan-time acquire-time ack-time lease-id receipt-id ack-response]} slot
         worker (:worker-id opts)
         deadline (.plusMillis ^Instant scan-time (long (get opts :lease-millis 60000)))
         claim {:intent-id intent-id :source-id source :worker-id worker :lease-id lease-id
@@ -44,10 +46,15 @@
                             :receipt {:receipt-id receipt-id :adapter :test/adapter :result :accepted}}
                 ack (temporal/predict-acknowledgment prefix (latest (:replay p)) ack-time ack-time submission)]
             (when (and (= :predicted (:status ack)) (#{:acknowledged :contended} (:outcome ack)))
-              {:prefix (append-tx prefix ack-time ack) :replay (:replay ack)
-               :step (assoc step :delivery {:kind (if (= :acknowledged (:outcome ack)) :accepted :contended)
-                                            :receipt-id receipt-id})
-               :stop? (= :contended (:outcome ack))}))
+              (let [lost? (#{:lost-before-submit :lost-after-submit} ack-response)
+                    submitted? (not= :lost-before-submit ack-response)]
+                {:prefix (if submitted? (append-tx prefix ack-time ack) prefix)
+                 :replay (if submitted? (:replay ack) (:replay p))
+                 :step (assoc step :delivery {:kind (cond lost? :unknown
+                                                         (= :acknowledged (:outcome ack)) :accepted
+                                                         :else :contended)
+                                              :receipt-id receipt-id})
+                 :stop? (or lost? (= :contended (:outcome ack)))})))
           {:prefix prefix :replay (:replay p) :step step})))))
 
 (defn predict-physical-cycle
@@ -56,7 +63,8 @@
    sweep consumes a clock/identity slot; no outcome or row readback is input.
    The progression marker represents only the supplied acquisition time, not
    a provider token. No concurrent writers, actual dispatch, live frontier,
-   unknown execution or universal refinement is established."
+   universal refinement is established. Selected lost responses are
+   physical hypotheses, not information available to the interrupted worker."
   [prefix source opts slots]
   (let [prior (temporal/replay prefix)
         budget (get opts :max-items 32)]
@@ -93,3 +101,21 @@
                                  (next todo) pages steps)))
                       unsupported)))
           unsupported)))))
+
+(defn predict-interrupted-inspection
+  "Compose the selected cycle failure with read-only reconciliation. Project
+   only reconciliation-relevant fields of the independently predicted cycle
+   envelope; acquisition-status is diagnostic, not an ownership credential.
+   The supplied physical history hypothesis and pinned point do not resolve
+   a genuinely outstanding transaction or authorize restart."
+  [physical source system-time valid-time]
+  (let [failure (get-in physical [:cycle :failure])]
+    (if (and (= profile (:profile physical)) (= :predicted (:status physical))
+             (= :delivery (:phase failure)) (= :delivery-exception (:reason failure))
+             (= :gesso.live.outbox/post-dispatch-ack-unknown (:original-error/type failure)))
+      (reconciliation/predict-inspection
+       (:replay physical) system-time valid-time source
+       (-> (select-keys failure [:error/type :rescan-required? :completed
+                                :completed-count :last-completed-cursor :in-flight])
+           (update :in-flight dissoc :acquisition-status)))
+      unsupported)))
