@@ -3691,3 +3691,20 @@ aggregate document budgets remain open. No production wiring,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates were not rerun. The operation namespace is 1007 lines;
 extract value interpretation or put-specific decoding next.
+
+* v2677 — extract independent Arrow value interpretation
+
+Move scalar and composite readers, recursive node and buffer accounting,
+and selected nullable-field interpretation into reference-arrow-values.
+Keep the SQL and put envelope entry points, profile identifiers, allowed
+schemas, bounds, and rejection reasons unchanged. The operation namespace
+falls from 1007 to 803 lines; the extracted namespace has 213 lines.
+
+Focused JVM: 29 tests / 1796 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. XTDB
+logged shutdown cancellation; the test process exited zero. This is a
+behavior-preserving extraction, not new assurance evidence. IID
+correspondence, actual nullable put documents, explicit valid-time bounds,
+multiple groups and aggregate document budgets remain open. No production
+wiring, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.
