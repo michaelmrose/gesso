@@ -4131,3 +4131,26 @@ Selected mixed nullable SQL/put profile v1. Aggregate recursive value
 budgets, reordered columns and independent transaction correspondence
 remain open. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2694 — reconstruct reordered positional SQL argument columns
+
+Qualify a separate mixed positional SQL/put profile accepting exactly a
+permutation of canonical ?_0 through ?_(n-1) column names. Interpret
+nodes, buffers and nested values in physical schema order; reorder only
+the qualified readers into logical argument order. Earlier profiles and
+reference-domain admission remain unchanged. No SQL arity claim.
+
+Focused JVM: 49 tests / 3282 assertions, zero failures or errors across
+reference Arrow operations, struct, put, mixed and source payload suites.
+Real retained nine-column mixed transactions reconstruct expected values,
+spans and IIDs before and after reopening, including nullable scalars,
+recursive vectors and both Z/UTC timestamps. Reject duplicate, out-of-range
+and noncanonical names without partial results. Exchanging two valid names
+changes logical argument order without moving physical buffers. Preserve
+prior positional fixture behavior. XTDB shutdown cancellation logged;
+process exited zero.
+
+Selected mixed positional SQL/put profile v1. Aggregate recursive value
+budgets and independent transaction correspondence integration remain open.
+No production wiring, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.

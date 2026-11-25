@@ -336,3 +336,77 @@
           (.awaitSourceBlocking (db/primary-db node) (peek rejected) (Duration/ofSeconds 15))
           (check-mixed-nullable! node id utc-id old-id rejected rows utc)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- argument-name-offset [^bytes data start name]
+  ;; Search only the embedded schema metadata, not argument values.
+  (let [b (doto (java.nio.ByteBuffer/wrap data) (.order java.nio.ByteOrder/LITTLE_ENDIAN))
+        end (+ start 8 (.getInt b (+ start 4)))
+        needle (vec (.getBytes ^String name java.nio.charset.StandardCharsets/UTF_8))
+        positions (filterv (fn [i] (= needle (mapv #(aget data %) (range i (+ i (count needle))))))
+                           (range (+ start 8) (- (inc end) (count needle))))]
+    (assert (= 1 (count positions)))
+    (first positions)))
+
+(defn- check-mixed-reordered! [node id old-id rows query]
+  (let [decode arrow/decode-mixed-positional-sql-put
+        data (#'fixture/retained-operation-bytes node id)
+        expected (into (mapv #(hash-map :kind :sql :query query :args %) rows) [foo sql-true bar])
+        r (decode data)
+        start (nth (#'fixture/buffer-starts data) 8)
+        name-start (argument-name-offset data start "?_8")]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :operations)))
+    (is (= arrow/mixed-positional-sql-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= expected (:operations r)))
+    (is (= [3 1 1 1] (:logged-operation-spans r)))
+    ;; This fixture is physically reordered on the pinned XTDB writer.
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-mixed-nullable-sql-put data))))
+    (doseq [bad [(#'fixture/edit-byte data (+ name-start 2) (int \0))
+                 (#'fixture/edit-byte data (+ name-start 2) (int \9))
+                 (#'fixture/edit-byte data name-start (int \x))]]
+      (let [r (decode bad)]
+        (is (= :unsupported (:status r)))
+        (is (= :unsupported-arrow-argument-column-names (:reason r)))
+        (is (not-any? #(contains? r %) [:groups :operations :logged-operation-spans :iid-correspondence]))))
+    ;; Exchange the names of two differently typed columns without moving
+    ;; any physical data. The positional values, not their types, move.
+    (let [other (argument-name-offset data start "?_1")
+          swapped (-> data (#'fixture/edit-byte (+ name-start 2) (int \1))
+                      (#'fixture/edit-byte (+ other 2) (int \8)))
+          swapped-rows (mapv #(assoc % 1 (nth % 8) 8 (nth % 1)) rows)]
+      (is (= (into (mapv #(hash-map :kind :sql :query query :args %) swapped-rows) [foo sql-true bar])
+             (:operations (decode swapped)))))
+    (let [data (#'fixture/retained-operation-bytes node old-id)
+          old (arrow/decode-mixed-nullable-sql-put data)]
+      (is (= :decoded (:status old)))
+      (is (= (dissoc old :profile) (dissoc (decode data) :profile))))))
+
+(deftest selected-mixed-reordered-columns-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-mixed-positional-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        p1 [:put-docs :foo {:xt/id 1 :name "a"}]
+        p2 [:put-docs :bar {:xt/id "x" :ok true}]
+        z (java.time.ZonedDateTime/parse "2026-01-01T00:00:00.000001Z")
+        utc (java.time.ZonedDateTime/parse "2026-01-01T00:00:00.000001Z[UTC]")
+        rows [[nil 7 false "café" :claim/open #uuid "00112233-4455-6677-8899-aabbccddeeff" z utc [[1 2]]]
+              [nil nil nil nil nil nil nil nil nil]
+              [nil -1 true "" :claim/done #uuid "ffffffff-ffff-ffff-ffff-ffffffffffff" z utc []]]
+        query (str nullable-query " AND ? IS NOT NULL")
+        retained-query (str retained-nullable-query " AND $9 IS NOT NULL")]
+    (try
+      (let [[id old-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitSourceBlocking database id (Duration/ofSeconds 15)) id))
+                    id (submit! (into (mapv #(into [query] %) rows) [p1 ["ASSERT TRUE"] p2]))
+                    old-id (submit! [p1 ["ASSERT ? IS NOT NULL" nil] p2])]
+                (check-mixed-reordered! node id old-id rows retained-query)
+                [id old-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) old-id (Duration/ofSeconds 15))
+          (check-mixed-reordered! node id old-id rows retained-query)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

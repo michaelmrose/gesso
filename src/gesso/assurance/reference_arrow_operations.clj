@@ -172,6 +172,15 @@
         [:nullable (scalar-kind! field name (conj allowed :nullable-field :nullable-list-fields))])
       (scalar-kind! field name allowed))))
 
+(defn- argument-column-order! [^Schema schema columns]
+  ;; Nodes and buffers follow physical schema order, not SQL positions.
+  ;; Admit only an exact permutation of the canonical positional names.
+  (let [names (mapv (fn [i] (.name ^Field (.fields schema i))) (range columns))
+        expected (mapv #(str "?_" %) (range columns))]
+    (require! (= (set names) (set expected)) :unsupported-arrow-argument-column-names)
+    (let [physical-index (zipmap names (range columns))]
+      (mapv physical-index expected))))
+
 (defn- scalar-rows! [bytes allowed]
   (if (nil? bytes)
     [[]]
@@ -185,7 +194,13 @@
         (require! (and (zero? (.remaining sb)) (= Endianness/Little (.endianness schema))
                        (zero? (.featuresLength schema)) (zero? (.customMetadataLength schema))
                        (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
-        (let [kinds (mapv #(argument-kind! (.fields schema %) (str "?_" %) allowed) (range columns))
+        (let [reordered? (contains? allowed :reordered-sql-columns)
+              order (if reordered? (argument-column-order! schema columns) (vec (range columns)))
+              allowed (disj allowed :reordered-sql-columns)
+              kinds (mapv (fn [i]
+                            (let [^Field field (.fields schema i)]
+                              (argument-kind! field (if reordered? (.name field) (str "?_" i)) allowed)))
+                          (range columns))
               starts (vec (reductions + 0 (map buffer-count kinds)))
               node-starts (vec (reductions + 0 (map node-count kinds)))]
           (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
@@ -202,7 +217,8 @@
                         (range columns))]
               (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
                         :unsupported-arrow-terminator)
-              (mapv (fn [row] (mapv #(% row) readers)) (range n)))))))))
+              (let [positional-readers (mapv readers order)]
+                (mapv (fn [row] (mapv #(% row) positional-readers)) (range n))))))))))
 
 (defn- fixed-rows! [bytes allow-boolean?]
   (scalar-rows! bytes (if allow-boolean? #{:integer :boolean} #{:integer})))
@@ -999,3 +1015,17 @@
    unqualified union legs reject. Diagnostic only; no admission claim."
   [bytes]
   (decode-mixed-sql-put* bytes mixed-nullable-sql-put-profile nullable-sql-rows!))
+
+(def mixed-positional-sql-put-profile :xtdb-2.2.0-beta1/selected-mixed-positional-sql-put-arrow-v1)
+
+(defn- positional-sql-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :nullable-sql-columns :reordered-sql-columns}))
+
+(defn decode-mixed-positional-sql-put
+  "Interpret selected mixed SQL/put streams whose argument columns form
+   an exact permutation of canonical positional names. Read nodes and
+   buffers in physical schema order, then return arguments in SQL order.
+   Retain nullable and recursive restrictions. Diagnostic only."
+  [bytes]
+  (decode-mixed-sql-put* bytes mixed-positional-sql-put-profile positional-sql-rows!))
