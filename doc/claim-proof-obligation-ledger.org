@@ -866,3 +866,37 @@ or provider refinement theorem follows. Production and the ordinary
 regression gate are unchanged. The earlier source-log pilot, full Claim,
 Ansatz, Chromium and full project suites were not rerun. No CLM-R2 premise
 is retired.
+
+* v2576 — bounded embedded XTDB source-log provider interface
+
+Extract the qualified read-only decoder into gesso.assurance.xtdb-source-log.
+The opt-in pilot now calls the production namespace and retains its own
+restricted expected-envelope construction. The provider returns either a
+complete decoded observation with the versioned provider profile, an
+unavailable result, or an unsupported result with a typed reason; it does
+not return partial operations. Missing records remain unavailable and
+unsupported identities, value types and operation legs are refused.
+Provider exceptions return a sanitized unavailable result; interruption
+is propagated with the interrupt signal restored.
+
+Bound each serialized Arrow message to 16 MiB, each decoded batch to
+16384 rows, aggregate charged rows and values to 262144 units, and
+recursive value traversal to depth 64. Callers may lower these ceilings
+but may not raise them. Limit exact-record acquisition to two observed
+records to detect ambiguity. These limits apply after provider record
+acquisition and do not sandbox Arrow parsing, bound provider I/O latency
+or guarantee peak memory use. The decoded observation contains sensitive
+transaction values and is not intended for public reporting.
+
+The initial regression revealed that delete-docs is serialized as SQL
+DELETE, not a distinct operation leg. Correct the fixture to check its
+actual SQL representation and exercise unsupported values using a float
+in a document. The complete pilot passed 5 tests / 83 assertions, zero
+failures or errors. Existing retained-envelope, batching and local
+node-restart qualification continues through the extracted provider.
+The provider remains opt-in and embedded-primary-only; the reported
+profile names the tested version, not an independently verified runtime
+version attestation. No production history classification, checkpoint,
+writer authority or certification semantics change. Independent JVM,
+full Claim, Ansatz, Chromium and full project suites were not rerun.
+No CLM-R2 premise is retired.

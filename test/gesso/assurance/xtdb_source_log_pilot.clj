@@ -5,6 +5,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is run-tests]]
+            [gesso.assurance.xtdb-source-log :as source-log]
             [gesso.model.mapped-frame :as frame]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-projection-test]
@@ -12,51 +13,18 @@
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
   (:import (java.time Duration Instant ZoneId ZonedDateTime)
-           (java.util Arrays HexFormat)
-           (org.apache.arrow.memory BufferAllocator)
-           (xtdb TaggedValue)
-           (xtdb.api.log Log Log$Record SourceMessage$Tx)
-           (xtdb.api.query IKeyFn$KeyFn)
-           (xtdb.arrow Relation VectorReader)
+           (java.util HexFormat)
            (xtdb.database Database)
            (xtdb.util Iid MsgIdUtil)))
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported source log observation." {:reason reason})))
 
-(defn- one-batch! [^BufferAllocator al ^bytes data f]
-  (with-open [loader (Relation/streamLoader al data)
-              rel (Relation. al (.getSchema loader))]
-    (when-not (.loadNextPage loader rel) (reject! :missing-arrow-batch))
-    (let [result (f rel)]
-      (when (.loadNextPage loader rel) (reject! :multiple-arrow-batches))
-      result)))
-
 (defn- decode-value! [v]
   (cond
     (or (string? v) (keyword? v) (boolean? v) (integer? v) (uuid? v)) v
     (instance? java.util.List v) (mapv decode-value! v)
     :else (reject! :unsupported-sql-argument)))
-
-(defn- sql-argument-rows! [al bytes]
-  (if (nil? bytes)
-    [[]]
-    (do
-      (when-not (bytes? bytes) (reject! :unsupported-argument-bytes))
-      (one-batch! al bytes
-                  (fn [^Relation rel]
-                    (let [columns (mapv (fn [i] (str "?_" i)) (range (count (.getVectors rel))))
-                          n (.getRowCount rel)]
-                      (when-not (and (pos? n)
-                                     (= (set columns) (set (map #(.getName ^VectorReader %) (.getVectors rel)))))
-                        (reject! :unsupported-argument-relation))
-                      ;; PGWire coalesces adjacent equal statements, including
-                      ;; parameterless statements. Preserve every row in order.
-                      (mapv (fn [i]
-                              (mapv (fn [column]
-                                      (decode-value! (.getObject (.vectorFor rel column) i
-                                                                 IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))) columns))
-                            (range n))))))))
 
 (defn- document-value! [v]
   (cond
@@ -72,73 +40,7 @@
 (defn- iid-hex [id]
   (.formatHex (HexFormat/of) (Iid/getAsIid id)))
 
-(defn- put-documents! [payload]
-  ;; The logged table is a tagged union leg, not the caller's table alias.
-  ;; Current API writes valid-time options into individual document rows;
-  ;; retain outer bounds too if present instead of dropping them.
-  (let [{:keys [iids documents]} payload]
-    (when-not (and (every? #{:iids :documents :xt/valid-from :xt/valid-to} (keys payload))
-                   (instance? TaggedValue documents) (instance? java.util.List iids))
-      (reject! :unsupported-put-docs-payload))
-    (let [table (.getTag ^TaggedValue documents)
-          raw (.getValue ^TaggedValue documents)]
-      (when-not (and (qualified-keyword? table) (instance? java.util.List raw)
-                     (seq raw) (= (count raw) (count iids)))
-        (reject! :unsupported-document-relation))
-      (let [docs (mapv document-value! raw)]
-        (doseq [[doc iid] (map vector docs iids)]
-          (when-not (and (map? doc) (contains? doc :xt/id)
-                         (bytes? iid) (= 16 (alength ^bytes iid))
-                         (Arrays/equals ^bytes iid ^bytes (Iid/getAsIid (:xt/id doc))))
-            (reject! :document-iid-mismatch)))
-        {:kind :put-docs :table table :documents docs
-         :iids (mapv #(.formatHex (HexFormat/of) ^bytes %) iids)
-         :bounds (document-value! (select-keys payload [:xt/valid-from :xt/valid-to]))}))))
-
-(defn observe-source-message!
-  "Read one retained source message at an exact epoch-qualified tx id.
-   Recover SQL text, ordered typed argument rows, and supported decoded
-   document puts. Reject unsupported legs. This does NOT attest commit,
-   writer identity, execution, or byte-identical caller input."
-  [node tx-id]
-  (let [^Database database (db/primary-db node)
-        ^Log log (.getSourceLog database)]
-    (if-not (and (integer? tx-id) (<= 0 tx-id) (< tx-id Long/MAX_VALUE)
-                 (= (.getEpoch log) (MsgIdUtil/msgIdToEpoch tx-id)
-                    (MsgIdUtil/msgIdToEpoch (inc tx-id))))
-      {:status :unavailable :reason :unsupported-log-identity}
-      (let [records (vec (iterator-seq (.iterator (.readRecords log tx-id (inc tx-id)))))]
-        (cond
-          (empty? records) {:status :unavailable :reason :source-message-not-retained}
-          (not= 1 (count records)) (reject! :ambiguous-source-message)
-          :else
-          (let [^Log$Record record (first records)
-                message (.getMessage record)]
-            (when-not (= tx-id (.getMsgId record)) (reject! :source-message-identity-mismatch))
-            (if-not (instance? SourceMessage$Tx message)
-              {:status :unavailable :reason :not-a-transaction-message}
-              (let [al (.getAllocator database)
-                    groups (one-batch! al (.getTxOps ^SourceMessage$Tx message)
-                                    (fn [^Relation rel]
-                                      (when-not (= ["tx-ops"] (mapv #(.getName ^VectorReader %) (.getVectors rel)))
-                                        (reject! :unexpected-transaction-relation))
-                                      (mapv (fn [row]
-                                              (let [^TaggedValue op (:tx-ops row)]
-                                                (when-not (instance? TaggedValue op) (reject! :unexpected-operation))
-                                                (case (.getTag op)
-                                                  :sql (let [{:keys [query args] :as payload} (.getValue op)]
-                                                         (when-not (and (string? query)
-                                                                        (every? #{:query :args} (keys payload)))
-                                                           (reject! :invalid-sql))
-                                                         (mapv (fn [row] {:kind :sql :query query :args row})
-                                                               (sql-argument-rows! al args)))
-                                                  :put-docs [(put-documents! (.getValue op))]
-                                                  (reject! :unsupported-operation-kind))))
-                                            (.toMaps rel IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))))]
-                {:status :source-message-observed :tx-id tx-id :operations (into [] cat groups)
-                 :logged-operation-spans (mapv count groups)
-                 :scope :retained-primary-source-log-decoded-sql-and-document-puts
-                 :authority :none :certificate :not-issued}))))))))
+(def observe-source-message! source-log/observe-source-message!)
 
 (defn- expected-log-sql! [[sql & args]]
   ;; Only the generated mapped prefix fragment: all question marks are
@@ -350,6 +252,37 @@
       (finally
         (doseq [entry (reverse (file-seq (.toFile root)))]
           (io/delete-file entry true))))))
+
+(deftest source-log-observation-refuses-unsupported-and-bounded-inputs
+  (with-open [node (xtn/start-node {})]
+    (let [tx-id (:tx-id (xt/execute-tx node [["ASSERT ? = ?" 1 1]
+                                            ["ASSERT ? = ?" 2 2]
+                                            [:put-docs :probe {:xt/id "a" :nested {:items [1 2]}}]]))
+          delete-id (:tx-id (xt/execute-tx node [[:delete-docs :probe "a"]]))
+          unsupported-id (:tx-id (xt/execute-tx node [[:put-docs :probe {:xt/id "float" :value 2.0}]]))
+          observe #(source-log/observe-source-message! node tx-id %)]
+      (is (= :xtdb-2.2.0-beta1/decoded-source-log-v1 (:provider-profile (observe {}))))
+      (doseq [[limits reason] [[{:max-message-bytes 1} :message-byte-limit]
+                               [{:max-rows 1} :arrow-row-limit]
+                               [{:max-values 1} :decoded-value-limit]
+                               [{:max-depth 1} :decoded-depth-limit]
+                               [{:max-rows 0} :invalid-observation-limits]
+                               [{:max-message-bytes Long/MAX_VALUE} :invalid-observation-limits]
+                               [{:other 1} :invalid-observation-limits]]]
+        (is (= {:status :unsupported :reason reason} (observe limits))))
+      ;; The public API lowers delete-docs into a SQL operation. Observe
+      ;; that actual log representation, not the caller operation family.
+      (is (= [{:kind :sql :query "DELETE FROM \"public\".\"probe\"  WHERE _id = $1" :args ["a"]}]
+             (:operations (source-log/observe-source-message! node delete-id))))
+      (is (= {:status :unsupported :reason :unsupported-sql-argument}
+             (source-log/observe-source-message! node unsupported-id)))
+      (is (= {:status :unsupported :reason :embedded-primary-log-required}
+             (source-log/observe-source-message! nil tx-id)))
+      (is (= {:status :unsupported :reason :unsupported-log-identity}
+             (source-log/observe-source-message! node -1)))
+      (is (= {:status :unavailable :reason :source-message-not-retained}
+             (source-log/observe-source-message! node (+ tx-id 1000000))))
+      (is (= :source-message-observed (:status (observe {})))))))
 
 (defn -main [& args]
   (let [{:keys [fail error]}
