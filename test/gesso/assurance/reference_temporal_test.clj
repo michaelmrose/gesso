@@ -841,3 +841,73 @@
                           prefix)))
                     [acquisition-seed] acquisition-cases)]
         (is (= 6 (count prefix)))))))
+
+(def ^:private reclamation-seed
+  [acquisition-seed {:system-time (worker-time 1) :ops acquire-operations}])
+(defn- reclaim-claim [id now deadline]
+  (assoc (pending-claim id now deadline) :lease-id intent-id :worker-id "worker-b"))
+(def ^:private reclamation-cases
+  [[1 2 (reclaim-claim third-intent-id 1 180) :unavailable :missing]
+   [1 2 (reclaim-claim other-intent-id 1 180) :unavailable :not-leased]
+   [1 2 (assoc (reclaim-claim intent-id 1 180) :source-id "wrong") :unavailable :source-mismatch]
+   [1 2 (assoc (reclaim-claim intent-id 1 180) :lease-id other-intent-id) :rejected :reused-lease-id]
+   [1 180 (reclaim-claim intent-id 180 360) :contended nil]
+   [180 181 (reclaim-claim intent-id 180 181) :contended nil]
+   [181 182 (reclaim-claim intent-id 183 483) :contended nil]
+   [182 183 (reclaim-claim intent-id 183 483) :reclaimed nil]
+   [1 184 (reclaim-claim intent-id 184 484) :contended nil]
+   [183 185 (assoc (reclaim-claim intent-id 185 485) :lease-id third-intent-id) :contended nil]
+   [185 483 (assoc (reclaim-claim intent-id 483 600) :lease-id third-intent-id) :reclaimed nil]])
+
+(deftest independently-composed-expired-reclamation
+  (let [claim (reclaim-claim intent-id 180 360)
+        predict #(temporal/predict-expired-reclamation reclamation-seed (worker-time 1) (worker-time 1) %1 %2)
+        exact (predict first-deadline claim)]
+    (is (= :predicted (:status exact)))
+    (is (= :reclaimed (:outcome exact)))
+    (is (= :none (:authority exact)))
+    (is (= :not-issued (:certificate exact)))
+    (is (= (utc-time first-deadline) (get-in exact [:ops 0 3])))
+    (is (= :contended (:outcome (predict (.minusNanos first-deadline 1000) claim))))
+    (is (= :reused-lease-id (:reason (predict first-deadline (assoc claim :lease-id other-intent-id)))))
+    (is (= :unsupported (:status (predict first-deadline (assoc claim :lease-id nil)))))
+    (let [malformed (conj reclamation-seed {:system-time (worker-time 2)
+                                           :ops [[:put-docs outbox/intent-table
+                                                  (dissoc first-lease :gesso.live.outbox/lease-id)]]})
+          r (temporal/predict-expired-reclamation malformed (worker-time 2) (worker-time 2)
+                                                (worker-time 181) claim)]
+      (is (= :unsupported (:status r)))
+      (is (not (contains? r :ops))))))
+
+(deftest composed-expired-reclamation-matches-worker-and-xtdb
+  (with-open [node (xtn/start-node {})]
+    (doseq [tx reclamation-seed]
+      (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+        (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+        (is (= [{:committed true}] (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+    (let [execute! live.xtdb/execute-tx!
+          prefix
+          (reduce (fn [prefix [observed tx-time claim outcome reason]]
+                    (let [s (worker-time observed) time (worker-time tx-time)
+                          predicted (temporal/predict-expired-reclamation prefix s s time claim)
+                          captured (atom [])
+                          actual (with-redefs [frontier/q-from! (fn [_ [_ id]]
+                                                                (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? WHERE _id = ?" s s id]))
+                                               live.xtdb/execute-tx! (fn [connectable ops]
+                                                                       (swap! captured conj ops)
+                                                                       (execute! connectable ops {:system-time time}))]
+                                   (try (acquisition/reclaim-expired! node claim)
+                                        (catch clojure.lang.ExceptionInfo e
+                                          (if (= :gesso.live.outbox/invalid-acquisition (:error/type (ex-data e)))
+                                            {:status :rejected :reason (:reason (ex-data e))}
+                                            (throw e)))))]
+                      (is (= :predicted (:status predicted)))
+                      (is (= outcome (:outcome predicted) (:status actual)))
+                      (is (= reason (:reason predicted) (:reason actual)))
+                      (is (= (if (seq (:ops predicted)) [(:ops predicted)] []) @captured))
+                      (is (= (frequencies (coalesce-valid (:rectangles (:replay predicted))))
+                             (frequencies (coalesce-valid (provider-rectangles node outbox/intent-table)))))
+                      (if (seq (:ops predicted))
+                        (conj prefix {:system-time time :ops (:ops predicted)}) prefix)))
+                  reclamation-seed reclamation-cases)]
+      (is (= 9 (count prefix))))))

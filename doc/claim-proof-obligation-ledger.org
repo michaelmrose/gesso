@@ -2312,3 +2312,32 @@ external delivery, arbitrary writer closure or universal provider
 refinement. No production assurance status changes and no CLM-R2 premise
 is retired. Full project, physical Claim, Chromium and independent proof
 gates were not rerun.
+
+* v2626 — compose selected expired worker reclamation
+
+Extend the independent acquisition predictor to distinguish pending
+acquisition from expired lease reclamation. Reconstruct the pinned leased
+row, check selected metadata and source eligibility, reject reuse of its
+observed lease token before submission, and derive the original version
+and deadline fence plus the two new-deadline assertions and replacement.
+Replay at supplied provider system time; distinguish unavailable,
+rejected, contended and reclaimed outcomes. Worker profile v2;
+observation v1, temporal v10, current-state v13 and history v19 unchanged.
+
+Combined reference JVM: 45 tests / 5222 assertions, zero failures or
+errors. Eleven production reclamation calls compare predicted outcomes,
+exact operation sequences and complete outbox history rectangles against
+embedded XTDB. Seven calls submit real transactions through the production
+adapter; four submit nothing. Pure regressions include exact expiry and
+one microsecond before expiry, reused tokens and unsupported metadata.
+The differential history covers stale observations, an unexpired lease,
+expired and excessive new deadlines, source mismatch and repeated recovery.
+Pinned reads and explicit transaction clocks remain harness inputs; next
+reference prefixes use predicted operations, not provider observations.
+
+This establishes selected finite composed reclamation correspondence,
+not global lease-token uniqueness, live frontier acquisition, external
+side-effect fencing, complete worker lifecycle or universal provider
+refinement. No production assurance status changes and no CLM-R2 premise
+is retired. Full project, physical Claim, Chromium and independent proof
+gates were not rerun.
