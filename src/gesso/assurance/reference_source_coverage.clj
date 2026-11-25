@@ -329,21 +329,36 @@
        :processed (.getLatestProcessedMsgId database)
        :ingestion-failed? (some? (.getIngestionError database))})))
 
-(defn observe-local-processed-coverage!
-  "Require stable submitted/processed byte-offset coordinates around local
-   framing and decoded coverage. A nonnegative processed coordinate must
-   identify a framed record, not an interior byte or the end of file.
-   No wait, atomic snapshot, retention or independent watcher semantics."
-  [node]
+(defn- observe-local-processed* [node observe!]
   (let [fail #(assoc (local-result %1 %2) :processed-profile local-processed-profile)]
     (if-not (db/<-node node)
       (fail :unsupported :embedded-primary-log-required)
       (try
         (let [before (read-local-frontier! node)
-              coverage (observe-local-coverage! node)
+              coverage (observe! node)
               after (read-local-frontier! node)]
           (frontier-correspondence* local-profile local-processed-profile before coverage after))
         (catch InterruptedException e
           (.interrupt (Thread/currentThread))
           (throw e))
         (catch Exception _ (fail :unavailable :source-frontier-read-failed))))))
+
+(defn observe-local-processed-coverage!
+  "Require stable submitted/processed byte-offset coordinates around local
+   framing and decoded coverage. A nonnegative processed coordinate must
+   identify a framed record, not an interior byte or the end of file.
+   No wait, atomic snapshot, retention or independent watcher semantics."
+  [node]
+  (observe-local-processed* node observe-local-coverage!))
+
+(def local-processed-payload-profile :xtdb-2.2.0-beta1/selected-local-processed-payload-v1)
+
+(defn observe-local-processed-payload-bound-coverage!
+  "Internal sample of independently compared selected payloads bracketed
+   by stable, fully processed local source frontiers. No wait or atomic
+   snapshot; fingerprint is an internal equality sample, not a receipt."
+  [node]
+  (let [sample (observe-local-processed* node observe-local-payload-bound-coverage!)]
+    (assoc sample :processed-payload-profile local-processed-payload-profile
+           :payload-profile local-payload-profile :decoder-profile payload/profile
+           :payload-binding-profile payload-binding-profile)))

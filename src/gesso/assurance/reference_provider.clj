@@ -256,15 +256,17 @@
                                               :processed-profile coverage/local-processed-profile))]
     (cond-> r (= :matched (:source-coverage r)) (assoc :processed-frontier :matched))))
 
+(defn- valid-payload-binding? [sample]
+  (and (= coverage/local-profile (:profile sample))
+       (= coverage/local-payload-profile (:payload-profile sample))
+       (= coverage/payload-binding-profile (:payload-binding-profile sample))
+       (= :matched (:payload-correspondence sample))
+       (string? (:payload-fingerprint sample))
+       (re-matches #"[0-9a-f]{64}" (:payload-fingerprint sample))))
+
 (defn- observe-bound-payload! [node]
   (let [sample (coverage/observe-local-payload-bound-coverage! node)]
-    (if (and (= :observed (:status sample))
-             (not (and (= coverage/local-profile (:profile sample))
-                       (= coverage/local-payload-profile (:payload-profile sample))
-                       (= coverage/payload-binding-profile (:payload-binding-profile sample))
-                       (= :matched (:payload-correspondence sample))
-                       (string? (:payload-fingerprint sample))
-                       (re-matches #"[0-9a-f]{64}" (:payload-fingerprint sample)))))
+    (if (and (= :observed (:status sample)) (not (valid-payload-binding? sample)))
       {:status :unavailable :reason :invalid-source-payload-binding}
       sample)))
 
@@ -280,3 +282,32 @@
                                               :payload-profile coverage/local-payload-profile
                                               :payload-binding-profile coverage/payload-binding-profile))]
     (cond-> r (= :matched (:source-coverage r)) (assoc :payload-correspondence :matched))))
+
+(defn- observe-processed-bound-payload! [node]
+  (let [sample (coverage/observe-local-processed-payload-bound-coverage! node)]
+    (if (and (= :observed (:status sample))
+             (not (and (valid-payload-binding? sample)
+                       (= coverage/local-processed-profile (:processed-profile sample))
+                       (= coverage/local-processed-payload-profile (:processed-payload-profile sample))
+                       (integer? (:processed-message-id sample))
+                       (<= -1 (:processed-message-id sample))
+                       (vector? (:record-offsets sample))
+                       (= (:processed-message-id sample) (:last-message-id sample)
+                          (or (peek (:record-offsets sample)) -1)))))
+      {:status :unavailable :reason :invalid-processed-source-payload-binding}
+      sample)))
+
+(defn compare-local-processed-payload-source-execution!
+  "Require selected independent payload correspondence, stable content and
+   fully processed source frontiers around source-bound execution. No raw
+   payload or fingerprint in the report; no wait, atomic acquisition,
+   authenticated provenance, independent Arrow semantics or refinement."
+  [node expectations tables]
+  (let [r (compare-source-coverage* node expectations tables observe-processed-bound-payload!
+                                    #(assoc % :source-coverage-profile coverage/local-profile
+                                              :processed-profile coverage/local-processed-profile
+                                              :payload-profile coverage/local-payload-profile
+                                              :payload-binding-profile coverage/payload-binding-profile
+                                              :processed-payload-profile coverage/local-processed-payload-profile))]
+    (cond-> r (= :matched (:source-coverage r))
+      (assoc :payload-correspondence :matched :processed-frontier :matched))))

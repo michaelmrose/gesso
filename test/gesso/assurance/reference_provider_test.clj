@@ -322,6 +322,61 @@
             (is (not (contains? r :payload-fingerprint)))))))
     (:payload-fingerprint sample)))
 
+(defn- assert-processed-payload-comparison! [node bound]
+  (let [observe! coverage/observe-local-processed-payload-bound-coverage!
+        compare! reference/compare-local-processed-payload-source-execution!
+        sample (observe! node)
+        end (:last-message-id sample)
+        frontier {:submitted end :processed end :ingestion-failed? false}
+        r (compare! node bound tables)]
+    (is (= :observed (:status sample)))
+    (is (= end (:processed-message-id sample)))
+    (is (= (coverage/observe-local-payload-bound-coverage! node)
+           (dissoc sample :processed-profile :processed-payload-profile :processed-message-id)))
+    (is (= :matched (:status r)) (pr-str r))
+    (is (= :matched (:source-coverage r) (:payload-correspondence r) (:processed-frontier r)))
+    (is (= coverage/local-processed-payload-profile (:processed-payload-profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :not-established (:provider-refinement r)))
+    (is (not (contains? r :payload-fingerprint)))
+    (doseq [[a b reason]
+            [[(assoc frontier :processed (:tx-id (peek bound)))
+              (assoc frontier :processed (:tx-id (peek bound))) :source-processing-incomplete]
+             [(assoc frontier :processed (dec end)) (assoc frontier :processed (dec end))
+              :source-processed-offset-not-framed]
+             [frontier (assoc frontier :ingestion-failed? true) :source-ingestion-failed]
+             [frontier (update frontier :submitted inc) :source-frontier-changed-during-observation]]]
+      (let [samples (atom [a b])]
+        (with-redefs-fn {#'coverage/read-local-frontier! (fn [_] (let [v (first @samples)] (swap! samples subvec 1) v))
+                          #'reference/compare-source-bound-execution! (fn [& _] (throw (AssertionError. "invalid frontier compared")))}
+          (fn []
+            (let [r (compare! node bound tables)]
+              (is (= :unavailable (:status r)))
+              (is (= reason (:reason r)))
+              (is (not (contains? r :processed-frontier)))
+              (is (not (contains? r :payload-correspondence))))))))
+    (doseq [[a b reason]
+            [[(dissoc sample :processed-message-id) sample :invalid-processed-source-payload-binding]
+             [(dissoc sample :payload-fingerprint) sample :invalid-processed-source-payload-binding]
+             [sample (assoc sample :processed-message-id (dec end)) :invalid-processed-source-payload-binding]
+             [sample (dissoc sample :processed-payload-profile) :invalid-processed-source-payload-binding]
+             [sample (update sample :payload-fingerprint #(str (if (= \0 (first %)) "1" "0") (subs % 1)))
+              :source-log-changed-during-comparison]
+             [sample {:status :unsupported :reason :unsupported-source-payload} :unsupported-source-payload]]]
+      (let [samples (atom [a b])]
+        (with-redefs [coverage/observe-local-processed-payload-bound-coverage!
+                      (fn [_] (let [v (first @samples)] (swap! samples subvec 1) v))
+                      reference/compare-source-bound-execution! (fn [& _] {:status :matched})]
+          (let [r (compare! node bound tables)]
+            (is (= (if (= reason :unsupported-source-payload) :unsupported :unavailable) (:status r)))
+            (is (= reason (:reason r)))
+            (is (not (contains? r :source-coverage)))
+            (is (not (contains? r :processed-frontier)))
+            (is (not (contains? r :payload-correspondence)))
+            (is (not (contains? r :payload-fingerprint)))))))
+    (:payload-fingerprint sample)))
+
 (deftest local-source-coverage-across-node-reopen
   (let [root (Files/createTempDirectory "gesso-reference-local-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}]
@@ -370,12 +425,14 @@
                   (is (= :not-established (:provider-refinement r)))
                   (is (= :none (:authority r)))
                   (is (= :not-issued (:certificate r))))
+                (assert-processed-payload-comparison! node bound)
                 [bound observed (assert-bound-payload-comparison! node bound)]))]
         (with-open [node (xtn/start-node config)]
           (let [database (db/primary-db node)]
             (.awaitSourceBlocking database (:last-message-id initial) (Duration/ofSeconds 10))
             (is (= initial (coverage/observe-local-coverage! node)))
             (is (= initial-fingerprint (assert-bound-payload-comparison! node bound)))
+            (is (= initial-fingerprint (assert-processed-payload-comparison! node bound)))
             (is (= :matched (:status (reference/compare-local-source-covered-execution! node bound tables))))
             (let [processed (coverage/observe-local-processed-coverage! node)
                   end (:last-message-id initial)
@@ -416,7 +473,12 @@
                 (let [r (reference/compare-local-processed-source-execution! node bound tables)]
                   (is (= :unavailable (:status r)))
                   (is (= :source-log-changed-during-comparison (:reason r)))
-                  (is (not (contains? r :processed-frontier)))))))))
+                  (is (not (contains? r :processed-frontier))))
+                (let [r (reference/compare-local-processed-payload-source-execution! node bound tables)]
+                  (is (= :unavailable (:status r)))
+                  (is (= :source-log-changed-during-comparison (:reason r)))
+                  (is (not (contains? r :processed-frontier)))
+                  (is (not (contains? r :payload-correspondence)))))))))
       (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
 
 (deftest local-source-framing-rejects-incomplete-and-contradictory-records
@@ -454,5 +516,7 @@
 
 (deftest local-processed-coverage-requires-local-backend
   (is (= :embedded-primary-log-required (:reason (coverage/observe-local-processed-coverage! nil))))
+  (is (= :embedded-primary-log-required (:reason (coverage/observe-local-processed-payload-bound-coverage! nil))))
   (with-open [node (xtn/start-node {})]
-    (is (= :unsupported-source-log (:reason (coverage/observe-local-processed-coverage! node))))))
+    (is (= :unsupported-source-log (:reason (coverage/observe-local-processed-coverage! node))))
+    (is (= :unsupported-source-log (:reason (coverage/observe-local-processed-payload-bound-coverage! node))))))

@@ -3049,3 +3049,26 @@ independent Arrow operation semantics or universal provider refinement.
 No processed-frontier requirement in this new comparison profile, no
 production wiring, certificate or CLM-R2 premise retirement. Full
 project, physical Claim, Chromium and independent proof gates not rerun.
+
+* v2651 — compose processed frontiers with retained payload binding
+
+Bracket independently compared and content-bound local source coverage
+with submitted and processed frontier observations. Require the final
+framed record to have been processed, including a maintenance suffix.
+Compose two such samples around the source-bound execution comparison;
+reject invalid bindings and changed samples. Preserve the existing
+coverage, processed and payload-only APIs. Return no raw payload or
+fingerprint in the combined execution report.
+
+Focused JVM: 13 tests / 643 assertions, zero failures or errors across
+reference provider and source-payload suites. Actual persistent history
+matches before and after reopening. Controlled observations reject
+lagging and interior processed offsets, ingestion failure, changing
+frontiers, malformed bindings and content changes. A real maintenance
+append during comparison invalidates the combined observation.
+
+This is selected bounded diagnostic composition, not independent watcher
+semantics, atomic acquisition, authenticated provenance, independent Arrow
+operation interpretation or universal provider refinement. No production
+wiring, certificate or CLM-R2 premise retirement. Full project, physical
+Claim, Chromium and independent proof gates were not rerun.
