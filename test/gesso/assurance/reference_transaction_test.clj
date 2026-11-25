@@ -318,6 +318,50 @@
       (is (not (contains? r :state)))
       (is (not (contains? r :committed?))))))
 
+(def ^:private recursive-binding (journal-binding "recursive" "helper-recursive" :request/claim))
+(def ^:private recursive-row
+  (resolution/command-record recursive-binding
+                             {:status :claimed :details {:empty {} :owner uuid-a
+                                                        :nested {:value "a"}}} "t1"))
+(def ^:private recursive-guards
+  (frame/formatted-prestate-assertions!
+   {:target-map {:outcome [:journal-slot "helper-recursive" :request/claim]}}
+   {} [recursive-row]))
+(def ^:private recursive-value-guard (last recursive-guards))
+(def ^:private recursive-cases
+  (let [out :gesso.command/outcome
+        restore (journal-put recursive-row)
+        changed (fn [path value] (journal-put (assoc-in recursive-row (into [out] path) value)))]
+    [[false recursive-guards]
+     [true (into [restore] recursive-guards)]
+     [false [(changed [:details :nested :value] "b") recursive-value-guard put-other]]
+     [false [(changed [:details :owner] uuid-b) recursive-value-guard]]
+     [false [(changed [:status] "claimed") recursive-value-guard]]
+     [false [(changed [:details :empty] {:extra true}) recursive-value-guard]]
+     [false [(changed [:details :nested] {:value "a" :extra true}) recursive-value-guard]]
+     [false [(changed [:details :nested] {:other "a"}) recursive-value-guard]]
+     [true recursive-guards]
+     [true [restore recursive-value-guard]]]))
+
+(deftest independent-recursive-journal-map-guards
+  (let [final (reduce (fn [state [expected ops]]
+                        (let [r (reference/execute state ops)]
+                          (is (= :predicted (:status r)) (pr-str r))
+                          (is (= expected (:committed? r)) (pr-str ops))
+                          (when-not expected (is (= state (:state r))))
+                          (:state r))) initial recursive-cases)]
+    (is (= recursive-row (get-in final [:gesso_commands "recursive"]))))
+  (doseq [guard [(pop recursive-value-guard)
+                 (conj recursive-value-guard :extra)
+                 (assoc recursive-value-guard 1 nil)
+                 (assoc recursive-value-guard 2 "request/claim")
+                 (update recursive-value-guard 0 str/replace " LIKE ?" " = ?")
+                 (update recursive-value-guard 0 str/replace "STR(ARRAY[?])" "STR(?)")]]
+    (let [r (reference/execute initial [["ASSERT FALSE"] guard])]
+      (is (= :unsupported (:status r)))
+      (is (not (contains? r :state)))
+      (is (not (contains? r :committed?))))))
+
 (deftest unsupported-reference-input-does-not-predict
   (doseq [ops [[] [(table-count -1)] [(table-count 16385)]
                [["ASSERT ? = (SELECT COUNT(*) FROM gesso_refcard)" nil]]
@@ -408,7 +452,8 @@
                           (map second cardinality-cases)
                           (map second mapped-cases)
                           (map second nested-cases)
-                          (map second slot-cases)))]
+                          (map second slot-cases)
+                          (map second recursive-cases)))]
         (when-let [ops (first cases)]
           (let [predicted (reference/execute state ops)
                 id (:tx-id (xt/submit-tx node ops))

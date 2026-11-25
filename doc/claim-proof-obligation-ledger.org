@@ -1939,3 +1939,32 @@ recursive journal guard semantics, general SQL equality or universal
 provider refinement. No production assurance status changes and no
 CLM-R2 premise is retired. Full project, physical Claim, Chromium and
 independent proof gates were not rerun.
+
+* v2612 — model recursive journal map guards
+
+Recognize the selected occupied journal COUNT assertion with quoted
+recursive map paths, visible member counts, the empty-map shape check,
+and exact scalar comparison triples (including UUID leaves). Decode
+canonical column paths independently of XTDB and the production
+formatter. Evaluate the conjunction on tentative slot rows, not on
+provider observations. Reject altered operand bindings, unsupported
+paths, vector predicates and unsupported reached operand domains.
+Accept bounded JVM Integer as well as Long count parameters because
+the real formatter supplies collection counts as Integer values.
+Reference profile v8; history v19 unchanged.
+
+Final reference JVM namespace: 10 tests / 1421 assertions, zero failures
+or errors. Ten additional differential transactions use generated full
+occupied-slot guards and recursive journal records, including absent
+slots, nested replacement, UUID mismatch, keyword/string distinction,
+empty-map changes, extra and missing members, and atomic rollback.
+Pure regressions also reject altered guard shapes before execution.
+The initial run exposed the count-parameter representation mismatch;
+the corrected final run passed. No provider readback feeds reference
+state.
+
+This is finite empirical correspondence for selected recursive maps,
+not vector-element predicate semantics, general SQL, temporal execution
+or a universal provider refinement theorem. No production assurance
+status changes and no CLM-R2 premise is retired. Full project, physical
+Claim, Chromium and independent proof gates were not rerun.

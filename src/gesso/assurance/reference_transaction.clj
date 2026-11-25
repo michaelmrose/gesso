@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v7)
+(def profile :selected-current-state-transaction-v8)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -126,7 +126,7 @@
         id-args (if (and bound? (seq args)) (subvec args 1) args)
         id (first id-args)
         table (keyword (str/replace table "\"" ""))]
-    (when-not (and (table? table) (instance? Long expected)
+    (when-not (and (table? table) (or (instance? Long expected) (instance? Integer expected))
                    (if (= :assert-field-count kind)
                      (<= 1 expected 8192)
                      (<= 0 expected 16384))
@@ -233,6 +233,93 @@
               (vals (get working :gesso_commands)))]
     (= expected (count (filter true? matches)))))
 
+;; Selected occupied journal guard: recursive map counts and scalar leaves.
+;; Vector element predicates are not part of this fragment yet.
+(def ^:private journal-value-pattern
+  #"ASSERT 1 = \(SELECT COUNT\(\*\) FROM gesso_commands WHERE \(gesso\$command\$binding\)\.principal\.gesso\$choreo\$identity\$value = \? AND \(gesso\$command\$binding\)\.operation = \? AND (.+)\)")
+
+(defn- journal-column! [column]
+  (if (= "_id" column)
+    :xt/id
+    (let [parts (str/split column #"\$" -1)
+          k (if (= 1 (count parts))
+              (keyword (str/replace column "_" "-"))
+              (keyword (str/join "." (butlast parts))
+                       (str/replace (last parts) "_" "-")))]
+      (when-not (and (value-key? k)
+                     (every? #(re-matches #"[a-z][a-z0-9]*" %) (butlast parts)))
+        (reject! :unsupported-reference-journal-column))
+      k)))
+
+(defn- journal-guard-path! [path]
+  (loop [s path tail ()]
+    (when (> (count tail) 8) (reject! :unsupported-reference-journal-path))
+    (if-let [[_ col] (re-matches #"\"([a-z_][a-z0-9_$]*)\"" s)]
+      (let [root (journal-column! col)]
+        (when (some #{:xt/id} tail) (reject! :unsupported-reference-journal-path))
+        (when (and (= :xt/id root) (seq tail)) (reject! :unsupported-reference-journal-path))
+        (into [root] tail))
+      (if-let [[_ parent col] (re-matches #"\((.+)\)\.\"([a-z_][a-z0-9_$]*)\"" s)]
+        (recur parent (conj tail (journal-column! col)))
+        (reject! :unsupported-reference-journal-path)))))
+
+(defn- journal-checks! [clauses args]
+  (loop [pairs (seq (map vector clauses args)) checks []]
+    (if-let [[clause v] (first pairs)]
+      (if-let [[_ path] (re-matches #"LENGTH\((.+)\) = \?" clause)]
+        (let [k (journal-guard-path! path)]
+          (when-not (and (or (instance? Long v) (instance? Integer v)) (<= 0 v 256))
+            (reject! :unsupported-reference-journal-length))
+          (if (zero? v)
+            (do (when-not (= [(str "STR(" path ") LIKE ?") "{%"] (second pairs))
+                  (reject! :unsupported-reference-journal-empty-map))
+                (recur (nnext pairs) (conj checks [:map-count k v])))
+            (recur (next pairs) (conj checks [:map-count k v]))))
+        (let [[_ path] (re-matches #"(.+) = \?" clause)]
+          (when-not (and path (leaf? v)
+                         (= [(str "STR(" path ") = STR(?)") v] (second pairs))
+                         (= [(str "STR(ARRAY[" path "]) = STR(ARRAY[?])") v]
+                            (nth pairs 2 nil))
+                         (= (equality-domain v) (equality-domain (second (second pairs)))
+                            (equality-domain (second (nth pairs 2 nil)))))
+            (reject! :unsupported-reference-journal-leaf))
+          (recur (nthnext pairs 3) (conj checks [:scalar (journal-guard-path! path) v]))))
+      checks)))
+
+(defn- journal-value-assertion! [op [_ predicate]]
+  (let [[_ principal operation & args] op
+        clauses (str/split predicate #" AND " -1)]
+    (when-not (and (id? principal) (= :string (equality-domain principal))
+                   (= :keyword (equality-domain operation))
+                   (<= 1 (count clauses) 8192) (= (count clauses) (count args)))
+      (reject! :unsupported-reference-journal-value-assertion))
+    {:kind :assert-journal-value :principal principal :operation operation
+     :checks (journal-checks! clauses args)}))
+
+(defn- journal-value-matches! [working {:keys [principal operation checks]}]
+  (let [matching (filterv (fn [row]
+                            (= true (journal-slot-matches? {:gesso_commands {(:xt/id row) row}}
+                                                           {:principal principal :operation operation
+                                                            :expected 1})))
+                          (vals (get working :gesso_commands)))]
+    (= 1 (count (filter true?
+                        (mapv (fn [row]
+                                (every? true?
+                                        (mapv (fn [[kind path expected]]
+                                                (let [actual (journal-path! row path)]
+                                                  (cond
+                                                    (nil? actual) false
+                                                    (= :map-count kind)
+                                                    (if (map? actual)
+                                                      (= expected (count actual))
+                                                      (reject! :unsupported-reference-journal-map-domain))
+                                                    (= (equality-domain actual) (equality-domain expected))
+                                                    (= actual expected)
+                                                    (= #{(equality-domain actual) (equality-domain expected)}
+                                                       #{:string :keyword}) false
+                                                    :else (reject! :unsupported-reference-journal-leaf-domain))))
+                                              checks))) matching))))))
+
 (defn- check-op! [op]
   (when-not (and (vector? op) (nil? (meta op)) (seq op))
     (reject! :unsupported-reference-operation))
@@ -250,6 +337,8 @@
     (mapped-assertion! op (re-matches mapped-pattern (first op)))
     (and (string? (first op)) (re-matches journal-slot-pattern (first op)))
     (journal-slot-assertion! op (re-matches journal-slot-pattern (first op)))
+    (and (string? (first op)) (re-matches journal-value-pattern (first op)))
+    (journal-value-assertion! op (re-matches journal-value-pattern (first op)))
     (= :put-docs (first op))
     (let [docs (subvec op (min 2 (count op)))]
       (when-not (and (table? (second op)) (<= 1 (count docs) 16384)
@@ -262,8 +351,8 @@
 (defn execute
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-id document}}. Puts replace entire documents in order;
-   literal, homogeneous parameter equality, selected row-read, count
-   mapped scalar and selected journal slot assertions can abort and return
+   literal, homogeneous parameter equality, selected row-read, count,
+   mapped scalar and selected journal slot/value assertions can abort and return
    the original state. Reads see the tentative state
    produced by preceding operations. The full vector is structurally validated
    before evaluation, including operations after a false guard; reached reads
@@ -294,6 +383,11 @@
                                         :state state :failed-assertion-index i))
                 :assert-journal-slot
                 (if (journal-slot-matches? working kind)
+                  (recur working (inc i))
+                  (assoc report :status :predicted :committed? false
+                         :state state :failed-assertion-index i))
+                :assert-journal-value
+                (if (journal-value-matches! working kind)
                   (recur working (inc i))
                   (assoc report :status :predicted :committed? false
                          :state state :failed-assertion-index i))
