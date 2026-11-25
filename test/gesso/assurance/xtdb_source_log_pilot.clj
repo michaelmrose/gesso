@@ -2,7 +2,8 @@
   "Opt-in probe of the installed XTDB 2.2.0-beta1 source log. Internal
    provider interfaces, not a production history classifier or receipt.
    Run with clojure -M:test -m gesso.assurance.xtdb-source-log-pilot."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is run-tests]]
             [gesso.model.mapped-frame :as frame]
             [gesso.model.certified-plan :as plan]
@@ -294,6 +295,61 @@
              (reason #(check-claim-envelope! node tx-id (assoc ops 0 (nth ops 1) 1 (first ops)) true))))
       (is (= :claim-envelope-mismatch
              (reason #(check-claim-envelope! node tx-id (vec (rest ops)) true)))))))
+
+(deftest retained-local-source-log-survives-node-restart
+  (let [root (java.nio.file.Files/createTempDirectory
+              "gesso-v2574-source-log-" (make-array java.nio.file.attribute.FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        doc {:xt/id "probe" :value :open :nested {:items [1 "open" true]}}
+        put [:put-docs :probe doc]
+        guarded [["ASSERT ? = ?" 1 1] ["ASSERT ? = ?" 2 2] put]
+        unguarded [put]
+        aborted [["ASSERT FALSE"] [:put-docs :probe (assoc doc :value :aborted)]]
+        check! (fn [node {:keys [tx-id ops committed? observation]}]
+                 (is (= observation (observe-source-message! node tx-id)))
+                 (is (= {:status :checked-decoded-claim-envelope :tx-id tx-id
+                         :committed? committed? :operation-count (count ops)
+                         :authority :none :certificate :not-issued}
+                        (check-claim-envelope! node tx-id ops committed?))))]
+    (try
+      (let [originals
+            (with-open [node (xtn/start-node config)]
+              (let [g (xt/execute-tx node guarded)
+                    u (xt/execute-tx node unguarded)
+                    a (xt/submit-tx node aborted)
+                    ^Database database (db/primary-db node)]
+                (.awaitTxBlocking database (:tx-id a) (Duration/ofSeconds 10))
+                (let [observations (mapv (fn [[tx ops committed?]]
+                                           {:tx-id (:tx-id tx) :ops ops :committed? committed?
+                                            :observation (observe-source-message! node (:tx-id tx))})
+                                         [[g guarded true] [u unguarded true] [a aborted false]])]
+                  (is (= 3 (count (set (map :tx-id observations)))))
+                  (doseq [entry observations] (check! node entry))
+                  (is (= [doc] (xt/q node "SELECT * FROM probe")))
+                  observations)))
+            later (assoc doc :value :later)]
+        ;; Fresh node, same persistent source log and storage.  No retained
+        ;; provider objects from the first node are used in the second.
+        (with-open [node (xtn/start-node config)]
+          ;; Wait for the reopened index to reach the last original tx
+          ;; before preparing a schema-dependent query.
+          (.awaitTxBlocking ^Database (db/primary-db node)
+                            (apply max (map :tx-id originals)) (Duration/ofSeconds 10))
+          (is (= [doc] (xt/q node "SELECT * FROM probe")))
+          (doseq [entry originals] (check! node entry))
+          (let [tx-id (:tx-id (xt/execute-tx node [[:put-docs :probe later]]))]
+            (is (> tx-id (apply max (map :tx-id originals))))
+            (is (= :checked-decoded-claim-envelope
+                   (:status (check-claim-envelope! node tx-id [[:put-docs :probe later]] true))))
+            (is (= [later] (xt/q node "SELECT * FROM probe")))
+            ;; Subsequent writes do not substitute the current row for the
+            ;; original logged operation, or change an aborted outcome.
+            (doseq [entry originals] (check! node entry)))
+          (is (= :unavailable (:status (observe-source-message! node (+ 1000000 (apply max (map :tx-id originals)))))))))
+      (finally
+        (doseq [entry (reverse (file-seq (.toFile root)))]
+          (io/delete-file entry true))))))
 
 (defn -main [& args]
   (let [{:keys [fail error]}

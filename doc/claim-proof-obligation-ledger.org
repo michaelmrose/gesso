@@ -809,3 +809,29 @@ provider read-basis semantics, authenticate writers, or establish durable
 log retention. Production history and checkpoint semantics are unchanged;
 ordinary tests do not enable the internal log observer. No CLM-R2 premise
 is retired. Ansatz, Chromium and the full project suite were not run.
+
+* v2574 — retained local source-log evidence across node restart
+
+The opt-in source-log pilot now uses persistent local log and storage
+paths across two independently opened XTDB nodes in one JVM. Capture
+three exact source-log observations and correlate their provider
+outcomes: committed guarded and unguarded submissions with identical
+visible writes, and an aborted submission with a distinct proposed
+write. Close the first node, reopen the same directories, wait for the
+last original transaction to be indexed, and require all three decoded
+envelopes and outcomes to remain identical. A subsequent committed
+update must not substitute its current document for the historical
+logged payload or change any original outcome. A future absent source
+message remains unavailable.
+
+The initial run exposed a prepared-query-out-of-date conflict on an
+immediate schema-dependent query after reopening. Explicitly await the
+last original transaction before preparing that query. The corrected
+complete pilot passed 4 tests / 69 assertions, zero failures or errors.
+The installed LocalLog readRecords implementation reads the retained
+file directly. This qualification concerns clean node shutdown and
+reopening in one JVM with intact local directories, not process death,
+crash recovery, indefinite retention, truncation, Kafka, remote access
+or database/log identity authentication. Production history and ordinary
+test gates remain unchanged. The full Claim, Ansatz, Chromium and
+project suites were not rerun. No CLM-R2 premise is retired.
