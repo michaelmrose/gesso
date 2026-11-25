@@ -44,10 +44,9 @@
         (is (= :retained-transaction-not-framed (:reason r)))
         (no-match! r)))
     (let [r (observe! other-id)]
-      (is (= :unsupported (:status r)))
-      (is (= :retained-operation-not-matched (:reason r)))
-      (is (= other-id (:message-id r)))
-      (no-match! r))
+      (is (= :observed (:status r)))
+      (is (= :matched (:operation-correspondence r)))
+      (is (= other-id (:operation-message-id r))))
     (with-redefs [operation/compare-operation-bytes!
                   (fn [& _] (throw (AssertionError. "must not compare mismatched envelope")))
                   payload/decode-payload
@@ -136,10 +135,13 @@
           (is (= :unsupported (:status r)))
           (is (= :invalid-processed-retained-operation (:reason r)))
           (no-match! r))))
-    (doseq [id [flush-id other-id]]
-      (let [r (observe! id)]
-        (is (= :unsupported (:status r)))
-        (no-match! r)))
+    (let [r (observe! flush-id)]
+      (is (= :unsupported (:status r)))
+      (no-match! r))
+    (let [r (observe! other-id)]
+      (is (= :observed (:status r)))
+      (is (= :matched (:operation-correspondence r)))
+      (is (= other-id (:operation-message-id r) (:processed-message-id r))))
     (with-redefs [operation/compare-operation-bytes!
                   (constantly {:status :mismatch :reason :operation-correspondence-mismatch})]
       (let [r (observe! tx-id)]

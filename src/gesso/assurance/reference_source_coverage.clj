@@ -347,7 +347,7 @@
   (assoc (observe-local* node true true nil) :payload-profile local-payload-profile
          :decoder-profile payload/profile :payload-binding-profile payload-binding-profile))
 
-(def retained-operation-profile :xtdb-2.2.0-beta1/selected-retained-operation-correspondence-v1)
+(def retained-operation-profile :xtdb-2.2.0-beta1/selected-retained-operation-correspondence-v2)
 
 (defn observe-local-retained-operation!
   "Compare selected envelopes across the framed local log and independently
@@ -407,7 +407,7 @@
            :payload-binding-profile payload-binding-profile)))
 
 (def local-processed-retained-operation-profile
-  :xtdb-2.2.0-beta1/selected-local-processed-retained-operation-v1)
+  :xtdb-2.2.0-beta1/selected-local-processed-retained-operation-v2)
 
 (defn observe-local-processed-retained-operation!
   "Require selected retained operation correspondence bracketed by stable,

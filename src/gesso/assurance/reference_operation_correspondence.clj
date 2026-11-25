@@ -4,12 +4,12 @@
   (:require [gesso.assurance.reference-arrow-operations :as arrow]
             [gesso.assurance.xtdb-source-log :as provider]))
 
-(def profile :xtdb-2.2.0-beta1/selected-mixed-operation-correspondence-v1)
+(def profile :xtdb-2.2.0-beta1/selected-operation-correspondence-v2)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 (def ^:private max-bytes (* 16 1024 1024))
 
 (defn compare-operation-bytes!
-  "Independently decode a bounded mixed SQL/put stream before calling the
+  "Independently decode a bounded SQL-only, put-only or mixed stream before calling the
    provider on a copy of the same byte sample. Compare the complete ordered
    operations (including document IIDs) and invocation spans. No values or
    raw bytes are returned. Unsupported input on either side fails closed;
@@ -19,10 +19,14 @@
   (if-not (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes))
     (assoc base :status :unsupported :reason :operation-byte-limit)
     (let [sample (aclone ^bytes bytes)
-          independent (arrow/decode-mixed-bounded-sql-put (aclone sample))]
+          independent (arrow/decode-bounded-operations (aclone sample))]
       (if-not (and (= :decoded (:status independent))
-                   (= arrow/mixed-bounded-sql-put-profile (:profile independent))
-                   (= :matched (:iid-correspondence independent)))
+                   (= arrow/bounded-operation-profile (:profile independent))
+                   (case (:iid-correspondence independent)
+                     :matched (some #(= :put-docs (:kind %)) (:operations independent))
+                     :not-applicable (and (seq (:operations independent))
+                                          (every? #(= :sql (:kind %)) (:operations independent)))
+                     false))
         (assoc base :status :unsupported :reason :independent-operation-unsupported
                :decode-reason (:reason independent))
         (let [observed (provider/observe-operation-bytes! node (aclone sample))]
@@ -38,5 +42,5 @@
             (assoc base :status :mismatch :reason :operation-correspondence-mismatch :field :logged-operation-spans)
             :else
             (assoc base :status :matched :operation-correspondence :matched
-                   :decoder-profile arrow/mixed-bounded-sql-put-profile
+                   :decoder-profile arrow/bounded-operation-profile
                    :provider-profile provider/operation-bytes-profile)))))))

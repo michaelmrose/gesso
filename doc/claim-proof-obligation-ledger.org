@@ -4252,3 +4252,27 @@ coverage mismatches and invalid operation reports. Earlier profiles remain
 unchanged. No wait, atomic snapshot, execution outcome, production admission,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates were not rerun.
+
+* v2699 — integrate bounded SQL-only and put-only operation correspondence
+
+Generalize the bounded mixed union reader to select exactly one or two
+qualified operation legs from the physical schema, with no fallback on
+rejection. Preserve previous mixed-only decoder profiles, aggregate value
+budgets, ordered spans and put IID verification. SQL-only has no IID
+obligation and reports :not-applicable rather than a vacuous match.
+Version the operation, retained and processed-retained correspondence
+profiles to reflect the expanded domain. Retain the mixed 256-group
+ceiling for all three layouts.
+
+Focused JVM: 64 tests / 4258 assertions, zero failures or errors across
+all eight prior regression namespaces. Real persistent SQL-only and
+multi-table put-only fixtures match independently interpreted operations
+and spans before and after reopening, including processed-frontier
+binding. Reject malformed union selections, unsupported floating-point
+arguments, and aggregate exhaustion before provider parsing. Nullable
+SQL arguments still fail provider admission. First test assumed native
+delete layout; XTDB normalizes that API operation into SQL, so use an
+unsupported argument instead. No change to execution semantics or
+reference-domain admission. Full history operation correspondence,
+transaction outcomes, production wiring, certificate and CLM-R2 premise
+retirement remain open. Full project and formal gates were not rerun.

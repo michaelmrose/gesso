@@ -901,16 +901,21 @@
 
 (def mixed-sql-put-profile :xtdb-2.2.0-beta1/selected-mixed-sql-put-arrow-v1)
 
-(defn- mixed-schema! [^Message m ^ByteBuffer body]
+(defn- mixed-schema! [^Message m ^ByteBuffer body single-leg?]
   (let [^Schema schema (.header m (Schema.))]
     (require! (and schema (zero? (.remaining body)) (= Endianness/Little (.endianness schema))
                    (= 1 (.fieldsLength schema)) (zero? (.featuresLength schema))
                    (zero? (.customMetadataLength schema))) :unsupported-arrow-schema)
-    (let [^Field root (field! (.fields schema 0) "tx-ops" Type/Union false 2)
+    (let [^Field root (.fields schema 0)
+          leg-count (.childrenLength root)
+          _ (require! (if single-leg? (<= 1 leg-count 2) (= 2 leg-count)) :unsupported-arrow-field)
+          _ (field! root "tx-ops" Type/Union false leg-count)
           ^Union u (.type root (Union.))
-          children (mapv #(.children root %) (range 2))]
+          children (mapv #(.children root %) (range leg-count))]
       (require! (and u (= UnionMode/Dense (.mode u)) (zero? (.typeIdsLength u))) :unsupported-arrow-union)
-      (require! (= #{"sql" "put-docs"} (set (map #(.name ^Field %) children))) :unsupported-arrow-field)
+      (let [names (set (map #(.name ^Field %) children))]
+        (require! (and (= leg-count (count names))
+                       (every? #{"sql" "put-docs"} names)) :unsupported-arrow-field))
       (mapv (fn [^Field child]
               (case (.name child)
                 "sql" {:kind :sql :nullable? (sql-schema-leg! child) :nodes 3 :buffers 7}
@@ -927,7 +932,7 @@
         n (.length batch)
         nodes (vec (reductions + 1 (map :nodes legs)))
         starts (vec (reductions + 2 (map :buffers legs)))]
-    (require! (and (<= 2 n 256) (= (peek nodes) (.nodesLength batch))
+    (require! (and (<= (count legs) n 256) (= (peek nodes) (.nodesLength batch))
                    (nil? (.compression batch)) (zero? (.variadicBufferCountsLength batch))) :unsupported-arrow-mixed-batch)
     (let [root (.nodes batch 0)
           counts (mapv #(.length (.nodes batch %)) (pop nodes))
@@ -938,9 +943,9 @@
       (require! (and (= n (.limit tags)) (= (* 4 n) (.limit indexes))) :unsupported-arrow-buffer-layout)
       (let [selections (mapv #(vector (int (.get tags %)) (.getInt indexes (* 4 %))) (range n))
             seen (reduce (fn [seen [tag idx]]
-                           (require! (and (<= 0 tag 1) (= idx (nth seen tag)) (< idx (nth counts tag)))
+                           (require! (and (<= 0 tag (dec (count legs))) (= idx (nth seen tag)) (< idx (nth counts tag)))
                                      :unsupported-arrow-union-selection)
-                           (update seen tag inc)) [0 0] selections)]
+                           (update seen tag inc)) (vec (repeat (count legs) 0)) selections)]
         (require! (= counts seen) :unsupported-arrow-union-selection)
         (let [groups (mapv (fn [{:keys [kind nullable? legs]} node start count]
                              (case kind
@@ -949,13 +954,13 @@
                            legs (pop nodes) (pop starts) counts)]
           (mapv (fn [[tag idx]] (get-in groups [tag idx])) selections))))))
 
-(defn- decode-mixed-sql-put* [bytes selected-profile rows!]
+(defn- decode-mixed-sql-put* [bytes selected-profile rows! & [single-leg?]]
   (let [result-base (assoc base :profile selected-profile)]
     (try
       (require! (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes)) :arrow-byte-limit)
       (let [stream (doto (ByteBuffer/wrap ^bytes bytes) (.order ByteOrder/LITTLE_ENDIAN))
             [sm sb] (message! stream MessageHeader/Schema)
-            legs (mixed-schema! sm sb)
+            legs (mixed-schema! sm sb single-leg?)
             [bm bb] (message! stream MessageHeader/RecordBatch)
             groups (mixed-batch! bm bb legs)]
         (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream))) :unsupported-arrow-terminator)
@@ -971,7 +976,7 @@
                             {:operations (into operations rows) :spans (conj spans (count rows))}))
                         {:operations [] :spans []} groups)]
             (assoc result-base :status :decoded :operations operations :logged-operation-spans spans
-                   :iid-correspondence :matched))))
+                   :iid-correspondence (if (some #(= :put-docs (:kind %)) legs) :matched :not-applicable)))))
       (catch clojure.lang.ExceptionInfo e (assoc result-base :status :unsupported :reason (:reason (ex-data e))))
       (catch CharacterCodingException _ (assoc result-base :status :unsupported :reason :invalid-arrow-utf8))
       (catch Exception _ (assoc result-base :status :unsupported :reason :invalid-arrow-stream)))))
@@ -1039,3 +1044,14 @@
   [bytes]
   (with-value-budget
     #(decode-mixed-sql-put* bytes mixed-bounded-sql-put-profile positional-sql-rows!)))
+
+(def bounded-operation-profile :xtdb-2.2.0-beta1/selected-bounded-sql-put-operations-arrow-v1)
+
+(defn decode-bounded-operations
+  "Interpret selected SQL-only, put-only or mixed streams with one shared
+   recursive value budget. Select the layout from validated union metadata,
+   never by retrying a rejected stream under another profile. SQL-only
+   streams have no IID obligation. Diagnostic only; retain mixed limits."
+  [bytes]
+  (with-value-budget
+    #(decode-mixed-sql-put* bytes bounded-operation-profile positional-sql-rows! true)))
