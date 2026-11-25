@@ -1,7 +1,8 @@
 (ns gesso.live.outbox.history-coverage
   "Bounded, read-only audit of the selected mapped host's visible ledger.
    A mapped stutter is not a proof of an infrastructure writer's authority.
-   No claim is made about valid-time evolution between ledger observations,
+   Check continuity at sampled valid-time endpoints, not all instants.
+   No claim is made about valid-time evolution between those endpoints,
    hidden tables, transaction-internal reads, or external writer closure."
   (:require [gesso.assurance.subject :as subject]
             [gesso.live.consistency.xtdb :as xtdb]
@@ -83,12 +84,19 @@
 (defn- classify-step! [node admission source-id tables opts prior current]
   (let [time (ledger-time current)
         previous-time (ledger-time prior)
+        previous (snapshot! node tables opts previous-time previous-time)
         before (snapshot! node tables opts previous-time time)
         after (snapshot! node tables opts time time)
         base {:tx-id (:xt/id current) :system-time time :committed? (:committed current)}
         id (appended-id (:journal before) (:journal after))
         worker (when (:committed current) (worker-step source-id time before after))]
     (cond
+      ;; Even a transaction that leaves the selected rows unchanged cannot
+      ;; compose with the previous step if advancing valid time changed its
+      ;; prestate. Compare at the SAME pinned prior system-time basis.
+      (not= previous before)
+      (assoc base :classification :unclassified :reason :sampled-valid-time-discontinuity)
+
       (= before after)
       (assoc base :classification (if (:committed current) :observed-mapped-stutter :aborted-stutter))
 
@@ -183,7 +191,7 @@
         {:keys [basis rows]} (observe-range! scope nil max-steps false)
         steps (classify-range! scope rows)]
     (require-current-scope! scope)
-    {:profile :selected-mapped-ledger-coverage-v1 :authority :none
+    {:profile :selected-mapped-ledger-coverage-v2 :authority :none
      :status (if (some #(= :unclassified (:classification %)) steps)
                :unclassified-steps :observed-interval-checked)
      :initialization (:initial scope) :through-basis basis :steps steps
@@ -229,7 +237,7 @@
          next-checkpoint (HistoryCheckpoint.)]
      (require-current-scope! scope)
      (locking checkpoints (.put checkpoints next-checkpoint next-state))
-     {:profile :selected-mapped-ledger-chunk-v1 :authority :none
+     {:profile :selected-mapped-ledger-chunk-v2 :authority :none
       :status (cond first-unclassified :unclassified-steps
                     caught-up? :observed-interval-checked
                     :else :partial-interval)
@@ -269,11 +277,13 @@
   "Export an issued checkpoint as authenticated, plain EDN data. The trusted
    owner must persist it and a separate 32-byte secret key, unique to this
    database and trusted audit/decoder implementation. Change deployment-id
-   (or rotate the key) when that implementation changes. No writer authority."
+   (or rotate the key) when that implementation changes. Version 1 cursors
+   cannot be restored: they did not check sampled valid-time continuity.
+   No writer authority."
   [connectable admission checkpoint key deployment-id]
   (let [scope (audit-scope! connectable admission 1)
         prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
-        payload {:profile :selected-mapped-history-checkpoint-v1
+        payload {:profile :selected-mapped-history-checkpoint-v2
                  :scope (durable-scope scope deployment-id)
                  :anchor (update (:anchor prior) :system-time str)
                  :counts (:counts prior)
@@ -292,7 +302,7 @@
   (let [scope (audit-scope! connectable admission 1)
         {:keys [payload mac]} sealed]
     (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
-                   (map? payload) (= :selected-mapped-history-checkpoint-v1 (:profile payload))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v2 (:profile payload))
                    (string? mac) (re-matches #"[0-9a-f]{64}" mac)
                    (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
                                           (checkpoint-mac key payload)))
