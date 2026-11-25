@@ -264,6 +264,9 @@
                 (cond
                   (not= witness (transition-witness! ops)) (report :mismatch :source-witness-mismatch)
                   (not (bound-transition-envelope? ops)) (report :mismatch :envelope-fingerprint-mismatch)
+                  (not= {[:public/gesso_transition_evidence witness] 1}
+                        (selected-put-entries (:operations observed) #{:public/gesso_transition_evidence}))
+                  (report :mismatch :transition-evidence-write-mismatch)
                   (and require-prefix?
                        (or (>= (count expected-prefix) (count ops))
                            (not= expected-prefix (subvec (:operations observed) 0 (count expected-prefix)))))
@@ -282,7 +285,8 @@
                       :else (cond-> (assoc (report :matched nil) :tx-id tx-id :operation-count (count ops)
                                            :envelope-fingerprint (:envelope-fingerprint witness))
                               require-prefix? (assoc :intended-guard-prefix :matched)
-                              require-writes? (assoc :intended-mapped-writes :matched)))))))
+                              require-writes? (assoc :intended-mapped-writes :matched
+                                                     :transition-evidence-write :matched)))))))
             (report :unsupported :unexpected-source-observation))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -295,6 +299,7 @@
 
 (defn check-recorded-transition!
   "Check a retained committed transition against its recorded binding.
+   Exactly one evidence document write is allowed: the final witness.
    The four-argument form additionally requires an independently derived,
    nonempty ordered guard prefix at the start of the decoded transaction.
    The five-argument form also checks complete selected-table puts with

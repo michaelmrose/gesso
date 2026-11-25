@@ -1100,3 +1100,34 @@ command outcome contents beyond the admitted decoder and relation. Extra
 assertions, auxiliary/infrastructure writes, transaction metadata, source
 log refinement and actual writer/authorization provenance remain open.
 No CLM-R2 premise is retired.
+
+* v2583 — verify the complete publication guard and sole evidence write
+
+The actual publication compiler adds an evidence-absence ASSERT before the
+admitted mapped guard prefix. The v6/v7 historical checker incorrectly
+expected the mapped prefix at operation zero; its synthetic history fixture
+omitted this production-owned assertion. Reconstruct the complete prefix
+using the pinned command identity and require the leading absence guard
+with its exact argument, followed by the independently reconstructed
+mapped prefix. Do not change the mapped prefix fingerprint, the writer or
+the recorded binding format.
+
+Require exactly one decoded put of the final transition evidence document
+across the entire retained envelope, with multiplicity. A self-bound
+transaction with an additional intermediate witness write is refused even
+if the final pinned witness and selected poststate agree. Report the new
+check explicitly in history and operational arguments. Advance history and
+checkpoint profiles to v8; v7 and earlier cursors require rescanning.
+
+Focused JVM validation: 8 tests / 437 assertions, no failures or errors.
+The mapped-history regression now uses the actual publication prefix and
+rejects self-bound missing/wrong evidence guards and duplicate evidence
+writes. Also ran the complete opt-in physical Claim JVM source-log suite:
+3 tests / 1052 assertions, no failures or errors. This exercises actual
+publication, competing claims, recovery modes and historical classification
+with source-log observation enabled. The full project, Chromium and separate
+proof gates were not rerun.
+
+Remaining assertions and auxiliary/infrastructure puts, transaction metadata,
+source-log refinement, transaction-internal reads and writer authorization
+remain open. No CLM-R2 premise is retired.

@@ -1231,6 +1231,9 @@
     (doseq [[mode reason] [[:valid nil]
                            [:unguarded :historical-envelope-mismatch]
                            [:self-bound-unguarded :historical-intended-guard-prefix-mismatch]
+                           [:self-bound-missing-evidence-guard :historical-intended-guard-prefix-mismatch]
+                           [:self-bound-wrong-evidence-guard :historical-intended-guard-prefix-mismatch]
+                           [:self-bound-duplicate-evidence :historical-transition-evidence-write-mismatch]
                            [:self-bound-hidden-change :unmapped-document-frame-mismatch]
                            [:self-bound-duplicate-put :historical-intended-mapped-writes-mismatch]
                            [:unbound :historical-envelope-unsupported]
@@ -1249,18 +1252,25 @@
             (let [framed (admission :frame-submission! base)
                   checked (admission :admit-framed! base framed)
                   witness (inductive/mapped-transition-evidence! admission checked)
+                  framed-ops (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" (:xt/id witness)]]
+                                   (:tx-ops framed))
                   bound (envelope/bind-transition-envelope!
-                         (conj (:tx-ops framed) [:put-docs :gesso_transition_evidence witness]))
+                         (conj framed-ops [:put-docs :gesso_transition_evidence witness]))
                   bound-witness (peek (peek bound))
                   unguarded? (#{:unguarded :self-bound-unguarded} mode)
                   unguarded-ops (into [] (filter #(= :put-docs (first %))) (:tx-ops base))
                   actual-base (case mode
                                 :self-bound-hidden-change (mapv (fn [op] (if (= [:put-docs :requests] (vec (take 2 op)))
-                                                                          (assoc-in op [2 :hidden] "changed") op)) (:tx-ops framed))
-                                :self-bound-duplicate-put (conj (:tx-ops framed) [:put-docs :requests (first (:requests after))])
-                                (if unguarded? unguarded-ops (:tx-ops framed)))
+                                                                          (assoc-in op [2 :hidden] "changed") op)) framed-ops)
+                                :self-bound-duplicate-put (conj framed-ops [:put-docs :requests (first (:requests after))])
+                                :self-bound-missing-evidence-guard (subvec framed-ops 1)
+                                :self-bound-wrong-evidence-guard (assoc-in framed-ops [0 1] "other")
+                                :self-bound-duplicate-evidence (conj framed-ops [:put-docs :gesso_transition_evidence witness])
+                                (if unguarded? unguarded-ops framed-ops))
                   corrupted (case mode
-                              (:self-bound-hidden-change :self-bound-duplicate-put)
+                              (:self-bound-hidden-change :self-bound-duplicate-put
+                               :self-bound-missing-evidence-guard :self-bound-wrong-evidence-guard
+                               :self-bound-duplicate-evidence)
                               (peek (peek (envelope/bind-transition-envelope!
                                           (conj actual-base [:put-docs :gesso_transition_evidence witness]))))
                               :valid bound-witness

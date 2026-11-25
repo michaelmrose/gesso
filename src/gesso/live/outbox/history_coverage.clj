@@ -6,7 +6,8 @@
    hidden tables, transaction-internal reads and external writer closure
    remain unproven. Mapped transitions require a matching retained envelope;
    also check the reconstructed prestate guard prefix against the retained
-   operations, and compare complete selected mapped puts. Auxiliary writes,
+   operations following the framework evidence-absence guard, and compare
+   complete selected mapped puts and the sole evidence write. Auxiliary writes,
    remaining assertion intent and writer identity remain unestablished."
   (:require [gesso.assurance.subject :as subject]
             [gesso.assurance.xtdb-envelope :as envelope]
@@ -125,6 +126,7 @@
       :matched (when-not (and (= envelope/binding-profile (:profile checked))
                               (= :matched (:intended-guard-prefix checked))
                               (= :matched (:intended-mapped-writes checked))
+                              (= :matched (:transition-evidence-write checked))
                               (= tx-id (:tx-id checked))
                               (= (:envelope-fingerprint evidence) (:envelope-fingerprint checked)))
                  (reject! :historical-envelope-invalid-result))
@@ -133,6 +135,7 @@
       :mismatch (reject! (case (:reason checked)
                            :intended-guard-prefix-mismatch :historical-intended-guard-prefix-mismatch
                            :intended-mapped-writes-mismatch :historical-intended-mapped-writes-mismatch
+                           :transition-evidence-write-mismatch :historical-transition-evidence-write-mismatch
                            :historical-envelope-mismatch))
       (reject! :historical-envelope-invalid-result))))
 
@@ -175,14 +178,19 @@
                             [(:xt/system-from command) (:xt/system-from witness)])
             (reject! :history-command-evidence-time-mismatch))
           (let [evidence (dissoc witness :xt/system-from)
-                prefix (inductive/reconstruct-mapped-prestate-prefix!
-                        admission evidence (docs before) (plain-rows (:journal before)))
+                mapped-prefix (inductive/reconstruct-mapped-prestate-prefix!
+                               admission evidence (docs before) (plain-rows (:journal before)))
+                ;; Publication adds the evidence-absence assertion ahead of
+                ;; the mapped prefix; the witness fingerprints only the latter.
+                prefix (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" id]]
+                             mapped-prefix)
                 writes (inductive/reconstruct-historical-mapped-writes!
                         admission (dissoc command :xt/system-from) evidence
                         (docs before) (docs after) (plain-rows (:journal after)))]
             (require-recorded-envelope! node (:xt/id current) evidence prefix writes))
           (assoc base :classification :verified-mapped-transition :command-id id
-                 :recorded-envelope :matched :intended-guard-prefix :matched :intended-mapped-writes :matched)
+                 :recorded-envelope :matched :intended-guard-prefix :matched :intended-mapped-writes :matched
+                 :transition-evidence-write :matched)
           (catch clojure.lang.ExceptionInfo e
             (assoc base :classification :unclassified :reason (or (:reason (ex-data e)) :transition-check-failed)))))
 
@@ -255,7 +263,7 @@
         {:keys [basis rows]} (observe-range! scope nil max-steps false)
         steps (classify-range! scope rows)]
     (require-current-scope! scope)
-    {:profile :selected-mapped-ledger-coverage-v7 :authority :none
+    {:profile :selected-mapped-ledger-coverage-v8 :authority :none
      :status (if (some #(= :unclassified (:classification %)) steps)
                :unclassified-steps :observed-interval-checked)
      :initialization (:initial scope) :through-basis basis :steps steps
@@ -269,7 +277,7 @@
 (defn- checkpoint-state! [scope checkpoint]
   (when (some? checkpoint)
     (let [prior (locking checkpoints (.get checkpoints checkpoint))]
-      (when-not (and prior (= :selected-mapped-history-checkpoint-v7 (:profile prior))
+      (when-not (and prior (= :selected-mapped-history-checkpoint-v8 (:profile prior))
                      (identical? (:token scope) (:token prior))
                      (identical? (:admission scope) (:admission prior))
                      (= (:initial scope) (:initial prior)))
@@ -298,12 +306,12 @@
          anchor (peek rows)
          through (xtdb/basis (:xt/id anchor) (ledger-time anchor))
          next-state (assoc (select-keys scope [:token :initial :admission])
-                           :profile :selected-mapped-history-checkpoint-v7
+                           :profile :selected-mapped-history-checkpoint-v8
                            :anchor anchor :counts counts :first-unclassified first-unclassified)
          next-checkpoint (HistoryCheckpoint.)]
      (require-current-scope! scope)
      (locking checkpoints (.put checkpoints next-checkpoint next-state))
-     {:profile :selected-mapped-ledger-chunk-v7 :authority :none
+     {:profile :selected-mapped-ledger-chunk-v8 :authority :none
       :status (cond first-unclassified :unclassified-steps
                     caught-up? :observed-interval-checked
                     :else :partial-interval)
@@ -343,13 +351,14 @@
   "Export an issued checkpoint as authenticated, plain EDN data. The trusted
    owner must persist it and a separate 32-byte secret key, unique to this
    database and trusted audit/decoder implementation. Change deployment-id
-   (or rotate the key) when that implementation changes. Versions 1 through 6
-   cannot be restored: they lack mandatory intended mapped-write comparison.
+   (or rotate the key) when that implementation changes. Versions 1 through 7
+   cannot be restored: they lack the complete publication guard prefix
+   and sole transition-evidence write check.
    No writer authority."
   [connectable admission checkpoint key deployment-id]
   (let [scope (audit-scope! connectable admission 1)
         prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
-        payload {:profile :selected-mapped-history-checkpoint-v7
+        payload {:profile :selected-mapped-history-checkpoint-v8
                  :scope (durable-scope scope deployment-id)
                  :anchor (update (:anchor prior) :system-time str)
                  :counts (:counts prior)
@@ -368,7 +377,7 @@
   (let [scope (audit-scope! connectable admission 1)
         {:keys [payload mac]} sealed]
     (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
-                   (map? payload) (= :selected-mapped-history-checkpoint-v7 (:profile payload))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v8 (:profile payload))
                    (string? mac) (re-matches #"[0-9a-f]{64}" mac)
                    (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
                                           (checkpoint-mac key payload)))
@@ -380,7 +389,7 @@
                                      (update :system-time #(Instant/parse %)))
           checkpoint (HistoryCheckpoint.)
           state (assoc (select-keys scope [:token :initial :admission])
-                       :profile :selected-mapped-history-checkpoint-v7
+                       :profile :selected-mapped-history-checkpoint-v8
                        :anchor anchor :counts (:counts payload) :first-unclassified first-unclassified)]
       ;; Verify the anchor at a pinned frontier; no classification or extension.
       (observe-range! scope anchor 1 true)
