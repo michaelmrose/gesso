@@ -2421,3 +2421,33 @@ The differential seed contains selected physical fixtures, not a proof
 of admitted writer closure. No production assurance status changes and
 no CLM-R2 premise is retired. Full project, physical Claim, Chromium and
 independent proof gates were not rerun.
+
+* v2630 — compose selected publication and worker lifecycle
+
+Add a separate independent lifecycle predictor starting from empty state.
+Construct selected pending publication documents and UUID absence guards
+from explicit declarations, prefix the guards to supplied domain writes,
+and compose pending acquisition, expired reclamation and acknowledgment
+using only independently predicted transaction prefixes. Distinguish call
+traces from submitted transactions; an unavailable call adds no ledger
+entry. Reject unsupported traces without returning partial predictions.
+Lifecycle profile v1; existing reference and history profiles unchanged.
+
+Combined reference JVM: 51 tests / 6451 assertions, zero failures or
+errors. Eleven lifecycle calls compare exact independently constructed
+operations and outcomes with production publication preparation and
+worker functions, using the real transaction adapter and embedded XTDB.
+Ten submit transactions (six commit, four abort); one submits nothing.
+Compare complete history rectangles and 256 bitemporal points across
+outbox and domain tables. Duplicate multi-intent publication aborts its
+domain write; stale acquisition and acknowledgment contend; expiry allows
+reclamation and both original intents reach dispatch-accepted. No
+production-generated operation or provider readback feeds prediction.
+
+This is finite composed lifecycle correspondence, not authenticated
+publication admission, manifest compatibility, arbitrary writer closure,
+live frontier acquisition, external delivery or universal refinement.
+Domain puts, explicit identities, observation points, clocks and trusted
+receipts are supplied inputs. No production assurance status changes and
+no CLM-R2 premise is retired. Full project, physical Claim, Chromium and
+independent proof gates were not rerun.
