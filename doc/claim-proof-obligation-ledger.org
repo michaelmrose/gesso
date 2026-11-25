@@ -1624,3 +1624,32 @@ Aborted worker attempts with temporal guards are not yet qualified by the
 restricted abort comparator. Initialization and manifest establishment
 still require separate retained-operation correspondence. No CLM-R2 premise
 is retired.
+* v2601 — qualify the retained initialization envelope
+
+Require the selected mapped writer's pinned initial projection to be
+accompanied by exact retained initialization operations before activation.
+Resolve marker system time to a unique committed ledger row and reconcile
+its transaction identity with the fresh execute receipt when present.
+Reconstruct the complete expectation from the checked seed and the existing
+framework initializer rules, not the observed log. Require ordered absence
+guards, exact seed puts and marker put with no additional operations. On
+restart this check is repeated; unavailable or mismatched evidence prevents
+activation. Record matched status and transaction id, bind the history root
+to that identity, and require the new premise in operational reporting.
+Advance history and checkpoints to v17; v16 and earlier require rescanning.
+
+Final initialization/history and operational-report JVM namespaces: 26
+tests / 597 assertions, zero failures or errors. An initial test-reader
+failure (missing closing parenthesis) was corrected before the complete
+run. Real embedded XTDB controls exercise exact, unguarded, extra-table and
+duplicate-write initializers, with correct pinned state and marker but
+incorrect retained operations. Fresh execution, restart, pinned readback
+and old-checkpoint refusal also pass. Full opt-in physical Claim source-log
+suite: 3 tests / 1128 assertions, zero failures or errors. Mapped-projection,
+full project, Chromium and separate proof gates were not rerun.
+
+This is selected mapped activation and initialization-envelope correspondence,
+not proof of pre-initialization history, independent guard-lowering semantics,
+provider execution or writer authority. The compatibility initialization API
+remains readback-only. Manifest establishment and aborted worker attempts with
+temporal guards still require qualification. No CLM-R2 premise is retired.

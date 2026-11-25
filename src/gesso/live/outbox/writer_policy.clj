@@ -73,9 +73,12 @@
         readback (initialization/initialize-and-readback!
                   node source-id initializer (mapped-tables admission) checked)
         observed (inductive/check-mapped-initialization-readback!
-                  admission initializer (:document-rows readback) (:journal-rows readback))]
+                  admission initializer (:document-rows readback) (:journal-rows readback))
+        retained (initialization/check-retained-initialization!
+                  node source-id initializer (mapped-tables admission) checked readback)]
     (merge (select-keys checked [:catalog-fingerprint :case-fingerprint])
            (select-keys observed [:initialization-fingerprint :physical-correspondence :authority])
+           retained
            {:source-id source-id :system-time (:system-time readback)})))
 
 (defn initialize!

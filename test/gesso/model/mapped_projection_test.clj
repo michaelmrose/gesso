@@ -1382,17 +1382,17 @@
                 (is (= reason (:reason step)) (name mode))
                 (when-not reason
                   (is (= :matched (:write-table-closure step)))
-                  (is (= :v16-mapped-steps-checked
+                  (is (= :v17-mapped-steps-checked
                          (get-in report [:physical-induction :premises :mapped-write-table-closure]))))
                 (is (= (if declared? :declared :not-declared) (:publication-expectation-profile chunk)))
                 (is (= (if residual? :declared :not-declared) (:residual-assertion-profile chunk)))
                 (when-not reason
                   (is (= (if residual? :matched :not-declared) (:residual-assertion-expectation step)))
-                  (is (= (if residual? :v16-declared-expectations-checked :open)
+                  (is (= (if residual? :v17-declared-expectations-checked :open)
                          (get-in report [:physical-induction :premises :residual-assertion-correspondence]))))
                 (when-not reason
                   (is (= (if declared? :matched :not-declared) (:publication-expectation step)))
-                  (is (= (if declared? :v16-declared-expectations-checked :open)
+                  (is (= (if declared? :v17-declared-expectations-checked :open)
                          (get-in report [:physical-induction :premises :publication-expectation-correspondence]))))
                 (is (= (if reason :unclassified-steps :observed-interval-checked) (:status chunk) (:status whole)))
                 (is (= (if reason :not-established :conditional-observed-prefix-argument)

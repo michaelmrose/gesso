@@ -249,6 +249,11 @@
   [connectable tx-id ops]
   (envelope/check-worker-envelope! (physical-connectable! connectable) tx-id ops))
 
+(defn check-initialization-envelope!
+  "Compare the complete expected initializer through the opaque adapter."
+  [connectable tx-id ops]
+  (envelope/check-envelope! (physical-connectable! connectable) tx-id ops true))
+
 (defn current-submission-policy-token
   "Observe the current opaque policy generation through a live handle or
    physical node. The token grants no submission or registration authority."

@@ -725,10 +725,10 @@
                      (is (= report (:report (host/history-status started))))
                      (is (= :declared (:publication-expectation-profile report)))
                      (is (= :declared (:residual-assertion-profile report)))
-                     (is (= :v16-declared-expectations-checked
+                     (is (= :v17-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :residual-assertion-correspondence])))
-                     (is (= :v16-declared-expectations-checked
+                     (is (= :v17-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
                      (let [operational (host/assurance-status started)]

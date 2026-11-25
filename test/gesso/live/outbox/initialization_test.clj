@@ -656,10 +656,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v15)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v16)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v16 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v17 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:unclassified] (mapv :classification (:steps prefix))))
@@ -765,7 +765,7 @@
                                              :puts [[:put-docs :gesso_commands record]]})]
               (xt/execute-tx node (envelope/bind-transition-envelope! (ops "good")))
               (let [prefix (history/audit-chunk! handle admission 8)]
-                (is (= :selected-mapped-ledger-chunk-v16 (:profile prefix)))
+                (is (= :selected-mapped-ledger-chunk-v17 (:profile prefix)))
                 (is (= :observed-interval-checked (:status prefix)))
                 (is (= [:matched] (mapv :recorded-envelope (:steps prefix))))
                 (is (= [:matched] (mapv :intended-guard-prefix (:steps prefix))))
@@ -936,3 +936,28 @@
               (let [later (history/audit-chunk! handle admission 8 (:checkpoint extended))]
                 (is (= (:first-unclassified extended) (:first-unclassified later))))))
           (finally (release)))))))
+
+(deftest retained-initialization-envelope-required-at-activation
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        checked (inductive/check-mapped-initialization! admission seed)
+        ops (init/transaction "s" seed #{:requests :assignments} checked)]
+    (doseq [[mode submitted expected] [[:exact ops nil]
+                                       [:unguarded (subvec ops (- (count ops) 2)) :initialization-envelope-mismatch]
+                                       [:extra (conj ops [:put-docs :unselected {:xt/id "hidden" :value 1}]) :initialization-envelope-mismatch]
+                                       [:duplicate (conj ops (first seed)) :initialization-envelope-mismatch]]]
+      (with-open [node (xtn/start-node {})]
+        (let [id (:tx-id (xt/execute-tx node submitted))
+              writer (policy/build-policy! node config {:source-id "s"})
+              release (xtdb/register-submission-policy! node writer)]
+          (try
+            (is (= expected (reason #(policy/activate-policy! writer))) (name mode))
+            (let [observation (correspondence/initialization-observation node admission)]
+              (if expected
+                (do (is (nil? observation))
+                    (is (= :missing-history-initialization (reason #(history/audit! node admission 8)))))
+                (do (is (= :matched (:initialization-envelope observation)))
+                    (is (= id (:initialization-tx-id observation)))
+                    (is (= :observed-interval-checked (:status (history/audit! node admission 8)))))))
+            (finally (release))))))))

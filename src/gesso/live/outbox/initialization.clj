@@ -86,7 +86,8 @@
   "Read all mapped tables and empty infrastructure at the seed commit's
    system and valid time. Fresh initialization uses the actual execute
    receipt; restart uses the exact durable marker's physical system-from.
-   No transaction id is inferred on restart. The caller must still project
+   Fresh readback includes the receipt transaction id. On restart the caller
+   must resolve the marker time against the ledger. The caller must still project
    and compare the rows with the issued initial constructor. A seedless
    unmarked host returns nil and has no initialization evidence."
   [node source-id seed mapped-tables checked]
@@ -102,10 +103,39 @@
         (when-not committed
           (throw (ex-info "Initialization has no complete commit basis."
                           {:reason :missing-initialization-commit-basis})))
-        (readback! node source-id mapped-tables checked
-                   (xtdb/basis-system-time committed) (xtdb/basis-snapshot-token committed)))
+        (assoc (readback! node source-id mapped-tables checked
+                          (xtdb/basis-system-time committed) (xtdb/basis-snapshot-token committed))
+               :receipt-tx-id (xtdb/basis-tx-id committed)))
 
       :else nil)))
+
+(defn check-retained-initialization!
+  "Resolve the pinned marker time to exactly one committed ledger identity,
+   reconcile a fresh receipt if present, and compare the complete retained
+   envelope to the checked seed and framework initialization rules. No
+   authority or proof of provider execution is granted."
+  [node source-id seed mapped-tables checked {:keys [system-time receipt-tx-id]}]
+  (let [rows (frontier/q-from! node ["SELECT _id, committed, system_time FROM xt.txs WHERE system_time = ? LIMIT 2" system-time])
+        row (first rows)
+        id (:xt/id row)]
+    (when-not (and (= 1 (count rows)) (integer? id) (true? (:committed row))
+                   (instance? ZonedDateTime (:system-time row))
+                   (= system-time (.toInstant ^ZonedDateTime (:system-time row)))
+                   (or (nil? receipt-tx-id) (= receipt-tx-id id)))
+      (throw (ex-info "Cannot identify the initialization transaction."
+                      {:reason :initialization-ledger-mismatch})))
+    (let [ops (transaction source-id seed mapped-tables checked)
+          result (xtdb/check-initialization-envelope! node id ops)]
+      (when-not (and (= :matched (:status result))
+                     (= id (:tx-id result)) (true? (:committed? result))
+                     (= (count ops) (:operation-count result)))
+        (throw (ex-info "Cannot establish retained initialization correspondence."
+                        {:reason (case (:status result)
+                                   :unavailable :initialization-envelope-unavailable
+                                   :unsupported :initialization-envelope-unsupported
+                                   :mismatch :initialization-envelope-mismatch
+                                   :initialization-envelope-invalid-result)})))
+      {:initialization-tx-id id :initialization-envelope :matched})))
 
 (defn initialize!
   "Compatibility entry point; check the durable evidence and read back the
