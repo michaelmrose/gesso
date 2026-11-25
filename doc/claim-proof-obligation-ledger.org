@@ -2510,3 +2510,30 @@ inspection, restart authorization or universal provider refinement. No
 production assurance status changes and no CLM-R2 premise is retired.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2633 — model fresh worker discovery after uncertain acknowledgment
+
+Independently predict one bounded advisory discovery page from the latest
+supplied completed temporal history and explicit query clock. Select
+source-scoped pending intents and expired leases, exclude terminal rows,
+order UUIDs canonically, and derive lookahead and continuation cursors.
+Reject unsupported visible row domains and request shapes without a page.
+Discovery profile v1; existing reference and history profiles unchanged.
+
+Combined reference JVM: 56 tests / 6831 assertions, zero failures or
+errors. Compare 34 production discovery pages with independent predictions
+using real XTDB selection SQL and a supplied query clock. Three physical
+hypotheses after uncertain acknowledgment cover unsubmitted, committed
+and aborted attempts. Scans immediately before, at and after expiry
+show why a fresh sweep without the old cursor is necessary. Additional
+cases cover source scoping, unsigned UUID ordering, lookahead and empty
+pages. Complete selected history remains unchanged by discovery.
+
+This is finite advisory discovery correspondence, not live frontier
+acquisition, atomic multipage inspection, authenticated restart, actual
+recovery execution, delivery or universal provider refinement. The
+harness substitutes explicit clock queries for live frontier acquisition
+and uses independently predicted physical histories as inputs. No
+production assurance status changes and no CLM-R2 premise is retired.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.

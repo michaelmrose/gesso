@@ -1,6 +1,8 @@
 (ns gesso.assurance.reference-lifecycle-test
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-lifecycle :as lifecycle]
+            [gesso.assurance.reference-discovery :as reference-discovery]
+            [gesso.live.outbox.discovery :as discovery]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.reference-reconciliation :as reference-reconciliation]
             [gesso.live.outbox.reconciliation :as reconciliation]
@@ -294,3 +296,71 @@
             (is (not (contains? p :observation)))))
         (is (= (reference-reconciliation/predict-inspection-with-reads prior "lifecycle" valid points)
                (reference-reconciliation/predict-inspection prior (time-at 15) (time-at 15) "lifecycle" valid)))))))
+
+(defn- discover-at! [node clock opts]
+  ;; Preserve production selection SQL and bind the query clock explicitly.
+  (with-redefs [frontier/q-from! (fn [_ query] (xt/q node query {:current-time clock}))]
+    (discovery/discover-eligible! node opts)))
+
+(deftest fresh-discovery-after-uncertain-acknowledgment
+  (doseq [[mode n] [[:not-submitted 3] [:committed 3] [:aborted 10]]]
+    (let [prefix (subvec steps 0 3)
+          history (lifecycle/predict-lifecycle (cond-> prefix (not= :not-submitted mode)
+                                                  (conj (ack n 2 1 11 "a" 21))))
+          prior (:replay history)
+          opts {:source-id "lifecycle" :limit 1}
+          pending {:intent-id (id 2) :action :acquire-pending}
+          expired {:intent-id (id 1) :action :reclaim-expired}]
+      (is (= :predicted (:status history)))
+      (with-open [node (xtn/start-node {})]
+        (submit-history! node (:transactions history))
+        (doseq [clock [(.minusNanos (time-at 10) 1000) (time-at 10) (time-at 11)]
+                after [nil (id 1) (id 2)]]
+          (let [request (cond-> opts after (assoc :after after))
+                candidates (cond
+                             (= after (id 2)) []
+                             (or after (= :committed mode) (.isBefore ^Instant clock (time-at 10))) [pending]
+                             :else [expired pending])
+                expected {:candidates (vec (take 1 candidates)) :has-more? (> (count candidates) 1)
+                          :next-after (when (> (count candidates) 1) (id 1))}
+                predicted (reference-discovery/predict-page prior clock request)]
+            (is (= :predicted (:status predicted)))
+            (is (= expected (:page predicted) (discover-at! node clock request)))
+            (is (= :none (:authority predicted)))
+            (is (= :not-issued (:certificate predicted)))))
+        (is (= (frequencies (coalesce-valid (:rectangles prior)))
+               (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) [:gesso_live_outbox :lifecycleprobe])))))))))
+
+(deftest independent-discovery-source-and-unsigned-pagination
+  (let [low #uuid "7fffffff-ffff-ffff-ffff-ffffffffffff"
+        high #uuid "80000000-0000-0000-0000-000000000000"
+        tail #uuid "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        history (lifecycle/predict-lifecycle [(publish 0 [high low tail] 1)
+                                              (assoc-in (publish 1 [(id 1)] 2) [:spec :source-id] "foreign")])
+        prior (:replay history)
+        opts {:source-id "lifecycle" :limit 1}
+        clock (time-at 2)]
+    (is (= :predicted (:status history)))
+    (with-open [node (xtn/start-node {})]
+      (submit-history! node (:transactions history))
+      (doseq [[request ids more? cursor] [[opts [low] true low]
+                                          [(assoc opts :after low) [high] true high]
+                                          [(assoc opts :after high) [tail] false nil]
+                                          [(assoc opts :after tail) [] false nil]
+                                          [opts [low] true low]
+                                          [{:source-id "foreign"} [(id 1)] false nil]
+                                          [{:source-id "missing"} [] false nil]]]
+        (let [p (reference-discovery/predict-page prior clock request)
+              expected {:candidates (mapv #(hash-map :intent-id % :action :acquire-pending) ids)
+                        :has-more? more? :next-after cursor}]
+          (is (= :predicted (:status p)))
+          (is (= expected (:page p) (discover-at! node clock request)))))
+      (doseq [bad [nil {} (assoc opts :limit 0) (assoc opts :limit 129)
+                   (assoc opts :after nil) (assoc opts :source-id " ") (assoc opts :extra true)]]
+        (let [p (reference-discovery/predict-page prior clock bad)]
+          (is (= :unsupported (:status p)))
+          (is (not (contains? p :page)))))
+      (is (= :unsupported (:status (reference-discovery/predict-page prior (.plusNanos clock 1) opts))))
+      (let [mixed (temporal/replay (conj (:transactions history) {:system-time (time-at 3)
+                                                                :ops [[:put-docs :gesso_live_outbox {:xt/id "legacy"}]]}))]
+        (is (= :unsupported (:status (reference-discovery/predict-page mixed (time-at 3) opts))))))))
