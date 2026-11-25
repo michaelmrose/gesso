@@ -209,7 +209,7 @@
               [:put-docs :assignments {:xt/id "a1" :owner "p1"}]
               [:put-docs :gesso_commands row]]
         mapping (plan/check-target-mapping! original targets)
-        guards-for #(mapv tx/format-assertion (frame/prestate-assertions! mapping %))
+        guards-for #(frame/formatted-prestate-assertions! mapping % [])
         guards (guards-for docs)
         {:keys [prepare! admit! pending?]} (preparation/build-admission! catalog targets decoder effects)
         prepare #(prepare! id (:gesso.command/binding row) snapshot {})
@@ -279,7 +279,7 @@
           prefix ((:frame-guards! registry) id "c1")
           ops (:tx-ops actual)
           n (count prefix)]
-      (is (= 3 n))
+      (is (= 5 n))
       (is (= (into prefix (:tx-ops base)) ops))
       (is (= (dissoc base :tx-ops) (dissoc actual :tx-ops)))
       (is ((:pending? registry) id "c1"))
@@ -658,3 +658,43 @@
               (is (= :checked-historical-projection (get-in result [:mapped-readback :physical-correspondence])))
               (is (= after (request-row)))))))
         (finally (when-let [release @release-policy] (release)))))))
+
+(deftest full-mapped-prefix-guards-empty-and-occupied-journal-slots
+  (let [mapping (plan/check-target-mapping! source targets)
+        occupied (record "old" "p2" {:nested {:value "original" :flags [true false]}})
+        candidate (record "fresh" "p1")
+        guards (frame/formatted-prestate-assertions! mapping rows [occupied])
+        ops (conj guards [:put-docs :gesso_commands candidate])
+        result (fn [node tx-ops]
+                 (try (xt/execute-tx node tx-ops) :committed
+                      (catch Exception e
+                        (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                          :assert-failed (throw e)))))
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= 7 (count guards)))
+    (is (frame/require-formatted-prestate-assertions! mapping rows [occupied] guards))
+    (is (= :missing-frame-prestate-assertion
+           (reason #(frame/require-formatted-prestate-assertions! mapping rows [occupied] (pop guards)))))
+    (is (= :duplicate-journal-frame-slot
+           (reason #(frame/formatted-prestate-assertions! mapping rows [occupied (record "duplicate" "p2")]))))
+    (is (= :unsupported-journal-frame-value
+           (reason #(frame/formatted-prestate-assertions! mapping rows [(assoc-in occupied [:gesso.command/outcome :extra] nil)]))))
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node [[:put-docs :requests (first (:requests rows))]])
+      (let [clear! #(xt/execute-tx node [[:delete-docs :gesso_commands "old" "duplicate" "intruder"]])
+            fresh #(xt/q node ["SELECT * FROM gesso_commands WHERE _id = ?" "fresh"])]
+        (doseq [changed [[]
+                         [(assoc-in occupied [:gesso.command/outcome :result] :rejected)]
+                         [(assoc-in occupied [:gesso.command/binding :arguments :nested :value] "changed")]
+                         [(assoc-in occupied [:gesso.command/outcome :extra] true)]
+                         [(assoc-in occupied [:gesso.command/binding :arguments :nested :flags] [false true])]
+                         [occupied (record "duplicate" "p2")]
+                         [occupied (record "intruder" "p1")]]]
+          (clear!)
+          (when (seq changed) (xt/execute-tx node [(into [:put-docs :gesso_commands] changed)]))
+          (is (= :assert-failed (result node ops)))
+          (is (empty? (fresh))))
+        (clear!)
+        (xt/execute-tx node [[:put-docs :gesso_commands occupied]])
+        (is (= :committed (result node ops)))
+        (is (= [candidate] (fresh)))))))

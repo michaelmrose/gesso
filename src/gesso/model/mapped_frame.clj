@@ -4,6 +4,8 @@
   (:require [clojure.string :as str]
             [clojure.set :as set]
             [gesso.model.tx :as tx]
+            [gesso.model.command-resolution :as resolution]
+            [gesso.choreo.identity :as identity]
             [xtdb.util :as xt-util]))
 
 (defn- reject! [reason]
@@ -129,6 +131,81 @@
   [mapping document-rows formatted-guards]
   (let [required (frequencies (map tx/format-assertion
                                   (prestate-assertions! mapping document-rows)))
+        supplied (frequencies formatted-guards)]
+    (when-not (every? (fn [[guard n]] (<= n (get supplied guard 0))) required)
+      (reject! :missing-frame-prestate-assertion))
+    true))
+
+(defn- journal-field-sql! [parent k]
+  (let [column (name (xt-util/kw->normal-form-kw k))]
+    (when-not (re-matches #"[a-z_][a-z0-9_$]*" column)
+      (reject! :unsupported-journal-frame-key))
+    (if parent (str "(" parent ")." column) column)))
+
+(defn- journal-field-tests! [path value]
+  ;; XTDB struct equality compares the union schema of field names. Use
+  ;; visible field counts and scalar leaves for nonempty maps instead.
+  ;; Empty maps retain the conservative equality check (LENGTH alone would
+  ;; not distinguish them from empty lists or strings).
+  (cond
+    (map? value)
+    (do (safe-keys! (keys value))
+        (if (seq value)
+          (into [[(str "LENGTH(" path ") = ?") (count value)]]
+                (mapcat (fn [[k v]] (journal-field-tests! (journal-field-sql! path k) v)))
+                (sort-by (comp str key) value))
+          [[(str path " = ?") value]]))
+    (or (comparable-field? value) (uuid? value)
+        (and (vector? value) (every? #(or (comparable-field? %) (uuid? %)) value)))
+    [[(str path " = ?") value]]
+    :else (reject! :unsupported-journal-frame-value)))
+
+(defn- occupied-slot-assertions! [where principal operation row]
+  (safe-keys! (keys row))
+  (let [checks (mapcat (fn [[k v]] (journal-field-tests! (journal-field-sql! nil k) v))
+                       (sort-by (comp str key) row))]
+    [(tx/format-assertion (tx/assert-document-field-count :gesso_commands (:xt/id row) (count row)))
+     (into [(str "ASSERT 1 = (SELECT COUNT(*)" where " AND "
+                 (str/join " AND " (map first checks)) ")") principal operation]
+           (map second checks))]))
+
+(defn formatted-prestate-assertions!
+  "Extend the mapped document prefix with every mapped journal slot. An
+   empty slot requires zero matches by principal/operation; an occupied
+   slot requires exactly one match and equality of the complete record,
+   including the binding and outcome used by the decoder. Supplied rows
+   must already have passed the mapped projection check. Restrict nested
+   values to a supported non-null fragment. Nonempty structs use visible
+   field counts and leaf equality, not whole-struct schema equality. This
+   does not establish independent codec or provider refinement."
+  [mapping document-rows journal-rows]
+  (let [slots (sort-by pr-str (filter #(= :journal-slot (first %))
+                                      (vals (:target-map mapping))))
+        slot-set (set slots)
+        _ (when-not (and (sequential? journal-rows) (every? map? journal-rows))
+            (reject! :invalid-journal-frame-rows))
+        index (reduce (fn [m row]
+                        (let [binding (:gesso.command/binding (resolution/require-record row))
+                              slot [:journal-slot (identity/raw-value (:principal binding))
+                                    (:operation binding)]]
+                          (when-not (contains? slot-set slot) (reject! :unexpected-journal-frame-row))
+                          (when (contains? m slot) (reject! :duplicate-journal-frame-slot))
+                          (assoc m slot row))) {} journal-rows)
+        where " FROM gesso_commands WHERE (gesso$command$binding).principal.gesso$choreo$identity$value = ? AND (gesso$command$binding).operation = ?"
+        count-sql (fn [n] (str "ASSERT " n " = (SELECT COUNT(*)" where ")"))]
+    (into (mapv tx/format-assertion (prestate-assertions! mapping document-rows))
+          (mapcat (fn [[_ principal operation :as slot]]
+                    (if-let [row (get index slot)]
+                      (into [[(count-sql 1) principal operation]]
+                            (occupied-slot-assertions! where principal operation row))
+                      [[(count-sql 0) principal operation]])))
+          slots)))
+
+(defn require-formatted-prestate-assertions!
+  "Require the full mapped document and journal prestate prefix in the
+   supplied pre-write guards. Exact ordering is checked by framed admission."
+  [mapping document-rows journal-rows formatted-guards]
+  (let [required (frequencies (formatted-prestate-assertions! mapping document-rows journal-rows))
         supplied (frequencies formatted-guards)]
     (when-not (every? (fn [[guard n]] (<= n (get supplied guard 0))) required)
       (reject! :missing-frame-prestate-assertion))

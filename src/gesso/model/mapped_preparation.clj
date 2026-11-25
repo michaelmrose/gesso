@@ -8,8 +8,7 @@
             [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.mapped-projection :as projection]
-            [gesso.model.mapped-frame :as frame]
-            [gesso.model.tx :as tx]))
+            [gesso.model.mapped-frame :as frame]))
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid mapped command preparation."
@@ -71,9 +70,9 @@
           lower-frame! (fn [id snapshot]
                          (when-not (some? document-effects)
                            (reject! :invalid-framed-admission))
-                         (mapv tx/format-assertion
-                               (frame/prestate-assertions! (:mapping (operation! id))
-                                                           (:document-rows snapshot))))
+                         (frame/formatted-prestate-assertions! (:mapping (operation! id))
+                                                              (:document-rows snapshot)
+                                                              (vec (vals (:records snapshot)))))
           frame-guards! (fn [id command-id]
                           (let [entry (or (get @pending [command-id id])
                                           (reject! :missing-preparation))]
@@ -102,7 +101,8 @@
                          (if (= :exact frame-mode)
                            (when-not (= (lower-frame! id snapshot) formatted-guards)
                              (reject! :noncanonical-frame-prefix))
-                           (frame/require-prestate-assertions! mapping (:document-rows snapshot) formatted-guards)))
+                           (frame/require-formatted-prestate-assertions! mapping (:document-rows snapshot)
+                                                                          (vec (vals (:records snapshot))) formatted-guards)))
                        (cond-> checked
                          (some? document-effects)
                          (assoc :document-frame :checked-supplied-complete-rows)

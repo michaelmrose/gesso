@@ -81,12 +81,12 @@
                                   (throw (ex-info "Incorrect evidence guard" {})))
                               ops (subvec ops 1 (dec (count ops)))
                               accepting? (some #(and (= :put-docs (first %)) (= :requests (second %))) ops)
-                              prefix (mapv tx/format-assertion
-                                           (frame/prestate-assertions!
+                              prefix (frame/formatted-prestate-assertions!
                                             (plan/check-target-mapping!
                                              (semantics/source "helper-1" (if accepting? :accept :refuse))
                                              semantics/target-map)
-                                            (:document-rows (if accepting? @initial-state @recovery-state))))]
+                                            (:document-rows (if accepting? @initial-state @recovery-state))
+                                            (vec (vals (:records (if accepting? @initial-state @recovery-state)))))]
                           (when-not (and (<= (count prefix) (count ops))
                                          (= prefix (subvec ops 0 (count prefix))))
                             (throw (ex-info "Incorrect observed Claim frame prefix" {})))
@@ -575,7 +575,7 @@
                    (is (every? #(= :exact-generated-prefix (:frame-prefix %)) (vals @checked-candidates)))
                    (doseq [{:keys [identity ops framed-ops]} @submissions]
                      (is (= ops (base-ops! framed-ops)))
-                     (is (= (if (= :accept (keyword (name (:alternative identity)))) 9 10)
+                     (is (= (if (= :accept (keyword (name (:alternative identity)))) 11 14)
                             (- (count framed-ops) (count ops)))))
                    (doseq [{:keys [identity]} expected]
                      (is (= (:state (if (= :accept (keyword (name (:alternative identity))))
