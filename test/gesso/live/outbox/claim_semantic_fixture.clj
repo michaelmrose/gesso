@@ -3,10 +3,8 @@
    One initial epoch and one command per helper; no production writer closure.
    Observations are diagnostic, not certificates or transaction authority."
   (:require [clojure.set :as set]
-            [clojure.walk :as walk]
-            [honey.sql :as hsql]
-            [xtdb.util :as xt-util]
             [gesso.model.tx :as model-tx]
+            [gesso.model.mapped-guard :as guard]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-projection :as projection]
             [gesso.model.inductive-plan :as inductive-plan]
@@ -131,45 +129,20 @@
                              rows)))]
     {:basis basis :state state :records @records :document-rows @document-rows}))
 
-(defn- literal-conditions! [declaration]
-  (construction/build-guarded-replacement! declaration)
-  (let [expression (get-in declaration [:guard :expression])
-        terms (if (= :and (first expression)) (rest expression) [expression])]
-    (into {} (map (fn [[_ [_ field] [_ value] :as term]]
-                    (require! (= term [:= [:read field] [:literal value]]))
-                    [field value])) terms)))
-
-(defn- format-assertion [assertion]
-  (hsql/format (walk/postwalk (fn [x] (if (qualified-keyword? x)
-                                       (xt-util/kw->normal-form-kw x) x)) assertion)))
-
-(defn- current-assertion [table id checks]
-  (format-assertion (model-tx/assert-document-current
-                     table {:model/id id :model/checks checks})))
-
-(defn- absence-assertion [table id]
-  (format-assertion (model-tx/assert-document-absent table id)))
-
 (defn- require-source-lowering!
   "Check the selected source's projected literal writes and exact pre-write
    assertions. The physical mapping and extra version/subject predicates are
    fixture declarations. Require both command-ID absence and principal/
    operation slot absence, so distinct IDs cannot fill the same slot."
-  [helper alternative id ops writes]
+  [helper alternative binding ops writes]
   (let [declaration (source helper alternative)
         mapping (plan/check-target-mapping! declaration target-map)
-        conditions (literal-conditions! declaration)
         [slot membership] (helpers helper)
         accept? (= :accept alternative)
-        mapped (if accept? #{:request/status :request/revision :assignment/helper slot membership}
-                   #{:request/status :request/revision slot})
         replacement-fields (if accept? #{:request/status :request/revision :assignment/helper slot} #{slot})
-        _ (require! (and (= mapped (set (keys conditions)))
-                         (= replacement-fields (:writes declaration))
+        _ (require! (and (= replacement-fields (:writes declaration))
                          (= replacement-fields (set (keys (:replacements declaration))))
-                         (every? #(= :literal (first %)) (vals (:replacements declaration)))
-                         (nil? (get conditions slot))
-                         (or (not accept?) (nil? (:assignment/helper conditions)))))
+                         (every? #(= :literal (first %)) (vals (:replacements declaration)))))
         after (into {} (map (fn [[k expression]] [k (second expression)])) (:replacements declaration))
         [_ request-table request-id status-field] (get target-map :request/status)
         [_ revision-table revision-id revision-field] (get target-map :request/revision)
@@ -182,19 +155,15 @@
         request (second (first (get writes request-table)))
         assignment (second (first (get writes assignment-table)))
         intents (map second (get writes :gesso_live_outbox))
-        expected (cond-> [(current-assertion request-table request-id
-                                             [[revision-field (:request/revision conditions)]
-                                              [:updated-at (if accept? "t0" "t1")]
-                                              [status-field (:request/status conditions)]])
-                           (absence-assertion :gesso_commands id)
-                           ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE (gesso$command$binding).principal.gesso$choreo$identity$value = ? AND (gesso$command$binding).operation = ?)"
-                            slot-principal slot-operation]]
-                   accept? (into [(current-assertion member-table member-id
-                                                     [[:revision 0] [:updated-at "t0"] [active-field (get conditions membership)]])
-                                  (absence-assertion assignment-table assignment-id)
-                                  (format-assertion (model-tx/assert-one :requests
+        layout (cond-> {[request-table request-id]
+                         [[:state :request/revision] [:extra :updated-at (if accept? "t0" "t1")]
+                          [:state :request/status]]}
+                 accept? (assoc [member-table member-id]
+                                [[:extra :revision 0] [:extra :updated-at "t0"] [:state membership]]))
+        expected (cond-> (guard/lower-assertions! declaration target-map binding layout)
+                   accept? (conj (model-tx/format-assertion (model-tx/assert-one :requests
                                                                       [:and [:= :xt/id [:lift "r1"]]
-                                                                       [:= :request/location-id [:lift "l1"]]]))])
+                                                                       [:= :request/location-id [:lift "l1"]]])))
                    accept? (into (map (fn [intent] ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)" (:xt/id intent)]) intents)))
         [assertions puts] (split-with #(string? (first %)) ops)]
     (require! (and (seq puts) (every? #(= :put-docs (first %)) puts)
@@ -250,7 +219,7 @@
                                           (= "l1" (:gesso.live.outbox/subject-id %))) intents)))
       :refuse (require! (= #{:gesso_commands} (set (keys by-table))))
       (require! false))
-    (require-source-lowering! helper alternative id ops by-table)
+    (require-source-lowering! helper alternative binding ops by-table)
     {:alternative (alternative-id helper alternative) :command-id id}))
 
 (defn writer-kind!

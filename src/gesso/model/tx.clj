@@ -1051,6 +1051,13 @@
     (hsql/format (normalize-sql-identifiers query))
     query))
 
+(defn format-assertion
+  "Format a canonical HoneySQL ASSERT, preserving lifted data as data."
+  [assertion]
+  (when-not (assertion-form? assertion)
+    (fail! ::invalid-assertion "Expected a canonical ASSERT form." {}))
+  (format-query assertion))
+
 (defn prepare
   "Normalizes, validates, and formats one transaction plan for Gesso Live.
 
