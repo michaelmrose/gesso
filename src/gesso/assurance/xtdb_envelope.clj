@@ -231,9 +231,9 @@
   [node tx-id ops]
   (check-envelope* node tx-id ops true expected-worker-operations! normalize-worker-operations))
 
-(defn- observed-restricted-operations! [operations]
-  ;; Require an exact round trip through the restricted caller language.
-  ;; Never discard bounds, IID, placeholder order or extra fields.
+(defn- observed-caller-operations! [operations]
+  ;; Recover caller shape without dropping operation order. The caller must
+  ;; subsequently check the complete decoded round trip.
   (when-not (and (vector? operations) (<= 1 (count operations) 16384))
     (reject! :unsupported-operation-sequence))
   (let [ops (mapv (fn [{:keys [kind query args table documents]}]
@@ -248,9 +248,39 @@
                                     (reject! :unsupported-observed-put))
                                   (into [:put-docs (keyword (name table))] documents))
                       (reject! :unsupported-observed-operation))) operations)]
+    ops))
+
+(defn- observed-restricted-operations! [operations]
+  (let [ops (observed-caller-operations! operations)]
     (when-not (= operations (expected-operations! ops))
       (reject! :unsupported-observed-envelope))
     ops))
+
+(def ^:private worker-attempt-guard-sequences
+  #{["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)"
+     "ASSERT CURRENT_TIMESTAMP < ?"
+     "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?"]
+    ["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP >= ?)"
+     "ASSERT CURRENT_TIMESTAMP < ?"
+     "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?"]
+    ["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)"]})
+
+(defn- qualify-observed-worker-attempt! [operations]
+  (let [ops (observed-caller-operations! operations)]
+    (when-not (and (contains? worker-attempt-guard-sequences (mapv first (pop ops)))
+                   (= (normalize-worker-operations operations)
+                      (expected-worker-operations! ops)))
+      (reject! :unsupported-observed-worker-envelope))
+    :restricted-worker-envelope))
+
+(defn- aborted-operation-profile! [operations]
+  (try
+    (observed-restricted-operations! operations)
+    :restricted-envelope
+    (catch clojure.lang.ExceptionInfo e
+      (if (::unsupported (ex-data e))
+        (qualify-observed-worker-attempt! operations)
+        (throw e)))))
 
 (defn- check-recorded-stuttering-attempt!
   [node tx-id committed?]
@@ -268,10 +298,12 @@
             (not= tx-id (:tx-id observed)) (report :mismatch :source-transaction-identity-mismatch)
             (and committed? (some #(= :put-docs (:kind %)) (:operations observed))) (report :mismatch :stutter-contains-write)
             :else
-            (let [ops (observed-restricted-operations! (:operations observed))
+            (let [qualification (if committed?
+                                  (do (observed-restricted-operations! (:operations observed))
+                                      :assertion-only)
+                                  (aborted-operation-profile! (:operations observed)))
                   outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
               (cond
-                (and committed? (not (every? #(string? (first %)) ops))) (report :mismatch :stutter-contains-write)
                 (empty? outcomes) (report :unavailable :transaction-outcome-unavailable)
                 (not (and (= 1 (count outcomes)) (boolean? (:committed (first outcomes)))))
                 (report :unsupported :invalid-transaction-outcome)
@@ -279,7 +311,7 @@
                 :else (if committed?
                         (assoc (report :matched nil) :tx-id tx-id :stutter-operations :assertion-only)
                         (assoc (report :matched nil) :tx-id tx-id :committed? false
-                               :aborted-operations :restricted-envelope)))))
+                               :aborted-operations qualification)))))
           (report :unsupported :unexpected-source-observation)))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -298,8 +330,8 @@
   (check-recorded-stuttering-attempt! node tx-id true))
 
 (defn check-recorded-abort!
-  "Qualify an exact retained restricted ASSERT/put-docs attempt and a
-   separately observed aborted outcome. Attempted writes need not be
+  "Qualify an exact retained restricted ASSERT/put-docs or fixed worker
+   envelope attempt and a separately observed aborted outcome. Attempted writes need not be
    authorized: this is neither intended-envelope correspondence nor proof
    of rollback, abort cause, or provider execution semantics."
   [node tx-id]

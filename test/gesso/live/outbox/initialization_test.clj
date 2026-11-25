@@ -657,10 +657,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v17)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v18)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v18 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v19 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:unclassified] (mapv :classification (:steps prefix))))
@@ -766,7 +766,7 @@
                                              :puts [[:put-docs :gesso_commands record]]})]
               (xt/execute-tx node (envelope/bind-transition-envelope! (ops "good")))
               (let [prefix (history/audit-chunk! handle admission 8)]
-                (is (= :selected-mapped-ledger-chunk-v18 (:profile prefix)))
+                (is (= :selected-mapped-ledger-chunk-v19 (:profile prefix)))
                 (is (= :observed-interval-checked (:status prefix)))
                 (is (= [:matched] (mapv :recorded-envelope (:steps prefix))))
                 (is (= [:matched] (mapv :intended-guard-prefix (:steps prefix))))
@@ -997,3 +997,45 @@
                 (is (< id (:initialization-tx-id initial)))
                 (is (not (contains? initial :manifest-row)))))
             (finally (release))))))))
+
+(deftest aborted-temporal-worker-attempts-have-separate-restricted-profile
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        id (random-uuid)
+        stamp (java.time.Instant/parse "2020-01-01T00:00:00Z")
+        deadline (.plusSeconds stamp 60)
+        cas "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)"
+        reclaim "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP >= ?)"
+        ack "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)"
+        clock [["ASSERT CURRENT_TIMESTAMP < ?" deadline]
+               ["ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" deadline]]
+        put [:put-docs :gesso_live_outbox {:xt/id id :value 1}]
+        acquire (conj (into [[cas id stamp]] clock) put)
+        attempts [[:acquire acquire true]
+                  [:reclaim (conj (into [[reclaim id stamp deadline]] clock) put) true]
+                  [:ack [[ack id stamp deadline] put] true]
+                  [:extra (conj acquire [:put-docs :unmapped {:xt/id "x"}]) false]
+                  [:wrong-table (assoc-in acquire [3 1] :unmapped) false]
+                  [:reordered (assoc acquire 1 (nth acquire 2) 2 (nth acquire 1)) false]
+                  [:interval (assoc-in acquire [2 0] "ASSERT CURRENT_TIMESTAMP + INTERVAL '6' MINUTE >= ?") false]
+                  [:assertion-only [["ASSERT CURRENT_TIMESTAMP < ?" deadline]] false]]]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (doseq [[mode ops allowed?] attempts]
+            (let [tx-id (:tx-id (xt/submit-tx node ops))
+                  _ (.awaitTxBlocking (db/primary-db node) tx-id (java.time.Duration/ofSeconds 10))
+                  result (xtdb/check-recorded-abort! node tx-id)
+                  step (last (:steps (history/audit! node admission 16)))]
+              (is (= [{:committed false}] (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])) (name mode))
+              (is (= (if allowed? :matched :unsupported) (:status result)) (name mode))
+              (is (= (when allowed? :restricted-worker-envelope) (:aborted-operations result)))
+              (is (= (if allowed? :aborted-stutter :unclassified) (:classification step)))
+              (is (= (when allowed? :restricted-worker-envelope) (:aborted-operations step)))
+              (is (= (when-not allowed? :historical-abort-envelope-unsupported) (:reason step)))
+              (is (= :unsupported (:status (envelope/check-envelope! node tx-id ops false))))))
+          (is (empty? (xt/q node "SELECT * FROM gesso_live_outbox")))
+          (finally (release)))))))

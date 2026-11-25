@@ -249,8 +249,8 @@
   (let [checked (xtdb/check-recorded-abort! node (:tx-id base))]
     (if (and (= :matched (:status checked)) (= envelope/profile (:profile checked))
              (= (:tx-id base) (:tx-id checked)) (false? (:committed? checked))
-             (= :restricted-envelope (:aborted-operations checked)))
-      (assoc base :classification :aborted-stutter :aborted-operations :restricted-envelope)
+             (contains? #{:restricted-envelope :restricted-worker-envelope} (:aborted-operations checked)))
+      (assoc base :classification :aborted-stutter :aborted-operations (:aborted-operations checked))
       (assoc base :classification :unclassified
              :reason (case (:status checked)
                        :unavailable :historical-abort-envelope-unavailable
@@ -416,7 +416,7 @@
         {:keys [basis rows]} (observe-range! scope nil max-steps false)
         steps (classify-range! scope rows)]
     (require-current-scope! scope)
-    {:profile :selected-mapped-ledger-coverage-v18 :authority :none
+    {:profile :selected-mapped-ledger-coverage-v19 :authority :none
      :status (if (some #(= :unclassified (:classification %)) steps)
                :unclassified-steps :observed-interval-checked)
      :initialization (:initial scope) :through-basis basis :steps steps
@@ -432,7 +432,7 @@
 (defn- checkpoint-state! [scope checkpoint]
   (when (some? checkpoint)
     (let [prior (locking checkpoints (.get checkpoints checkpoint))]
-      (when-not (and prior (= :selected-mapped-history-checkpoint-v18 (:profile prior))
+      (when-not (and prior (= :selected-mapped-history-checkpoint-v19 (:profile prior))
                      (identical? (:token scope) (:token prior))
                      (identical? (:admission scope) (:admission prior))
                      (= (:initial scope) (:initial prior)))
@@ -461,12 +461,12 @@
          anchor (peek rows)
          through (xtdb/basis (:xt/id anchor) (ledger-time anchor))
          next-state (assoc (select-keys scope [:token :initial :admission])
-                           :profile :selected-mapped-history-checkpoint-v18
+                           :profile :selected-mapped-history-checkpoint-v19
                            :anchor anchor :counts counts :first-unclassified first-unclassified)
          next-checkpoint (HistoryCheckpoint.)]
      (require-current-scope! scope)
      (locking checkpoints (.put checkpoints next-checkpoint next-state))
-     {:profile :selected-mapped-ledger-chunk-v18 :authority :none
+     {:profile :selected-mapped-ledger-chunk-v19 :authority :none
       :status (cond first-unclassified :unclassified-steps
                     caught-up? :observed-interval-checked
                     :else :partial-interval)
@@ -508,13 +508,13 @@
   "Export an issued checkpoint as authenticated, plain EDN data. The trusted
    owner must persist it and a separate 32-byte secret key, unique to this
    database and trusted audit/decoder implementation. Change deployment-id
-   (or rotate the key) when that implementation changes. Versions 1 through 17
-   cannot be restored: they lack retained manifest-root checks.
+   (or rotate the key) when that implementation changes. Versions 1 through 18
+   cannot be restored: they lack restricted temporal-worker abort qualification.
    No writer authority."
   [connectable admission checkpoint key deployment-id]
   (let [scope (audit-scope! connectable admission 1)
         prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
-        payload {:profile :selected-mapped-history-checkpoint-v18
+        payload {:profile :selected-mapped-history-checkpoint-v19
                  :scope (durable-scope scope deployment-id)
                  :anchor (update (:anchor prior) :system-time str)
                  :counts (:counts prior)
@@ -533,7 +533,7 @@
   (let [scope (audit-scope! connectable admission 1)
         {:keys [payload mac]} sealed]
     (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
-                   (map? payload) (= :selected-mapped-history-checkpoint-v18 (:profile payload))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v19 (:profile payload))
                    (string? mac) (re-matches #"[0-9a-f]{64}" mac)
                    (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
                                           (checkpoint-mac key payload)))
@@ -545,7 +545,7 @@
                                      (update :system-time #(Instant/parse %)))
           checkpoint (HistoryCheckpoint.)
           state (assoc (select-keys scope [:token :initial :admission])
-                       :profile :selected-mapped-history-checkpoint-v18
+                       :profile :selected-mapped-history-checkpoint-v19
                        :anchor anchor :counts (:counts payload) :first-unclassified first-unclassified)]
       ;; Verify the anchor at a pinned frontier; no classification or extension.
       (observe-range! scope anchor 1 true)

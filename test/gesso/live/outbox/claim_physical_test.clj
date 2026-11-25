@@ -728,10 +728,10 @@
                      (is (= :declared (:residual-assertion-profile report)))
                      (is (= :matched (get-in (host/combined-assurance-status started)
                                              [:physical-induction :premises :manifest-establishment-correspondence])))
-                     (is (= :v18-declared-expectations-checked
+                     (is (= :v19-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :residual-assertion-correspondence])))
-                     (is (= :v18-declared-expectations-checked
+                     (is (= :v19-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
                      (let [operational (host/assurance-status started)]

@@ -1685,3 +1685,30 @@ not proof of the compiled descriptor's semantics, all pre-initialization
 history, or prevention of raw concurrent writers. Aborted temporal worker
 attempts, provider execution refinement and physical writer authority remain
 open. No CLM-R2 premise is retired.
+
+* v2603 — qualify retained temporal worker aborts
+
+Preserve the existing restricted ASSERT/put-docs round trip for mapped
+attempts and committed stutters. For aborted attempts only, fall back on
+a distinct restricted worker envelope: one of the three fixed ordered
+worker guard sequences followed by a single canonical outbox put. Require
+complete decoded round-trip equality, normalizing SQL timestamps as instants
+only. Independently check the provider's false committed outcome. Expose
+:restricted-worker-envelope separately from :restricted-envelope; retain
+equal selected snapshots and valid-time continuity requirements. Advance
+history, checkpoint and operational profiles to v19; v18 and earlier
+checkpoints require rescanning.
+
+JVM initialization/history, manifest and operational-report namespaces:
+31 tests / 732 assertions, zero failures or errors. Real embedded XTDB
+aborted worker-shaped submissions exercise acquisition, reclamation and
+acknowledgment guards, extra or wrong-table puts, reordered guards, a different
+interval literal and a standalone temporal assertion. The generic mapped
+comparator refuses all eight temporal cases. These raw test attempts isolate
+retained decoding, not production worker authorization. Full opt-in physical
+Claim source-log suite: 3 tests / 1136 assertions, zero failures or errors.
+Full mapped-projection, project, Chromium and separate proof gates not rerun.
+
+Qualification establishes a restricted retained attempted operation shape
+and recorded abort, not semantic legitimacy, abort cause, rollback semantics,
+provider execution refinement or writer authority. No CLM-R2 premise is retired.
