@@ -1,5 +1,6 @@
 (ns gesso.live.outbox.initialization-test
   (:require [clojure.java.io :as io]
+            [clojure.edn :as edn]
             [clojure.test :refer [deftest is]]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
@@ -449,3 +450,58 @@
             (is (= :invalid-history-checkpoint
                    (reason #(history/audit-chunk! node admission 1 @checkpoint))))
             (finally (release))))))))
+
+(deftest authenticated-history-checkpoint-survives-node-restart
+  (let [root (java.nio.file.Files/createTempDirectory
+              "gesso-v2540-history-" (make-array java.nio.file.attribute.FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        file (io/file (.toFile root) "checkpoint.edn")
+        key (byte-array 32)
+        _ (.nextBytes (java.security.SecureRandom.) key)
+        wrong-key (aclone key)
+        _ (aset-byte wrong-key 0 (unchecked-byte (bit-xor 1 (aget wrong-key 0))))
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        install! (fn [node admission]
+                   (let [writer (policy/build-policy! node {:admission admission :initializer seed :observe! identity}
+                                                      {:source-id "s"})
+                         release (xtdb/register-submission-policy! node writer)]
+                     (policy/activate-policy! writer)
+                     release))]
+    (try
+      (with-open [node (xtn/start-node config)]
+        (let [admission (admission!) release (install! node admission)]
+          (try
+            (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :item-count 99}]])
+            (let [report (history/audit-chunk! node admission 1)
+                  sealed (history/seal-checkpoint! node admission (:checkpoint report) key "db/audit-v1")]
+              (is (= {:unclassified 1} (:counts report)))
+              (is (= sealed (edn/read-string (pr-str sealed))))
+              (is (= :invalid-history-checkpoint
+                     (reason #(history/seal-checkpoint! node admission report key "db/audit-v1"))))
+              (spit file (pr-str sealed)))
+            (finally (release)))))
+      (with-open [node (xtn/start-node config)]
+        (let [admission (admission!) release (install! node admission)
+              sealed (edn/read-string (slurp file))
+              restore #(history/restore-checkpoint! node admission %1 %2 %3)]
+          (try
+            (is (= :invalid-durable-history-checkpoint
+                   (reason #(restore (assoc-in sealed [:payload :counts] {}) key "db/audit-v1"))))
+            (is (= :invalid-durable-history-checkpoint
+                   (reason #(restore sealed wrong-key "db/audit-v1"))))
+            (is (= :incompatible-durable-history-checkpoint
+                   (reason #(restore sealed key "db/audit-v2"))))
+            (let [cursor (restore sealed key "db/audit-v1")]
+              (xt/execute-tx node seed)
+              (let [extended (history/audit-chunk! node admission 1 cursor)
+                    whole (history/audit! node admission 16)]
+                (is (= :unclassified-steps (:status extended)))
+                (is (true? (:caught-up? extended)))
+                (is (= {:unclassified 2} (:counts extended)))
+                (is (= (first (:steps whole)) (:first-unclassified extended)))
+                (is (= [(second (:steps whole))] (:steps extended)))
+                (is (= (:through-basis whole) (:through-basis extended)))))
+            (finally (release)))))
+      (finally
+        (doseq [entry (reverse (file-seq (.toFile root)))] (io/delete-file entry true))))))

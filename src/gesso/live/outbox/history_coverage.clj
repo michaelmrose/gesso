@@ -3,14 +3,20 @@
    A mapped stutter is not a proof of an infrastructure writer's authority.
    No claim is made about valid-time evolution between ledger observations,
    hidden tables, transaction-internal reads, or external writer closure."
-  (:require [gesso.live.consistency.xtdb :as xtdb]
+  (:require [gesso.assurance.subject :as subject]
+            [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.live.outbox.maintenance-policy :as maintenance]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.read-frontier :as frontier]
             [gesso.model.inductive-plan :as inductive]
             [xtdb.basis :as basis])
-  (:import [java.time ZonedDateTime]))
+  (:import [java.time Instant ZonedDateTime]
+           [java.nio.charset StandardCharsets]
+           [java.security MessageDigest]
+           [java.util HexFormat]
+           [javax.crypto Mac]
+           [javax.crypto.spec SecretKeySpec]))
 
 (defn- reject! [reason]
   (throw (ex-info "Cannot establish bounded mapped history coverage."
@@ -204,7 +210,8 @@
    the first unresolved step cannot be reset by supplying a report as a
    cursor. :caught-up? refers only to the observed frontier. Steps are local
    to this chunk; the checkpoint retains only bounded summary data. A fresh
-   policy/restart requires a fresh audit. This remains diagnostic evidence."
+   policy/restart requires a fresh audit or an authenticated restored
+   checkpoint. This remains diagnostic evidence."
   ([connectable admission max-steps]
    (audit-chunk! connectable admission max-steps nil))
   ([connectable admission max-steps checkpoint]
@@ -230,3 +237,76 @@
       :caught-up? caught-up? :steps steps :counts counts
       :first-unclassified first-unclassified :checkpoint next-checkpoint
       :open-obligations open-obligations})))
+
+;; Durable transport is intentionally outside XTDB: recording a checkpoint
+;; must not create another ledger step. The owner persists the sealed EDN
+;; and protects a unique key for this database and trusted implementation.
+(defn- durable-scope [scope deployment-id]
+  (when-not (and (string? deployment-id) (<= 1 (count deployment-id) 512))
+    (reject! :invalid-history-deployment))
+  {:deployment-id deployment-id
+   :initialization (update (:initial scope) :system-time str)
+   :admission-fingerprint (:fingerprint
+                           (subject/describe-subject
+                            {:kind :rule :id ::checkpoint-admission
+                             :interface (select-keys
+                                         (inductive/describe-mapped-admission (:admission scope))
+                                         [:catalog-fingerprint :induction-fingerprint :target-map
+                                          :operation-mappings :input-derivations
+                                          :document-effects :auxiliary-tables])}))})
+
+(defn- checkpoint-mac [key payload]
+  (when-not (and (bytes? key) (= 32 (alength ^bytes key)))
+    (reject! :invalid-history-checkpoint-key))
+  (let [fingerprint (:fingerprint (subject/describe-subject
+                                   {:kind :rule :id ::durable-checkpoint
+                                    :interface payload}))
+        mac (Mac/getInstance "HmacSHA256")]
+    (.init mac (SecretKeySpec. ^bytes key "HmacSHA256"))
+    (.doFinal mac (.getBytes ^String fingerprint StandardCharsets/US_ASCII))))
+
+(defn seal-checkpoint!
+  "Export an issued checkpoint as authenticated, plain EDN data. The trusted
+   owner must persist it and a separate 32-byte secret key, unique to this
+   database and trusted audit/decoder implementation. Change deployment-id
+   (or rotate the key) when that implementation changes. No writer authority."
+  [connectable admission checkpoint key deployment-id]
+  (let [scope (audit-scope! connectable admission 1)
+        prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
+        payload {:profile :selected-mapped-history-checkpoint-v1
+                 :scope (durable-scope scope deployment-id)
+                 :anchor (update (:anchor prior) :system-time str)
+                 :counts (:counts prior)
+                 :first-unclassified (some-> (:first-unclassified prior) (update :system-time str))}
+        signature (.formatHex (HexFormat/of) ^bytes (checkpoint-mac key payload))]
+    (require-current-scope! scope)
+    {:payload payload :mac signature}))
+
+(defn restore-checkpoint!
+  "Authenticate a saved checkpoint and rebind it to a freshly activated
+   matching admission. Check the exact anchor against the current ledger,
+   without rescanning the prefix. Trusts the owner's key, deployment identity
+   and intact historical storage; does not detect database forks or rollback
+   of a previously valid checkpoint. Never grants certification authority."
+  [connectable admission sealed key deployment-id]
+  (let [scope (audit-scope! connectable admission 1)
+        {:keys [payload mac]} sealed]
+    (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v1 (:profile payload))
+                   (string? mac) (re-matches #"[0-9a-f]{64}" mac)
+                   (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
+                                          (checkpoint-mac key payload)))
+      (reject! :invalid-durable-history-checkpoint))
+    (when-not (= (:scope payload) (durable-scope scope deployment-id))
+      (reject! :incompatible-durable-history-checkpoint))
+    (let [anchor (update (:anchor payload) :system-time #(ZonedDateTime/parse %))
+          first-unclassified (some-> (:first-unclassified payload)
+                                     (update :system-time #(Instant/parse %)))
+          checkpoint (HistoryCheckpoint.)
+          state (assoc (select-keys scope [:token :initial :admission])
+                       :anchor anchor :counts (:counts payload) :first-unclassified first-unclassified)]
+      ;; Verify the anchor at a pinned frontier; no classification or extension.
+      (observe-range! scope anchor 1 true)
+      (require-current-scope! scope)
+      (locking checkpoints (.put checkpoints checkpoint state))
+      checkpoint)))
