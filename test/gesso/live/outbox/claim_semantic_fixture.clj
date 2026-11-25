@@ -97,9 +97,9 @@
    typed projection and identity coverage to the mapped decoder. The extra
    assignment relationship and outcome meanings remain fixture-specific."
   [q]
-  (let [requests (q ["SELECT _id, status, revision FROM requests"])
-        assignments (q ["SELECT _id, request_id, helper FROM request_assignments"])
-        memberships (q ["SELECT _id, active FROM memberships"])
+  (let [requests (q ["SELECT * FROM requests"])
+        assignments (q ["SELECT * FROM request_assignments"])
+        memberships (q ["SELECT * FROM memberships"])
         records (q ["SELECT * FROM gesso_commands"])]
     (require! (every? #(and (= "r1" (:request-id %)) (helpers (:helper %))) assignments))
     (projection/project-state! (source "helper-1" :accept) target-map
@@ -122,9 +122,9 @@
                            (let [rows (xtdb/q-from node query opts)]
                              (when (= query ["SELECT * FROM gesso_commands"])
                                (reset! records (into {} (map (juxt :xt/id clojure.core/identity)) rows)))
-                             (when-let [table ({["SELECT _id, status, revision FROM requests"] :requests
-                                                ["SELECT _id, request_id, helper FROM request_assignments"] :request_assignments
-                                                ["SELECT _id, active FROM memberships"] :memberships} query)]
+                             (when-let [table ({["SELECT * FROM requests"] :requests
+                                                ["SELECT * FROM request_assignments"] :request_assignments
+                                                ["SELECT * FROM memberships"] :memberships} query)]
                                (swap! document-rows assoc table rows))
                              rows)))]
     {:basis basis :state state :records @records :document-rows @document-rows}))
@@ -319,9 +319,19 @@
     (require! (= (:state snapshot) (:before checked)))
     checked))
 
+(def document-effects
+  (into {} (for [helper (keys helpers) alternative alternatives]
+             [(alternative-id helper alternative)
+              (if (= :accept alternative)
+                {[:document :requests "r1"] {:updated-at "t1"}
+                 [:document :request_assignments "primary-r1"]
+                 {:request-id "r1" :revision 0 :created-at "t1" :updated-at "t1" :request/location-id "l1"}}
+                {})])))
+
 (defn mapped-admission-source [bound]
   {:inductive-source bound :target-map target-map :decode-outcome! decode-claim-outcome!
-   :transaction-footprint! submitted-alternative! :auxiliary-tables #{:gesso_live_outbox}})
+   :transaction-footprint! submitted-alternative! :auxiliary-tables #{:gesso_live_outbox}
+   :document-effects document-effects})
 
 (defn build-prepared-admission! [bound]
   (let [source (mapped-admission-source bound)

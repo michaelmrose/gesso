@@ -6,7 +6,8 @@
   (:require [gesso.choreo.identity :as identity]
             [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
-            [gesso.model.mapped-projection :as projection]))
+            [gesso.model.mapped-projection :as projection]
+            [gesso.model.mapped-frame :as frame]))
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid mapped command preparation."
@@ -21,7 +22,9 @@
    Trusted callers may discard abandoned preparations. New attempts require
    new preparations; durable replay/slot uniqueness remain XTDB concerns.
    Only pass the mapped puts after checking the full transaction footprint."
-  [catalog target-map decode-outcome!]
+  ([catalog target-map decode-outcome!]
+   (build-admission! catalog target-map decode-outcome! nil))
+  ([catalog target-map decode-outcome! document-effects]
   (let [entries (:operations catalog)
         ids (mapv :id entries)]
     (when-not (and (vector? entries) (seq entries) (fn? decode-outcome!)
@@ -33,6 +36,11 @@
                                        (reject! :operation-subject-mismatch))
                                      [id {:construction construction
                                           :mapping (plan/check-target-mapping! construction target-map)}])) entries)
+          _ (when (some? document-effects)
+              (when-not (and (map? document-effects) (= (set ids) (set (keys document-effects))))
+                (reject! :incomplete-document-effect-catalog))
+              (doseq [[id {:keys [mapping]}] operations]
+                (frame/check-effects! mapping (get document-effects id))))
           pending (atom {})
           operation! (fn [id] (or (get operations id) (reject! :unknown-operation)))
           prepare! (fn [id binding snapshot inputs]
@@ -67,7 +75,10 @@
                        (when-not (and (= (:fingerprint mapping) (:mapping-fingerprint checked))
                                       (= (:state snapshot) (:before checked)))
                          (reject! :preparation-state-mismatch))
-                       checked)))]
+                       (when (some? document-effects)
+                         (frame/check-replacements! mapping (get document-effects id) (:document-rows snapshot) puts))
+                       (cond-> checked (some? document-effects)
+                         (assoc :document-frame :checked-supplied-complete-rows)))))]
       {:prepare! prepare! :admit! admit!
        :discard! (fn [id command-id] (swap! pending dissoc [command-id id]) nil)
-       :pending? (fn [id command-id] (contains? @pending [command-id id]))})))
+       :pending? (fn [id command-id] (contains? @pending [command-id id]))}))))

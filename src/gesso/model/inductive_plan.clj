@@ -25,7 +25,8 @@
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.transition :as transition]
             [gesso.model.certified-plan :as plan]
-            [gesso.model.mapped-preparation :as preparation])
+            [gesso.model.mapped-preparation :as preparation]
+            [gesso.model.mapped-frame :as frame])
   (:import (java.util WeakHashMap)))
 
 (def adapter-version 1)
@@ -297,7 +298,7 @@
 (def ^:private ^WeakHashMap issued-mapped (WeakHashMap.))
 
 (def ^:private mapped-source-keys
-  #{:inductive-source :target-map :decode-outcome! :transaction-footprint! :auxiliary-tables})
+  #{:inductive-source :target-map :decode-outcome! :transaction-footprint! :auxiliary-tables :document-effects})
 
 (defn- checked-mapped-source! [source]
   (exact-map! source mapped-source-keys [])
@@ -315,7 +316,12 @@
                                  (re-matches #"[a-z][a-z0-9_]*" (name %))) auxiliary)
                    (empty? (set/intersection auxiliary mapped-tables)))
       (reject! :invalid-auxiliary-tables [:auxiliary-tables] {}))
-    (assoc checked :auxiliary-tables auxiliary)))
+    (let [effects (:document-effects source)
+          mappings (:operation-mappings checked)]
+      (when-not (and (map? effects) (= (set (keys mappings)) (set (keys effects))))
+        (reject! :incomplete-document-effect-catalog [:document-effects] {}))
+      (doseq [[id mapping] mappings] (frame/check-effects! mapping (get effects id)))
+      (assoc checked :auxiliary-tables auxiliary :document-effects effects))))
 
 (defn- admit-transaction!
   [registry footprint! auxiliary {:keys [api tx-ops tx-options] :as submission}]
@@ -361,7 +367,7 @@
   [source]
   (let [checked (checked-mapped-source! source)
         registry (original-mapped-builder (get-in source [:inductive-source :catalog])
-                                          (:target-map source) (:decode-outcome! source))
+                                          (:target-map source) (:decode-outcome! source) (:document-effects source))
         admission (fn [action & args]
                     (if (= :admit! action)
                       (apply admit-transaction! registry (:transaction-footprint! source)
@@ -396,6 +402,7 @@
                    (= (:target-map original) (:target-map current-source))
                    (identical? (:decode-outcome! original) (:decode-outcome! current-source))
                    (= (:auxiliary-tables original) (:auxiliary-tables current-source))
+                   (= (:document-effects original) (:document-effects current-source))
                    (identical? (:transaction-footprint! original) (:transaction-footprint! current-source)))
       (reject! :changed-mapped-admission-registration [:current-source] {}))
     (let [fresh (mapped-description (checked-mapped-source! current-source))]

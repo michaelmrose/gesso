@@ -510,6 +510,7 @@
                    (is (= (count expected) (count @submissions)))
                    (is (= expected (set (map #(dissoc % :ops :commit-basis) @submissions))))
                    (is (= (set (map :identity expected)) (set (keys @checked-candidates))))
+                   (is (every? #(= :checked-supplied-complete-rows (:document-frame %)) (vals @checked-candidates)))
                    (doseq [{:keys [identity]} expected]
                      (is (= (:state (if (= :accept (keyword (name (:alternative identity))))
                                      @initial-state @recovery-state))
@@ -580,6 +581,17 @@
                        (is (not ((:pending? preparations) alternative id)))
                        (is (= original-admissions @policy-admissions))
                        (is (= original-checks @checked-candidates))
+                       ;; Direct adapter calls with the genuine original preparation
+                       ;; cannot introduce a hidden field or remove a framed field.
+                       (doseq [mutate [(fn [doc] (assoc doc :unexpected true))
+                                       (fn [doc] (dissoc doc :created-at))]]
+                         ((:prepare! preparations) alternative binding @initial-state {})
+                         (is (= :submission-policy-refused
+                                (denied #(execute-adapter node
+                                          (mapv (fn [op] (if (= :requests (second op))
+                                                          (update op 2 mutate) op)) accepted) nil))))
+                         (is (not ((:pending? preparations) alternative id))))
+                       (is (= original-admissions @policy-admissions))
                        ;; A well-shaped write is not enough without every source-derived predicate.
                        (doseq [guard guards]
                          (is (= :submission-policy-refused
@@ -652,7 +664,7 @@
                                     (let [rows (q n query opts)]
                                       (when-not (= query ["SELECT 1 AS ready"])
                                         (swap! pinned-opts conj opts))
-                                      (when (= query ["SELECT _id, status, revision FROM requests"])
+                                      (when (= query ["SELECT * FROM requests"])
                                         ;; Commit between projection queries, not before basis capture.
                                         (xt/execute-tx node
                                           [[:put-docs :requests {:xt/id "r1" :status :claimed :revision 1}]

@@ -142,3 +142,39 @@
                  (preparation/build-admission! (assoc catalog :declared-operation-ids #{}) targets identity/identity)))
     (is (thrown? clojure.lang.ExceptionInfo
                  (preparation/build-admission! (update catalog :operations conj (first (:operations catalog))) targets identity/identity)))))
+
+(deftest complete-document-frame-rejects-hidden-mutations
+  (let [id :example/projection
+        original (assoc source :writes #{:example/count :example/one :example/owner}
+                        :replacements {:example/count [:literal 3] :example/one [:literal :accepted]
+                                       :example/owner [:literal "p1"]}
+                        :frame #{:example/enabled :example/two})
+        catalog {:declared-operation-ids #{id} :operations [{:id id :construction original}]}
+        effects {id {[:document :requests "r1"] {:updated-at "t1"}
+                     [:document :assignments "a1"] {:created-at "t1"}}}
+        decoder #(get-in % [:gesso.command/outcome :result])
+        docs (update-in rows [:requests 0] assoc :hidden {:x 1} :nullable nil :updated-at "t0")
+        snapshot {:document-rows docs :records {} :state (project docs [])}
+        row (record "c1" "p1")
+        puts [[:put-docs :requests (assoc (first (:requests docs)) :item-count 3 :updated-at "t1")]
+              [:put-docs :assignments {:xt/id "a1" :owner "p1" :created-at "t1"}]
+              [:put-docs :gesso_commands row]]
+        check (fn [ops] (let [{:keys [prepare! admit!]} (preparation/build-admission! catalog targets decoder effects)]
+                          (prepare! id (:gesso.command/binding row) snapshot {})
+                          (admit! id "c1" ops)))
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= :checked-supplied-complete-rows (:document-frame (check puts))))
+    (doseq [bad [(assoc-in puts [0 2 :hidden :x] 2)
+                 (update-in puts [0 2] dissoc :hidden)
+                 (update-in puts [0 2] dissoc :nullable)
+                 (assoc-in puts [0 2 :extra] nil)]]
+      (is (= :unmapped-document-frame-mismatch (reason #(check bad)))))
+    (is (= :supplemental-document-value-mismatch (reason #(check (assoc-in puts [0 2 :updated-at] "bad")))))
+    (is (= :created-document-field-mismatch (reason #(check (assoc-in puts [1 2 :extra] true)))))
+    (is (= :supplemental-document-value-mismatch (reason #(check (update-in puts [1 2] dissoc :created-at)))))
+    (is (= :aliased-document-key (reason #(check (assoc-in puts [0 2 :item_count] 3)))))
+    (is (= :incomplete-document-effects
+           (reason #(preparation/build-admission! catalog targets decoder {id {}}))))
+    (is (= :overlapping-document-effects
+           (reason #(preparation/build-admission! catalog targets decoder
+                       (assoc-in effects [id [:document :requests "r1"] :item_count] 3)))))))
