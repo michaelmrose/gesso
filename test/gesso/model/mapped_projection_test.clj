@@ -7,6 +7,7 @@
             [gesso.model.mapped-frame :as frame]
             [gesso.assurance.proof.mapped-prestate-semantics :as prestate]
             [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
+            [gesso.assurance.proof.mapped-prestate-rules :as rules]
             [gesso.model.certified-plan :as plan]
             [gesso.model.inductive-plan :as inductive]
             [gesso.model.tx :as tx]
@@ -802,3 +803,64 @@
         (is (= :checked-exact-prefix (:status (lowering/check-prefix! source targets docs records generated))))))
     (is (= :unsupported-value
            (reason #(lowering/check-prefix! source targets (assoc-in rows [:requests 0 :extra] nil) journal prefix))))))
+
+(deftest restricted-prestate-rules-model-exact-decoded-row-equality
+  (let [mapping (plan/check-target-mapping! source targets)
+        occupied (record "old" "p2" {:nested {:value "original" :flags [true false] :empty {}}})
+        journal [occupied]
+        prefix (frame/formatted-prestate-assertions! mapping rows journal)
+        description (rules/derive! source targets rows journal prefix)
+        request [:document :requests "r1"]
+        nullable [:document :assignments "a1"]
+        empty-slot [:journal-slot "p1" :example/command]
+        slot [:journal-slot "p2" :example/command]
+        expected {request (:requests rows) nullable [] empty-slot [] slot journal}
+        observe #(rules/evaluate! source targets rows journal prefix description %)
+        report (observe expected)
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+        nested [:gesso.command/binding :arguments :nested]
+        original-nested (get-in occupied nested)]
+    (is (:rules-pass? report))
+    (is (:exact-match? report))
+    (is (:instance-correspondence? report))
+    (is (= :not-established (:sql-refinement report)))
+    (is (= :not-issued (:certificate report)))
+    (is (= :none (:authority report)))
+    (is (contains? (:open-obligations report) :transaction-internal-read-basis))
+    (is (= prefix (into [] (mapcat :assertions) (:groups description))))
+    (let [group (first (filter #(= slot (:target %)) (:groups description)))]
+      (is (some #{[:map-size nested 3]} (:rules group)))
+      (is (some #{[:equals (conj nested :empty) {}]} (:rules group))))
+    (doseq [bad [(dissoc expected request) (assoc expected :unexpected [])
+                 (assoc expected slot nil) (assoc expected slot [nil])]]
+      (is (= :invalid-selected-bags (reason #(observe bad)))))
+    (doseq [bad [(update description :groups pop)
+                 (update-in description [:groups 0 :rules] pop)
+                 (assoc description :sql-refinement :proved)]]
+      (is (= :description-mismatch
+             (reason #(rules/evaluate! source targets rows journal prefix bad expected)))))
+    (doseq [bad [(assoc expected request [])
+                 (assoc expected request (vec (repeat 2 (first (:requests rows)))))
+                 (assoc-in expected [request 0 :item-count] 3)
+                 (update-in expected [request 0] dissoc :enabled)
+                 (assoc-in expected [request 0 :extra] nil)
+                 (assoc expected nullable [{:xt/id "a1" :owner "p1"}])
+                 (assoc expected empty-slot [(record "intruder" "p1")])
+                 (assoc expected slot [])
+                 (assoc expected slot [occupied occupied])]]
+      (let [r (observe bad)]
+        (is (false? (:rules-pass? r)))
+        (is (false? (:exact-match? r)))
+        (is (:instance-correspondence? r))))
+    (doseq [v [original-nested (dissoc original-nested :value)
+               (assoc original-nested :extra nil)
+               (assoc original-nested :value nil)
+               (assoc original-nested :flags [false true])
+               (assoc original-nested :empty [])
+               (assoc original-nested :empty "")
+               (assoc original-nested :empty nil)
+               {} [] nil false "original" ["original" [true false] {}]]]
+      (let [candidate (assoc-in occupied nested v)
+            r (observe (assoc expected slot [candidate]))]
+        (is (= (= occupied candidate) (:rules-pass? r)))
+        (is (:instance-correspondence? r))))))
