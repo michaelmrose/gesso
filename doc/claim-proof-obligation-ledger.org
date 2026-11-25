@@ -1191,3 +1191,30 @@ frozen production UUID vectors and retry/fencing regression passed.
 The full opt-in physical Claim source-log suite also passed: 3 tests /
 1052 assertions, zero failures or errors. Full project, Chromium and separate
 proof gates were not rerun. No CLM-R2 premise is retired.
+
+* v2586 — derive publication expectations from admitted selectors
+
+Add an optional closed publication-derivations catalog to the issued mapped
+admission. If supplied, it must cover every alternative. A nonpublishing
+alternative explicitly declares nil. Publishing alternatives declare a
+qualified purpose and ordered document/topic/physical-field contributions
+covering exactly the admitted document write targets, without repeated
+coordinate/topic pairs or conflicting selectors for one topic. The current
+source recheck and durable checkpoint scope bind the declaration.
+
+Reconstruct expected pending intents independently of the observed outbox
+and caller change vector. Given already checked historical document rows,
+read old/new subjects in declared order, deduplicate topic/subject changes,
+and derive command-bound intent identities over the resulting slots. Refuse
+missing replacement rows, invalid subjects and mismatched journal slots.
+Distinguish a missing declaration from an explicitly empty expectation.
+
+Focused JVM validation: 2 tests / 38 assertions, zero failures or errors.
+Tests exercise changed and unchanged subjects, creation, explicit absence,
+missing declarations, invalid selectors and source registration drift.
+This is an expectation builder, not historical admission. The declaration
+is trusted admitted data; its correspondence to installed publication
+wiring and command order must still be checked. History classification
+remains v10 and does not yet compare these expectations with observed rows.
+Full Claim, project, Chromium and separate proof gates were not rerun.
+No CLM-R2 premise is retired.

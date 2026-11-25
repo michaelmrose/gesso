@@ -21,6 +21,8 @@
    weak identity registry. Copying a report or presenting a different issued
    plan executor is not a valid substitute."
   (:require [clojure.set :as set]
+            [clojure.string :as str]
+            [gesso.live.outbox :as outbox]
             [gesso.assurance.inductive-report :as inductive]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.initial-constructor :as constructor]
@@ -310,7 +312,8 @@
 
 (defn- mapped-source-keys! [source]
   (exact-map! source (cond-> mapped-source-keys
-                       (contains? source :input-derivations) (conj :input-derivations)) []))
+                       (contains? source :input-derivations) (conj :input-derivations)
+                       (contains? source :publication-derivations) (conj :publication-derivations)) []))
 
 (defn- check-input-derivations! [catalog source]
   (let [operations (:operations catalog)
@@ -354,6 +357,32 @@
     (reject! :mapped-input-derivation-mismatch [] {}))
   nil)
 
+(defn- check-publication-derivations! [mappings source]
+  (when (contains? source :publication-derivations)
+    (let [declarations (:publication-derivations source)]
+      (exact-map! declarations (set (keys mappings)) [:publication-derivations])
+      (doseq [[alternative declaration] declarations]
+        (when (some? declaration)
+          (let [at [:publication-derivations alternative]
+                _ (exact-map! declaration #{:purpose :contributions} at)
+                {:keys [purpose contributions]} declaration
+                targets (into #{} (filter #(= :document (first %)))
+                              (get-in mappings [alternative :write-targets]))]
+            (when-not (and (contains? (:auxiliary-tables source) outbox/intent-table)
+                           (qualified-keyword? purpose) (vector? contributions)
+                           (nil? (meta contributions)) (<= 1 (count contributions) 16384))
+              (reject! :invalid-publication-derivation at {}))
+            (doseq [entry contributions]
+              (exact-map! entry #{:target :topic :field} at)
+              (when-not (and (contains? targets (:target entry))
+                             (keyword? (:topic entry)) (keyword? (:field entry)))
+                (reject! :invalid-publication-contribution at {})))
+            (when-not (and (= targets (set (map :target contributions)))
+                           (= (count contributions) (count (set (map (juxt :target :topic) contributions))))
+                           (every? #(apply = (map :field %)) (vals (group-by :topic contributions))))
+              (reject! :incomplete-or-ambiguous-publication-contributions at {})))))
+      declarations)))
+
 (defn- checked-mapped-source! [source]
   (mapped-source-keys! source)
   (when-not (and (fn? (:decode-outcome! source)) (fn? (:transaction-footprint! source))
@@ -375,8 +404,10 @@
       (when-not (and (map? effects) (= (set (keys mappings)) (set (keys effects))))
         (reject! :incomplete-document-effect-catalog [:document-effects] {}))
       (doseq [[id mapping] mappings] (frame/check-effects! mapping (get effects id)))
-      (assoc checked :auxiliary-tables auxiliary :document-effects effects
-             :input-derivations (check-input-derivations! (get-in source [:inductive-source :catalog]) source)))))
+      (cond-> (assoc checked :auxiliary-tables auxiliary :document-effects effects
+                     :input-derivations (check-input-derivations! (get-in source [:inductive-source :catalog]) source))
+        (contains? source :publication-derivations)
+        (assoc :publication-derivations (check-publication-derivations! mappings source))))))
 
 (defn- inspect-transaction!
   [footprint! auxiliary {:keys [api tx-ops tx-options] :as submission}]
@@ -737,6 +768,57 @@
         (reject! :historical-mapped-document-frame-mismatch [] {})))
     {:tables tables :puts (conj puts [:put-docs :gesso_commands record])}))
 
+(defn reconstruct-mapped-publication!
+  "Derive ordered canonical publication intents from the issued alternative's
+   declared purpose and ordered document/topic selectors. Before and after
+   rows must already have passed the historical relation and frame checks.
+   No observed outbox rows or caller change vector enter this calculation.
+   Missing declaration is not equivalent to a declared empty publication.
+   This is an expectation builder, not historical admission or authority."
+  [admission alternative source-id record before-docs after-docs]
+  (let [description (describe-mapped-admission admission)
+        declarations (:publication-derivations description)]
+    (when-not (contains? (:operation-mappings description) alternative)
+      (reject! :unknown-operation [alternative] {}))
+    (if-not (contains? declarations alternative)
+      {:status :not-declared}
+      (let [declaration (get declarations alternative)
+            {:keys [principal operation command-id]}
+            (:gesso.command/binding (resolution/require-record record))
+            principal (identity/raw-value principal)
+            command-id (identity/raw-value command-id)
+            _ (when-not (contains? (get-in description [:operation-mappings alternative :write-targets])
+                                   [:journal-slot principal operation])
+                (reject! :publication-command-slot-mismatch [] {}))]
+        (if (nil? declaration)
+          {:status :derived :intents []}
+          (let [row (fn [docs [_ table id] required?]
+                      (let [matches (filterv #(= id (:xt/id %)) (get docs table))]
+                        (when-not (if required? (= 1 (count matches)) (<= (count matches) 1))
+                          (reject! :invalid-publication-document-rows [] {}))
+                        (first matches)))
+                subject (fn [doc field]
+                          (let [id (get doc field)]
+                            (when-not (or (and (string? id) (not (str/blank? id)))
+                                          (keyword? id) (integer? id) (uuid? id))
+                              (reject! :invalid-publication-document-subject [] {}))
+                            id))
+                changes (into [] (comp (mapcat (fn [{:keys [target topic field]}]
+                                                  (let [before (row before-docs target false)
+                                                        after (row after-docs target true)
+                                                        new (subject after field)
+                                                        ids (if before [(subject before field) new] [new])]
+                                                    (map (fn [id] {:topic topic :id id}) ids))))
+                                        (distinct)) (:contributions declaration))]
+            (when-not (<= 1 (count changes) 16384)
+              (reject! :invalid-derived-publication-count [] {}))
+            {:status :derived
+             :intents (:intents (outbox/prepare!
+                                  {:intent-ids (mapv #(outbox/derived-intent-id source-id operation principal command-id %)
+                                                     (range (count changes)))
+                                   :source-id source-id :operation operation :purpose (:purpose declaration)
+                                   :command-id command-id} changes))}))))))
+
 (defn reconstruct-mapped-prestate-prefix!
   "Internal historical verifier: return the exact reconstructed guard vector.
    Do not expose it through operational reports. Compare the durable prestate witness with a supplied physical projection
@@ -816,6 +898,7 @@
                    (= (:auxiliary-tables original) (:auxiliary-tables current-source))
                    (= (:document-effects original) (:document-effects current-source))
                    (= (:input-derivations original) (:input-derivations current-source))
+                   (= (:publication-derivations original) (:publication-derivations current-source))
                    (identical? (:transaction-footprint! original) (:transaction-footprint! current-source)))
       (reject! :changed-mapped-admission-registration [:current-source] {}))
     (let [fresh (mapped-description (checked-mapped-source! current-source))]

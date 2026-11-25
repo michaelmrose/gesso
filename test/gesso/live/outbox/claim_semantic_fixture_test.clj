@@ -6,6 +6,9 @@
             [gesso.assurance.proof.induction :as induction]
             [gesso.model.certified-plan :as plan]
             [gesso.model.inductive-plan :as mapped]
+            [gesso.model.command-resolution :as resolution]
+            [gesso.choreo.identity :as identity]
+            [gesso.live.outbox :as outbox]
             [gesso.assurance.observed-correspondence :as correspondence]
             [gesso.assurance.proof.guarded-substitution :as guarded]
             [gesso.assurance.proof.unified-preservation :as unified]
@@ -297,3 +300,55 @@
     (is (= :invalid-mapped-admission-checker-or-decoder
            (with-redefs [mapped/check-inductive-target-mapping! (constantly info)]
              (reason #(issue source)))))))
+
+(deftest mapped-publication-expectations-derive-from-admitted-document-selectors
+  (let [source (claim/mapped-admission-source (claim/bound-inductive-source!))
+        accept (claim/alternative-id "helper-1" :accept)
+        refuse (claim/alternative-id "helper-1" :refuse)
+        declaration {:purpose :gesso.live/refresh
+                     :contributions [{:target [:document :requests "r1"]
+                                      :topic :request :field :request/location-id}
+                                     {:target [:document :request_assignments "primary-r1"]
+                                      :topic :request-assignment :field :request/location-id}]}
+        declarations (into {} (for [helper (keys claim/helpers) alternative claim/alternatives]
+                                [(claim/alternative-id helper alternative)
+                                 (when (= :accept alternative) declaration)]))
+        source* (assoc source :publication-derivations declarations)
+        issue mapped/build-inductive-mapped-admission!
+        admission (issue source*)
+        record (resolution/command-record {:principal (identity/principal "helper-1")
+                                            :command-id (identity/command-id "c1")
+                                            :operation :request/claim :arguments {:request-id "r1"}}
+                                           {:outcome :request/claimed :helper "helper-1"} "t1")
+        before {:requests [{:xt/id "r1" :request/location-id "l1"}]
+                :request_assignments []}
+        after {:requests [{:xt/id "r1" :request/location-id "l2"}]
+               :request_assignments [{:xt/id "primary-r1" :request/location-id "l2"}]}
+        derive #(mapped/reconstruct-mapped-publication! admission % "source" record before %2)
+        expectation (fn [changes]
+                      {:status :derived
+                       :intents (:intents (outbox/prepare! {:intent-ids (mapv #(outbox/derived-intent-id "source" :request/claim "helper-1" "c1" %) (range (count changes)))
+                                                           :source-id "source" :operation :request/claim :purpose :gesso.live/refresh :command-id "c1"} changes))})
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= declarations (:publication-derivations (mapped/describe-mapped-admission admission))))
+    (is (= (expectation [{:topic :request :id "l1"} {:topic :request :id "l2"}
+                         {:topic :request-assignment :id "l2"}]) (derive accept after)))
+    (is (= (expectation [{:topic :request :id "l1"} {:topic :request-assignment :id "l2"}])
+           (derive accept (assoc-in after [:requests 0 :request/location-id] "l1"))))
+    (is (= {:status :derived :intents []} (derive refuse before)))
+    (is (= {:status :not-declared}
+           (mapped/reconstruct-mapped-publication! (issue source) accept "source" record before after)))
+    (is (= :invalid-publication-document-subject
+           (reason #(derive accept (assoc-in after [:requests 0 :request/location-id] "")))))
+    (is (= :invalid-publication-document-rows
+           (reason #(derive accept (assoc after :request_assignments [])))))
+    (is (= :publication-command-slot-mismatch
+           (reason #(derive (claim/alternative-id "helper-2" :accept) after))))
+    (is (= :changed-mapped-admission-registration
+           (reason #(mapped/require-current-mapped-admission! admission (assoc-in source* [:publication-derivations accept :purpose] :example/other)))))
+    (doseq [bad [(dissoc declarations accept)
+                 (assoc-in declarations [accept :contributions 0 :target] [:document :memberships "helper-1"])
+                 (update-in declarations [accept :contributions] pop)
+                 (update-in declarations [accept :contributions] conj (first (:contributions declaration)))
+                 (assoc-in declarations [accept :purpose] :unqualified)]]
+      (is (thrown? clojure.lang.ExceptionInfo (issue (assoc source* :publication-derivations bad)))))))

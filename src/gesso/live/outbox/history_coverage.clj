@@ -391,7 +391,7 @@
                                          (inductive/describe-mapped-admission (:admission scope))
                                          [:catalog-fingerprint :induction-fingerprint :target-map
                                           :operation-mappings :input-derivations
-                                          :document-effects :auxiliary-tables])}))})
+                                          :document-effects :auxiliary-tables :publication-derivations])}))})
 
 (defn- checkpoint-mac [key payload]
   (when-not (and (bytes? key) (= 32 (alength ^bytes key)))
