@@ -4,6 +4,7 @@
             [gesso.assurance.reference-transaction :as current]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
+            [gesso.live.outbox.publication-manifest :as manifest]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
@@ -643,3 +644,67 @@
                  (into {} (map (juxt :xt/id identity)) rows)))))
       (is (= (frequencies (coalesce-valid (:rectangles r)))
              (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) [outbox/intent-table :temporalprobe]))))))))
+
+(defn- establish [source]
+  (#'manifest/expected-establishment source "reference-descriptor"))
+(defn- source-intent [id source]
+  (assoc (first (:intents (publication [id]))) :gesso.live.outbox/source-id source))
+(def ^:private manifest-transactions
+  (mapv (fn [n ops] {:system-time (sys n) :ops ops}) (range 1 11)
+        [[[:put-docs {:into outbox/intent-table :valid-from (sys 3) :valid-to (sys 6)}
+           (source-intent intent-id "scheduled")]
+          [:put-docs outbox/intent-table (source-intent other-intent-id "existing")]]
+         (establish "fresh")
+         (establish "scheduled")
+         (establish "existing")
+         (establish "fresh")
+         (establish "scheduled")
+         (into [[:put-docs outbox/intent-table (source-intent third-intent-id "tentative")]]
+               (establish "tentative"))
+         (into (establish "aborted") [["ASSERT FALSE"]])
+         (establish "aborted")
+         (into [[:put-docs outbox/intent-table {:xt/id third-intent-id :value 1}]]
+               (establish "missing-field"))]))
+
+(deftest independent-publication-manifest-establishment
+  (let [r (temporal/replay manifest-transactions)]
+    (is (= :predicted (:status r)))
+    (is (= [true true false false false true false false true true]
+           (mapv :committed? (:history r))))
+    (is (= [nil nil 1 1 0 nil 2 3 nil nil]
+           (mapv :failed-assertion-index (:history r))))
+    (is (= #{"fresh" "scheduled" "aborted" "missing-field"}
+           (set (keys (get (temporal/visible-at r (sys 10) (sys 10))
+                          :gesso_publication_manifests)))))
+    (is (= (get-in r [:history 5 :segments]) (get-in r [:history 7 :segments]))))
+  (let [guard (second (establish "existing"))]
+    (doseq [op [(pop guard) (conj guard true) (assoc guard 1 nil)
+                (assoc guard 1 :existing) (assoc guard 1 "")
+                (assoc guard 0 "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = ?)")]]
+      (let [r (current/execute {} [["ASSERT FALSE"] op])]
+        (is (= :unsupported (:status r)))
+        (is (not (contains? r :state)))))
+    (doseq [v [:existing 1 true intent-id ["existing"]]]
+      (let [r (current/execute {} [[:put-docs outbox/intent-table
+                                    (source-intent intent-id v)] guard])]
+        (is (= :unsupported (:status r)))
+        (is (not (contains? r :state)))))))
+
+(deftest independently-predicted-manifest-establishment-matches-xtdb
+  (let [r (temporal/replay manifest-transactions)
+        tables [outbox/intent-table :gesso_publication_manifests]]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector manifest-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (doseq [s (range 0 11) v (range 0 12) table tables]
+        (let [rows (xt/q node [(str "SELECT * FROM " (name table) " FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ?")
+                               (sys v) (sys s)])]
+          (is (= (count rows) (count (set (map :xt/id rows)))))
+          (is (= (get (temporal/visible-at r (sys s) (sys v)) table {})
+                 (into {} (map (juxt :xt/id identity)) rows)))))
+      (is (= (frequencies (coalesce-valid (:rectangles r)))
+             (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) tables))))))))

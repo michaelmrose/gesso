@@ -2230,3 +2230,30 @@ publication admission. Manifest/source guards, observed lease metadata
 correspondence and universal provider refinement remain open. No production
 assurance status changes and no CLM-R2 premise is retired. Full project,
 physical Claim, Chromium and independent proof gates were not rerun.
+
+* v2623 — model publication manifest source absence
+
+Recognize the exact source-wide zero-count assertion used in publication
+manifest establishment. Reuse the existing string-id count guard for
+manifest identity absence, independently select tentative visible outbox
+rows by their source-id field, and treat missing fields as nonmatching.
+Reject unsupported source operands and reached non-string source domains
+rather than assuming SQL coercion. Current-state profile v13; temporal
+v10; history v19 unchanged.
+
+Combined reference JVM: 39 tests / 4920 assertions, zero failures or
+errors. Ten additional embedded XTDB transactions use the production
+expected-establishment constructor and selected outbox records. Compare
+outcomes, 132 bitemporal points across both tables and complete selected
+history rectangles. Cover duplicate manifests, preexisting source intents,
+scheduled and expired visibility, missing source fields, tentative writes
+and atomic rollback. Pure regressions reject malformed and unsupported
+operands. Corrected a test-only extra bracket before the passing run.
+No provider readback feeds reference replay.
+
+This is finite empirical correspondence for the establishment transaction,
+not startup descriptor compatibility, retained-envelope verification,
+lifetime absence or universal provider refinement. Observed lease metadata
+correspondence and composed worker execution remain open. No production
+assurance status changes and no CLM-R2 premise is retired. Full project,
+physical Claim, Chromium and independent proof gates were not rerun.

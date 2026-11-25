@@ -5,7 +5,7 @@
   (:require [clojure.string :as str])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-current-state-transaction-v12)
+(def profile :selected-current-state-transaction-v13)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -180,6 +180,23 @@
     (when-not (every? uuid? (keys rows))
       (reject! :unsupported-reference-publication-id-domain))
     (not (contains? rows id))))
+
+(def ^:private source-absence-sql
+  "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = ?)")
+
+(defn- source-absence! [op]
+  (let [source (second op)]
+    (when-not (and (= 2 (count op)) (id? source) (= :string (equality-domain source)))
+      (reject! :unsupported-reference-publication-source))
+    {:kind :assert-source-absence :source source}))
+
+(defn- source-absent! [working source]
+  ;; Missing fields are SQL null and do not match. Validate every present
+  ;; operand before counting; do not assume unlike-type SQL coercion.
+  (let [sources (mapv :gesso.live.outbox/source-id (vals (get working :gesso_live_outbox)))]
+    (when-not (every? #(or (nil? %) (= :string (equality-domain %))) sources)
+      (reject! :unsupported-reference-publication-source-domain))
+    (not-any? #(= source %) sources)))
 
 (defn- count-matches? [working {:keys [kind table id expected]}]
   (let [rows (get working table)]
@@ -412,6 +429,7 @@
     (and (string? (first op)) (re-matches read-pattern (first op)))
     (read-assertion! op)
     (= publication-absence-sql (first op)) (publication-absence! op)
+    (= source-absence-sql (first op)) (source-absence! op)
     (and (string? (first op)) (re-matches count-pattern (first op)))
     (count-assertion! op :assert-row-count (re-matches count-pattern (first op)))
     (and (string? (first op)) (re-matches field-count-pattern (first op)))
@@ -435,7 +453,7 @@
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-or-uuid-id document}}. Puts replace entire documents in order;
    literal, homogeneous parameter equality, selected row-read, count,
-   mapped scalar, publication absence and selected journal slot/value assertions can abort and return
+   mapped scalar, publication identity/source absence and selected journal slot/value assertions can abort and return
    the original state. Reads see the tentative state
    produced by preceding operations. The full vector is structurally validated
    before evaluation, including operations after a false guard; reached reads
@@ -476,6 +494,11 @@
                          :state state :failed-assertion-index i))
                 :assert-publication-absence
                 (if (publication-absent? working (:id kind))
+                  (recur working (inc i))
+                  (assoc report :status :predicted :committed? false
+                         :state state :failed-assertion-index i))
+                :assert-source-absence
+                (if (source-absent! working (:source kind))
                   (recur working (inc i))
                   (assoc report :status :predicted :committed? false
                          :state state :failed-assertion-index i))
