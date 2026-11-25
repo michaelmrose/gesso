@@ -1,8 +1,9 @@
 (ns gesso.model.mapped-preparation
   "Local preparation admission for mapped durable candidates. A trusted
    assembly supplies the original operation catalog, mapping, outcome decoder
-   and pinned rows. No SQL/auxiliary-effect checking, physical provenance,
-   executor issuance, or transaction authority is established here."
+   and pinned rows. The framed admission arity checks restricted lowered
+   pre-write guards; general SQL/auxiliary-effect checking, physical
+   provenance, executor issuance and transaction authority remain open."
   (:require [gesso.choreo.identity :as identity]
             [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
@@ -21,7 +22,10 @@
    admission atomically consumes the selected preparation even on failure.
    Trusted callers may discard abandoned preparations. New attempts require
    new preparations; durable replay/slot uniqueness remain XTDB concerns.
-   Only pass the mapped puts after checking the full transaction footprint."
+   Only pass the mapped puts after checking the full transaction footprint.
+   The four-argument admit! additionally requires the formatted pre-write
+   guard prefix to match the same consumed preparation. The three-argument
+   form checks supplied replacements only; it is not framed admission."
   ([catalog target-map decode-outcome!]
    (build-admission! catalog target-map decode-outcome! nil))
   ([catalog target-map decode-outcome! document-effects]
@@ -60,7 +64,7 @@
                                         (when (contains? m k) (reject! :duplicate-pending-preparation))
                                         (assoc m k {:binding binding :snapshot snapshot :inputs inputs})))
                        nil))
-          admit! (fn [id command-id puts]
+          admit-candidate! (fn [id command-id puts framed? formatted-guards]
                    (let [k [command-id id]
                          [prior _] (swap-vals! pending dissoc k)
                          {:keys [binding snapshot inputs]} (or (get prior k) (reject! :missing-preparation))
@@ -77,8 +81,20 @@
                          (reject! :preparation-state-mismatch))
                        (when (some? document-effects)
                          (frame/check-replacements! mapping (get document-effects id) (:document-rows snapshot) puts))
-                       (cond-> checked (some? document-effects)
-                         (assoc :document-frame :checked-supplied-complete-rows)))))]
+                       (when framed?
+                         (when-not (and (some? document-effects) (vector? formatted-guards)
+                                        (every? vector? formatted-guards))
+                           (reject! :invalid-framed-admission))
+                         (frame/require-prestate-assertions! mapping (:document-rows snapshot) formatted-guards))
+                       (cond-> checked
+                         (some? document-effects)
+                         (assoc :document-frame :checked-supplied-complete-rows)
+                         framed?
+                         (assoc :frame-prestate :checked-supplied-prewrite-guards)))))
+          admit! (fn
+                   ([id command-id puts] (admit-candidate! id command-id puts false nil))
+                   ([id command-id puts formatted-guards]
+                    (admit-candidate! id command-id puts true formatted-guards)))]
       {:prepare! prepare! :admit! admit!
        :discard! (fn [id command-id] (swap! pending dissoc [command-id id]) nil)
        :pending? (fn [id command-id] (contains? @pending [command-id id]))}))))

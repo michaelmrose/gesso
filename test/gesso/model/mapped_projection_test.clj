@@ -3,7 +3,10 @@
             [gesso.choreo.identity :as identity]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.mapped-projection :as projection]
-            [gesso.model.mapped-preparation :as preparation]))
+            [gesso.model.mapped-preparation :as preparation]
+            [gesso.model.mapped-frame :as frame]
+            [gesso.model.certified-plan :as plan]
+            [gesso.model.tx :as tx]))
 
 (def ^:private source
   {:subject {:kind :operation :id :example/projection :interface {:operation :example/projection}}
@@ -178,3 +181,53 @@
     (is (= :overlapping-document-effects
            (reason #(preparation/build-admission! catalog targets decoder
                        (assoc-in effects [id [:document :requests "r1"] :item_count] 3)))))))
+
+(deftest framed-admission-binds-guards-to-consumed-preparation
+  (let [id :example/projection
+        original (assoc source :writes #{:example/count :example/one :example/owner}
+                        :replacements {:example/count [:literal 3] :example/one [:literal :accepted]
+                                       :example/owner [:literal "p1"]}
+                        :frame #{:example/enabled :example/two})
+        catalog {:declared-operation-ids #{id} :operations [{:id id :construction original}]}
+        effects {id {[:document :requests "r1"] {} [:document :assignments "a1"] {}}}
+        decoder #(get-in % [:gesso.command/outcome :result])
+        docs (update-in rows [:requests 0] assoc :hidden "original")
+        snapshot {:document-rows docs :records {} :state (project docs [])}
+        row (record "c1" "p1")
+        puts [[:put-docs :requests (assoc (first (:requests docs)) :item-count 3)]
+              [:put-docs :assignments {:xt/id "a1" :owner "p1"}]
+              [:put-docs :gesso_commands row]]
+        mapping (plan/check-target-mapping! original targets)
+        guards-for #(mapv tx/format-assertion (frame/prestate-assertions! mapping %))
+        guards (guards-for docs)
+        {:keys [prepare! admit! pending?]} (preparation/build-admission! catalog targets decoder effects)
+        prepare #(prepare! id (:gesso.command/binding row) snapshot {})
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (doseq [[prefix expected]
+            [[[] :missing-frame-prestate-assertion]
+             [nil :invalid-framed-admission]
+             [(seq guards) :invalid-framed-admission]
+             [(pop guards) :missing-frame-prestate-assertion]
+             [(guards-for (assoc-in docs [:requests 0 :hidden] "different"))
+              :missing-frame-prestate-assertion]
+             [(guards-for (assoc docs :assignments [{:xt/id "a1" :owner "p1"}]))
+              :missing-frame-prestate-assertion]]]
+      (prepare)
+      (is (= expected (reason #(admit! id "c1" puts prefix))))
+      (is (not (pending? id "c1")))
+      (is (= :missing-preparation (reason #(admit! id "c1" puts guards)))))
+    (prepare)
+    (is (= :unmapped-document-frame-mismatch
+           (reason #(admit! id "c1" (assoc-in puts [0 2 :hidden] "different") guards))))
+    (prepare)
+    (let [checked (admit! id "c1" puts (conj guards ["ASSERT TRUE"]))]
+      (is (= :checked-supplied-prewrite-guards (:frame-prestate checked)))
+      (is (= :checked-supplied-complete-rows (:document-frame checked)))
+      (is (= :none (:authority checked)))
+      (is (= :not-established (:atomicity checked)))
+      (is (false? (:transaction-submitted? checked))))
+    (prepare)
+    (is (nil? (:frame-prestate (admit! id "c1" puts))))
+    (let [{:keys [prepare! admit!]} (preparation/build-admission! catalog targets decoder)]
+      (prepare! id (:gesso.command/binding row) snapshot {})
+      (is (= :invalid-framed-admission (reason #(admit! id "c1" puts guards)))))))
