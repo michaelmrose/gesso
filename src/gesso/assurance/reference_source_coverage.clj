@@ -1,9 +1,11 @@
 (ns gesso.assurance.reference-source-coverage
   "Bounded identity coverage of the installed embedded source logs."
-  (:require [xtdb.db-catalog :as db])
+  (:require [gesso.assurance.reference-source-payload :as payload]
+            [xtdb.db-catalog :as db])
   (:import (java.io RandomAccessFile)
            (java.lang ReflectiveOperationException)
            (java.nio.file Path)
+           (java.util Arrays)
            (xtdb.time InstantUtil)
            (xtdb.api.log LocalLog InMemoryLog Log$Record SourceMessage$Tx
                          SourceMessage$FlushBlock SourceMessage$TriesAdded SourceMessage$BlockUploaded)
@@ -179,13 +181,59 @@
                                         (map vector frames kinds))
                  :maintenance-count (count (remove #{:transaction} kinds))))))))
 
-(defn observe-local-coverage!
-  "Selected epoch-zero LocalLog coverage. Independently walk byte frames
-   from zero to EOF and compare decoded record identities and timestamps.
-   Recheck framing and submitted end. Requires the installed private path
-   field and stable quiescent file; not independent payload decoding,
-   retention, an atomic snapshot, processed frontier or tamper detection."
-  [node]
+(def local-payload-profile :xtdb-2.2.0-beta1/selected-local-payload-correspondence-v1)
+
+(defn- read-local-payloads! [^RandomAccessFile file frames]
+  ;; The framing scan bounds both total file bytes and individual messages.
+  (mapv (fn [[offset _ length]]
+          (.seek file (+ offset 13))
+          (let [bytes (byte-array length)]
+            (.readFully file bytes)
+            bytes))
+        frames))
+
+(defn- same-payloads? [a b]
+  (and (= (count a) (count b))
+       (every? true? (map (fn [^bytes x ^bytes y] (Arrays/equals x y)) a b))))
+
+(defn- payload-mismatch [message provider]
+  ;; Compare opaque operation and metadata bytes by content, not identity.
+  ;; Do not include either raw payload or decoded values in diagnostics.
+  (case (:kind message)
+    :transaction
+    (if-not (instance? SourceMessage$Tx provider)
+      :kind
+      (let [^SourceMessage$Tx p provider]
+        (cond
+          (some? (.getExternalSourceToken p)) :external-source-token
+          (not (Arrays/equals ^bytes (:tx-ops message) ^bytes (.getTxOps p))) :tx-ops
+          (not= (:system-time message) (.getSystemTime p)) :system-time
+          (not= (:default-tz message) (.getDefaultTz p)) :default-tz
+          (not= (:user message) (.getUser p)) :user
+          (not (Arrays/equals ^bytes (:user-metadata message) ^bytes (.getUserMetadata p))) :user-metadata)))
+    :flush-block
+    (cond
+      (not (instance? SourceMessage$FlushBlock provider)) :kind
+      (not= (:expected-block-index message) (.getExpectedBlockIdx ^SourceMessage$FlushBlock provider))
+      :expected-block-index)
+    :kind))
+
+(defn- compare-local-payloads [report frames bytes records]
+  ;; Only compare after coordinates, order and cardinality have matched.
+  (if-not (= :observed (:status report))
+    report
+    (or (some (fn [[[offset _ _] bytes ^Log$Record record]]
+                (let [decoded (payload/decode-payload bytes)]
+                  (if-not (= :decoded (:status decoded))
+                    (assoc (local-result :unsupported :unsupported-source-payload)
+                           :message-id offset :decode-reason (:reason decoded))
+                    (when-let [field (payload-mismatch (:message decoded) (.getMessage record))]
+                      (assoc (local-result :mismatch :source-payload-mismatch)
+                             :message-id offset :field field)))))
+              (map vector frames bytes records))
+        (assoc report :payload-correspondence :matched))))
+
+(defn- observe-local* [node payload?]
   (if-not (db/<-node node)
     (local-result :unsupported :embedded-primary-log-required)
     (try
@@ -197,24 +245,51 @@
                 end (.getLatestSubmittedOffset log)
                 path (local-log-path log)]
             (with-open [file (RandomAccessFile. (.toFile ^Path path) "r")]
-              (let [framing (local-frames file)]
+              (let [framing (local-frames file)
+                    frames (:frames framing)]
                 (if-not (= :framed (:status framing))
                   framing
-                  (if (not= end (or (ffirst (rseq (:frames framing))) -1))
+                  (if (not= end (or (ffirst (rseq frames)) -1))
                     (local-result :unavailable :source-frame-end-mismatch)
-                    (let [records (if (neg? end) []
+                    (let [bytes (when payload? (read-local-payloads! file frames))
+                          records (if (neg? end) []
                                     (into [] (take (inc max-records))
                                           (iterator-seq (.iterator (.readRecords log 0 (inc end))))))
-                          report (classify-local-records framing records end)]
-                      (if (or (not= framing (local-frames file))
-                              (not= end (.getLatestSubmittedOffset log)))
+                          report (classify-local-records framing records end)
+                          report (if payload? (compare-local-payloads report frames bytes records) report)]
+                      (cond
+                        (and payload? (not= framing (local-frames file)))
                         (local-result :unavailable :source-log-changed-during-observation)
-                        report)))))))))
+                        (and payload? (not (same-payloads? bytes (read-local-payloads! file frames))))
+                        (local-result :unavailable :source-payload-changed-during-observation)
+                        (or (not= framing (local-frames file))
+                            (not= end (.getLatestSubmittedOffset log)))
+                        (local-result :unavailable :source-log-changed-during-observation)
+                        :else report)))))))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
         (throw e))
       (catch ReflectiveOperationException _ (local-result :unsupported :unsupported-local-log-layout))
       (catch Exception _ (local-result :unavailable :source-log-read-failed)))))
+
+(defn observe-local-coverage!
+  "Selected epoch-zero LocalLog coverage. Independently walk byte frames
+   from zero to EOF and compare decoded record identities and timestamps.
+   Recheck framing and submitted end. Requires the installed private path
+   field and stable quiescent file; not independent payload decoding,
+   retention, an atomic snapshot, processed frontier or tamper detection."
+  [node]
+  (observe-local* node false))
+
+(defn observe-local-payload-coverage!
+  "Additionally compare every selected independently decoded envelope with
+   the provider message at the same framed coordinate. Re-read raw bytes
+   within the observation; reject unsupported variants and mismatches.
+   Return no raw payloads. No independent Arrow interpretation, processed
+   frontier, atomic snapshot, cross-observation content binding or proof."
+  [node]
+  (assoc (observe-local* node true) :payload-profile local-payload-profile
+         :decoder-profile payload/profile))
 
 (def local-processed-profile :xtdb-2.2.0-beta1/selected-local-processed-frontier-v1)
 

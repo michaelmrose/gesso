@@ -103,6 +103,77 @@
               (is (= {:kind :flush-block :expected-block-index (.getExpectedBlockIdx ^SourceMessage$FlushBlock provider)} message))
               :else (is false "unexpected provider source variant"))))))))
 
+(defn- assert-payload-coverage! [node ids]
+  (let [plain (coverage/observe-local-coverage! node)
+        checked (coverage/observe-local-payload-coverage! node)]
+    (is (= :observed (:status checked)) (pr-str checked))
+    (is (= :matched (:payload-correspondence checked)))
+    (is (= coverage/local-payload-profile (:payload-profile checked)))
+    (is (= payload/profile (:decoder-profile checked)))
+    (is (= plain (dissoc checked :payload-profile :decoder-profile :payload-correspondence)))
+    (is (= ids (:record-offsets checked)))
+    (is (= [(nth ids 1) (nth ids 2)] (:transaction-ids checked)))
+    (is (= 2 (:maintenance-count checked)))
+    (is (= :none (:authority checked)))
+    (is (= :not-issued (:certificate checked)))))
+
+(defn- assert-payload-rejections! [node ids]
+  (let [decode! payload/decode-payload]
+    ;; Perturb the independent observation without modifying provider data.
+    (doseq [[kind field value id]
+            [[:transaction :tx-ops (wire [1 2 3]) (nth ids 1)]
+             [:transaction :system-time Instant/EPOCH (nth ids 1)]
+             [:transaction :default-tz (ZoneId/of "Asia/Tokyo") (nth ids 1)]
+             [:transaction :user "unexpected" (nth ids 1)]
+             [:transaction :user-metadata (wire [1]) (nth ids 1)]
+             [:transaction :kind :flush-block (nth ids 1)]
+             [:flush-block :expected-block-index 7 (first ids)]]]
+      (with-redefs [payload/decode-payload
+                    (fn [bytes]
+                      (let [r (decode! bytes)]
+                        (cond-> r (= kind (get-in r [:message :kind]))
+                          (assoc-in [:message field] value))))]
+        (let [r (coverage/observe-local-payload-coverage! node)]
+          (is (= :mismatch (:status r)) (pr-str r))
+          (is (= :source-payload-mismatch (:reason r)))
+          (is (= field (:field r)))
+          (is (= id (:message-id r)))
+          (is (not (contains? r :payload-correspondence)))
+          (is (= :not-issued (:certificate r)))
+          (is (= :observed (:status (coverage/observe-local-coverage! node)))))))
+    (with-redefs [payload/decode-payload (fn [_] {:status :unsupported :reason :unsupported-field})]
+      (let [r (coverage/observe-local-payload-coverage! node)]
+        (is (= :unsupported (:status r)))
+        (is (= :unsupported-source-payload (:reason r)))
+        (is (= :unsupported-field (:decode-reason r)))
+        (is (= (first ids) (:message-id r)))
+        (is (not (contains? r :payload-correspondence)))))
+    (let [read! @#'coverage/read-local-payloads!
+          calls (atom 0)]
+      (with-redefs-fn {#'coverage/read-local-payloads!
+                      (fn [file frames]
+                        (let [sample (read! file frames)]
+                          (if (= 2 (swap! calls inc))
+                            (let [copy (aclone ^bytes (first sample))]
+                              (aset-byte copy 0 (unchecked-byte (bit-xor 1 (aget copy 0))))
+                              (assoc sample 0 copy))
+                            sample)))}
+        (fn []
+          (let [r (coverage/observe-local-payload-coverage! node)]
+            (is (= 2 @calls))
+            (is (= :unavailable (:status r)))
+            (is (= :source-payload-changed-during-observation (:reason r)))
+            (is (not (contains? r :payload-correspondence)))))))))
+
+(deftest payload-coverage-requires-local-backend
+  (is (= :embedded-primary-log-required (:reason (coverage/observe-local-payload-coverage! nil))))
+  (with-open [node (xtn/start-node {})]
+    (let [r (coverage/observe-local-payload-coverage! node)]
+      (is (= :unsupported (:status r)))
+      (is (= :unsupported-source-log (:reason r)))
+      (is (= coverage/local-payload-profile (:payload-profile r)))
+      (is (not (contains? r :payload-correspondence))))))
+
 (deftest decode-actual-persistent-source-messages
   (let [root (Files/createTempDirectory "gesso-source-payload-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}]
@@ -117,8 +188,12 @@
                                              (.awaitTxBlocking db id (Duration/ofSeconds 10)) id))
                         ids [(flush!) (tx! [["ASSERT TRUE"]] {:system-time (Instant/parse "2020-01-01T00:00:00Z")})
                              (tx! [["ASSERT FALSE"]] {}) (flush!)]]
-                    (compare-physical! node ids) ids))]
+                    (compare-physical! node ids)
+                    (assert-payload-coverage! node ids)
+                    (assert-payload-rejections! node ids)
+                    ids))]
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 10))
-          (compare-physical! node ids)))
+          (compare-physical! node ids)
+          (assert-payload-coverage! node ids)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

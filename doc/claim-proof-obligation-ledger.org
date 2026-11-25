@@ -2999,3 +2999,28 @@ interpretation, complete source coverage, atomic acquisition, writer
 closure or universal provider refinement. Tries-added, block-uploaded,
 legacy messages and external tokens remain outside the selected decoder.
 No certificate, production assurance upgrade or CLM-R2 premise retirement.
+
+* v2649 — compare independently decoded persistent payloads
+
+Compose selected local source framing and independent envelope decoding
+in a new opt-in payload-coverage observer. Compare each framed message
+with the provider record at the same identity and timestamp, including
+opaque transaction operation and metadata bytes, time, zone, user and
+flush index. Reject unsupported envelopes and mismatches without
+exposing raw payloads. Re-read bounded payload bytes and framing and
+recheck the submitted frontier. Preserve the existing coverage-only and
+processed-frontier profiles. No production wiring.
+
+Focused JVM: 3 tests / 203 assertions for source payloads, and 9 tests /
+213 assertions for existing reference-provider behavior; zero failures
+or errors. Actual persistent commit, abort and flush records match
+before and after reopen. Controlled perturbations reject every selected
+field mismatch, unsupported decoding and same-length payload changes
+between reads. Wrong backends reject; ordinary coverage remains separate.
+
+The selected payload profile is diagnostic only. It does not bind content
+across separate observations, independently interpret Arrow operations,
+establish atomic acquisition or prove retention, writer closure or
+universal provider refinement. No certificate, production assurance
+upgrade or CLM-R2 premise retirement. Full project, physical Claim,
+Chromium and independent proof gates were not rerun.
