@@ -9,6 +9,9 @@
             [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.assurance.proof.mapped-prestate-rules :as rules]
             [gesso.assurance.proof.mapped-prestate-partition :as partition]
+            [gesso.assurance.operational-report :as operational-report]
+            [gesso.live.outbox.history-coverage :as history]
+            [gesso.live.outbox.writer-policy :as policy]
             [gesso.model.certified-plan :as plan]
             [gesso.model.inductive-plan :as inductive]
             [gesso.model.tx :as tx]
@@ -1178,3 +1181,96 @@
                      (assoc-in prefix [0 2] "open")
                      (assoc-in prefix [1 1] ["1" "open"])]]
       (is (not= evidence (frame/prefix-evidence! changed))))))
+
+(deftest historical-guard-evidence-corruption-blocks-physical-prefix-argument
+  (let [id :example/projection
+        original (assoc source :writes #{:example/count :example/one}
+                        :replacements {:example/count [:literal 3] :example/one [:literal :accepted]}
+                        :frame #{:example/enabled :example/owner :example/two})
+        invariant {:readers #{:example/count} :expression [:>= [:read :example/count] [:literal 0]]}
+        catalog {:id :example/guard-history :initial-condition invariant
+                 :invariants {:example/nonnegative invariant}
+                 :declared-operation-ids #{id} :operations [{:id id :construction original}]}
+        docs (assoc-in rows [:requests 0 :hidden] "original")
+        seed [[:put-docs :requests (first (:requests docs))]]
+        command (record "c1" "p1")
+        after (assoc-in docs [:requests 0 :item-count] 3)
+        base {:api :execute-tx :tx-options {}
+              :tx-ops [["ASSERT TRUE"] [:put-docs :requests (first (:requests after))]
+                       [:put-docs :gesso_commands command]]}
+        decoder #(get-in % [:gesso.command/outcome :result])
+        admission (inductive/build-inductive-mapped-admission!
+                   {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
+                    :target-map targets :decode-outcome! decoder
+                    :transaction-footprint! (fn [ops]
+                                              (when-not (= (:tx-ops base) ops)
+                                                (throw (ex-info "Unexpected footprint" {})))
+                                              {:alternative id :command-id "c1"})
+                    :auxiliary-tables #{} :document-effects {id {[:document :requests "r1"] {}}}})
+        source-id (select-keys (inductive/describe-mapped-admission admission)
+                               [:catalog-fingerprint :induction-fingerprint])
+        abstract (inductive/recheck-mapped-induction! admission)
+        describe #(operational-report/describe-application abstract {:phase :open :source source-id :report %})
+        mapping (plan/check-target-mapping! original targets)
+        other-fingerprint (:guard-prefix-fingerprint
+                           (frame/prefix-evidence! (frame/formatted-prestate-assertions!
+                                                    mapping (assoc-in docs [:requests 0 :hidden] "other") [])))]
+    (doseq [[mode reason] [[:valid nil]
+                           [:other-prestate :historical-guard-prefix-mismatch]
+                           [:legacy :invalid-historical-mapped-evidence]
+                           [:wrong-profile :invalid-historical-mapped-evidence]]]
+      (with-open [node (xtn/start-node {})]
+        (let [writer (policy/build-policy! node {:admission admission :initializer seed :observe! identity}
+                                           {:source-id "guard-history"})
+              release (live-xtdb/register-submission-policy! node writer)]
+          (try
+            (policy/activate-policy! writer)
+            (admission :prepare! id (:gesso.command/binding command)
+                       {:document-rows docs :records {} :state (project docs [])} {})
+            (let [framed (admission :frame-submission! base)
+                  checked (admission :admit-framed! base framed)
+                  witness (inductive/mapped-transition-evidence! admission checked)
+                  corrupted (case mode
+                              :valid witness
+                              :other-prestate (assoc witness :guard-prefix-fingerprint other-fingerprint)
+                              :legacy (-> witness (assoc :profile-version 3)
+                                          (dissoc :guard-profile :guard-prefix-fingerprint))
+                              :wrong-profile (assoc witness :guard-profile :example/obsolete))
+                  initial (history/audit-chunk! node admission 8)]
+              (is (= :conditional-observed-prefix-argument (get-in (describe initial) [:physical-induction :status])))
+              (is (not= other-fingerprint (:guard-prefix-fingerprint witness)))
+              ;; Deliberate raw writer bypass: identical valid domain and command
+              ;; writes, same-transaction evidence, only the witness differs.
+              (xt/execute-tx node (conj (:tx-ops framed) [:put-docs :gesso_transition_evidence corrupted]))
+              (is (= [corrupted] (xt/q node "SELECT * FROM gesso_transition_evidence")))
+              (is (= (:requests after) (xt/q node "SELECT * FROM requests")))
+              (is (= [command] (xt/q node "SELECT * FROM gesso_commands")))
+              (let [chunk (history/audit-chunk! node admission 8 (:checkpoint initial))
+                    whole (history/audit! node admission 8)
+                    step (first (:steps chunk))
+                    report (describe chunk)]
+                (is (= (:steps chunk) (:steps whole)))
+                (is (= 1 (count (:steps chunk))))
+                (is (= (if reason :unclassified :verified-mapped-transition) (:classification step)) (name mode))
+                (is (= reason (:reason step)) (name mode))
+                (is (= (if reason :unclassified-steps :observed-interval-checked) (:status chunk) (:status whole)))
+                (is (= (if reason :not-established :conditional-observed-prefix-argument)
+                       (get-in report [:physical-induction :status])))
+                (is (= :not-issued (:certificate report)))
+                (when reason
+                  (is (= step (:first-unclassified chunk)))
+                  (is (contains? (:open-obligations report) :unclassified-historical-steps))
+                  ;; A subsequent repair cannot erase the original historical
+                  ;; failure, even across authenticated cursor restoration.
+                  (let [key (byte-array 32)
+                        sealed (history/seal-checkpoint! node admission (:checkpoint chunk) key "guard-history")
+                        cursor (history/restore-checkpoint! node admission sealed key "guard-history")]
+                    (xt/execute-tx node [[:put-docs :gesso_transition_evidence witness]])
+                    (is (= [witness] (xt/q node "SELECT * FROM gesso_transition_evidence")))
+                    (let [extended (history/audit-chunk! node admission 8 cursor)
+                          rescanned (history/audit! node admission 8)]
+                      (is (= :unclassified-steps (:status extended) (:status rescanned)))
+                      (is (= step (:first-unclassified extended) (first (:steps rescanned))))
+                      (is (= {:unclassified 2} (:counts extended)))
+                      (is (= :not-established (get-in (describe extended) [:physical-induction :status]))))))))
+            (finally (release))))))))
