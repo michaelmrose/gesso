@@ -3547,3 +3547,29 @@ document puts, independent IID correspondence and aggregate reference
 document budgets remain open. No production wiring, certificate or
 CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2671 — decode selected nullable scalar Arrow struct fields
+
+Qualify nullable scalar fields only inside selected canonical-key
+structs, excluding document IDs. Check exact validity bitmap extent,
+node length and reported null count (or the observed unknown count -1).
+Require empty value spans for invalid UTF-8 and keyword slots. Preserve
+present false, zero and empty strings; omit invalid entries. Physical
+SQL struct probes show omitted keys and explicit nil share validity
+encoding, so this diagnostic reconstruction cannot recover that
+submission distinction. Preserve all earlier profile restrictions.
+
+Focused JVM: 25 tests / 1449 assertions, zero failures or errors across
+reference Arrow operations, struct and source payload suites. Retained
+integer, Boolean, UTF-8, keyword, UUID and UTC timestamp fields match
+expected diagnostic maps before and after reopening. Check bitmap byte
+boundaries, field and value mutations, invalid variable-width extents,
+malformed UTF-8, nullable ID/container/top-level argument rejection and
+unsupported all-null fields. Corrected an unmatched source delimiter
+before the passing run. XTDB logged shutdown cancellation; exit zero.
+
+Selected nullable scalar struct profile v1. Actual document-put field
+semantics, null-only fields and nullable containers remain open. Do not
+infer original key presence from null bits or admit nulls to the reference
+transaction domain. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.

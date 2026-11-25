@@ -193,3 +193,78 @@
           (.awaitSourceBlocking (db/primary-db node) nullable-id (Duration/ofSeconds 10))
           (check-empty-structs! node id empty-id nullable-id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-nullable-fields! [node id rejected rows]
+  (let [data (#'fixture/retained-operation-bytes node id)
+        decoded (arrow/decode-nullable-struct-operations data)
+        expected (mapv #(hash-map :kind :sql :query "ASSERT $1 IS NOT NULL" :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ a-valid a-values b-valid _ b-values c-valid _ d-valid] (#'fixture/buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/nullable-struct-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded)))
+    (is (= [(count rows)] (:logged-operation-spans decoded)))
+    (is (= rows (:rows (arrow/decode-nullable-struct-arguments args))))
+    (is (= [{}] (nth rows 1) (nth rows 2)))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-empty-struct-operations data))))
+    (is (= :unsupported-sql-argument (:reason (provider/observe-source-message! node id))))
+    (is (= 9 (bit-and 255 (aget ^bytes args a-valid))))
+    (is (= (update-in rows [0 0] dissoc :a)
+           (:rows (arrow/decode-nullable-struct-arguments (#'fixture/edit-byte args a-valid 8)))))
+    (is (= (assoc-in rows [0 0 :a] 99)
+           (:rows (arrow/decode-nullable-struct-arguments (#'fixture/edit-long args a-values 99)))))
+    (is (= (update-in rows [3 0] dissoc :c)
+           (:rows (arrow/decode-nullable-struct-arguments (#'fixture/edit-byte args c-valid 1)))))
+    (is (= (update-in rows [8 0] dissoc :a)
+           (:rows (arrow/decode-nullable-struct-arguments (#'fixture/edit-byte args (inc a-valid) 0)))))
+    (doseq [[bad reason] [[(#'fixture/edit-byte args b-valid 8) :unsupported-arrow-nullable-value-extent]
+                          [(#'fixture/edit-byte args d-valid 8) :unsupported-arrow-nullable-value-extent]
+                          [(#'fixture/edit-byte args b-values 255) :invalid-arrow-utf8]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-nullable-struct-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (doseq [[other-id reason] rejected]
+      (let [r (arrow/decode-nullable-struct-operations (#'fixture/retained-operation-bytes node other-id))]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :operations)))))))
+
+(deftest selected-nullable-scalar-fields-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-nullable-struct-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        uuid #uuid "00112233-4455-6677-8899-aabbccddeeff"
+        deadline (java.time.ZonedDateTime/parse "2026-01-01T00:00:00Z[UTC]")
+        input [{:a 1 :b "x" :c true :d :open :e uuid :f deadline}
+               {:a nil :b nil :c nil :d nil :e nil :f nil}
+               {} {:a 2 :b "" :c false :d :closed :e uuid :f deadline}
+               {} {} {} {} {:a -1} {}]
+        rows (mapv vector (assoc input 1 {}))]
+    (is (= [[]] (:rows (arrow/decode-nullable-struct-arguments nil))))
+    (try
+      (let [[id rejected]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! (mapv #(vector "ASSERT ? IS NOT NULL" %) input))
+                    nullable-id (submit! [["ASSERT ? IS NOT NULL" {:xt/id "x"}]
+                                          ["ASSERT ? IS NOT NULL" {}]])
+                    nullable-list (submit! [["ASSERT ? IS NOT NULL" {:items [1]}]
+                                            ["ASSERT ? IS NOT NULL" {}]])
+                    null-only (submit! [["ASSERT ? IS NOT NULL" {:a nil}]])
+                    nullable-arg (submit! [["ASSERT ? IS NOT NULL" 1] ["ASSERT ? IS NOT NULL" nil]])
+                    rejected [[nullable-id :unsupported-arrow-field]
+                              [nullable-list :unsupported-arrow-nullable-field]
+                              [null-only :unsupported-arrow-field]
+                              [nullable-arg :unsupported-arrow-field]]]
+                (check-nullable-fields! node id rejected rows)
+                [id rejected]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (first (peek rejected)) (Duration/ofSeconds 10))
+          (check-nullable-fields! node id rejected rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

@@ -257,7 +257,9 @@
         name)))
 
 (defn- scalar-kind-at! [^Field f field-name allowed depth]
-  (let [type (.typeType f)
+  (let [nullable? (and (contains? allowed :nullable-field) (.nullable f))
+        allowed (disj allowed :nullable-field)
+        type (.typeType f)
         extension? (pos? (.customMetadataLength f))
         kind (if extension?
                (let [_ (require! (= 2 (.customMetadataLength f)) :unsupported-arrow-field)
@@ -283,11 +285,13 @@
                                                            (contains? allowed :scalar-list) :scalar-list
                                                            :else :int64-list)} type))]
     (require! (contains? allowed kind) :unsupported-arrow-field)
+    (require! (or (not nullable?) (#{:integer :boolean :string :keyword :uuid :timestamp} kind))
+              :unsupported-arrow-nullable-field)
     (if (#{:keyword :uuid} kind)
-      (require! (and (= field-name (.name f)) (not (.nullable f))
+      (require! (and (= field-name (.name f)) (= (boolean nullable?) (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
-      (field! f field-name type false (cond
+      (field! f field-name type (boolean nullable?) (cond
                                       (= :struct-map kind) (.childrenLength f)
                                       (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind) 1
                                       :else 0)))
@@ -306,8 +310,14 @@
         (let [fields (mapv (fn [i]
                              (let [^Field child (.children f i)
                                    name (.name child)]
-                               [(struct-key! name allowed depth)
-                                (scalar-kind-at! child name allowed (inc depth))]))
+                               (let [key (struct-key! name allowed depth)
+                                     nullable-field? (and (contains? allowed :nullable-struct-fields)
+                                                          (not= "xt/id" key) (.nullable child))
+                                     child-kind (scalar-kind-at! child name
+                                                                 (cond-> allowed nullable-field?
+                                                                   (conj :nullable-field))
+                                                                 (inc depth))]
+                                 [key (if nullable-field? [:nullable child-kind] child-kind)])))
                            (range n))]
           (require! (= n (count (distinct (map first fields)))) :duplicate-arrow-struct-key)
           [:struct fields]))
@@ -362,14 +372,19 @@
 (defn- union-kind? [kind] (and (vector? kind) (= :union (first kind))))
 (defn- struct-kind? [kind] (and (vector? kind) (= :struct (first kind))))
 
+(defn- nullable-kind? [kind] (and (vector? kind) (= :nullable (first kind))))
+(def ^:private absent-field (Object.))
+
 (defn- node-count [kind]
-  (cond (list-kind? kind) (inc (node-count (second kind)))
+  (cond (nullable-kind? kind) (node-count (second kind))
+        (list-kind? kind) (inc (node-count (second kind)))
         (union-kind? kind) (inc (count (second kind)))
         (struct-kind? kind) (inc (reduce + 0 (map (comp node-count second) (second kind))))
         :else 1))
 
 (defn- buffer-count [kind]
-  (cond (= :empty-child kind) 0
+  (cond (nullable-kind? kind) (buffer-count (second kind))
+        (= :empty-child kind) 0
         (list-kind? kind) (+ 2 (buffer-count (second kind)))
         (union-kind? kind) (+ 2 (reduce + (map buffer-count (second kind))))
         (struct-kind? kind) (inc (reduce + 0 (map (comp buffer-count second) (second kind))))
@@ -475,16 +490,38 @@
                       (range (count fields)) kinds)
         keys (mapv (comp keyword first) fields)]
     (fn [row]
-      (into {} (map (fn [k reader] [k (reader row)]) keys readers)))))
+      (into {} (keep (fn [[k reader]]
+                       (let [v (reader row)]
+                         (when-not (identical? absent-field v) [k v]))))
+            (map vector keys readers)))))
 
-(defn- value-reader! [kind ^RecordBatch batch node-index buffers start n]
+(defn- nullable-reader! [kind ^RecordBatch batch node-index buffers start n]
   (let [node (.nodes batch node-index)
         ^ByteBuffer validity (nth buffers start)]
-    (require! (and (= n (.length node)) (zero? (.nullCount node))
-                   (zero? (.limit validity))) :unsupported-integer-buffer-layout)
-    (cond (list-kind? kind) (list-reader! (second kind) batch node-index buffers start n)
-          (struct-kind? kind) (struct-reader! (second kind) batch node-index buffers start n)
-          :else (scalar-reader! kind buffers start n))))
+    (require! (and (= n (.length node))
+                   (= (quot (+ n 7) 8) (.limit validity)))
+              :unsupported-arrow-nullable-layout)
+    (let [nulls (count (remove #(present? validity %) (range n)))
+          reported (.nullCount node)]
+      (require! (or (= -1 reported) (= nulls reported)) :arrow-null-count-mismatch))
+    (when (#{:string :keyword} kind)
+      (let [offsets (offsets! (nth buffers (inc start)) (nth buffers (+ start 2)) n)]
+        (require! (every? #(or (present? validity %) (= (nth offsets %) (nth offsets (inc %))))
+                          (range n))
+                  :unsupported-arrow-nullable-value-extent)))
+    (let [reader (scalar-reader! kind buffers start n)]
+      (fn [row] (if (present? validity row) (reader row) absent-field)))))
+
+(defn- value-reader! [kind ^RecordBatch batch node-index buffers start n]
+  (if (nullable-kind? kind)
+    (nullable-reader! (second kind) batch node-index buffers start n)
+    (let [node (.nodes batch node-index)
+          ^ByteBuffer validity (nth buffers start)]
+      (require! (and (= n (.length node)) (zero? (.nullCount node))
+                     (zero? (.limit validity))) :unsupported-integer-buffer-layout)
+      (cond (list-kind? kind) (list-reader! (second kind) batch node-index buffers start n)
+            (struct-kind? kind) (struct-reader! (second kind) batch node-index buffers start n)
+            :else (scalar-reader! kind buffers start n)))))
 
 (defn- scalar-rows! [bytes allowed]
   (if (nil? bytes)
@@ -940,3 +977,29 @@
   "Expand selected diagnostic SQL groups including empty struct maps."
   [bytes]
   (expand-fixed-operations bytes empty-struct-base empty-struct-rows!))
+
+(def nullable-struct-profile :xtdb-2.2.0-beta1/selected-nullable-scalar-struct-arrow-operations-v1)
+(def ^:private nullable-struct-base (assoc base :profile nullable-struct-profile))
+
+(defn- nullable-struct-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :struct-map :document-keys :empty-struct
+                        :nullable-struct-fields}))
+
+(defn decode-nullable-struct-arguments
+  "Decode selected nullable scalar struct fields by omitting invalid entries.
+   The retained representation cannot distinguish explicit null from absent
+   keys. Diagnostic only; nullable IDs, containers and SQL parameters reject."
+  [bytes]
+  (try
+    (assoc nullable-struct-base :status :decoded :rows (nullable-struct-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc nullable-struct-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc nullable-struct-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc nullable-struct-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-nullable-struct-operations
+  "Expand selected diagnostic SQL groups with nullable scalar struct fields."
+  [bytes]
+  (expand-fixed-operations bytes nullable-struct-base nullable-struct-rows!))
