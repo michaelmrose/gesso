@@ -67,3 +67,38 @@
           (is (= #{:dispatch-accepted} (set (map :gesso.live.outbox/status
                                                 (xt/q node ["SELECT * FROM gesso_live_outbox"]))))))
         (finally (release))))))
+
+(deftest historical-worker-relation-checks-clock-and-complete-payload
+  (let [time (Instant/parse "2026-01-01T00:00:00Z")
+        at #(java.time.ZonedDateTime/ofInstant (.plusSeconds time %) java.time.ZoneOffset/UTC)
+        pending {:xt/id (random-uuid) :xt/system-from (at -100)
+                 :gesso.live.outbox/type outbox/intent-type
+                 :gesso.live.outbox/version outbox/intent-version
+                 :gesso.live.outbox/status :pending :gesso.live.outbox/source-id "s"
+                 :gesso.live.outbox/command-id "c1" :extra "preserve"}
+        leased (assoc pending :xt/system-from (at 0) :gesso.live.outbox/status :leased
+                      :gesso.live.outbox/lease-id (random-uuid)
+                      :gesso.live.outbox/lease-owner "w" :gesso.live.outbox/lease-until (at 60))
+        expired (assoc leased :xt/system-from (at -100) :gesso.live.outbox/lease-until (at -1)
+                       :gesso.live.outbox/lease-id (random-uuid))
+        active (assoc expired :gesso.live.outbox/lease-until (at 1))
+        acknowledged (assoc active :xt/system-from (at 0) :gesso.live.outbox/status :dispatch-accepted
+                            :gesso.live.outbox/dispatch-receipt-id (random-uuid)
+                            :gesso.live.outbox/dispatch-adapter :example/adapter)
+        observe #(policy/observe-worker-transition "s" time %1 %2)]
+    (is (= :lease-acquisition (observe pending leased)))
+    (is (= :expired-lease-reclamation (observe expired leased)))
+    (is (= :dispatch-acknowledgment (observe active acknowledged)))
+    (doseq [bad [(assoc leased :extra "changed") (dissoc leased :extra)
+                 (assoc leased :xt/system-from (at 1))
+                 (assoc leased :gesso.live.outbox/source-id "other")
+                 (assoc leased :gesso.live.outbox/lease-owner "")
+                 (assoc leased :gesso.live.outbox/lease-until (at 0))
+                 (assoc leased :gesso.live.outbox/lease-until (at 301))]]
+      (is (nil? (observe pending bad))))
+    (is (nil? (observe active leased)))
+    (is (nil? (observe expired (assoc leased :gesso.live.outbox/lease-id (:gesso.live.outbox/lease-id expired)))))
+    (is (nil? (observe expired (assoc acknowledged :gesso.live.outbox/lease-until (at -1)))))
+    (is (nil? (observe active (assoc acknowledged :gesso.live.outbox/lease-owner "other"))))
+    (is (nil? (observe active (assoc acknowledged :gesso.live.outbox/dispatch-receipt-id "fake"))))
+    (is (nil? (policy/observe-worker-transition "other" time pending leased)))))

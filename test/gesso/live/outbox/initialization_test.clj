@@ -388,5 +388,10 @@
               (is (= [:observed-mapped-stutter :aborted-stutter :unclassified :unclassified]
                      (mapv :classification (:steps report))))
               (is (= :history-step-limit-exceeded (reason #(history/audit! handle admission 3))))
-              (is (= :missing-history-initialization (reason #(history/audit! handle (admission!) 16))))))
+              (is (= :missing-history-initialization (reason #(history/audit! handle (admission!) 16))))
+              ;; Changes confined to infrastructure are not automatically stutters.
+              (xt/execute-tx node [[:put-docs :gesso_live_outbox {:xt/id (random-uuid) :unexpected true}]])
+              (xt/execute-tx node [[:put-docs :gesso_publication_manifests {:xt/id "s" :descriptor "unexplained"}]])
+              (is (= [:unclassified :unclassified]
+                     (mapv :classification (take-last 2 (:steps (history/audit! handle admission 16))))))))
           (finally (release)))))))

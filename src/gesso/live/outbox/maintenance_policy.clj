@@ -4,7 +4,8 @@
    in the submitted transaction protects the interval after that read.
    A changed row before admission is refused locally, not reported as an
    XTDB abort. Receipt provenance remains a trusted worker obligation."
-  (:require [gesso.live.outbox :as outbox]
+  (:require [clojure.string :as str]
+            [gesso.live.outbox :as outbox]
             [gesso.live.outbox.read-frontier :as frontier])
   (:import [java.time Instant ZonedDateTime]))
 
@@ -87,3 +88,53 @@
           :gesso_publication_manifests (manifest-admission source-id descriptor ops)
           :gesso_live_outbox (worker-admission node source-id worker-id ops (peek op))
           nil)))))
+
+(defn- instant [value]
+  (when (instance? ZonedDateTime value) (.toInstant ^ZonedDateTime value)))
+
+(defn observe-worker-transition
+  "Independently classify a historical current-row replacement at the
+   transaction's valid/system time. Compare the entire payload, including
+   unknown fields. The observed owner and receipt are not authenticated;
+   this checks the state relation, not the submitted SQL footprint."
+  [source-id time old new]
+  (let [id (:xt/id old)
+        owner (:gesso.live.outbox/lease-owner new)
+        lease (:gesso.live.outbox/lease-id new)
+        deadline (instant (:gesso.live.outbox/lease-until new))
+        old-deadline (instant (:gesso.live.outbox/lease-until old))
+        old-time (instant (:xt/system-from old))
+        status (:gesso.live.outbox/status old)
+        next-status (:gesso.live.outbox/status new)
+        row (dissoc new :xt/system-from)
+        before (dissoc old :xt/system-from)]
+    (when (and (instance? Instant time) old-time (.isBefore old-time time)
+               (= time (instant (:xt/system-from new)))
+               (uuid? id) (= id (:xt/id new))
+               (= outbox/intent-type (:gesso.live.outbox/type old))
+               (= outbox/intent-version (:gesso.live.outbox/version old))
+               (string? source-id) (= source-id (:gesso.live.outbox/source-id old))
+               (string? owner) (not (str/blank? owner))
+               (uuid? lease) deadline)
+      (cond
+        (and (= :leased next-status)
+             (.isAfter deadline time)
+             (not (.isAfter deadline (.plusSeconds time 300)))
+             (or (= :pending status)
+                 (and (= :leased status) (valid-lease? old)
+                      (not= lease (:gesso.live.outbox/lease-id old))
+                      (not (.isAfter old-deadline time))))
+             (= row (assoc before :gesso.live.outbox/status :leased
+                           :gesso.live.outbox/lease-id lease
+                           :gesso.live.outbox/lease-owner owner
+                           :gesso.live.outbox/lease-until (:gesso.live.outbox/lease-until new))))
+        (if (= :pending status) :lease-acquisition :expired-lease-reclamation)
+
+        (and (= :dispatch-accepted next-status) (= :leased status)
+             (valid-lease? old) (.isAfter old-deadline time)
+             (uuid? (:gesso.live.outbox/dispatch-receipt-id new))
+             (qualified-keyword? (:gesso.live.outbox/dispatch-adapter new))
+             (= row (assoc before :gesso.live.outbox/status :dispatch-accepted
+                           :gesso.live.outbox/dispatch-receipt-id (:gesso.live.outbox/dispatch-receipt-id new)
+                           :gesso.live.outbox/dispatch-adapter (:gesso.live.outbox/dispatch-adapter new))))
+        :dispatch-acknowledgment))))

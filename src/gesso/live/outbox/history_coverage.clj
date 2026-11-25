@@ -5,6 +5,8 @@
    hidden tables, transaction-internal reads, or external writer closure."
   (:require [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.physical-correspondence :as correspondence]
+            [gesso.live.outbox.maintenance-policy :as maintenance]
+            [gesso.live.outbox :as outbox]
             [gesso.live.outbox.read-frontier :as frontier]
             [gesso.model.inductive-plan :as inductive]
             [xtdb.basis :as basis])
@@ -32,6 +34,8 @@
     {:documents (into {} (map (fn [table] [table (read! table)])) tables)
      :journal (read! :gesso_commands)
      :evidence (read! :gesso_transition_evidence)
+     :outbox (read! :gesso_live_outbox)
+     :manifests (read! :gesso_publication_manifests)
      :initialization (read! :gesso_initializations)}))
 
 (defn- plain-rows [index]
@@ -45,13 +49,39 @@
     (when (and (= 1 (count added)) (= before (dissoc after (first added))))
       (first added))))
 
-(defn- classify-step! [node admission tables opts prior current]
+(defn- written-at? [time row]
+  (let [written (:xt/system-from row)]
+    (and (instance? ZonedDateTime written) (= time (.toInstant ^ZonedDateTime written)))))
+
+(defn- publication-append? [source-id time command-id before after]
+  (let [added (apply dissoc after (keys before))]
+    (and (= before (apply dissoc after (keys added)))
+         (every? (fn [[id row]]
+                   (and (uuid? id) (written-at? time row)
+                        (= outbox/intent-type (:gesso.live.outbox/type row))
+                        (= outbox/intent-version (:gesso.live.outbox/version row))
+                        (= :pending (:gesso.live.outbox/status row))
+                        (= source-id (:gesso.live.outbox/source-id row))
+                        (= command-id (:gesso.live.outbox/command-id row)))) added))))
+
+(defn- worker-step [source-id time before after]
+  (let [old (:outbox before) new (:outbox after)
+        changed (filter #(not= (get old %) (get new %)) (keys old))]
+    (when (and (= (dissoc before :outbox) (dissoc after :outbox))
+               (= (set (keys old)) (set (keys new))) (= 1 (count changed)))
+      (let [id (first changed) row (get old id)]
+        (when (contains? (:journal before) (:gesso.live.outbox/command-id row))
+          (when-let [kind (maintenance/observe-worker-transition source-id time row (get new id))]
+            {:classification :verified-infrastructure-transition :maintenance kind :intent-id id}))))))
+
+(defn- classify-step! [node admission source-id tables opts prior current]
   (let [time (ledger-time current)
         previous-time (ledger-time prior)
         before (snapshot! node tables opts previous-time time)
         after (snapshot! node tables opts time time)
         base {:tx-id (:xt/id current) :system-time time :committed? (:committed current)}
-        id (appended-id (:journal before) (:journal after))]
+        id (appended-id (:journal before) (:journal after))
+        worker (when (:committed current) (worker-step source-id time before after))]
     (cond
       (= before after)
       (assoc base :classification (if (:committed current) :observed-mapped-stutter :aborted-stutter))
@@ -59,8 +89,12 @@
       (not (:committed current))
       (assoc base :classification :unclassified :reason :aborted-step-changed-observed-rows)
 
+      worker (merge base worker)
+
       (and id (= id (appended-id (:evidence before) (:evidence after)))
-           (= (:initialization before) (:initialization after)))
+           (= (:initialization before) (:initialization after))
+           (= (:manifests before) (:manifests after))
+           (publication-append? source-id time id (:outbox before) (:outbox after)))
       (let [command (get-in after [:journal id])
             witness (get-in after [:evidence id])]
         (try
@@ -83,8 +117,9 @@
    checked initialization through a pinned completed basis. Refuse an
    oversized or ambiguous interval rather than returning a partial success.
    Every ledger step is classified, including aborts and unexplained changes.
-   Stutters compare the complete observed mapped/journal/evidence/marker rows
-   at the step's valid time; they do not identify actual writer footprints."
+   Stutters compare mapped and infrastructure rows at the step's valid
+   time. Worker replacements check the historical lease/receipt relation;
+   neither establishes actual writer footprints."
   [connectable admission max-steps]
   (when-not (and (integer? max-steps) (<= 1 max-steps 128))
     (reject! :invalid-history-step-limit))
@@ -111,7 +146,7 @@
                    (every? (fn [[a b]] (neg? (compare a b))) (partition 2 1 times)))
       (reject! :ambiguous-history-ledger))
     (let [opts (frontier/query-options! node)
-          steps (mapv (fn [[prior current]] (classify-step! node admission tables opts prior current))
+          steps (mapv (fn [[prior current]] (classify-step! node admission (:source-id initial) tables opts prior current))
                       (partition 2 1 rows))
           unresolved (filterv #(= :unclassified (:classification %)) steps)]
       (when-not (and (identical? token (xtdb/current-submission-policy-token node))
@@ -123,6 +158,7 @@
        :open-obligations #{:transaction-internal-read-basis-refinement
                            :valid-time-continuity-between-steps
                            :infrastructure-writer-footprint-coverage
+                           :historical-worker-and-receipt-authentication
                            :unrestricted-physical-writer-closure
                            :principal-authentication-and-business-authorization
                            :complete-application-refinement}})))

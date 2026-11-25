@@ -590,7 +590,10 @@
                    (is (= (cond-> #{id} valid? (conj loser-id))
                           (set (map :command-id (:verified-mapped-transition groups)))))
                    (is (= 1 (count (:aborted-stutter groups))))
-                   (is (= 4 (count (:observed-mapped-stutter groups))))
+                   (is (= 4 (count (:verified-infrastructure-transition groups))))
+                   (is (= {:lease-acquisition 2 :dispatch-acknowledgment 2}
+                          (frequencies (map :maintenance (:verified-infrastructure-transition groups)))))
+                   (is (empty? (:observed-mapped-stutter groups)))
                    (is (empty? (:unclassified groups))))
                  (let [entries @writers
                        claims (filter #(= :claim (:kind %)) entries)
