@@ -4,6 +4,9 @@
    completeness, pinning, and application outcome interpretation are trusted
    inputs, not established here. This is not a physical writer inventory."
   (:require [clojure.string :as str]
+            [gesso.assurance.transition :as construction]
+            [gesso.assurance.proof.transition :as abstract]
+            [gesso.assurance.proof.independent-transition-semantics :as independent]
             [gesso.assurance.proof.typed-value-semantics :as values]
             [gesso.choreo.identity :as identity]
             [gesso.model.certified-plan :as plan]
@@ -69,3 +72,49 @@
                                       (reject! :missing-required-document))))])) coordinates)]
       (values/observe-state! (:state-types original) state)
       state)))
+
+(defn check-put-candidate!
+  "Overlay actual put-docs on supplied prestate rows and check the declared
+   relation. Exactly the mapped write targets must occur once; journal
+   slots are insert-only. SQL guards and auxiliary effects are checked
+   elsewhere. This checks projected fields, not acquisition, atomicity or
+   unmapped fields, and grants no authority."
+  [original target-map document-rows journal-rows decode-outcome! inputs puts]
+  (let [mapping (plan/check-target-mapping! original target-map)
+        before (project-state! original target-map document-rows journal-rows decode-outcome!)
+        expected (:write-targets mapping)]
+    (when-not (and (vector? puts)
+                   (every? (fn [op] (and (vector? op) (= :put-docs (first op))
+                                         (keyword? (second op)) (> (count op) 2)
+                                         (every? map? (drop 2 op)))) puts))
+      (reject! :unsupported-candidate-operation))
+    (let [entries (mapv (fn [[table row]]
+                          [(if (= :gesso_commands table)
+                             (into [:journal-slot] (journal-key! row))
+                             [:document table (:xt/id row)]) row])
+                        (mapcat (fn [[_ table & rows]] (map #(vector table %) rows)) puts))
+          targets (mapv first entries)]
+      (when-not (and (= expected (set targets)) (= (count targets) (count expected)))
+        (reject! :candidate-write-target-mismatch))
+      (let [occupied (set (map journal-key! journal-rows))
+            _ (when (some (fn [[kind & slot]]
+                            (and (= :journal-slot kind) (contains? occupied (vec slot)))) targets)
+                (reject! :occupied-journal-slot))
+            docs (reduce (fn [docs [[kind table id] row]]
+                           (if (= :document kind)
+                             (update docs table (fn [rows] (conj (filterv #(not= id (:xt/id %)) rows) row)))
+                             docs)) document-rows entries)
+            journal (into (vec journal-rows) (keep (fn [[[kind] row]] (when (= :journal-slot kind) row))) entries)
+            after (project-state! original target-map docs journal decode-outcome!)
+            transition (:transition (construction/build-guarded-replacement! original))
+            observed (abstract/observe-transition! transition before inputs after)
+            other (independent/observe-transition! transition before inputs after)
+            checks [:guard-holds? :assignments-hold? :frame-holds? :matches?]]
+        (when-not (= (select-keys observed checks) (select-keys other checks))
+          (reject! :candidate-interpreter-disagreement))
+        (when-not (:matches? observed) (reject! :candidate-relation-mismatch))
+        {:type ::checked-put-candidate :mapping-fingerprint (:fingerprint mapping)
+         :transition-fingerprint (:transition-fingerprint mapping)
+         :write-targets expected :before before :after after
+         :scope :declared-projection-of-supplied-put-candidate
+         :transaction-submitted? false :atomicity :not-established :authority :none}))))

@@ -69,3 +69,30 @@
            (try (projection/project-state! (assoc-in source [:state-types :example/count :optional?] true)
                                            targets rows [] (constantly :accepted))
                 nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))))
+
+(deftest put-candidate-derives-poststate-and-checks-frame
+  (let [original (assoc source :writes #{:example/count :example/one}
+                       :replacements {:example/count [:literal 3] :example/one [:literal :accepted]}
+                       :frame #{:example/enabled :example/owner :example/two})
+        puts [[:put-docs :requests {:xt/id "r1" :item-count 3 :enabled false}]
+              [:put-docs :gesso_commands (record "c1" "p1")]]
+        check (fn [ops journal] (projection/check-put-candidate! original targets rows journal
+                                          #(get-in % [:gesso.command/outcome :result]) {} ops))
+        reason (fn [ops journal] (try (check ops journal) nil
+                                      (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+        r (check puts [])]
+    (is (= 2 (get-in r [:before :example/count])))
+    (is (= 3 (get-in r [:after :example/count])))
+    (is (= :accepted (get-in r [:after :example/one])))
+    (is (= :none (:authority r)))
+    (is (false? (:transaction-submitted? r)))
+    (is (= :candidate-relation-mismatch (reason (assoc-in puts [0 2 :item-count] 4) [])))
+    (is (= :candidate-relation-mismatch (reason (assoc-in puts [0 2 :enabled] true) [])))
+    (is (= :candidate-write-target-mismatch (reason (pop puts) [])))
+    (is (= :candidate-write-target-mismatch (reason (conj puts (first puts)) [])))
+    (is (= :candidate-write-target-mismatch (reason (conj puts [:put-docs :assignments {:xt/id "a1" :owner "p1"}]) [])))
+    (is (= :unsupported-candidate-operation (reason (conj puts ["ASSERT TRUE"]) [])))
+    (is (= :occupied-journal-slot (reason puts [(record "old" "p1")])))
+    (is (= :candidate-write-target-mismatch (reason (assoc-in puts [1 2] (record "c1" "p2")) [])))
+    (is (= (:before r) (:after (projection/check-put-candidate! source targets rows []
+                                          (constantly :accepted) {} []))))))

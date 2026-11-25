@@ -118,12 +118,17 @@
         opts {:snapshot-token (xtdb/basis-snapshot-token basis)
               :current-time (Instant/now)}
         records (atom nil)
+        document-rows (atom {})
         state (snapshot! (fn [query]
                            (let [rows (xtdb/q-from node query opts)]
                              (when (= query ["SELECT * FROM gesso_commands"])
                                (reset! records (into {} (map (juxt :xt/id clojure.core/identity)) rows)))
+                             (when-let [table ({["SELECT _id, status, revision FROM requests"] :requests
+                                                ["SELECT _id, request_id, helper FROM request_assignments"] :request_assignments
+                                                ["SELECT _id, active FROM memberships"] :memberships} query)]
+                               (swap! document-rows assoc table rows))
                              rows)))]
-    {:basis basis :state state :records @records}))
+    {:basis basis :state state :records @records :document-rows @document-rows}))
 
 (defn- literal-conditions! [declaration]
   (construction/build-guarded-replacement! declaration)
@@ -370,6 +375,14 @@
                           (not (pos? (xtdb/compare-bases commit-basis after-basis)))
                           (not (contains? (:records before) command-id))
                           (= (assoc (:records before) command-id record) (:records after)))))
+         ;; The existing full submission classifier checks SQL and publication
+         ;; writes separately. Here the actual mapped puts determine poststate.
+         (let [puts (if replay? [] (filterv #(and (= :put-docs (first %))
+                                                  (not= :gesso_live_outbox (second %))) ops))
+               candidate (projection/check-put-candidate! (source helper alternative) target-map
+                                                           (:document-rows before) (vec (vals (:records before)))
+                                                           decode-claim-outcome! {} puts)]
+           (require! (= [(:state before) (:state after)] [(:before candidate) (:after candidate)])))
          {:command-id command-id :operation-id (alternative-id helper alternative)
           :commit-basis commit-basis :before-basis before-basis :after-basis after-basis
           :submission (if replay? :no-new-submission :committed-in-window)
