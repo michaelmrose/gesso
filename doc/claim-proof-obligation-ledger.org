@@ -3357,3 +3357,26 @@ nullable columns remain outside the selected profile. No independent
 document-put interpretation, aggregate reference document budget,
 production wiring, certificate or CLM-R2 premise retirement. Full project
 and independent formal gates were not rerun.
+
+* v2663 — decode selected homogeneous temporal Arrow lists
+
+Extend homogeneous scalar-list qualification to nonnullable Z and UTC
+microsecond timestamp children, preserving exact timezone identity and
+selected reference date bounds. Reuse the existing independent scalar
+reader and list extent checks, including the 256-element vector bound.
+Preserve the earlier non-temporal list profile and all narrower profiles.
+
+Focused JVM: 16 tests / 889 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Actual retained
+mixed Z/UTC list columns, integer lists and scalar arguments match
+expected rows, operation spans and provider observations before and
+after reopening. Exercise empty typed lists, negative epoch values,
+date boundaries, exact child byte mutations, invalid offsets, out-of-range
+values and an unsupported timezone. XTDB logged shutdown cancellation;
+the test process exited zero.
+
+Selected homogeneous temporal scalar-list profile v1. Heterogeneous,
+recursive and nullable composites, untyped empty lists, document puts
+and aggregate reference document budgets remain open. No production
+wiring, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.

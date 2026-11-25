@@ -705,3 +705,60 @@
           (.awaitSourceBlocking (db/primary-db node) (peek unsupported-ids) (Duration/ofSeconds 10))
           (check-scalar-list-retained! node id unsupported-ids rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-temporal-list-retained! [node id other-id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-temporal-list-operations data)
+        query "ASSERT ($1 IS NOT NULL AND $2 IS NOT NULL AND $3 IS NOT NULL AND ($4 = 0))"
+        expected (mapv #(hash-map :kind :sql :query query :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ offsets _ values _ _ _ utc-values] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/temporal-list-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-temporal-list-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-scalar-list-operations data))))
+    (doseq [[col offset zone] [[0 values "Z"] [1 utc-values "UTC"]]]
+      (is (= (assoc-in rows [0 col 0] (.atZone java.time.Instant/EPOCH (java.time.ZoneId/of zone)))
+             (:rows (arrow/decode-temporal-list-arguments (edit-long args offset 0))))))
+    (doseq [[bad reason] [[(edit-long args values Long/MIN_VALUE) :unsupported-arrow-timestamp-range]
+                          [(edit-long args utc-values Long/MAX_VALUE) :unsupported-arrow-timestamp-range]
+                          [(edit-int args offsets 1) :invalid-arrow-list-offsets]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-temporal-list-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (let [r (arrow/decode-temporal-list-operations (retained-operation-bytes node other-id))]
+      (is (= :unsupported (:status r)))
+      (is (= :unsupported-arrow-timestamp-type (:reason r)))
+      (is (not (contains? r :operations))))))
+
+(deftest selected-temporal-lists-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-temporal-list-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        instants (mapv #(java.time.Instant/parse %) ["1969-12-31T23:59:59.999999Z"
+                                                     "0001-01-01T00:00:00Z"
+                                                     "9998-12-31T23:59:59.999999Z"])
+        z (java.time.ZoneId/of "Z") utc (java.time.ZoneId/of "UTC")
+        zs (mapv #(.atZone % z) instants) us (mapv #(.atZone % utc) instants)
+        rows [[zs us [1 2] 0] [[] [] [] 1] [[(peek zs)] [(peek us)] [-1] -1]]]
+    (is (= [[]] (:rows (arrow/decode-temporal-list-arguments nil))))
+    (try
+      (let [[id other-id] (with-open [node (xtn/start-node config)]
+                            (let [database (db/primary-db node)
+                                  submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                                      (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                                  id (submit! (mapv #(into ["ASSERT (? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND (? = 0))"] %) rows))
+                                  other-id (submit! [["ASSERT ? IS NOT NULL" [(java.time.ZonedDateTime/parse "2026-01-01T00:00:00-08:00[America/Los_Angeles]")]]])]
+                              (check-temporal-list-retained! node id other-id rows)
+                              [id other-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
+          (check-temporal-list-retained! node id other-id rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

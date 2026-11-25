@@ -230,14 +230,16 @@
                    (and (= Type/FixedSizeBinary type) (= "uuid" name)) :uuid
                    :else (require! false :unsupported-arrow-field)))
                (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
-                     Type/Timestamp :timestamp Type/List (if (contains? allowed :scalar-list)
-                                                           :scalar-list :int64-list)} type))]
+                     Type/Timestamp :timestamp Type/List (cond
+                                                           (contains? allowed :temporal-list) :temporal-list
+                                                           (contains? allowed :scalar-list) :scalar-list
+                                                           :else :int64-list)} type))]
     (require! (contains? allowed kind) :unsupported-arrow-field)
     (if (#{:keyword :uuid} kind)
       (require! (and (= field-name (.name f)) (not (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
-      (field! f field-name type false (if (#{:int64-list :scalar-list} kind) 1 0)))
+      (field! f field-name type false (if (#{:int64-list :scalar-list :temporal-list} kind) 1 0)))
     (when (= :integer kind)
       (let [^Int t (.type f (Int.))]
         (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
@@ -245,10 +247,12 @@
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
         (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
     (cond
-      (#{:int64-list :scalar-list} kind)
+      (#{:int64-list :scalar-list :temporal-list} kind)
       [:list (scalar-kind! (.children f 0) "$data$"
-                           (if (= :int64-list kind) #{:integer}
-                               #{:integer :boolean :string :keyword :uuid}))]
+                           (case kind
+                             :int64-list #{:integer}
+                             :scalar-list #{:integer :boolean :string :keyword :uuid}
+                             :temporal-list #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc}))]
       (= :timestamp kind)
       (let [^Timestamp t (.type f (Timestamp.))
             zone (when t (.timezone t))]
@@ -608,3 +612,27 @@
    and earlier scalar values. No heterogeneous or nullable list children."
   [bytes]
   (expand-fixed-operations bytes scalar-list-base scalar-list-rows!))
+
+(def temporal-list-profile :xtdb-2.2.0-beta1/selected-homogeneous-temporal-scalar-list-arrow-operations-v1)
+(def ^:private temporal-list-base (assoc base :profile temporal-list-profile))
+
+(defn- temporal-list-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc :temporal-list}))
+
+(defn decode-temporal-list-arguments
+  "Decode bounded homogeneous nonnullable scalar vectors including Z and UTC
+   microsecond timestamps. Preserve exact child timezone labels and bounds."
+  [bytes]
+  (try
+    (assoc temporal-list-base :status :decoded :rows (temporal-list-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc temporal-list-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc temporal-list-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc temporal-list-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-temporal-list-operations
+  "Expand selected SQL groups with homogeneous scalar vectors including
+   temporal children. No heterogeneous, nested or nullable children."
+  [bytes]
+  (expand-fixed-operations bytes temporal-list-base temporal-list-rows!))
