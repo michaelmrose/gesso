@@ -2123,3 +2123,30 @@ storage, current-time overrides or universal provider refinement. No
 production assurance status changes and no CLM-R2 premise is retired.
 Current-state, full project, physical Claim, Chromium and independent
 proof gates were not rerun.
+
+* v2619 — model worker row-version compare-and-swap
+
+Interpret the exact outbox UUID identity and _system_from equality
+assertion against the issuing system time of the visible tentative
+segment. Compare microsecond-aligned Instant and ZonedDateTime operands
+by instant, including the worker's physical timestamp representation.
+Admit UUID document identities in the shared reference storage language;
+existing string-id selectors reject non-string identity domains rather
+than assuming SQL coercion. Version guards reject visible non-UUID rows.
+Preserve rollback and reject malformed suffixes before replay. Temporal
+profile v6; current-state v10; history v19 unchanged.
+
+Combined reference JVM: 29 tests / 3273 assertions, zero failures or
+errors. Ten additional embedded XTDB transactions exercise absent and
+stale rows, identical-value replacement, tentative version changes,
+future-scheduled validity, mismatched identity and atomic rollback.
+Compare independently predicted outcomes, 132 bitemporal point queries
+and the complete selected outbox history rectangle inventory. No provider
+observation feeds reference replay. Re-run both reference suites after
+the shared identity-domain change.
+
+This is finite empirical CAS correspondence over selected documents,
+not timestamp-valued lease storage, expired or active lease fencing,
+complete worker execution or universal provider refinement. No production
+assurance status changes and no CLM-R2 premise is retired. Full project,
+physical Claim, Chromium and independent proof gates were not rerun.

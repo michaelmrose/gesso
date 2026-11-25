@@ -514,3 +514,13 @@
             (is (= (:state predicted) (provider-state node)) (pr-str ops))
             (is (= :matched (:status (envelope/check-envelope! node id ops (:committed? predicted)))))
             (recur (:state predicted) (next cases))))))))
+
+(deftest uuid-identities-do-not-extend-string-selectors
+  (let [doc {:xt/id uuid-a :value 1}
+        r (reference/execute {} [[:put-docs :refprobe doc]])]
+    (is (= {:refprobe {uuid-a doc}} (:state r)))
+    (doseq [op [(read-guard :refprobe "a" :value 1)
+                ["ASSERT 0 = (SELECT COUNT(*) FROM \"refprobe\" WHERE _id = ?)" "a"]]]
+      (let [result (reference/execute (:state r) [op])]
+        (is (= :unsupported (:status result)))
+        (is (not (contains? result :state)))))))

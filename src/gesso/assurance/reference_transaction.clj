@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v9)
+(def profile :selected-current-state-transaction-v10)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -65,8 +65,9 @@
          :else false)))
 
 (defn- document? [doc]
-  (and (map? doc) (nil? (meta doc)) (id? (:xt/id doc))
-       (= :string (equality-domain (:xt/id doc)))
+  (and (map? doc) (nil? (meta doc))
+       (or (uuid? (:xt/id doc))
+           (and (id? (:xt/id doc)) (= :string (equality-domain (:xt/id doc)))))
        (<= (count doc) 256)
        (let [budget (volatile! 8192)]
          (every? (fn [[k v]]
@@ -98,8 +99,14 @@
     {:kind :assert-read :table (keyword table) :id id
      :field (keyword field) :expected expected :domain domain}))
 
+(defn- string-id-row! [rows id]
+  ;; Existing string-id selectors have no qualified UUID coercion rule.
+  (when-not (every? string? (keys rows))
+    (reject! :unsupported-reference-id-domain))
+  (get rows id))
+
 (defn- read-matches! [working {:keys [table id field expected domain]}]
-  (let [row (get-in working [table id])]
+  (let [row (string-id-row! (get working table) id)]
     (if (contains? row field)
       (let [actual (get row field)]
         ;; Do not infer SQL coercion rules from Clojure equality.
@@ -139,8 +146,8 @@
 (defn- count-matches? [working {:keys [kind table id expected]}]
   (let [rows (get working table)]
     (case kind
-      :assert-row-count (= expected (if id (if (contains? rows id) 1 0) (count rows)))
-      :assert-field-count (when-let [doc (get rows id)]
+      :assert-row-count (= expected (if id (if (string-id-row! rows id) 1 0) (count rows)))
+      :assert-field-count (when-let [doc (string-id-row! rows id)]
                             (= expected (count doc))))))
 
 ;; Exact selected mapped scalar guard; each field contributes three
@@ -179,7 +186,7 @@
       {:kind :assert-mapped :table (keyword table) :id id :checks checks})))
 
 (defn- mapped-matches! [working {:keys [table id checks]}]
-  (let [row (get-in working [table id])]
+  (let [row (string-id-row! (get working table) id)]
     (and row
          ;; Validate every reached present comparison, without relying on
          ;; SQL evaluation order or short-circuiting the field checks.
@@ -387,7 +394,7 @@
 
 (defn execute
   "Interpret a complete, supported operation vector on a canonical map
-   {table {string-id document}}. Puts replace entire documents in order;
+   {table {string-or-uuid-id document}}. Puts replace entire documents in order;
    literal, homogeneous parameter equality, selected row-read, count,
    mapped scalar and selected journal slot/value assertions can abort and return
    the original state. Reads see the tentative state

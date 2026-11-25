@@ -350,3 +350,75 @@
       (let [actual (mapcat #(provider-rectangles node %) [:temporalprobe :temporalother])]
         (is (= (frequencies (coalesce-valid (:rectangles r)))
                (frequencies (coalesce-valid actual))))))))
+
+(def ^:private intent-id #uuid "00000000-0000-0000-0000-000000000001")
+(def ^:private other-intent-id #uuid "00000000-0000-0000-0000-000000000002")
+(defn- intent-put [value]
+  [:put-docs :gesso_live_outbox {:xt/id intent-id :value value}])
+(defn- version-guard [id version]
+  ["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)" id version])
+(defn- version-at [n]
+  (.atZone (sys n) (java.time.ZoneId/of "America/Los_Angeles")))
+
+(def ^:private version-transactions
+  (mapv (fn [n ops] {:system-time (sys n) :ops ops}) (range 1 11)
+        [[(version-guard intent-id (sys 1))]
+         [(intent-put 1)]
+         [(version-guard intent-id (version-at 2)) (intent-put 1)]
+         [(intent-put 2) (version-guard intent-id (sys 3))]
+         [(version-guard intent-id (sys 3)) (intent-put 2) (version-guard intent-id (sys 5))]
+         [(version-guard other-intent-id (sys 5))]
+         [(version-guard intent-id (sys 5))
+          [:put-docs {:into :gesso_live_outbox :valid-from (sys 8) :valid-to (sys 9)}
+           {:xt/id intent-id :value 3}]
+          (version-guard intent-id (sys 5))]
+         [(version-guard intent-id (sys 7))]
+         [(version-guard intent-id (sys 5)) (intent-put 4) ["ASSERT FALSE"]]
+         [(version-guard intent-id (sys 5)) (intent-put 5)]]))
+
+(deftest independent-worker-version-guards
+  (let [r (temporal/replay version-transactions)]
+    (is (= :predicted (:status r)))
+    (is (= [false true true false true false true true false true]
+           (mapv :committed? (:history r))))
+    (is (= [0 nil nil 1 nil 0 nil nil 2 nil]
+           (mapv :failed-assertion-index (:history r))))
+    (is (= {:xt/id intent-id :value 5}
+           (get-in (temporal/visible-at r (sys 10) (sys 10)) [:gesso_live_outbox intent-id])))
+    (is (= {:xt/id intent-id :value 3}
+           (get-in (temporal/visible-at r (sys 10) (sys 8)) [:gesso_live_outbox intent-id])))
+    (is (= (get-in r [:history 7 :segments]) (get-in r [:history 8 :segments])))))
+
+(deftest rejects-unsupported-worker-version-guards
+  (doseq [op [(version-guard "id" (sys 1))
+              (version-guard intent-id nil)
+              (version-guard intent-id "2025-01-01")
+              (version-guard intent-id (.plusNanos (sys 1) 1))
+              (pop (version-guard intent-id (sys 1)))
+              (conj (version-guard intent-id (sys 1)) true)
+              (assoc (version-guard intent-id (sys 1)) 0 "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from >= ?)")]]
+    (let [r (temporal/replay [{:system-time (sys 1) :ops [["ASSERT FALSE"] op]}])]
+      (is (= :unsupported (:status r)))
+      (is (not (contains? r :history)))))
+  (let [r (temporal/replay [{:system-time (sys 1)
+                            :ops [[:put-docs :gesso_live_outbox {:xt/id "a" :value 1}]
+                                  (version-guard intent-id (sys 1))]}])]
+    (is (= :unsupported (:status r)))
+    (is (not (contains? r :history)))))
+
+(deftest independently-predicted-worker-versions-match-xtdb
+  (let [r (temporal/replay version-transactions)]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector version-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (doseq [s (range 0 11) v (range 0 12)]
+        (let [rows (xt/q node ["SELECT * FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ?"
+                               (sys v) (sys s)])]
+          (is (= (get (temporal/visible-at r (sys s) (sys v)) :gesso_live_outbox {})
+                 (into {} (map (juxt :xt/id identity)) rows)))))
+      (is (= (frequencies (coalesce-valid (:rectangles r)))
+             (frequencies (coalesce-valid (provider-rectangles node :gesso_live_outbox))))))))

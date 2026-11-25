@@ -2,9 +2,9 @@
   "Independent finite bitemporal replay of selected document puts.
    System times are supplied as inputs, never inferred from provider results."
   (:require [gesso.assurance.reference-transaction :as current])
-  (:import (java.time Instant)))
+  (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-bitemporal-transaction-v5)
+(def profile :selected-bitemporal-transaction-v6)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -40,14 +40,39 @@
     :future (before? system-time deadline)
     :within-five-minutes (not (before? (.plusSeconds ^Instant system-time 300) deadline))))
 
+(def ^:private version-guard
+  "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)")
+
+(defn- version-instant [x]
+  (cond
+    (instance? Instant x) x
+    (instance? ZonedDateTime x) (.toInstant ^ZonedDateTime x)))
+
+(defn- check-version-guard! [system-time op]
+  (when-not (and (= 3 (count op)) (uuid? (second op))
+                 (clock-instant? system-time)
+                 (clock-instant? (version-instant (nth op 2))))
+    (reject! :unsupported-temporal-version-guard)))
+
+(defn- version-matches! [working system-time [_ id version]]
+  (let [rows (get-in working [:segments :gesso_live_outbox])
+        visible (fn [intervals]
+                  (first (filter (fn [[a b _ _]]
+                                   (and (not (before? system-time a))
+                                        (before-end? system-time b))) intervals)))]
+    (when (some (fn [[k intervals]] (and (not (uuid? k)) (visible intervals))) rows)
+      (reject! :unsupported-temporal-version-id-domain))
+    (= (version-instant version) (nth (visible (get rows id)) 3 nil))))
+
 (defn- normalize-op! [system-time op]
   (when-not (and (vector? op) (nil? (meta op)))
     (reject! :unsupported-temporal-operation))
   (if (string? (first op))
-    (do (if (contains? clock-guards (first op))
-          (check-clock-guard! system-time op)
-          (when-not (= :predicted (:status (current/execute {} [op])))
-            (reject! :unsupported-temporal-assertion)))
+    (do (cond
+          (contains? clock-guards (first op)) (check-clock-guard! system-time op)
+          (= version-guard (first op)) (check-version-guard! system-time op)
+          :else (when-not (= :predicted (:status (current/execute {} [op])))
+                  (reject! :unsupported-temporal-assertion)))
         op)
     (let [[kind raw-opts & docs] op
           opts (if (keyword? raw-opts) {:into raw-opts} raw-opts)]
@@ -125,9 +150,10 @@
       (let [op (nth ops i)]
         (if (= :put-docs (first op))
           (recur (apply-put working system-time op) (inc i))
-          (let [matches? (if (contains? clock-guards (first op))
-                           (clock-matches? system-time op)
-                           (let [result (current/execute (project-visible (:segments working) system-time) [op])]
+          (let [matches? (cond
+                           (contains? clock-guards (first op)) (clock-matches? system-time op)
+                           (= version-guard (first op)) (version-matches! working system-time op)
+                           :else (let [result (current/execute (project-visible (:segments working) system-time) [op])]
                              (when-not (= :predicted (:status result))
                                (reject! :unsupported-temporal-assertion-domain))
                              (:committed? result)))]
@@ -141,7 +167,7 @@
    half-open and microsecond-aligned, with omitted starts at the supplied
    system time and omitted ends unbounded. Abort retains the prior snapshot.
    Selected assertions read tentative documents at the transaction system
-   time (no current-time override), including selected worker clock guards.
+   time (no current-time override), including selected worker clock and row-version guards.
    Validate all operation shapes before
    replay. Rectangles retain the issuing system time and exclusive supersession
    time. No provider observations, implicit clock or authority are admitted."
