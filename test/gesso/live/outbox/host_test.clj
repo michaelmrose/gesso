@@ -78,6 +78,7 @@
   (doseq [[change reason]
           [[{:xtdb-config nil} :invalid-xtdb-config]
            [{:xtdb-submission-policy! nil} :invalid-xtdb-submission-policy]
+           [{:history-audit {}} :history-audit-requires-mapped-writer]
            [{:mapped-writer-policy nil} :invalid-mapped-writer-policy]
            [{:mapped-writer-policy {} :xtdb-submission-policy! identity}
             :conflicting-xtdb-submission-policies]
@@ -107,6 +108,8 @@
            live-system (:gesso.live/system started)
            worker (get started managed/handle-key)]
        (try
+         (is (nil? (host/history-status started)))
+         (is (= :history-audit-not-selected (:reason (problem #(host/audit-history! started)))))
          (is (some? node))
          (is (some? live-system))
          (is (some? worker) "Lifecycle handle should be present")

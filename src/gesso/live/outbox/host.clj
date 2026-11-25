@@ -24,6 +24,7 @@
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.http :as http]
+            [gesso.live.outbox.history-controller :as history-controller]
             [gesso.live.outbox.http-jdk :as jdk]
             [gesso.live.outbox.http-fragment :as fragment-http]
             [gesso.live.outbox.http-operation :as operation-http]
@@ -55,7 +56,7 @@
                          :reason reason))))
 
 (def ^:private allowed-config
-  #{:xtdb-config :xtdb-submission-policy! :mapped-writer-policy :live-options :source-id :worker-options :rules-context
+  #{:xtdb-config :xtdb-submission-policy! :mapped-writer-policy :history-audit :live-options :source-id :worker-options :rules-context
     :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
@@ -87,6 +88,10 @@
     (when (contains? config :xtdb-submission-policy!)
       (reject! :conflicting-xtdb-submission-policies {}))
     (writer-policy/validate-config! (:mapped-writer-policy config)))
+  (when (contains? config :history-audit)
+    (when-not (:mapped-writer-policy config)
+      (reject! :history-audit-requires-mapped-writer {}))
+    (history-controller/validate-options! (:history-audit config)))
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -152,7 +157,10 @@
 
 (defn- start-xtdb! [system]
   (let [release (atom nil)
+        audit (atom nil)
+        timeout-ms (get-in system [config-key :stop-timeout-ms] 10000)
         close! (fn [node]
+                 (when-let [controller @audit] ((:close! controller) timeout-ms))
                  (.close ^java.lang.AutoCloseable node)
                  (when-let [f @release] (f)))
         node (managed/acquire-startup-resource!
@@ -171,8 +179,11 @@
       (manifest/require-compatible! node (:source-id config)
                                     (::publication-manifest system))
       (when (:mapped-writer-policy config)
-        (writer-policy/activate-policy! policy)))
-    (assoc system :xtdb/connectable node ::close-node! close!)))
+        (writer-policy/activate-policy! policy))
+      (when-let [options (:history-audit config)]
+        (reset! audit (history-controller/start! node (get-in config [:mapped-writer-policy :admission]) options))))
+    (cond-> (assoc system :xtdb/connectable node ::close-node! close!)
+      @audit (assoc ::history-controller @audit))))
 
 (defn- stop-xtdb! [system]
   ((::close-node! system) (:xtdb/connectable system)))
@@ -319,6 +330,12 @@
    to the exact owned node, with durable one-time startup initialization and restricted
    framework-owned maintenance admission. The two selections are exclusive.
    Both cover adapter submit/execute calls, not direct or external XTDB writes.
+   Optional :history-audit requires the mapped profile and trusted owner
+   :load!, :save!, :key, :deployment-id and :max-steps options. Restore and
+   persist a first bounded chunk before request admission. Further chunks
+   are owner-driven via audit-history!. Startup transport errors propagate;
+   unresolved findings remain diagnostic. Stop fences and drains audit work
+   before native provider shutdown. No audit scheduler is installed.
    :live-options allows only owned :rules, :source-options, :dispatch-options.
    :source-id, :worker-options and :rules-context are mandatory. The worker
    is installed AFTER providers, and cannot be omitted or re-ordered.
@@ -427,6 +444,8 @@
                           ((:close-and-await! admission))
                           (retire-recovery! @recovery* timeout-ms)
                           (retire-route! @route* timeout-ms)
+                          (when-let [controller (::history-controller started)]
+                            ((:close! controller) timeout-ms))
                           (native-stop)))]
       ;; Wrap the actual native stop chain, not just host/stop!: a caller of
       ;; biff/stop on this returned system must encounter the same fence.
@@ -462,6 +481,19 @@
                 (.addSuppressed error cleanup-error)
                 (throw error))))
           (throw startup-error))))))
+
+(defn history-status
+  "Observe the last successfully persisted history report and controller phase.
+   Nil means the owner did not select historical auditing. No cursor or key."
+  [system]
+  (when-let [controller (::history-controller system)] ((:status controller))))
+
+(defn audit-history!
+  "Advance one bounded chunk on the exact owner system, not a Ring context."
+  [system]
+  (if-let [controller (::history-controller system)]
+    ((:advance! controller))
+    (reject! :history-audit-not-selected {})))
 
 (defn stop!
   "Use the exact Biff system returned by start!. A drain timeout propagates

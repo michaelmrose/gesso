@@ -5,6 +5,7 @@
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
             [gesso.live.outbox.history-coverage :as history]
+            [gesso.live.outbox.history-controller :as controller]
             [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.writer-policy :as policy]
@@ -505,3 +506,63 @@
             (finally (release)))))
       (finally
         (doseq [entry (reverse (file-seq (.toFile root)))] (io/delete-file entry true))))))
+
+(deftest owner-history-controller-persistence-and-drain
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        sealed (atom nil)
+        fail? (atom false)
+        block? (atom false)
+        entered (promise)
+        proceed (promise)
+        opts {:key (byte-array 32) :deployment-id "controller-test" :max-steps 1
+              :load! #(deref sealed)
+              :save! (fn [value]
+                       (when @fail? (throw (ex-info "Storage unavailable" {:reason :test-save-failed})))
+                       (when @block? (deliver entered true) @proceed)
+                       (reset! sealed value))}]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (reset! fail? true)
+          (is (= :test-save-failed (reason #(controller/start! node admission opts))))
+          (reset! fail? false)
+          (let [c (controller/start! node admission opts)
+                advance (:advance! c) status (:status c) close (:close! c)
+                initial (:report (status))
+                initial-sealed @sealed]
+            (is (= :observed-interval-checked (:status initial)))
+            (is (= {} (:counts initial)))
+            (is (not (contains? initial :checkpoint)))
+            (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :item-count 99}]])
+            (reset! fail? true)
+            (is (= :test-save-failed (reason advance)))
+            (is (= initial (:report (status))))
+            (is (= initial-sealed @sealed))
+            (is (= :history-advance-failed (:last-error (status))))
+            (reset! fail? false)
+            (is (= {:unclassified 1} (:counts (advance))))
+            (is (nil? (:last-error (status))))
+            (close 10)
+            (is (= :history-controller-closed (reason advance)))
+            (let [c (controller/start! node admission opts)
+                  advance (:advance! c) status (:status c) close (:close! c)]
+              (is (= {:unclassified 1} (get-in (status) [:report :counts])))
+              (is (empty? (get-in (status) [:report :steps])))
+              (xt/execute-tx node seed)
+              (reset! block? true)
+              (let [task (future (advance))]
+                (try
+                  (is (= true (deref entered 5000 :timeout)))
+                  (is (= :history-controller-busy (reason advance)))
+                  (is (= :history-controller-not-drained (reason #(close 0))))
+                  (is (= :closing (:phase (status))))
+                  (finally (deliver proceed true)))
+                (is (= {:unclassified 2} (:counts (deref task 5000 :timeout))))
+                (close 1000)
+                (is (= :closed (:phase (status))))
+                (is (= :history-controller-closed (reason advance))))))
+          (finally (release)))))))

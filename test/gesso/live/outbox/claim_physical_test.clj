@@ -230,7 +230,10 @@
         operation (fixture/trusted-operation :request/claim {:published-change-topics #{:request :request-assignment} :execute! executor})
         resolve-id (fn [ctx _] (or (get-in ctx [:headers "fragment-id"])
                                   (when (= "scope=l1" (:query-string ctx)) "l1")))
-        config {:xtdb-config {} :source-id "v2480-claim" :rules-context {}
+        history-store (atom nil)
+        config {:history-audit {:key (byte-array 32) :deployment-id "claim-test" :max-steps 2
+                                :load! #(deref history-store) :save! #(reset! history-store %)}
+                :xtdb-config {} :source-id "v2480-claim" :rules-context {}
                 :mapped-writer-policy
                 {:admission (:issued preparations)
                  :initializer seed
@@ -358,6 +361,8 @@
                                            (protocol/wire->settlement (edn/read-string (get-in marker [:attrs :data-gesso-live-optimistic-settlement])))))})
                         (catch Exception e {:failure (ex-data e)})))]
          (try
+           (is (= :observed-interval-checked (get-in (host/history-status started) [:report :status])))
+           (is (map? @history-store))
            (reset! initial-state (semantics/snapshot-at-frontier! node))
            (when (= :valid recovery-mode)
              ;; Actual network refusals must not reach either constructor.
@@ -595,6 +600,13 @@
                           (frequencies (map :maintenance (:verified-infrastructure-transition groups)))))
                    (is (empty? (:observed-mapped-stutter groups)))
                    (is (empty? (:unclassified groups)))
+                   (let [report (loop [n 0]
+                                  (let [r (host/audit-history! started)]
+                                    (if (or (:caught-up? r) (= n 8)) r (recur (inc n)))))]
+                     (is (= :observed-interval-checked (:status report)))
+                     (is (= (:through-basis audit) (:through-basis report)))
+                     (is (= (frequencies (map :classification steps)) (:counts report)))
+                     (is (= report (:report (host/history-status started)))))
                    (let [chunks (loop [cursor nil chunks []]
                                   (let [chunk (history/audit-chunk! node (:issued preparations) 2 cursor)
                                         accumulated (conj chunks chunk)]
@@ -739,7 +751,8 @@
            (finally
              (when-let [opened @observer] (browser/close! opened))
              (doseq [input @streams] (.close input))
-             (host/stop! started)))))))))))))
+             (host/stop! started)
+             (is (= :closed (:phase (host/history-status started))))))))))))))))
 
 (deftest claim-semantic-snapshot-does-not-mix-completed-bases
   (with-open [node (xtn/start-node {})]
