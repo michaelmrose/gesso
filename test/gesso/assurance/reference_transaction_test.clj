@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-transaction :as reference]
             [gesso.assurance.xtdb-envelope :as envelope]
+            [gesso.model.tx :as tx]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
@@ -102,8 +103,76 @@
   (let [r (reference/execute initial [put-a (read-guard :refprobe "a" :value 1)])]
     (is (= 1 (:failed-assertion-index r)))))
 
+(def ^:private card-table :gesso_refcard)
+(def ^:private card-a [:put-docs card-table a])
+(def ^:private card-b [:put-docs card-table b])
+(def ^:private card-replacement [:put-docs card-table replacement])
+(def ^:private card-c [:put-docs card-table {:xt/id "c" :value 4}])
+
+(defn- table-count [n]
+  [(str "ASSERT " n " = (SELECT COUNT(*) FROM gesso_refcard)")])
+
+(defn- id-count [n id]
+  [(str "ASSERT " n " = (SELECT COUNT(*) FROM gesso_refcard WHERE _id = ?)") id])
+
+(defn- field-count [n id]
+  ;; Real constructor/formatter only in the differential harness; the
+  ;; independent interpreter must not call either to recognize the guard.
+  (tx/format-assertion (tx/assert-document-field-count card-table id n)))
+
+(def ^:private cardinality-cases
+  ;; These run as a sequence, starting without the cardinality table.
+  [[true [(table-count 0) (id-count 0 "a")]]
+   [true [card-a (table-count 1) (id-count 1 "a") (field-count 3 "a")]]
+   [true [card-b (table-count 2) (id-count 1 "b") (field-count 2 "b")]]
+   [true [card-replacement (field-count 2 "a") (table-count 2)]]
+   [false [card-a (field-count 2 "a") put-other]]
+   [false [card-c (table-count 2) put-other]]
+   [false [card-c (id-count 1 "c") (id-count 0 "c")]]
+   [true [(id-count 0 "c") (table-count 2) (field-count 2 "a")]]
+   [false [(id-count 0 "a") put-other]]
+   [false [(id-count 1 "c")]]
+   [false [(field-count 1 "c")]]
+   [true [card-c ["ASSERT ? = (SELECT COUNT(*) FROM \"gesso_refcard\")" 3]
+          (tx/format-assertion (tx/assert-document-exists card-table "c"))]]
+   [false [(tx/format-assertion (tx/assert-document-absent card-table "c"))]]
+   [true [(tx/format-assertion (tx/assert-document-absent card-table "absent"))
+          ["ASSERT 1 = (SELECT COUNT(*) FROM \"refother\" WHERE _id = ?)" "a"]]]])
+
+(deftest independent-document-cardinality
+  (let [states (reductions (fn [state [expected ops]]
+                             (let [r (reference/execute state ops)]
+                               (is (= :predicted (:status r)) (pr-str ops))
+                               (is (= expected (:committed? r)) (pr-str ops))
+                               (if expected
+                                 (is (not (contains? r :failed-assertion-index)))
+                                 (do (is (= state (:state r)))
+                                     (is (integer? (:failed-assertion-index r)))))
+                               (is (= :none (:authority r)))
+                               (is (= :not-issued (:certificate r)))
+                               (:state r))) initial cardinality-cases)
+        final (last states)]
+    (is (= {"a" replacement "b" b "c" {:xt/id "c" :value 4}}
+           (get final card-table)))
+    (is (= (:refother initial) (:refother final)))
+    (is (= 1 (:failed-assertion-index
+              (reference/execute initial [card-a (field-count 2 "a")]))))))
+
 (deftest unsupported-reference-input-does-not-predict
-  (doseq [ops [[] [(read-guard :refprobe "a" :value nil)]
+  (doseq [ops [[] [(table-count -1)] [(table-count 16385)]
+               [["ASSERT ? = (SELECT COUNT(*) FROM gesso_refcard)" nil]]
+               [["ASSERT ? = (SELECT COUNT(*) FROM gesso_refcard)" 1.0]]
+               [["ASSERT ? = (SELECT COUNT(*) FROM gesso_refcard)" 1 2]]
+               [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_refcard)" "a"]]
+               [(id-count 0 "")] [(id-count 0 nil)] [(id-count 0 1)]
+               [(pop (id-count 0 "a"))]
+               [["ASSERT 0 = (SELECT COUNT(*) FROM xt_txs)"]]
+               [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_refcard WHERE value = ?)" 1]]
+               [["ASSERT 0 = (SELECT LENGTH(NEST_ONE (SELECT * FROM gesso_refcard WHERE _id = ?)))" "a"]]
+               [(assoc (field-count 2 "a") 1 0)]
+               [(assoc (field-count 2 "a") 1 8193)]
+               [["ASSERT FALSE"] (id-count 0 nil)]
+               [(read-guard :refprobe "a" :value nil)]
                [(read-guard :refprobe "a" :value "1")]
                [(read-guard :refprobe "a" :value :open)]
                [(read-guard :xt_txs "a" :value 1)]
@@ -144,7 +213,7 @@
                        (let [indexed (into {} (map (juxt :xt/id identity)) rows)]
                          (is (= (count rows) (count indexed)) "No duplicate visible document IDs")
                          [table indexed])))))
-        [:refprobe :refother]))
+        [:refprobe :refother card-table]))
 
 (deftest reference-predictions-match-selected-real-xtdb-executions
   (with-open [node (xtn/start-node {})]
@@ -172,7 +241,8 @@
                               ["ASSERT ? = ?" left right]
                               [:put-docs :refother {:xt/id "a" :value (+ 200 i)}]])
                            equality-cases)
-                          (map second read-cases)))]
+                          (map second read-cases)
+                          (map second cardinality-cases)))]
         (when-let [ops (first cases)]
           (let [predicted (reference/execute state ops)
                 id (:tx-id (xt/submit-tx node ops))

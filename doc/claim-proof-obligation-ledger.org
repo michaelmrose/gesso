@@ -1834,3 +1834,31 @@ SQL, COUNT/NOT EXISTS, mapped predicates, bitemporal semantics or universal
 provider refinement. No production assurance status changes and no CLM-R2
 premise is retired. Full physical Claim, project, Chromium and separate
 proof gates were not rerun.
+* v2608 — model selected row and document cardinality assertions
+
+Extend independent reference execution to literal and parameterized
+COUNT(*) equality over a whole current table or its string-id selection,
+and the exact formatted LENGTH(NEST_ONE (SELECT * FROM table WHERE
+_id = ?)) document field-count guard. Counts use the tentative state;
+zero row matches establish absence, whereas a missing document cannot
+satisfy a positive field count. Count every visible non-null top-level
+field, including identity, within the existing flat document fragment.
+Restrict SQL identifiers to quoted simple names or unquoted Gesso-prefixed
+names, reject invalid counts, arities, identities and unsupported clauses
+before execution, and preserve atomic rollback. Reference profile v4;
+history v19 unchanged.
+
+Final reference JVM namespace: 6 tests / 768 assertions, zero failures
+or errors. Fourteen additional differential transactions cover absent
+and populated tables, inserted and replaced rows, distinct identities,
+field additions/removals, absent document field counts and rollback.
+The harness exercises actual formatted document existence, absence and
+field-count assertions, comparing independently predicted outcomes,
+complete selected visible maps and retained envelopes. Pure regressions
+check unsupported forms and the independently expected sequence results.
+
+This is finite empirical evidence for selected cardinality guards, not
+general SQL, nested mapped value predicates, temporal semantics or a
+universal provider refinement theorem. No production assurance status
+changes or CLM-R2 premise is retired. Full project, physical Claim,
+Chromium and independent proof gates were not rerun.

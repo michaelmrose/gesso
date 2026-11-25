@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v3)
+(def profile :selected-current-state-transaction-v4)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -84,6 +84,41 @@
         (= expected actual))
       false)))
 
+;; Selected physical count guards: either quoted simple identifiers or
+;; unquoted Gesso-prefixed tables, avoiding SQL reserved-word ambiguity.
+;; Literal counts occur in infrastructure guards; bound counts are used
+;; by the model transaction formatter. No arbitrary WHERE predicates.
+(def ^:private count-pattern
+  #"ASSERT (\?|0|[1-9][0-9]{0,4}) = \(SELECT COUNT\(\*\) FROM (\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+)( WHERE _id = \?)?\)")
+
+(def ^:private field-count-pattern
+  #"ASSERT (\?|[1-9][0-9]{0,4}) = \(SELECT LENGTH\(NEST_ONE \(SELECT \* FROM (\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+) WHERE _id = \?\)\)\)")
+
+(defn- count-assertion! [op kind [_ count-token table id-clause]]
+  (let [bound? (= "?" count-token)
+        id-required? (or (= :assert-field-count kind) (some? id-clause))
+        args (subvec op 1)
+        expected (if bound? (first args) (Long/parseLong count-token))
+        id-args (if (and bound? (seq args)) (subvec args 1) args)
+        id (first id-args)
+        table (keyword (str/replace table "\"" ""))]
+    (when-not (and (table? table) (instance? Long expected)
+                   (if (= :assert-field-count kind)
+                     (<= 1 expected 8192)
+                     (<= 0 expected 16384))
+                   (= (count args) (+ (if bound? 1 0) (if id-required? 1 0)))
+                   (or (not id-required?)
+                       (and (id? id) (= :string (equality-domain id)))))
+      (reject! :unsupported-reference-count-assertion))
+    {:kind kind :table table :id id :expected expected}))
+
+(defn- count-matches? [working {:keys [kind table id expected]}]
+  (let [rows (get working table)]
+    (case kind
+      :assert-row-count (= expected (if id (if (contains? rows id) 1 0) (count rows)))
+      :assert-field-count (when-let [doc (get rows id)]
+                            (= expected (count doc))))))
+
 (defn- check-op! [op]
   (when-not (and (vector? op) (nil? (meta op)) (seq op))
     (reject! :unsupported-reference-operation))
@@ -93,6 +128,10 @@
     (= "ASSERT ? = ?" (first op)) (equality-kind! op)
     (and (string? (first op)) (re-matches read-pattern (first op)))
     (read-assertion! op)
+    (and (string? (first op)) (re-matches count-pattern (first op)))
+    (count-assertion! op :assert-row-count (re-matches count-pattern (first op)))
+    (and (string? (first op)) (re-matches field-count-pattern (first op)))
+    (count-assertion! op :assert-field-count (re-matches field-count-pattern (first op)))
     (= :put-docs (first op))
     (let [docs (subvec op (min 2 (count op)))]
       (when-not (and (table? (second op)) (<= 1 (count docs) 16384)
@@ -105,8 +144,8 @@
 (defn execute
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-id document}}. Puts replace entire documents in order;
-   literal, homogeneous parameter equality and selected row-read assertions
-   can abort and return the original state. Row reads see the tentative state
+   literal, homogeneous parameter equality, selected row-read and count
+   assertions can abort and return the original state. Reads see the tentative state
    produced by preceding operations. The full vector is structurally validated
    before evaluation, including operations after a false guard; reached reads
    also check the stored operand domain.
@@ -130,6 +169,11 @@
                                (recur working (inc i))
                                (assoc report :status :predicted :committed? false
                                       :state state :failed-assertion-index i))
+                (:assert-row-count :assert-field-count)
+                (if (count-matches? working kind)
+                  (recur working (inc i))
+                  (assoc report :status :predicted :committed? false
+                         :state state :failed-assertion-index i))
                 :put (let [[_ table & docs] (nth ops i)]
                        (recur (reduce (fn [s doc] (assoc-in s [table (:xt/id doc)] doc)) working docs)
                               (inc i))))))))
