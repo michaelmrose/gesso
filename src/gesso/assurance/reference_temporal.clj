@@ -4,7 +4,7 @@
   (:require [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant)))
 
-(def profile :selected-bitemporal-transaction-v4)
+(def profile :selected-bitemporal-transaction-v5)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -18,12 +18,36 @@
   ;; Internal nil represents an unbounded exclusive end, not a SQL null.
   (or (nil? end) (before? instant end)))
 
+;; Exact transaction-clock guards emitted by the outbox lease worker.
+(def ^:private clock-guards
+  {"ASSERT CURRENT_TIMESTAMP < ?" :future
+   "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" :within-five-minutes})
+
+(defn- clock-instant? [x]
+  ;; Conservative portable timestamp domain; exclude precision loss and
+  ;; extreme JVM instants before doing arithmetic or comparing deadlines.
+  (and (instant? x)
+       (not (before? x (Instant/parse "0001-01-01T00:00:00Z")))
+       (before? x (Instant/parse "9999-01-01T00:00:00Z"))))
+
+(defn- check-clock-guard! [system-time op]
+  (when-not (and (= 2 (count op)) (clock-instant? system-time)
+                 (clock-instant? (second op)))
+    (reject! :unsupported-temporal-clock-guard)))
+
+(defn- clock-matches? [system-time [sql deadline]]
+  (case (get clock-guards sql)
+    :future (before? system-time deadline)
+    :within-five-minutes (not (before? (.plusSeconds ^Instant system-time 300) deadline))))
+
 (defn- normalize-op! [system-time op]
   (when-not (and (vector? op) (nil? (meta op)))
     (reject! :unsupported-temporal-operation))
   (if (string? (first op))
-    (do (when-not (= :predicted (:status (current/execute {} [op])))
-          (reject! :unsupported-temporal-assertion))
+    (do (if (contains? clock-guards (first op))
+          (check-clock-guard! system-time op)
+          (when-not (= :predicted (:status (current/execute {} [op])))
+            (reject! :unsupported-temporal-assertion)))
         op)
     (let [[kind raw-opts & docs] op
           opts (if (keyword? raw-opts) {:into raw-opts} raw-opts)]
@@ -101,10 +125,13 @@
       (let [op (nth ops i)]
         (if (= :put-docs (first op))
           (recur (apply-put working system-time op) (inc i))
-          (let [result (current/execute (project-visible (:segments working) system-time) [op])]
-            (when-not (= :predicted (:status result))
-              (reject! :unsupported-temporal-assertion-domain))
-            (if (:committed? result)
+          (let [matches? (if (contains? clock-guards (first op))
+                           (clock-matches? system-time op)
+                           (let [result (current/execute (project-visible (:segments working) system-time) [op])]
+                             (when-not (= :predicted (:status result))
+                               (reject! :unsupported-temporal-assertion-domain))
+                             (:committed? result)))]
+            (if matches?
               (recur working (inc i))
               {:state prior :committed? false :failed-assertion-index i})))))))
 
@@ -114,7 +141,8 @@
    half-open and microsecond-aligned, with omitted starts at the supplied
    system time and omitted ends unbounded. Abort retains the prior snapshot.
    Selected assertions read tentative documents at the transaction system
-   time (no current-time override). Validate all operation shapes before
+   time (no current-time override), including selected worker clock guards.
+   Validate all operation shapes before
    replay. Rectangles retain the issuing system time and exclusive supersession
    time. No provider observations, implicit clock or authority are admitted."
   [transactions]

@@ -2096,3 +2096,30 @@ not explicit temporal SQL predicates, current-time overrides, worker
 temporal guards or universal provider refinement. No production assurance
 status changes and no CLM-R2 premise is retired. Current-state, full
 project, physical Claim, Chromium and independent proof gates were not rerun.
+
+* v2618 — model worker transaction-clock deadline guards
+
+Recognize the exact new-deadline and maximum-duration assertions used
+by the outbox lease worker. Compare the supplied transaction clock to
+an explicit deadline with a strict lower and inclusive five-minute
+upper bound; no host clock or provider result feeds the prediction.
+Restrict clock operands to microsecond-aligned Instants in a conservative
+calendar range. Validate arity and operands before replay, including
+unsupported suffixes after a failed guard. Preserve atomic rollback
+and failed assertion indexes. Temporal profile v5; current-state v9
+and history v19 unchanged.
+
+Temporal JVM: 14 tests / 1492 assertions, zero failures or errors. Seven
+additional embedded XTDB transactions exercise expired, exact-current,
+one-microsecond future, near-limit, exact-limit and excessive deadlines.
+Compare independently predicted outcomes, complete visible maps at 72
+additional bitemporal points and the complete selected rectangle inventory.
+Pure regressions reject malformed shapes, unsupported timestamp domains
+and altered SQL. No provider readback feeds reference replay.
+
+This establishes selected finite clock-guard correspondence, not worker
+row-version CAS, expired or active lease fencing, timestamp-valued outbox
+storage, current-time overrides or universal provider refinement. No
+production assurance status changes and no CLM-R2 premise is retired.
+Current-state, full project, physical Claim, Chromium and independent
+proof gates were not rerun.

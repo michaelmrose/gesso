@@ -288,3 +288,65 @@
       (let [actual (mapcat #(provider-rectangles node %) [:temporalprobe :temporalother])]
         (is (= (frequencies (coalesce-valid (:rectangles r)))
                (frequencies (coalesce-valid actual))))))))
+
+(defn- deadline-guards [deadline]
+  [["ASSERT CURRENT_TIMESTAMP < ?" deadline]
+   ["ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" deadline]])
+
+(def ^:private clock-cases
+  ;; Deadline offsets in microseconds relative to the supplied tx clock.
+  [[-1 false 1] [0 false 1] [1 true nil]
+   [299999999 true nil] [300000000 true nil] [300000001 false 2]
+   [600000000 false 2]])
+
+(def ^:private clock-transactions
+  (mapv (fn [n [micros _ _]]
+          (let [time (sys n)
+                deadline (.plusNanos time (* 1000 micros))]
+            {:system-time time
+             :ops (into [[:put-docs :temporalprobe {:xt/id "a" :value n}]]
+                        (concat (deadline-guards deadline)
+                                [[:put-docs :temporalother d]]))}))
+        (range 1 8) clock-cases))
+
+(deftest independent-worker-deadline-guards
+  (let [r (temporal/replay clock-transactions)]
+    (is (= :predicted (:status r)))
+    (is (= (mapv second clock-cases) (mapv :committed? (:history r))))
+    (is (= (mapv #(nth % 2) clock-cases)
+           (mapv :failed-assertion-index (:history r))))
+    (is (= {:xt/id "a" :value 5}
+           (get-in (temporal/visible-at r (sys 7) (sys 7)) [:temporalprobe "a"])))
+    (is (= (get-in r [:history 4 :segments]) (get-in r [:history 6 :segments])))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))))
+
+(deftest rejects-unsupported-worker-clock-guards
+  (doseq [op [["ASSERT CURRENT_TIMESTAMP < ?"]
+              ["ASSERT CURRENT_TIMESTAMP < ?" nil]
+              ["ASSERT CURRENT_TIMESTAMP < ?" "2025-01-01"]
+              ["ASSERT CURRENT_TIMESTAMP < ?" (.plusNanos (sys 1) 1)]
+              ["ASSERT CURRENT_TIMESTAMP < ?" Instant/MAX]
+              ["ASSERT CURRENT_TIMESTAMP < ?" (sys 2) (sys 3)]
+              ["ASSERT CURRENT_TIMESTAMP <= ?" (sys 2)]
+              ["ASSERT CURRENT_TIMESTAMP + INTERVAL '6' MINUTE >= ?" (sys 2)]]]
+    (let [r (temporal/replay [{:system-time (sys 1) :ops [["ASSERT FALSE"] op]}])]
+      (is (= :unsupported (:status r)) (pr-str op))
+      (is (not (contains? r :history)))
+      (is (not (contains? r :rectangles))))))
+
+(deftest independently-predicted-worker-clock-guards-match-xtdb
+  (let [r (temporal/replay clock-transactions)]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector clock-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (doseq [s (range 0 8) v (range 0 9)]
+        (is (= (temporal/visible-at r (sys s) (sys v))
+               (provider-at node (sys s) (sys v))) (str "system " s " valid " v)))
+      (let [actual (mapcat #(provider-rectangles node %) [:temporalprobe :temporalother])]
+        (is (= (frequencies (coalesce-valid (:rectangles r)))
+               (frequencies (coalesce-valid actual))))))))
