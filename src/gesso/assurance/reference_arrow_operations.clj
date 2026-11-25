@@ -15,52 +15,62 @@
 
 (def profile :xtdb-2.2.0-beta1/selected-sql-arrow-operations-v1)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
+(defn- sql-schema-leg! [^Field sql]
+  (field! sql "sql" Type/Struct_ false 2)
+  (field! (.children sql 0) "query" Type/Utf8 false 0)
+  (let [^Field args (.children sql 1) nullable? (.nullable args)]
+    (field! args "args" Type/Binary nullable? 0)
+    nullable?))
+
 (defn- schema! [^Message m ^ByteBuffer body]
   (let [^Schema schema (.header m (Schema.))]
     (require! (and (zero? (.remaining body)) schema (= Endianness/Little (.endianness schema))
                    (= 1 (.fieldsLength schema)) (zero? (.featuresLength schema))
                    (zero? (.customMetadataLength schema))) :unsupported-arrow-schema)
     (let [^Field root (field! (.fields schema 0) "tx-ops" Type/Union false 1)
-          ^Union union (.type root (Union.))
-          ^Field sql (field! (.children root 0) "sql" Type/Struct_ false 2)]
-      ;; Installed XTDB emits implicit zero-based type ids (empty array).
+          ^Union union (.type root (Union.))]
       (require! (and union (= UnionMode/Dense (.mode union)) (zero? (.typeIdsLength union)))
                 :unsupported-arrow-union)
-      (field! (.children sql 0) "query" Type/Utf8 false 0)
-      (let [^Field args (.children sql 1) nullable? (.nullable args)]
-        (field! args "args" Type/Binary nullable? 0)
-        nullable?))))
+      (sql-schema-leg! (.children root 0)))))
+
+(defn- sql-batch-leg! [^RecordBatch batch buffers node start n nullable?]
+  (let [nodes (mapv #(let [node (.nodes batch %)] [(.length node) (.nullCount node)]) (range node (+ node 3)))
+        _ (require! (and (= [n n n] (mapv first nodes))
+                         (= [0 0] (mapv second (subvec nodes 0 2)))
+                         (<= -1 (second (peek nodes)) n)) :unsupported-arrow-nodes)
+        [^ByteBuffer struct-valid ^ByteBuffer query-valid query-offsets queries
+         ^ByteBuffer arg-valid arg-offsets args] (subvec buffers start (+ start 7))]
+    (require! (and (zero? (.limit struct-valid)) (zero? (.limit query-valid))
+                   (or (zero? (.limit arg-valid)) (= (quot (+ n 7) 8) (.limit arg-valid))))
+              :unsupported-arrow-buffer-layout)
+    (let [qs (offsets! query-offsets queries n) as (offsets! arg-offsets args n)
+          nulls (count (remove #(present? arg-valid %) (range n)))]
+      (require! (and (or nullable? (zero? nulls))
+                     (or (= -1 (second (peek nodes))) (= nulls (second (peek nodes)))))
+                :arrow-null-count-mismatch)
+      (mapv (fn [i]
+              (let [query (str (.decode (.newDecoder StandardCharsets/UTF_8)
+                                        (ByteBuffer/wrap (value-bytes! queries qs i))))
+                    arg (value-bytes! args as i)]
+                (require! (not (empty? query)) :empty-arrow-query)
+                (require! (if (present? arg-valid i) (pos? (alength arg)) (zero? (alength arg)))
+                          :unsupported-arrow-argument-slot)
+                {:kind :sql :query query :argument-bytes (when (present? arg-valid i) arg)}))
+            (range n)))))
 
 (defn- batch! [^Message m ^ByteBuffer body nullable?]
   (let [^RecordBatch batch (.header m (RecordBatch.)) n (.length batch)]
     (require! (and (<= 1 n max-rows) (= 4 (.nodesLength batch))
                    (nil? (.compression batch)) (zero? (.variadicBufferCountsLength batch)))
               :unsupported-arrow-batch)
-    (let [nodes (mapv #(let [node (.nodes batch %)] [(.length node) (.nullCount node)]) (range 4))
-          _ (require! (and (= [n n n n] (mapv first nodes))
-                           (= [-1 0 0] (mapv second (subvec nodes 0 3)))
-                           (<= -1 (second (peek nodes)) n)) :unsupported-arrow-nodes)
-          [^ByteBuffer tags ^ByteBuffer indexes ^ByteBuffer struct-valid ^ByteBuffer query-valid
-           query-offsets queries ^ByteBuffer arg-valid arg-offsets args] (buffers! batch body 9)]
-      (require! (and (= n (.limit tags)) (= (* 4 n) (.limit indexes))
-                     (zero? (.limit struct-valid)) (zero? (.limit query-valid))
-                     (or (zero? (.limit arg-valid)) (= (quot (+ n 7) 8) (.limit arg-valid))))
-                :unsupported-arrow-buffer-layout)
-      (let [qs (offsets! query-offsets queries n) as (offsets! arg-offsets args n)
-            nulls (count (remove #(present? arg-valid %) (range n)))]
-        (require! (and (or nullable? (zero? nulls))
-                       (or (= -1 (second (peek nodes))) (= nulls (second (peek nodes)))))
-                  :arrow-null-count-mismatch)
-        (mapv (fn [i]
-                (require! (and (zero? (.get tags i)) (= i (.getInt indexes (* 4 i)))) :unsupported-arrow-union-selection)
-                (let [query (str (.decode (.newDecoder StandardCharsets/UTF_8)
-                                          (ByteBuffer/wrap (value-bytes! queries qs i))))
-                      arg (value-bytes! args as i)]
-                  (require! (not (empty? query)) :empty-arrow-query)
-                  (require! (if (present? arg-valid i) (pos? (alength arg)) (zero? (alength arg)))
-                            :unsupported-arrow-argument-slot)
-                  {:kind :sql :query query :argument-bytes (when (present? arg-valid i) arg)}))
-              (range n))))))
+    (let [root (.nodes batch 0)
+          buffers (buffers! batch body 9)
+          [^ByteBuffer tags ^ByteBuffer indexes] buffers]
+      (require! (and (= n (.length root)) (= -1 (.nullCount root))) :unsupported-arrow-nodes)
+      (require! (and (= n (.limit tags)) (= (* 4 n) (.limit indexes))) :unsupported-arrow-buffer-layout)
+      (require! (every? #(and (zero? (.get tags %)) (= % (.getInt indexes (* 4 %)))) (range n))
+                :unsupported-arrow-union-selection)
+      (sql-batch-leg! batch buffers 1 2 n nullable?))))
 
 (defn decode-operations
   "Decode one selected SQL-only stream into ordered SQL groups. Nested
@@ -863,3 +873,84 @@
     (if (= :decoded (:status r))
       (assoc r :logged-operation-spans (mapv (constantly 1) (:groups r)))
       r)))
+
+(def mixed-sql-put-profile :xtdb-2.2.0-beta1/selected-mixed-sql-put-arrow-v1)
+
+(defn- mixed-schema! [^Message m ^ByteBuffer body]
+  (let [^Schema schema (.header m (Schema.))]
+    (require! (and schema (zero? (.remaining body)) (= Endianness/Little (.endianness schema))
+                   (= 1 (.fieldsLength schema)) (zero? (.featuresLength schema))
+                   (zero? (.customMetadataLength schema))) :unsupported-arrow-schema)
+    (let [^Field root (field! (.fields schema 0) "tx-ops" Type/Union false 2)
+          ^Union u (.type root (Union.))
+          children (mapv #(.children root %) (range 2))]
+      (require! (and u (= UnionMode/Dense (.mode u)) (zero? (.typeIdsLength u))) :unsupported-arrow-union)
+      (require! (= #{"sql" "put-docs"} (set (map #(.name ^Field %) children))) :unsupported-arrow-field)
+      (mapv (fn [^Field child]
+              (case (.name child)
+                "sql" {:kind :sql :nullable? (sql-schema-leg! child) :nodes 3 :buffers 7}
+                "put-docs" (let [legs (put/read-schema-leg! child #{:mixed-document-ids :nullable-struct-fields
+                                                                   :null-only-fields :nullable-list-fields
+                                                                   :nullable-map-fields :document-valid-time
+                                                                   :nullable-document-valid-time :multiple-put-groups
+                                                                   :multiple-put-tables})]
+                             {:kind :put-docs :legs legs :nodes (put/leg-node-count legs)
+                              :buffers (put/leg-buffer-count legs)}))) children))))
+
+(defn- mixed-batch! [^Message m ^ByteBuffer body legs]
+  (let [^RecordBatch batch (.header m (RecordBatch.))
+        n (.length batch)
+        nodes (vec (reductions + 1 (map :nodes legs)))
+        starts (vec (reductions + 2 (map :buffers legs)))]
+    (require! (and (<= 2 n 256) (= (peek nodes) (.nodesLength batch))
+                   (nil? (.compression batch)) (zero? (.variadicBufferCountsLength batch))) :unsupported-arrow-mixed-batch)
+    (let [root (.nodes batch 0)
+          counts (mapv #(.length (.nodes batch %)) (pop nodes))
+          buffers (buffers! batch body (peek starts))
+          [^ByteBuffer tags ^ByteBuffer indexes] buffers]
+      (require! (and (= n (.length root)) (= -1 (.nullCount root))
+                     (every? #(<= 1 % n) counts) (= n (reduce + counts))) :unsupported-arrow-mixed-nodes)
+      (require! (and (= n (.limit tags)) (= (* 4 n) (.limit indexes))) :unsupported-arrow-buffer-layout)
+      (let [selections (mapv #(vector (int (.get tags %)) (.getInt indexes (* 4 %))) (range n))
+            seen (reduce (fn [seen [tag idx]]
+                           (require! (and (<= 0 tag 1) (= idx (nth seen tag)) (< idx (nth counts tag)))
+                                     :unsupported-arrow-union-selection)
+                           (update seen tag inc)) [0 0] selections)]
+        (require! (= counts seen) :unsupported-arrow-union-selection)
+        (let [groups (mapv (fn [{:keys [kind nullable? legs]} node start count]
+                             (case kind
+                               :sql (sql-batch-leg! batch buffers node start count nullable?)
+                               :put-docs (put/read-batch-leg! batch buffers legs node start count true)))
+                           legs (pop nodes) (pop starts) counts)]
+          (mapv (fn [[tag idx]] (get-in groups [tag idx])) selections))))))
+
+(defn decode-mixed-sql-put
+  "Independently interpret a selected two-leg SQL/put transaction stream.
+   Expand empty or signed int64 SQL argument rows, preserve ordered put
+   groups, and verify every IID. No execution or SQL arity claim."
+  [bytes]
+  (let [result-base (assoc base :profile mixed-sql-put-profile)]
+    (try
+      (require! (and (bytes? bytes) (<= 1 (alength ^bytes bytes) max-bytes)) :arrow-byte-limit)
+      (let [stream (doto (ByteBuffer/wrap ^bytes bytes) (.order ByteOrder/LITTLE_ENDIAN))
+            [sm sb] (message! stream MessageHeader/Schema)
+            legs (mixed-schema! sm sb)
+            [bm bb] (message! stream MessageHeader/RecordBatch)
+            groups (mixed-batch! bm bb legs)]
+        (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream))) :unsupported-arrow-terminator)
+        (let [verified (verify-put-iids (assoc result-base :status :decoded :groups (filterv #(= :put-docs (:kind %)) groups))
+                                        mixed-sql-put-profile iid/document-iid)]
+          (require! (= :decoded (:status verified)) (:reason verified))
+          (let [{:keys [operations spans]}
+                (reduce (fn [{:keys [operations spans]} {:keys [kind query argument-bytes] :as group}]
+                          (let [rows (case kind
+                                       :sql (mapv #(hash-map :kind :sql :query query :args %) (integer-rows! argument-bytes))
+                                       :put-docs [group])]
+                            (require! (<= (+ (count operations) (count rows)) max-rows) :arrow-expanded-row-limit)
+                            {:operations (into operations rows) :spans (conj spans (count rows))}))
+                        {:operations [] :spans []} groups)]
+            (assoc result-base :status :decoded :operations operations :logged-operation-spans spans
+                   :iid-correspondence :matched))))
+      (catch clojure.lang.ExceptionInfo e (assoc result-base :status :unsupported :reason (:reason (ex-data e))))
+      (catch CharacterCodingException _ (assoc result-base :status :unsupported :reason :invalid-arrow-utf8))
+      (catch Exception _ (assoc result-base :status :unsupported :reason :invalid-arrow-stream)))))

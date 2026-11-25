@@ -28,12 +28,8 @@
       (require! (struct-kind? kind) :unsupported-arrow-put-document)
       {:table (keyword table-name) :kind kind})))
 
-(defn- put-schema! [^Message m ^ByteBuffer body field-options]
-  (let [^Schema schema (.header m (Schema.))]
-    (require! (and schema (zero? (.remaining body)) (= Endianness/Little (.endianness schema))
-                   (= 1 (.fieldsLength schema)) (zero? (.featuresLength schema))
-                   (zero? (.customMetadataLength schema))) :unsupported-arrow-schema)
-    (let [^Field put (field! (single-union-field! (.fields schema 0) "tx-ops") "put-docs" Type/Struct_ false 4)
+(defn read-schema-leg! [^Field put field-options]
+  (let [^Field put (field! put "put-docs" Type/Struct_ false 4)
           ^Field iids (field! (.children put 0) "iids" Type/List false 1)
           ^Field iid (field! (.children iids 0) "$data$" Type/FixedSizeBinary false 0)
           ^FixedSizeBinary binary (.type iid (FixedSizeBinary.))
@@ -51,7 +47,14 @@
                     :unsupported-arrow-put-bound-type)))
       (let [legs (mapv #(put-table! (.children tables %) field-options) (range t))]
         (require! (= t (count (distinct (map :table legs)))) :unsupported-arrow-put-table)
-        legs))))
+        legs)))
+
+(defn- put-schema! [^Message m ^ByteBuffer body field-options]
+  (let [^Schema schema (.header m (Schema.))]
+    (require! (and schema (zero? (.remaining body)) (= Endianness/Little (.endianness schema))
+                   (= 1 (.fieldsLength schema)) (zero? (.featuresLength schema))
+                   (zero? (.customMetadataLength schema))) :unsupported-arrow-schema)
+    (read-schema-leg! (single-union-field! (.fields schema 0) "tx-ops") field-options)))
 
 (defn- put-list-offsets! [^ByteBuffer offsets g n]
   (require! (and (= (* 4 (inc g)) (.limit offsets)) (zero? (.getInt offsets 0)))
@@ -78,25 +81,25 @@
       {:table table :groups g :documents n
        :rows (mapv (fn [[a b]] (subvec docs a b)) (partition 2 1 xs))})))
 
-(defn- put-batch! [^Message m ^ByteBuffer body legs multi-groups?]
-  (let [^RecordBatch batch (.header m (RecordBatch.))
-        g (.length batch)
-        nodes-at (vec (reductions + 5 (map #(inc (node-count (:kind %))) legs)))
-        buffers-at (vec (reductions + 9 (map #(+ 2 (buffer-count (:kind %))) legs)))
-        bound-node (peek nodes-at) bound-buffer (peek buffers-at)]
-    (require! (and batch (<= 1 g (if multi-groups? 256 1))
-                   (= (+ bound-node 2) (.nodesLength batch))
-                   (nil? (.compression batch)) (zero? (.variadicBufferCountsLength batch))) :unsupported-arrow-put-batch)
-    (let [n (.length (.nodes batch 3))
-          nodes (mapv #(let [node (.nodes batch %)] [(.length node) (.nullCount node)]) (range 5))
-          buffers (buffers! batch body (+ bound-buffer 4))
-          [^ByteBuffer tags ^ByteBuffer indexes _ _ ^ByteBuffer iid-offsets _ ^ByteBuffer iids
+(defn leg-node-count [legs] (+ 6 (reduce + (map #(inc (node-count (:kind %))) legs))))
+(defn leg-buffer-count [legs] (+ 11 (reduce + (map #(+ 2 (buffer-count (:kind %))) legs))))
+
+(defn read-batch-leg!
+  "Read the put child of an already qualified operation union."
+  [^RecordBatch batch all-buffers legs node start g multi-groups?]
+  (let [nodes-at (vec (reductions + (+ node 4) (map #(inc (node-count (:kind %))) legs)))
+        buffers-at (vec (reductions + 7 (map #(+ 2 (buffer-count (:kind %))) legs)))
+        bound-node (peek nodes-at) bound-buffer (peek buffers-at)
+        buffers (subvec all-buffers start (+ start (leg-buffer-count legs)))]
+    (require! (<= 1 g (if multi-groups? 256 1)) :unsupported-arrow-put-batch)
+    (let [n (.length (.nodes batch (+ node 2)))
+          nodes (mapv #(let [node (.nodes batch %)] [(.length node) (.nullCount node)]) (range node (+ node 4)))
+          [_ _ ^ByteBuffer iid-offsets _ ^ByteBuffer iids
            ^ByteBuffer table-tags ^ByteBuffer table-indexes] buffers]
       (require! (and (<= 1 n (if multi-groups? 4096 256))
-                     (= [[g -1] [g 0] [g 0] [n 0] [g -1]] nodes)) :unsupported-arrow-put-nodes)
-      (require! (and (every? #(zero? (.limit ^ByteBuffer (nth buffers %))) [2 3 5])
-                     (= g (.limit tags) (.limit table-tags)) (= (* 4 g) (.limit indexes) (.limit table-indexes))
-                     (every? (fn [i] (and (zero? (.get tags i)) (= i (.getInt indexes (* 4 i))))) (range g)))
+                     (= [[g 0] [g 0] [n 0] [g -1]] nodes)) :unsupported-arrow-put-nodes)
+      (require! (and (every? #(zero? (.limit ^ByteBuffer (nth buffers %))) [0 1 3])
+                     (= g (.limit table-tags)) (= (* 4 g) (.limit table-indexes)))
                 :unsupported-arrow-put-selection)
       (require! (= (* 16 n) (.limit iids)) :unsupported-arrow-put-list-layout)
       (let [xs (put-list-offsets! iid-offsets g n)
@@ -128,6 +131,21 @@
                       (require! (= (- b a) (count docs)) :unsupported-arrow-put-list-layout)
                       {:kind :put-docs :table table :documents docs :iids (subvec ids a b) :bounds {}}))
                   selections (partition 2 1 xs))))))))
+
+(defn- put-batch! [^Message m ^ByteBuffer body legs multi-groups?]
+  (let [^RecordBatch batch (.header m (RecordBatch.))
+        g (.length batch)]
+    (require! (and batch (<= 1 g (if multi-groups? 256 1))
+                   (= (inc (leg-node-count legs)) (.nodesLength batch))
+                   (nil? (.compression batch)) (zero? (.variadicBufferCountsLength batch))) :unsupported-arrow-put-batch)
+    (let [root (.nodes batch 0)
+          buffers (buffers! batch body (+ 2 (leg-buffer-count legs)))
+          [^ByteBuffer tags ^ByteBuffer indexes] buffers]
+      (require! (and (= g (.length root)) (= -1 (.nullCount root))) :unsupported-arrow-put-nodes)
+      (require! (and (= g (.limit tags)) (= (* 4 g) (.limit indexes))
+                     (every? (fn [i] (and (zero? (.get tags i)) (= i (.getInt indexes (* 4 i))))) (range g)))
+                :unsupported-arrow-put-selection)
+      (read-batch-leg! batch buffers legs 1 2 g multi-groups?))))
 
 (defn read-envelope!
   "Interpret selected put groups from the complete retained Arrow stream.

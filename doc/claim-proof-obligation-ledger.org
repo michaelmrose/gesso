@@ -4026,3 +4026,30 @@ behavior-preserving extraction, not expanded assurance coverage. Mixed
 operation sequences and aggregate recursive value budgets remain open.
 No production wiring, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2690 — independently interpret mixed SQL and put operation streams
+
+Physical retained source observation establishes a two-leg tx-ops dense
+union with SQL and put-docs children. Qualify each leg using the shared
+single-kind readers at its actual node and buffer offsets; require exact
+root selections, sequential child indexes and complete leg consumption.
+Expand selected empty and signed int64 SQL argument rows, preserve put
+boundaries and verify every retained IID independently. Preserve physical
+operation order and logged-operation-spans. Bound mixed streams to 256
+physical groups and 16384 expanded operations, with existing put and
+stream limits. Earlier single-kind profiles still reject mixed streams.
+
+Focused JVM: 45 tests / 3016 assertions, zero failures or errors across
+reference Arrow operations, struct, put, mixed and source payload suites.
+Real persistent SQL-first and put-first interleaved transactions match
+expected operations and provider observations before and after reopening,
+including coalesced parameterless and int64 invocations. Reject malformed
+root selections, invalid UTF-8 and nested argument framing, mismatched
+IIDs, invalid table selections, truncation, unsupported SQL argument
+types and single-kind streams without partial results. Exit zero.
+
+Selected mixed SQL/put profile v1. Additional SQL argument types,
+aggregate recursive value budgets and integration into independent
+transaction correspondence remain open. No production wiring, certificate
+or CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.
