@@ -463,3 +463,65 @@
           (.awaitSourceBlocking (db/primary-db node) id (Duration/ofSeconds 10))
           (check-uuid-retained! node id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- edit-long [^bytes data offset value]
+  (let [copy (aclone data)]
+    (.putLong (doto (ByteBuffer/wrap copy) (.order ByteOrder/LITTLE_ENDIAN)) offset (long value))
+    copy))
+
+(defn- check-timestamp-retained! [node id other-id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-timestamp-operations data)
+        expected (mapv (fn [row] {:kind :sql :query "ASSERT ($1 = $2 AND ($3 = 0) AND $4)" :args row}) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ values] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/timestamp-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-timestamp-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-uuid-operations data))))
+    (is (= -1 (.getLong (doto (ByteBuffer/wrap args) (.order ByteOrder/LITTLE_ENDIAN)) values)))
+    (doseq [[micros spelling] [[-1000001 "1969-12-31T23:59:58.999999Z"]
+                              [0 "1970-01-01T00:00:00Z"] [1 "1970-01-01T00:00:00.000001Z"]]]
+      (is (= (assoc-in rows [0 0] (java.time.ZonedDateTime/parse spelling))
+             (:rows (arrow/decode-timestamp-arguments (edit-long args values micros))))))
+    (doseq [[bad reason] [[(edit-long args values Long/MIN_VALUE) :unsupported-arrow-timestamp-range]
+                          [(edit-long args values Long/MAX_VALUE) :unsupported-arrow-timestamp-range]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-timestamp-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (let [r (arrow/decode-timestamp-operations (retained-operation-bytes node other-id))]
+      (is (= :unsupported (:status r)))
+      (is (= :unsupported-arrow-timestamp-type (:reason r)))
+      (is (not (contains? r :operations))))))
+
+(deftest selected-timestamp-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-timestamp-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        instants (mapv #(java.time.Instant/parse %) ["1969-12-31T23:59:59.999999Z"
+                                                "1970-01-01T00:00:00Z" "2026-01-01T00:00:00.123456Z"
+                                                "0001-01-01T00:00:00Z" "9998-12-31T23:59:59.999999Z"])
+        input (mapv (fn [i] [i i 0 true]) instants)
+        rows (mapv (fn [i] (let [z (.atZone i (java.time.ZoneId/of "Z"))] [z z 0 true])) instants)]
+    (is (= [[]] (:rows (arrow/decode-timestamp-arguments nil))))
+    (try
+      (let [[id other-id] (with-open [node (xtn/start-node config)]
+                            (let [database (db/primary-db node)
+                                  submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                                      (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                                  id (submit! (mapv #(into ["ASSERT (? = ? AND (? = 0) AND ?)"] %) input))
+                                  z (java.time.ZonedDateTime/parse "2026-01-01T00:00:00-08:00[America/Los_Angeles]")
+                                  other-id (submit! [["ASSERT ? = ?" z z]])]
+                              (check-timestamp-retained! node id other-id rows)
+                              [id other-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
+          (check-timestamp-retained! node id other-id rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

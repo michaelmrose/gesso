@@ -3251,3 +3251,30 @@ execution semantics remain open. Arrow metadata accessors remain a
 library dependency. No production wiring, certificate or CLM-R2
 premise retirement. Full project and independent formal gates were
 not rerun.
+
+* v2659 — decode selected epoch-microsecond Arrow timestamps
+
+Qualify nonnullable timestamp columns with the installed MICROSECOND
+unit and exact Z timezone label. Interpret signed little-endian epoch
+microseconds using floor division and modulus, preserving negative
+fractional seconds and the provider's ZonedDateTime representation.
+Restrict instants to the selected reference date interval, inclusive
+0001-01-01 and exclusive 9999-01-01. Preserve mixed scalar rows,
+coalesced invocation spans and the earlier narrower profiles.
+
+Focused JVM: 12 tests / 671 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Physical retained
+Instant submissions yield Z-zone timestamp columns and ZonedDateTime
+observations. Check pre-epoch and post-epoch values, date boundaries,
+mixed scalar rows, exact microsecond mutations and persistent reopening.
+Reject signed extrema outside the selected range, a retained non-Z
+zone, and malformed framing. XTDB logged shutdown cancellation; the
+process exited zero.
+
+Selected Z/microsecond timestamp profile v1. Other timezone labels,
+units, nullable columns, composite values, document operations and SQL
+temporal semantics remain open. The reference document timestamp UTC
+label is not admitted by this profile. Arrow metadata accessors remain
+a library dependency. No production wiring, certificate or CLM-R2
+premise retirement. Full project and independent formal gates were
+not rerun.

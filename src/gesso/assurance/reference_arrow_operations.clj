@@ -6,8 +6,9 @@
   (:import (java.nio ByteBuffer ByteOrder)
            (java.nio.charset StandardCharsets CharacterCodingException)
            (java.util UUID)
+           (java.time Instant ZoneId)
            (org.apache.arrow.flatbuf Message MessageHeader MetadataVersion
-                                    Schema RecordBatch Field Type Union UnionMode Endianness Int FixedSizeBinary)))
+                                    Schema RecordBatch Field Type Union UnionMode Endianness Int FixedSizeBinary Timestamp TimeUnit)))
 
 (def profile :xtdb-2.2.0-beta1/selected-sql-arrow-operations-v1)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
@@ -228,7 +229,8 @@
                    (and (= Type/Utf8 type) (= "xt/clj-keyword" name)) :keyword
                    (and (= Type/FixedSizeBinary type) (= "uuid" name)) :uuid
                    :else (require! false :unsupported-arrow-field)))
-               (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string} type))]
+               (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
+                     Type/Timestamp :timestamp} type))]
     (require! (contains? allowed kind) :unsupported-arrow-field)
     (if (#{:keyword :uuid} kind)
       (require! (and (= (str "?_" i) (.name f)) (not (.nullable f))
@@ -241,7 +243,22 @@
     (when (= :uuid kind)
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
         (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
+    (when (= :timestamp kind)
+      (let [^Timestamp t (.type f (Timestamp.))]
+        (require! (and t (= TimeUnit/MICROSECOND (.unit t)) (= "Z" (.timezone t)))
+                  :unsupported-arrow-timestamp-type)))
     kind))
+
+(def ^:private timestamp-min (Instant/parse "0001-01-01T00:00:00Z"))
+(def ^:private timestamp-end (Instant/parse "9999-01-01T00:00:00Z"))
+(def ^:private timestamp-zone (ZoneId/of "Z"))
+
+(defn- timestamp-value! [micros]
+  (let [instant (Instant/ofEpochSecond (Math/floorDiv (long micros) (long 1000000))
+                                       (* 1000 (Math/floorMod (long micros) (long 1000000))))]
+    (require! (and (not (.isBefore instant timestamp-min)) (.isBefore instant timestamp-end))
+              :unsupported-arrow-timestamp-range)
+    (.atZone instant timestamp-zone)))
 
 (defn- keyword-value! [s]
   ;; Match the selected reference transaction keyword domain. The retained
@@ -303,6 +320,10 @@
                                     (fn [row]
                                       (let [offset (* 16 row)]
                                         (UUID. (.getLong v offset) (.getLong v (+ offset 8)))))))
+                              :timestamp
+                              (do (require! (= (* 8 n) (.limit values))
+                                            :unsupported-arrow-timestamp-buffer-layout)
+                                  #(timestamp-value! (.getLong values (* 8 %))))
                               :integer
                               (do (require! (= (* 8 n) (.limit values))
                                             :unsupported-integer-buffer-layout)
@@ -443,3 +464,28 @@
    Other extensions, nullable columns and SQL semantics are excluded."
   [bytes]
   (expand-fixed-operations bytes uuid-base uuid-rows!))
+
+(def timestamp-profile :xtdb-2.2.0-beta1/selected-z-micros-scalar-arrow-operations-v1)
+(def ^:private timestamp-base (assoc base :profile timestamp-profile))
+
+(defn- timestamp-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp}))
+
+(defn decode-timestamp-arguments
+  "Decode selected nonnullable Z-zone epoch-microsecond timestamp columns
+   and earlier scalar values. Preserve the provider's ZonedDateTime value;
+   reject other timezone labels, units and out-of-domain instants."
+  [bytes]
+  (try
+    (assoc timestamp-base :status :decoded :rows (timestamp-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc timestamp-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc timestamp-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc timestamp-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-timestamp-operations
+  "Expand selected SQL groups with Z-zone timestamps and earlier scalars.
+   No SQL temporal semantics, coercion or general timezone support."
+  [bytes]
+  (expand-fixed-operations bytes timestamp-base timestamp-rows!))
