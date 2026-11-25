@@ -4836,3 +4836,24 @@ wrong table prefix, comments and wrong cardinality. The first fixture
 invocation had a missing delimiter, corrected before successful tests.
 Field-count and journal projection remain open. No certificate or CLM-R2
 premise retirement; other regression namespaces and formal gates not run.
+
+* v2723 — project retained document field-count assertions
+
+Recognize exact retained bound and literal LENGTH(NEST_ONE(SELECT *))
+field-count guards for selected quoted or Gesso-prefixed tables. Preserve
+canonical placeholder order and use the independent operation grammar
+for positive bounded counts and string identity. Combine with mapped
+scalar predicates under strict temporal replay; clocked replay unchanged.
+
+Focused JVM: 42 tests / 3772 assertions, zero failures or errors in two
+completed batches: replay input 11 / 856; temporal, provider and retained
+operation 31 / 2916. Persistent history using the actual Gesso field-count
+formatter matches exact projected operations, addition of a field causing
+an abort despite a matching scalar guard, missing document rejection,
+field removal and identity-only documents, and selected historical
+rectangles before and after reopening. Include literal quoted-table
+form; reject noncanonical parameters, partial projection, zero/excessive
+counts, wrong identity domain and comments. Only selected non-absent
+top-level fields are covered, not arbitrary null or nested equality.
+No production admission, certificate or CLM-R2 premise retirement.
+Other regression namespaces and independent formal gates not rerun.

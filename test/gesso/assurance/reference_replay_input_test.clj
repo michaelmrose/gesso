@@ -752,3 +752,67 @@
           (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
           (check! node expected)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest strict-retained-document-field-count-assertions
+  (let [root (Files/createTempDirectory "gesso-retained-field-count-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        table :gesso_refmapped
+        put (fn [doc] [:put-docs table (assoc doc :xt/id "a")])
+        fields (fn [n id] (tx/format-assertion (tx/assert-document-field-count table id n)))
+        guard (tx/format-assertion (tx/assert-document-decoded-current table "a" [[:value :claim/open]]))
+        quoted ["ASSERT 2 = (SELECT LENGTH(NEST_ONE (SELECT * FROM \"gesso_refmapped\" WHERE _id = ?)))" "a"]
+        txs [[(put {:value :claim/open}) guard (fields 2 "a")]
+             [(put {:value :claim/open :extra true}) guard (fields 2 "a")]
+             [guard quoted]
+             [(put {:value :claim/open :extra false}) guard (fields 3 "a")]
+             [(fields 1 "missing")]
+             [(put {}) (fields 1 "a")]
+             [(fields 2 "a")]]
+        check! (fn [node expected]
+                 (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
+                       prediction (temporal/replay (mapv #(dissoc % :tx-id) expected))
+                       report (reference/compare-local-processed-retained-replay-execution! node #{table})
+                       id (:tx-id (first expected))
+                       body (get (read-bytes node) id)
+                       arrow! arrow/decode-bounded-operations
+                       sql (-> body payload/decode-payload :message :tx-ops arrow! :operations peek)]
+                   (is (= :observed (:status sample)) (pr-str (dissoc sample :replay-inputs :payload-fingerprint)))
+                   (is (= expected (:replay-inputs sample)))
+                   (is (= :predicted (:status prediction)))
+                   (is (= [true false true true false true false] (mapv :committed? (:history prediction))))
+                   (is (= [2 0 0] (mapv :failed-assertion-index (filter #(not (:committed? %)) (:history prediction)))))
+                   (is (= :matched (:status report)) (pr-str report))
+                   (is (= 7 (:transaction-count report)))
+                   (is (= :none (:authority report)))
+                   (is (= :not-issued (:certificate report)))
+                   (is (= :unsupported (:status (coverage/observe-local-processed-retained-clocked-inputs! node))))
+                   (is (= :sql (:kind sql)))
+                   (is (= (subvec (fields 2 "a") 1) (:args sql)))
+                   (doseq [bad [{:query "ASSERT $2 = (SELECT LENGTH(NEST_ONE (SELECT * FROM gesso_refmapped WHERE _id = $1)))" :args [2 "a"]}
+                                {:query "ASSERT $1 = (SELECT LENGTH(NEST_ONE (SELECT * FROM gesso_refmapped WHERE _id = $1)))" :args [2 "a"]}
+                                {:query "ASSERT $1 = (SELECT LENGTH(NEST_ONE (SELECT * FROM gesso_refmapped WHERE _id = $02)))" :args [2 "a"]}
+                                {:query "ASSERT $1 = (SELECT LENGTH(NEST_ONE (SELECT value FROM gesso_refmapped WHERE _id = $2)))" :args [2 "a"]}
+                                {:query "ASSERT $1 = (SELECT LENGTH(NEST_ONE (SELECT * FROM gesso_refmapped WHERE _id = $2)))" :args [0 "a"]}
+                                {:query "ASSERT $1 = (SELECT LENGTH(NEST_ONE (SELECT * FROM gesso_refmapped WHERE _id = $2)))" :args [8193 "a"]}
+                                {:query "ASSERT $1 = (SELECT LENGTH(NEST_ONE (SELECT * FROM gesso_refmapped WHERE _id = $2)))" :args [2 1]}
+                                {:query "ASSERT 2 = (SELECT LENGTH(NEST_ONE (SELECT * FROM gesso_refmapped WHERE _id = $1))) -- comment" :args ["a"]}]]
+                     (with-redefs [arrow/decode-bounded-operations #(assoc-in (arrow! %) [:operations 2] (assoc bad :kind :sql))]
+                       (let [r (input/decode-replay-input id body)]
+                         (is (= :unsupported (:status r)) (pr-str bad))
+                         (is (not (contains? r :transaction))))))))]
+    (try
+      (let [expected (with-open [node (xtn/start-node config)]
+                       (let [database (db/primary-db node)
+                             expected (mapv (fn [i ops]
+                                              (let [time (.plusSeconds t i)
+                                                    id (:tx-id (xt/submit-tx node ops {:system-time time}))]
+                                                (.awaitTxBlocking database id (Duration/ofSeconds 15))
+                                                {:tx-id id :system-time time :ops ops})) (range) txs)]
+                         (.awaitSourceBlocking database (:tx-id (peek expected)) (Duration/ofSeconds 15))
+                         (check! node expected)
+                         expected))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
+          (check! node expected)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
