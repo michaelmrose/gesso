@@ -623,6 +623,27 @@
       {:authority :none :physical-correspondence :checked-historical-projection
        :abstract-relation :checked-supplied-witness})))
 
+(defn check-mapped-prestate!
+  "Compare the durable prestate witness with a supplied physical projection.
+   The caller must independently establish the preceding system-time basis
+   at the committing transaction's valid time. This is not an attestation
+   of the provider's transaction-internal read basis or input derivation."
+  [admission evidence document-rows journal-rows]
+  (let [{:keys [source description]} (registered-mapped! admission)
+        alternative (:alternative evidence)
+        mapping (get-in description [:operation-mappings alternative])
+        original (some (fn [{:keys [id construction]}]
+                         (when (= id alternative) construction))
+                       (get-in source [:inductive-source :catalog :operations]))]
+    (when-not (and original mapping (= 2 (:profile-version evidence))
+                   (identical? original-initial-projection projection/project-state!))
+      (reject! :invalid-historical-mapped-evidence [] {}))
+    (let [actual (original-initial-projection original (:target-map source)
+                                              document-rows journal-rows (:decode-outcome! source))]
+      (when-not (= (decode-valuation! (:prestate-witness evidence)) actual)
+        (reject! :mapped-prestate-mismatch [] {}))
+      {:authority :none :physical-correspondence :checked-supplied-prestate})))
+
 (defn check-mapped-poststate!
   "Compare the complete supplied projection with the admitted transition's
    expected poststate, using the selected original operation and decoder.

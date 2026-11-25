@@ -322,6 +322,34 @@
                  (sort tables))
      :journal (xtdb/q-from node ["SELECT * FROM gesso_commands"] opts)}))
 
+(defn- ledger-time [row]
+  (when (instance? ZonedDateTime (:system-time row))
+    (.toInstant ^ZonedDateTime (:system-time row))))
+
+(defn- check-preceding-mapped-state! [node admission evidence opts commit-time tx-id]
+  ;; The selected host submits default-time transactions. The two most recent
+  ;; ledger rows at the commit basis must identify a unique committed step
+  ;; and a strictly earlier predecessor (which may itself have aborted).
+  ;; Do not guess a time interval or require adjacent numeric transaction IDs.
+  (let [rows (xtdb/q-from node ["SELECT _id, committed, system_time FROM xt.txs ORDER BY _id DESC LIMIT 2"] opts)
+        [committed preceding] rows
+        preceding-time (ledger-time preceding)]
+    (when-not (and (vector? rows) (= 2 (count rows))
+                   (integer? (:xt/id committed)) (integer? (:xt/id preceding))
+                   (< (:xt/id preceding) (:xt/id committed))
+                   (or (nil? tx-id) (= tx-id (:xt/id committed)))
+                   (true? (:committed committed)) (boolean? (:committed preceding))
+                   (= commit-time (ledger-time committed))
+                   preceding-time (neg? (compare preceding-time commit-time)))
+      (reject! :ambiguous-mapped-prestate-ledger {}))
+    ;; Valid time must remain at the commit time, not the predecessor time.
+    (let [prior-opts (assoc opts :snapshot-token
+                            (basis/->time-basis-str {xtdb/default-database-name [preceding-time]}))
+          {:keys [docs journal]} (mapped-rows! node admission prior-opts)]
+      (inductive/check-mapped-prestate! admission evidence docs journal)
+      {:system-time preceding-time :tx-id (:xt/id preceding)
+       :physical-correspondence :checked-preceding-projection})))
+
 (defn- check-committed-poststate! [ctx {:keys [admission checked evidence]} receipt]
   (try
     (let [basis (xtdb/tx-result-basis (:tx-result receipt))
@@ -335,8 +363,11 @@
                                                 (:xt/id evidence)] opts))
         (reject! :mapped-transition-evidence-mismatch {}))
       (inductive/check-mapped-poststate! admission checked docs journal)
-      (assoc receipt :mapped-readback {:basis basis :authority :none
-                                       :physical-correspondence :checked-commit-basis-projection}))
+      (let [prestate (check-preceding-mapped-state! node admission evidence opts
+                                                     (xtdb/basis-system-time basis) (xtdb/basis-tx-id basis))]
+        (assoc receipt :mapped-readback {:basis basis :authority :none
+                                         :prestate prestate
+                                         :physical-correspondence :checked-commit-basis-projection})))
     (catch Exception cause
       (when (instance? InterruptedException cause)
         (.interrupt (Thread/currentThread)))
@@ -446,8 +477,11 @@
               {:keys [docs journal]} (mapped-rows! node admission opts)]
           (inductive/check-historical-mapped-poststate!
            admission record (dissoc evidence-row :xt/system-from) docs journal)
-          (assoc prior :mapped-readback {:system-time instant :authority :none
-                                          :physical-correspondence :checked-historical-projection}))
+          (let [prestate (check-preceding-mapped-state! node admission (dissoc evidence-row :xt/system-from)
+                                                         opts instant nil)]
+            (assoc prior :mapped-readback {:system-time instant :authority :none
+                                            :prestate prestate
+                                            :physical-correspondence :checked-historical-projection})))
         prior))))
 
 (defn- reconcile-selected! [ctx may-disclose? admission]

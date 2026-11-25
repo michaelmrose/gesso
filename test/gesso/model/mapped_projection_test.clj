@@ -469,8 +469,12 @@
             (is (= (live-xtdb/tx-result-basis (get-in result [:transaction :tx-result]))
                    (get-in result [:transaction :mapped-readback :basis])))
             (is (= 4 (:item-count (request-row))))
-            (is (= :checked-historical-projection
-                   (get-in (exec (call "valid")) [:mapped-readback :physical-correspondence])))
+            (is (= :checked-preceding-projection
+                   (get-in result [:transaction :mapped-readback :prestate :physical-correspondence])))
+            (let [replay (exec (call "valid"))]
+              (is (= :checked-historical-projection (get-in replay [:mapped-readback :physical-correspondence])))
+              (is (= (get-in result [:transaction :mapped-readback :prestate])
+                     (get-in replay [:mapped-readback :prestate]))))
             (is (= 4 (:item-count (request-row))))
             (xt/execute-tx node [[:put-docs :requests after]]))
           (is (= after (request-row)))
@@ -566,13 +570,23 @@
                                    [:put-docs :requests (assoc after :item-count 99)]])
               (xt/execute-tx node [[:put-docs :requests after]])
               (is (= :historical-mapped-poststate-mismatch (reason #(exec (call "corrupt")))))
+              ;; A valid poststate and internally valid saved transition are
+              ;; insufficient when the actual preceding state differs.
+              (xt/execute-tx node [[:delete-docs :gesso_commands "corrupt"]
+                                   [:delete-docs :assignments "a1"]
+                                   [:put-docs :requests (assoc before :item-count 99)]])
+              (xt/execute-tx node [[:put-docs :gesso_commands (record "precorrupt" "p1")]
+                                   [:put-docs :gesso_transition_evidence (assoc witness :xt/id "precorrupt")]
+                                   [:put-docs :requests after]
+                                   [:put-docs :assignments assignment]])
+              (is (= :mapped-prestate-mismatch (reason #(exec (call "precorrupt")))))
               (is (= prior-constructs @constructs))
               (is (= prior-claims (count @claimed))))
             ;; A lost execute receipt must use the same historical replay
             ;; gate in recovery, not an ordinary journal-only lookup.
             (xt/execute-tx node [[:put-docs :requests before]
                                  [:delete-docs :assignments "a1"]
-                                 [:delete-docs :gesso_commands "corrupt"]])
+                                 [:delete-docs :gesso_commands "precorrupt"]])
             (let [execute live-xtdb/execute-tx-from!
                   result (with-redefs [live-xtdb/execute-tx-from!
                                        (fn [ctx ops & [opts]]
