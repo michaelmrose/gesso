@@ -3452,3 +3452,29 @@ Selected empty and scalar-list profile v1. Recursive composites, nullable
 values, document puts and aggregate reference document budgets remain open.
 No production wiring, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2667 — decode selected bounded recursive Arrow lists
+
+Extend the selected empty/scalar-list profile with homogeneous nesting
+of List children, retaining scalar, scalar-union and empty terminal
+children. Qualify each nested node and buffer extent, enforce the
+existing 256-element limit at every list level and reject schemas
+exceeding eight list levels before recursively reading values. Preserve
+all earlier profile restrictions and positional operation spans.
+
+Focused JVM: 20 tests / 1201 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Actual retained
+nested integer vectors, nested vectors with heterogeneous scalar leaves,
+empty vectors and scalar columns match expected rows and provider
+observations before and after reopening. Mutate leaf values and both
+outer and inner offsets; test the eight-level boundary and reject nine
+levels, mixed scalar/list union legs and malformed framing. XTDB logged
+shutdown cancellation; the test process exited zero.
+
+Selected recursive-list profile v1 is diagnostic only. The reference
+transaction document domain currently admits recursive maps but only
+scalar vector elements; this decoder does not widen that domain.
+Recursive union legs, document maps and puts, nullable values and
+aggregate reference document budgets remain open. No production wiring,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates were not rerun.

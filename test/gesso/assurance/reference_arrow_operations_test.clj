@@ -934,3 +934,64 @@
           (.awaitSourceBlocking (db/primary-db node) (peek other-ids) (Duration/ofSeconds 10))
           (check-empty-list-retained! node id other-ids rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-recursive-list-retained! [node id depth-id too-deep-id mixed-id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-recursive-list-operations data)
+        expected (mapv #(hash-map :kind :sql :query "ASSERT ($1 IS NOT NULL AND ($2 = 0) AND $3 IS NOT NULL)" :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ offsets _ inner-offsets _ values] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/recursive-list-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-recursive-list-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-empty-list-operations data))))
+    (is (= (assoc-in rows [0 0 0 0] 99)
+           (:rows (arrow/decode-recursive-list-arguments (edit-long args values 99)))))
+    (doseq [[bad reason] [[(edit-int args offsets 1) :invalid-arrow-list-offsets]
+                          [(edit-int args inner-offsets 1) :invalid-arrow-list-offsets]
+                          [(edit-int args (+ inner-offsets 4) -1) :invalid-arrow-list-offsets]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-recursive-list-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (let [r (arrow/decode-recursive-list-operations (retained-operation-bytes node depth-id))]
+      (is (= :decoded (:status r)))
+      (is (= [{:kind :sql :query "ASSERT $1 IS NOT NULL" :args [(nth (iterate vector 1) 8)]}]
+             (:operations r) (:operations (provider/observe-source-message! node depth-id)))))
+    (doseq [[id reason] [[too-deep-id :arrow-list-depth-limit]
+                         [mixed-id :unsupported-arrow-list-union-leg]]]
+      (let [r (arrow/decode-recursive-list-operations (retained-operation-bytes node id))]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :operations)))))))
+
+(deftest selected-recursive-lists-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-recursive-list-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows [[[[1 2] [] [3]] 0 [[1 "x"] [true :open]]]
+              [[[4] [5 6]] 1 [[] [2 false]]]
+              [[] -1 []]]]
+    (is (= [[]] (:rows (arrow/decode-recursive-list-arguments nil))))
+    (try
+      (let [[id depth-id too-deep-id mixed-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! (mapv #(into ["ASSERT (? IS NOT NULL AND (? = 0) AND ? IS NOT NULL)"] %) rows))
+                    depth-id (submit! [["ASSERT ? IS NOT NULL" (nth (iterate vector 1) 8)]])
+                    too-deep-id (submit! [["ASSERT ? IS NOT NULL" (nth (iterate vector 1) 9)]])
+                    mixed-id (submit! [["ASSERT ? IS NOT NULL" [1 [2]]]])]
+                (check-recursive-list-retained! node id depth-id too-deep-id mixed-id rows)
+                [id depth-id too-deep-id mixed-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) mixed-id (Duration/ofSeconds 10))
+          (check-recursive-list-retained! node id depth-id too-deep-id mixed-id rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

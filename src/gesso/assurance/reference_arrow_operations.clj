@@ -238,7 +238,7 @@
       (require! (= n (count (distinct kinds))) :unsupported-arrow-list-union-leg)
       [:union kinds])))
 
-(defn- scalar-kind! [^Field f field-name allowed]
+(defn- scalar-kind-at! [^Field f field-name allowed depth]
   (let [type (.typeType f)
         extension? (pos? (.customMetadataLength f))
         kind (if extension?
@@ -279,7 +279,10 @@
     (cond
       (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind)
       (let [^Field child (.children f 0)]
+        (require! (< depth 8) :arrow-list-depth-limit)
         [:list (cond
+                 (and (contains? allowed :recursive-list) (= Type/List (.typeType child)))
+                 (scalar-kind-at! child "$data$" allowed (inc depth))
                  (and (= :empty-list kind) (= Type/Null (.typeType child)))
                  (do (field! child "$data$" Type/Null false 0) :empty-child)
                  (and (#{:union-list :temporal-union-list :empty-list} kind) (= Type/Union (.typeType child)))
@@ -299,6 +302,9 @@
                   :unsupported-arrow-timestamp-type)
         (if (= "UTC" zone) :timestamp-utc :timestamp))
       :else kind)))
+
+(defn- scalar-kind! [f field-name allowed]
+  (scalar-kind-at! f field-name allowed 0))
 
 (def ^:private timestamp-min (Instant/parse "0001-01-01T00:00:00Z"))
 (def ^:private timestamp-end (Instant/parse "9999-01-01T00:00:00Z"))
@@ -416,6 +422,7 @@
                 :arrow-list-element-limit)
       (let [read-child (cond empty? (fn [_] (require! false :unsupported-arrow-list-buffer-layout))
                              union? (union-reader! (second kind) batch (inc node-index) buffers (+ start 2) child-count)
+                             (list-kind? kind) (list-reader! (second kind) batch (inc node-index) buffers (+ start 2) child-count)
                              :else (scalar-reader! kind buffers (+ start 2) child-count))]
         (fn [row]
           (mapv read-child (range (nth xs row) (nth xs (inc row)))))))))
@@ -784,3 +791,28 @@
   "Expand selected SQL groups including all-empty and typed scalar vectors."
   [bytes]
   (expand-fixed-operations bytes empty-list-base empty-list-rows!))
+
+(def recursive-list-profile :xtdb-2.2.0-beta1/selected-recursive-list-arrow-operations-v1)
+(def ^:private recursive-list-base (assoc base :profile recursive-list-profile))
+
+(defn- recursive-list-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc :empty-list :recursive-list}))
+
+(defn decode-recursive-list-arguments
+  "Decode selected homogeneous nesting of vectors up to eight list levels,
+   with existing scalar, scalar-union or empty terminal children. This is
+   physical diagnostic decoding, not admission to the reference domain."
+  [bytes]
+  (try
+    (assoc recursive-list-base :status :decoded :rows (recursive-list-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc recursive-list-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc recursive-list-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc recursive-list-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-recursive-list-operations
+  "Expand selected SQL groups including bounded homogeneous nesting of lists.
+   No union leg containing a list or map, or reference document admission."
+  [bytes]
+  (expand-fixed-operations bytes recursive-list-base recursive-list-rows!))
