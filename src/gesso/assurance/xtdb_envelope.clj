@@ -7,7 +7,7 @@
             [gesso.assurance.subject :as subject]
             [gesso.assurance.xtdb-source-log :as source-log]
             [xtdb.api :as xt])
-  (:import (java.time Instant ZonedDateTime)
+  (:import (java.time Instant ZoneId ZonedDateTime)
            (java.util HexFormat)
            (xtdb.util Iid)))
 
@@ -17,7 +17,21 @@
 (defn- reject! [reason]
   (throw (ex-info "Unsupported expected envelope." {::unsupported true :reason reason})))
 
-(defn- expected-operations! [ops]
+(def temporal-profile :xtdb-2.2.0-beta1/restricted-temporal-envelope-v1)
+
+(defn- temporal-put-options! [opts]
+  (when-not (and (map? opts) (nil? (meta opts)) (contains? opts :into)
+                 (every? #{:into :valid-from :valid-to} (keys opts))
+                 (every? #(and (instance? Instant %) (zero? (mod (.getNano ^Instant %) 1000)))
+                         (vals (dissoc opts :into)))
+                 (or (not (and (contains? opts :valid-from) (contains? opts :valid-to)))
+                     (.isBefore ^Instant (:valid-from opts) ^Instant (:valid-to opts))))
+    (reject! :unsupported-temporal-put-options))
+  (reduce-kv (fn [bounds k v]
+               (assoc bounds (keyword "xt" (name k)) (.atZone ^Instant v (ZoneId/of "UTC"))))
+             {} (dissoc opts :into)))
+
+(defn- expected-operations* [ops temporal?]
   (when-not (and (vector? ops) (<= 1 (count ops) 16384))
     (reject! :unsupported-operation-sequence))
   (let [remaining (volatile! 262144)
@@ -58,7 +72,9 @@
                 (when-not (= @n (count args)) (reject! :unsupported-placeholder-shape))
                 {:kind :sql :query query :args (mapv #(value! % 0 false) args)}))
             (put! [op]
-              (let [table (second op)]
+              (let [opts (second op)
+                    bounds (if (and temporal? (map? opts)) (temporal-put-options! opts) {})
+                    table (if (and temporal? (map? opts)) (:into opts) opts)]
                 (when-not (and (simple-keyword? table)
                                (re-matches #"[a-z][a-z0-9_]*" (name table))
                                (< 2 (count op)))
@@ -68,7 +84,7 @@
                                    (when-not (and (map? doc) (contains? doc :xt/id)
                                                   (not-any? #(contains? doc %) [:xt/valid-from :xt/valid-to]))
                                      (reject! :unsupported-document-shape))
-                                   (value! doc 0 true)) (subvec op 2))]
+                                   (value! (merge doc bounds) 0 true)) (subvec op 2))]
                   {:kind :put-docs :table (keyword "public" (name table)) :documents docs
                    :iids (mapv #(.formatHex (HexFormat/of) (Iid/getAsIid (:xt/id %))) docs)
                    :bounds {}})))]
@@ -79,6 +95,8 @@
                 (string? (first op)) (sql! op)
                 (= :put-docs (first op)) (put! op)
                 :else (reject! :unsupported-operation))) ops))))
+
+(defn- expected-operations! [ops] (expected-operations* ops false))
 
 (def binding-profile :xtdb-2.2.0-beta1/expected-transition-envelope-v1)
 (def binding-keys [:envelope-profile :envelope-fingerprint])
@@ -187,6 +205,14 @@
    transaction metadata, caller bytes, writer identity or certification."
   [node tx-id ops committed?]
   (check-envelope* node tx-id ops committed? expected-operations! identity))
+
+(defn check-temporal-envelope!
+  "Compare selected uniform explicit put options as exact retained UTC
+   row fields. Do not normalize observed documents, IIDs or outer bounds.
+   The restricted production and worker envelope profiles are unchanged."
+  [node tx-id ops committed?]
+  (assoc (check-envelope* node tx-id ops committed? #(expected-operations* % true) identity)
+         :profile temporal-profile))
 
 (def ^:private worker-guard-arities
   {"ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)" 2

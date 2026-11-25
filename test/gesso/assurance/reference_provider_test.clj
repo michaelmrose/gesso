@@ -671,3 +671,77 @@
             (is (= :empty-retained-replay-history (:reason r)))
             (is (not (contains? r :outcome-correspondence))))))
       (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
+
+(defn- check-temporal-put-execution! [node bound]
+  (let [compare! reference/compare-local-processed-retained-replay-execution!
+        tables #{:providerprobe}
+        txs (mapv #(dissoc % :tx-id) bound)
+        prediction (temporal/replay txs)
+        ledger (#'reference/read-ledger! node)
+        envelopes (mapv (fn [tx row]
+                          (envelope/check-temporal-envelope! node (:tx-id row) (:ops tx) (:committed? row)))
+                        txs ledger)
+        observed {:ledger ledger :envelopes envelopes :rectangles (#'reference/read-rectangles! node tables)}
+        r (compare! node tables)
+        last-tx (peek bound)
+        check #(envelope/check-temporal-envelope! node (:tx-id last-tx) % false)
+        ops (:ops last-tx)]
+    (is (= [true true true false] (mapv :committed? (:history prediction)) (mapv :committed? ledger)))
+    (is (= [:matched :matched :matched :matched] (mapv :status envelopes)) (pr-str envelopes))
+    (is (every? #(= envelope/temporal-profile (:profile %)) envelopes))
+    (is (= :matched (:status (reference/compare-execution txs tables observed))))
+    (is (= :unsupported (:status (reference/compare-execution txs tables
+                                    (assoc-in observed [:envelopes 0 :profile] envelope/profile)))))
+    (is (= :matched (:status r)) (pr-str r))
+    (is (= :matched (:outcome-correspondence r) (:operation-correspondence r)))
+    (is (= {:ledger true :retained-envelopes true :selected-history true} (:checks r)))
+    (is (= 4 (:transaction-count r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :not-established (:provider-refinement r)))
+    (is (not-any? #(contains? r %) [:replay-inputs :payload-fingerprint :operations]))
+    (is (= :unsupported-put-shape (:reason (envelope/check-envelope! node (:tx-id last-tx) ops false))))
+    ;; Even a rolled-back write must match the exact retained temporal bounds.
+    (doseq [changed [(update-in ops [0 1 :valid-from] #(.plusSeconds % 1))
+                     (update-in ops [0 1] dissoc :valid-to)
+                     (assoc-in ops [0 2 :value] 99)]]
+      (is (= :operation-sequence-mismatch (:reason (check changed)))))
+    (doseq [opts [(assoc (get-in ops [0 1]) :valid-from nil)
+                  (assoc (get-in ops [0 1]) :unknown true)
+                  (assoc (get-in ops [0 1]) :valid-to (get-in ops [0 1 :valid-from]))
+                  (update (get-in ops [0 1]) :valid-from #(.plusNanos % 1))]]
+      (is (= :unsupported-temporal-put-options (:reason (check (assoc-in ops [0 1] opts))))))
+    (is (= :unsupported-document-shape (:reason (check (assoc-in ops [0 2 :xt/valid-from] (time-at 0))))))
+    (is (= :transaction-outcome-mismatch (:reason (envelope/check-temporal-envelope! node (:tx-id last-tx) ops true))))
+    (is (= :mismatch (:status (reference/compare-source-bound-execution! node
+                                (update-in bound [3 :ops 0 1 :valid-to] #(.plusSeconds % 1)) tables))))
+    (is (= r (compare! node tables)))))
+
+(deftest direct-retained-execution-with-uniform-valid-time-bounds
+  (let [root (Files/createTempDirectory "gesso-temporal-envelope-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        from (java.time.Instant/parse "1969-12-31T23:59:59.999999Z")
+        to (time-at 100)
+        txs [[[:put-docs {:into :providerprobe :valid-from from :valid-to to}
+               {:xt/id "a" :value 1} {:xt/id "b" :value 1}]]
+             [[:put-docs {:into :providerprobe :valid-from (time-at 1)} {:xt/id "a" :value 2}]]
+             [[:put-docs {:into :providerprobe :valid-to to} {:xt/id "b" :value 3}]]
+             [[:put-docs {:into :providerprobe :valid-from from :valid-to to} {:xt/id "a" :value 4}]
+              ["ASSERT FALSE"]]]]
+    (try
+      (let [bound (with-open [node (xtn/start-node config)]
+                    (let [database (db/primary-db node)
+                          bound (mapv (fn [i ops]
+                                        (let [time (time-at i)
+                                              id (:tx-id (xt/submit-tx node ops {:system-time time}))]
+                                          (.awaitTxBlocking database id (Duration/ofSeconds 15))
+                                          {:tx-id id :system-time time :ops ops}))
+                                      (range) txs)]
+                      (.awaitSourceBlocking database (:tx-id (peek bound)) (Duration/ofSeconds 15))
+                      (check-temporal-put-execution! node bound)
+                      bound))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek bound)) (Duration/ofSeconds 15))
+          (check-temporal-put-execution! node bound)))
+      (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))

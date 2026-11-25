@@ -4411,3 +4411,27 @@ envelope comparison still rejects temporal put options; full direct
 execution correspondence for these operations remains open. No production
 admission, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2706 — compare execution of retained uniform valid-time puts
+
+Introduce a distinct diagnostic temporal envelope profile encoding
+explicit Instant valid-time options as the pinned writer's exact UTC
+row fields. Preserve document contents, order, IIDs and outer bounds;
+reject invalid options, non-microsecond precision and conflicting row
+fields. Select the expected envelope profile per transaction, not from
+the supplied report. Version the expanded provider execution and retained
+execution profiles. Existing production, transition-binding and worker
+envelope profiles remain unchanged.
+
+Focused JVM: 81 tests / 5034 assertions, zero failures or errors across
+the nine prior namespaces plus the restricted source-log pilot; provider
+suite 13 tests / 671 assertions. Persistent multi-document finite,
+from-only, to-only and aborted bounded puts match independent ledger
+predictions and all-time selected rectangles before and after reopening.
+Reject wrong envelope profile, changed attempted bounds or document,
+missing bound, invalid options, null, sub-microsecond precision, conflicting
+row fields and wrong outcome. The old envelope checker still rejects
+option maps. Heterogeneous row bounds, implicit system times and broader
+assertions remain outside the selected direct replay domain. No production
+admission, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.
