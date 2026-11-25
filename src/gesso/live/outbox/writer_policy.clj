@@ -26,14 +26,15 @@
        (every? map? (subvec op 2))))
 
 (defn- initializer? [ops]
-  (and (vector? ops) (seq ops)
+  (and (vector? ops)
        (every? #(and (put-op? %)
                      (not (contains? reserved-tables (second %)))) ops)))
 
 (defn validate-config!
   "Validate the exact selected policy inputs before acquiring a node.
-   The optional initializer is an exact trusted vector, not a general
-   writer grant. The framework adds the durable marker and guards.
+   The initializer is an explicit vector (possibly empty), not a general
+   writer grant. The framework checks Init and adds the durable marker
+   and guards. An omitted initializer is not an enrollment mechanism.
    The observer is trusted."
   [{:keys [admission initializer observe!] :as config}]
   (when-not (and (map? config)
@@ -51,7 +52,8 @@
       (reject! :reserved-mapped-document-table))
     (when-not (every? #{:gesso_live_outbox} auxiliary-tables)
       (reject! :unsupported-mapped-auxiliary-table)))
-  (when initializer (inductive/check-mapped-initialization! admission initializer))
+  (when (nil? initializer) (reject! :missing-mapped-initializer))
+  (inductive/check-mapped-initialization! admission initializer)
   config)
 
 (defn- mapped-tables [admission]
@@ -64,9 +66,10 @@
    readback. Repeat that check at the marker's historical time on restart;
    a compatible marker alone cannot bypass a failed readback."
   [node source-id {:keys [admission initializer]}]
-  (when-let [readback (initialization/initialize-and-readback!
-                       node source-id initializer (mapped-tables admission)
-                       (when initializer (inductive/check-mapped-initialization! admission initializer)))]
+  (when (nil? initializer) (reject! :missing-mapped-initializer))
+  (let [readback (initialization/initialize-and-readback!
+                  node source-id initializer (mapped-tables admission)
+                  (inductive/check-mapped-initialization! admission initializer))]
     (inductive/check-mapped-initialization-readback!
      admission initializer (:document-rows readback) (:journal-rows readback)))
   nil)
@@ -91,7 +94,7 @@
   (let [{:keys [admission initializer observe!]} (validate-config! config)
         initialized? (atom false)
         source-id (:source-id infrastructure)
-        checked-init (when initializer (inductive/check-mapped-initialization! admission initializer))
+        checked-init (inductive/check-mapped-initialization! admission initializer)
         seed-ops (initialization/transaction source-id initializer (mapped-tables admission) checked-init)]
     (when-not connectable (reject! :missing-mapped-writer-connectable))
     (fn [{:keys [api tx-ops tx-options] :as envelope}]

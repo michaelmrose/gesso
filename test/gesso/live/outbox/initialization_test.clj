@@ -86,7 +86,7 @@
             (is (true? (init/initialized? node source checked)))
             (is (= :initialization-evidence-mismatch
                    (reason #(policy/initialize! node source {:admission admission :initializer changed}))))
-            (is (= :initialization-evidence-mismatch
+            (is (= :missing-mapped-initializer
                    (reason #(policy/initialize! node source {:admission admission :initializer nil}))))
             (is (nil? (policy/initialize! node source {:admission (admission!) :initializer seed})))
             (is (= :initialization-evidence-mismatch
@@ -117,7 +117,7 @@
                                                 :observe! identity})))))))
 
 (deftest selected-writer-policy-reserves-infrastructure-tables
-  (let [config #(hash-map :admission % :initializer nil :observe! identity)
+  (let [config #(hash-map :admission % :initializer [[:put-docs :requests {:xt/id "r1" :item-count 0}]] :observe! identity)
         check #(reason (fn [] (policy/validate-config! (config %))))
         canonical? (deref (ns-resolve 'gesso.live.outbox.writer-policy 'mapped-operations?))]
     (doseq [table [:gesso_initializations :gesso_publication_manifests :gesso_live_outbox]]
@@ -228,4 +228,57 @@
           (is (= :initialization-readback-state-mismatch
                  (reason #(policy/initialize! node "s" config))))
           (is (= [{:xt/id "r1" :item-count 0}] (xt/q node ["SELECT * FROM requests"])))
+          (finally (release)))))))
+
+(defn- empty-admission! []
+  (let [id :example/empty-init
+        source {:subject {:kind :operation :id id :interface {:operation id}}
+                :state-types {:example/status {:type :keyword :nullable? true}}
+                :input-types {} :guard {:readers #{} :expression [:literal true]}
+                :reads #{} :writes #{:example/status}
+                :replacements {:example/status [:literal :claimed]} :frame #{}}
+        invariant {:readers #{} :expression [:literal true]}
+        catalog {:id :example/empty-initialization
+                 :initial-condition {:readers #{:example/status}
+                                     :expression [:= [:read :example/status] [:literal nil]]}
+                 :invariants {:example/valid invariant}
+                 :declared-operation-ids #{id} :operations [{:id id :construction source}]}]
+    (inductive/build-inductive-mapped-admission!
+     {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
+      :target-map {:example/status [:nullable-document :requests "r1" :status]}
+      :decode-outcome! identity
+      :transaction-footprint! (fn [_] (throw (ex-info "Unexpected mapped operation" {})))
+      :auxiliary-tables #{} :document-effects {id {[:document :requests "r1"] {}}}})))
+
+(deftest mapped-initialization-requires-an-explicit-checked-seed
+  (let [admission (empty-admission!)
+        config {:admission admission :initializer [] :observe! identity}
+        omitted (assoc config :initializer nil)
+        scope {:source-id "s"}
+        checked (inductive/check-mapped-initialization! admission [])]
+    (is (= {:example/status nil} (:state checked)))
+    (is (= :missing-mapped-initializer (reason #(policy/validate-config! omitted))))
+    (is (= :missing-required-document
+           (reason #(policy/validate-config! (assoc config :admission (admission!))))))
+    (is (= :constructor-outside-initial-condition
+           (reason #(policy/validate-config!
+                     (assoc config :initializer [[:put-docs :requests {:xt/id "r1" :status :claimed}]])))))
+    (with-open [node (xtn/start-node {})]
+      (is (= :missing-mapped-initializer (reason #(policy/build-policy! node omitted scope))))
+      (is (= :missing-mapped-initializer (reason #(policy/initialize! node "s" omitted))))
+      (is (empty? (xt/q node ["SELECT * FROM gesso_initializations"])))
+      (let [release (xtdb/register-submission-policy! node (policy/build-policy! node config scope))]
+        (try
+          (is (nil? (policy/initialize! node "s" config)))
+          (is (= [(init/marker "s" checked)] (xt/q node ["SELECT * FROM gesso_initializations"])))
+          (is (empty? (xt/q node ["SELECT * FROM requests"])))
+          (is (nil? (policy/initialize! node "s" config)))
+          (finally (release)))))
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :status :claimed}]])
+      (let [release (xtdb/register-submission-policy! node (policy/build-policy! node config scope))]
+        (try
+          (is (= :assert-failed (assert-result #(policy/initialize! node "s" config))))
+          (is (empty? (xt/q node ["SELECT * FROM gesso_initializations"])))
+          (is (= [{:xt/id "r1" :status :claimed}] (xt/q node ["SELECT * FROM requests"])))
           (finally (release)))))))

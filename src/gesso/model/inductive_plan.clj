@@ -444,7 +444,7 @@
                    (identical? original-initial-projection projection/project-state!)
                    (identical? original-initial-identity subject/describe-subject))
       (reject! :substituted-initialization-checker [] {}))
-    (when-not (and (vector? seed) (seq seed)
+    (when-not (and (vector? seed)
                    (every? (fn [[op table & rows :as entry]]
                              (and (vector? entry) (= :put-docs op)
                                   (simple-keyword? table)
