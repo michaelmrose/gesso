@@ -1891,3 +1891,26 @@ This is finite empirical correspondence, not a universal SQL refinement
 or full mapped value language theorem. No production assurance status
 changes or CLM-R2 premise is retired. Full project, physical Claim,
 Chromium and separate proof gates were not rerun.
+
+* v2610 — model bounded nested document replacement
+
+Extend independent current-state storage to non-null recursive maps,
+scalar vectors and UUID leaves, including empty maps and vectors and
+restricted dotted qualified keys used by journal bindings. Bound depth,
+collection size and total visited values per document. Retain whole-row
+replacement and atomic rollback; do not extend SQL predicates to nested
+value comparison in this revision. Reference profile v6; history v19.
+
+Final reference JVM namespace: 8 tests / 1061 assertions, zero failures
+or errors. Eight additional differential transactions compare complete
+selected visible maps, outcomes and retained envelopes against embedded
+XTDB, including nested writes, repeated replacement, removed fields,
+UUIDs, empty collections and rollback. Pure tests reject unsupported
+nested shapes, nulls, metadata, noncanonical keys and excessive depth
+or vector size. No provider observation feeds the reference state.
+
+This is finite empirical nested storage correspondence, not recursive
+journal guard semantics, arbitrary decoded key coverage or a universal
+provider refinement theorem. No production assurance status changes
+and no CLM-R2 premise is retired. Full project, physical Claim, Chromium
+and separate proof gates were not rerun.

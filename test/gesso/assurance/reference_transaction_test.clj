@@ -212,6 +212,50 @@
         (is (not (contains? r :state)))
         (is (not (contains? r :committed?)))))))
 
+(def ^:private nested-table :gesso_refnested)
+(def ^:private nested-doc
+  {:xt/id "a"
+   :gesso.command/binding {:principal {:gesso.choreo.identity/value uuid-a}
+                           :operation :claim/request
+                           :arguments {:nested {:value "original"}
+                                       :items [1 :open "open" false uuid-b]}}
+   :empty {} :items []})
+(def ^:private nested-replacement
+  {:xt/id "a" :gesso.command/binding {:operation :claim/request
+                                      :arguments {:items [uuid-a]}}})
+(def ^:private nested-cases
+  [[true [[:put-docs nested-table nested-doc]]]
+   [true [(tx/format-assertion (tx/assert-document-field-count nested-table "a" 4))]]
+   [false [[:put-docs nested-table nested-replacement] ["ASSERT FALSE"]]]
+   [true [[:put-docs nested-table nested-replacement]]]
+   [false [[:put-docs nested-table nested-doc]
+           (tx/format-assertion (tx/assert-document-field-count nested-table "a" 2))]]
+   [true [[:put-docs nested-table nested-doc] [:put-docs nested-table nested-replacement]]]
+   [true [[:put-docs nested-table {:xt/id "b" :value uuid-b}]]]
+   [true [[:put-docs nested-table nested-doc]]]])
+
+(deftest independent-nested-document-replacement
+  (let [final (reduce (fn [state [expected ops]]
+                        (let [r (reference/execute state ops)]
+                          (is (= :predicted (:status r)) (pr-str ops))
+                          (is (= expected (:committed? r)) (pr-str ops))
+                          (when-not expected (is (= state (:state r))))
+                          (:state r))) initial nested-cases)]
+    (is (= {"a" nested-doc "b" {:xt/id "b" :value uuid-b}}
+           (get final nested-table))))
+  (let [r (reference/execute {nested-table {"a" nested-doc}}
+                             [[:put-docs nested-table nested-replacement]])]
+    (is (= nested-replacement (get-in (:state r) [nested-table "a"]))))
+  (doseq [v [{:nested nil} {:nested [1 nil]} {:nested [[:open]]}
+             {:nested #{:open}} {:xt/id "nested"} {:bad_key 1}
+             {:nested (with-meta {:value 1} {:tag true})}
+             (nth (iterate #(hash-map :nested %) 10) 10)
+             (vec (repeat 257 1))]]
+    (let [r (reference/execute initial [[:put-docs nested-table {:xt/id "a" :value v}]])]
+      (is (= :unsupported (:status r)) (pr-str v))
+      (is (not (contains? r :state)))
+      (is (not (contains? r :committed?))))))
+
 (deftest unsupported-reference-input-does-not-predict
   (doseq [ops [[] [(table-count -1)] [(table-count 16385)]
                [["ASSERT ? = (SELECT COUNT(*) FROM gesso_refcard)" nil]]
@@ -250,7 +294,7 @@
                [[:put-docs :refprobe (assoc a :value 1N)]]
                [[:put-docs :refprobe (assoc a :value (str (char 0xd800)))]]
                [[:put-docs :refprobe (assoc a :value (keyword "bad space"))]]
-               [[:put-docs :refprobe (assoc a :value {:nested 1})]]
+               [[:put-docs :refprobe (assoc a :value {:nested nil})]]
                [[:put-docs :refprobe (assoc a :xt/id 1)]]
                [[:put-docs :refprobe a replacement]]
                [[:put-docs :refprobe]] [[:put-docs :xt_txs a]]
@@ -270,7 +314,7 @@
                        (let [indexed (into {} (map (juxt :xt/id identity)) rows)]
                          (is (= (count rows) (count indexed)) "No duplicate visible document IDs")
                          [table indexed])))))
-        [:refprobe :refother card-table mapped-table]))
+        [:refprobe :refother card-table mapped-table nested-table]))
 
 (deftest reference-predictions-match-selected-real-xtdb-executions
   (with-open [node (xtn/start-node {})]
@@ -300,7 +344,8 @@
                            equality-cases)
                           (map second read-cases)
                           (map second cardinality-cases)
-                          (map second mapped-cases)))]
+                          (map second mapped-cases)
+                          (map second nested-cases)))]
         (when-let [ops (first cases)]
           (let [predicted (reference/execute state ops)
                 id (:tx-id (xt/submit-tx node ops))

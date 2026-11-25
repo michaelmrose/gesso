@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v5)
+(def profile :selected-current-state-transaction-v6)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -40,14 +40,38 @@
 (defn- scalar? [x]
   (#{:i64 :boolean :string :keyword} (equality-domain x)))
 
+(defn- value-key? [k]
+  ;; Conservative canonical keys, including dotted journal namespaces.
+  (and (keyword? k) (re-matches #"[a-z][a-z0-9]*" (name k))
+       (or (nil? (namespace k))
+           (and (not= "xt" (namespace k))
+                (re-matches #"[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*" (namespace k))))))
+
+(defn- leaf? [v]
+  (or (scalar? v) (uuid? v)))
+
+(defn- document-value? [v depth budget]
+  ;; Bound recursive validation; accept maps and scalar vectors only.
+  (and (<= depth 8) (not (neg? (vswap! budget dec)))
+       (cond
+         (leaf? v) true
+         (map? v) (and (nil? (meta v)) (<= (count v) 256)
+                       (every? (fn [[k child]]
+                                 (and (value-key? k)
+                                      (document-value? child (inc depth) budget))) v))
+         (vector? v) (and (nil? (meta v)) (<= (count v) 256)
+                          (every? #(and (leaf? %)
+                                        (document-value? % (inc depth) budget)) v))
+         :else false)))
+
 (defn- document? [doc]
   (and (map? doc) (nil? (meta doc)) (id? (:xt/id doc))
        (= :string (equality-domain (:xt/id doc)))
        (<= (count doc) 256)
-       (every? (fn [[k v]]
-                 (or (= :xt/id k)
-                     (and (simple-keyword? k) (re-matches #"[a-z][a-z0-9]*" (name k))
-                          (scalar? v)))) doc)))
+       (let [budget (volatile! 8192)]
+         (every? (fn [[k v]]
+                   (or (= :xt/id k)
+                       (and (value-key? k) (document-value? v 0 budget)))) doc))))
 
 (defn- check-state! [state]
   (when-not (and (map? state) (nil? (meta state)) (<= (count state) 256)
