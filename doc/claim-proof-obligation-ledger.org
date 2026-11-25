@@ -1245,3 +1245,36 @@ declared report distinction, and the authenticated v10 checkpoint refusal
 is covered by the selected checkpoint test. Full Claim, Chromium, separate
 proof and full project regression gates were not rerun. No CLM-R2 premise
 is retired.
+
+* v2588 — check installed mapped publication wiring in physical Claim
+
+Keep the exact mapped admission in the existing weak executor registration.
+For a registered executor with a declared publication catalog, host wiring
+must select the identical admission in its mapped writer policy and use
+strict derived-model publication with a closed operation entity inventory.
+Select alternatives by the mapped journal slot's operation. Check the union
+of admitted contribution entities and topics against the installed inventory
+and registered operation topics. Check each declared target's complete topic
+set and normalized subject selector against the installed model mappings.
+Leave undeclared legacy executors on their existing admission path.
+
+Enable explicit declarations in the installed physical Claim fixture, using
+request then assignment contributions, with location-id subjects and refresh
+purpose for acceptance and nil for refusal/replay. Check that whole-history,
+chunked host history and the combined assurance report recognize declared
+expectation correspondence for the actual publication path. Negative wiring
+controls reject a missing writer admission, incomplete entity inventory,
+wrong subject selector and different per-entity topic set before startup.
+
+JVM validation: all three namespaces (physical Claim with source-log observer
+selected, Claim semantic fixture, and command race), 25 tests / 1587
+assertions, zero failures or errors. Full project, Chromium and separate
+proof gates were not rerun. No history profile bump: the v11 expectation
+check and checkpoint scope already bind the declaration.
+
+Static wiring checks the selected configuration, not arbitrary constructor
+callback purpose or command ordering. Those are checked for committed
+fixture transitions by history, not yet enforced against the compiled
+candidate before submission. This is not general installed-executor or
+writer authority refinement; the corresponding open obligation remains.
+No CLM-R2 premise is retired.

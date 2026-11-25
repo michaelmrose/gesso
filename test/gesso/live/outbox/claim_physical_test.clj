@@ -310,6 +310,18 @@
                                                  fixture/rendered-basis "fixture-csrf")]}}
      (fn [{:keys [assembly report]}]
        (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
+       (let [reason (fn [candidate]
+                      (try (publication/require-host-wiring! assembly candidate) nil
+                           (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+         (is (nil? (reason config)))
+         (is (= :mapped-publication-wiring-mismatch
+                (reason (update config :mapped-writer-policy dissoc :admission))))
+         (is (= :mapped-publication-wiring-mismatch
+                (reason (assoc-in config [:assembled-publication :operation-model-entities :request/claim] #{:requests}))))
+         (is (= :mapped-publication-selector-mismatch
+                (reason (assoc-in config [:assembled-publication :subject-keys :request] :xt/id))))
+         (is (= :mapped-publication-selector-mismatch
+                (reason (assoc-in config [:assembled-publication :model-entity-topics :requests] #{:request :request-assignment})))))
        (with-open [client (HttpClient/newHttpClient)]
         (let [delegate (if (= :valid recovery-mode)
                          (browser/shell-handler
@@ -655,6 +667,8 @@
                        groups (group-by :classification steps)]
                    (is (= :observed-interval-checked (:status audit)))
                    (is (= :none (:authority audit)))
+                   (is (= :declared (:publication-expectation-profile audit)))
+                   (is (every? #(= :matched (:publication-expectation %)) (:verified-mapped-transition groups)))
                    (is (= (cond-> #{id} valid? (conj loser-id))
                           (set (map :command-id (:verified-mapped-transition groups)))))
                    (is (= (set (map (fn [{:keys [identity commit-basis]}]
@@ -701,6 +715,10 @@
                      (is (= (:through-basis audit) (:through-basis report)))
                      (is (= (frequencies (map :classification steps)) (:counts report)))
                      (is (= report (:report (host/history-status started))))
+                     (is (= :declared (:publication-expectation-profile report)))
+                     (is (= :v11-declared-expectations-checked
+                            (get-in (host/combined-assurance-status started)
+                                    [:physical-induction :premises :publication-expectation-correspondence])))
                      (let [operational (host/assurance-status started)]
                        (is (= :observed-interval-checked (:status operational)))
                        (is (= (:counts report) (get-in operational [:coverage :classification-counts])))
@@ -805,7 +823,7 @@
                      (is (= before (semantics/snapshot-at-frontier! node)))))
                  (when valid?
                    (let [issued (inductive-plan/require-current-mapped-admission!
-                                 (:issued preparations) (semantics/mapped-admission-source bound))
+                                 (:issued preparations) (semantics/publication-mapped-admission-source bound))
                          correlated (semantics/correlate-history! @comparisons @submissions)
                          report (correspondence/check-bound-declared-observations!
                                  {:inductive-source bound

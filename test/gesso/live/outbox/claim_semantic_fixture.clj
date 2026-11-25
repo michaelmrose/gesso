@@ -341,8 +341,19 @@
    :transaction-footprint! submitted-alternative! :auxiliary-tables #{:gesso_live_outbox}
    :document-effects document-effects})
 
+(defn publication-mapped-admission-source [bound]
+  (assoc (mapped-admission-source bound) :publication-derivations
+         (into {} (for [helper (keys helpers) alternative alternatives]
+                    [(alternative-id helper alternative)
+                     (when (= :accept alternative)
+                       {:purpose :gesso.live/refresh
+                        :contributions [{:target [:document :requests "r1"]
+                                         :topic :request :field :request/location-id}
+                                        {:target [:document :request_assignments "primary-r1"]
+                                         :topic :request-assignment :field :request/location-id}]})]))))
+
 (defn build-prepared-admission! [bound]
-  (let [source (mapped-admission-source bound)
+  (let [source (publication-mapped-admission-source bound)
         issued (inductive-plan/build-inductive-mapped-admission! source)]
     {:issued issued
      :prepare! (partial issued :prepare!) :admit! (partial issued :admit!)

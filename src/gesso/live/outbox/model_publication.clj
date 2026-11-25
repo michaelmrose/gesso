@@ -748,11 +748,11 @@
 
 (def ^:private ^WeakHashMap registered-executors (WeakHashMap.))
 
-(defn- executor-operation [executor]
+(defn- executor-registration [executor]
   (locking registered-executors
-    (let [{:keys [reference operation]} (.get registered-executors executor)]
+    (let [{:keys [reference] :as registration} (.get registered-executors executor)]
       (when (and reference (identical? executor (.get ^WeakReference reference)))
-        operation))))
+        registration))))
 
 (defn build-executor
   "Construct the ordinary optimistic operation :execute! callback for the
@@ -805,8 +805,35 @@
                                  (assoc :mapped-admission mapped-admission))))]
     (locking registered-executors
       (.put registered-executors executor
-            {:reference (WeakReference. executor) :operation operation}))
+            {:reference (WeakReference. executor) :operation operation
+             :mapped-admission mapped-admission}))
     executor))
+
+(defn- require-declared-publication-wiring! [admission operation topics config]
+  (when admission
+    (let [{:keys [operation-mappings publication-derivations] :as description}
+          (inductive/describe-mapped-admission admission)]
+      (when (contains? description :publication-derivations)
+        (let [{:keys [subject-keys model-entity-topics require-derived-model? operation-model-entities]}
+              (:assembled-publication config)
+              alternatives (filter (fn [[_ mapping]]
+                                     (some (fn [[kind _ op]] (and (= :journal-slot kind) (= operation op)))
+                                           (:write-targets mapping))) operation-mappings)
+              contributions (mapcat (fn [[id _]] (:contributions (get publication-derivations id))) alternatives)
+              entities (set (map (comp second :target) contributions))]
+          (when-not (and (identical? admission (get-in config [:mapped-writer-policy :admission]))
+                         (true? require-derived-model?) (seq alternatives)
+                         (= entities (get operation-model-entities operation))
+                         (= topics (set (map :topic contributions))))
+            (reject! :mapped-publication-wiring-mismatch {:operation operation}))
+          (doseq [[id _] alternatives
+                  :let [entries (:contributions (get publication-derivations id))]
+                  [target grouped] (group-by :target entries)]
+            (when-not (and (= (get model-entity-topics (second target)) (set (map :topic grouped)))
+                           (every? (fn [{:keys [topic field]}]
+                                     (let [installed (get subject-keys topic)]
+                                       (= field (if (= :id installed) :xt/id installed)))) grouped))
+              (reject! :mapped-publication-selector-mismatch {:operation operation}))))))))
 
 (defn require-host-wiring!
   "Check the exact selected executor objects against their registered
@@ -824,7 +851,8 @@
         derived-topics (when (and (map? entity-topics) (every? set? (vals entity-topics)))
                          (into #{} cat (vals entity-topics)))]
     (doseq [[operation entry] (sort-by key operations)
-            :let [built-for (executor-operation (:execute! entry))]]
+            :let [registration (executor-registration (:execute! entry))
+                  built-for (:operation registration)]]
       (when (and strict? (nil? built-for))
         (reject! :unrecognized-strict-publication-executor {:operation operation}))
       (when built-for
@@ -839,7 +867,8 @@
             (reject! :unsupported-publication-executor-topics {:operation operation :topics topics}))
           (when (and strict? derived-topics (not (every? derived-topics topics)))
             (reject! :unmapped-publication-executor-topics
-                     {:operation operation :topics (into #{} (remove derived-topics) topics)})))))))
+                     {:operation operation :topics (into #{} (remove derived-topics) topics)}))
+          (require-declared-publication-wiring! (:mapped-admission registration) operation topics config))))))
 
 (defn- physical-entity-name! [entity]
   ;; Restrict the selected profile to simple lowercase SQL identifiers.
