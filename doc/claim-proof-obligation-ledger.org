@@ -1750,3 +1750,33 @@ or errors. The installed host report exercises the observed mapped and
 worker cases, the aborted case and the unobserved committed-stutter case.
 Full project, mapped-projection, Chromium and independent proof gates
 were not rerun. No CLM-R2 premise is retired.
+
+* v2605 — introduce independent reference transaction execution
+
+Add a pure selected current-state transaction interpreter independent of
+XTDB, its decoder, production constructors and observed transaction outcomes.
+Model a canonical table/string-id/document map, ordered whole-document
+replacement and literal ASSERT TRUE/FALSE. On false, return the original
+state with the failed assertion index. Validate the entire vector before
+execution, including the suffix after a false assertion. Unsupported input
+has no predicted state or outcome. The first profile intentionally excludes
+nested or nullable values, non-string ids, same-batch repeated ids, temporal
+options, SQL predicates and all other operations. It is not a temporal or
+provider execution model for the full mapped envelope.
+
+Final JVM reference transaction namespace: 3 tests / 107 assertions,
+zero failures or errors. A pure unit test and unsupported-input regressions
+check the model. An embedded XTDB differential regression starts from a
+seed and executes eight successive transactions, carrying forward the
+reference's own predictions. Compare complete selected visible row maps
+(with duplicate-id checks), independently queried ledger outcomes and
+retained envelopes. Exercise whole-document replacement, cross-table
+identity, multiple puts, assertion-only commit and rollback after writes.
+The initial run passed 89 assertions; an intermediate test-only delimiter
+error while adding duplicate-id checks was corrected before the final run.
+
+This is finite empirical evidence for a narrow independent reference
+semantics, not a theorem of provider refinement or full mapped transaction
+coverage. No production assurance status changes; history remains v19.
+Full physical Claim, project, Chromium and separate proof gates not rerun.
+No CLM-R2 premise is retired.
