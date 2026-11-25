@@ -125,7 +125,12 @@
                                                      (= Type/Null (.typeType child)))
                                      child-kind (cond
                                                   valid-time?
-                                                  (let [k (scalar-kind-at! child name #{:timestamp :timestamp-utc} (inc depth))]
+                                                  (let [k (scalar-kind-at! child name
+                                                                           (cond-> #{:timestamp :timestamp-utc}
+                                                                             (and nullable-field?
+                                                                                  (contains? allowed :nullable-document-valid-time))
+                                                                             (conj :nullable-field))
+                                                                           (inc depth))]
                                                     (require! (= :timestamp-utc k) :unsupported-arrow-put-bound-type)
                                                     k)
                                                   (and (= "xt/id" key)

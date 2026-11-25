@@ -644,3 +644,69 @@
           (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 10))
           (check-temporal-documents! node ids expected)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-nullable-temporal-documents! [node id plain-id group]
+  (let [decode arrow/decode-nullable-temporal-document-put
+        data (#'fixture/retained-operation-bytes node id)
+        r (decode data)
+        [_ _ _ _ _ _ iids _ _ _ _ _ _ _ from-valid from to-valid to outer-valid]
+        (#'fixture/buffer-starts data)
+        epoch (.atZone Instant/EPOCH (java.time.ZoneId/of "UTC"))]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+    (is (= arrow/nullable-temporal-document-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= [group] (:groups r) (:operations (provider/observe-source-message! node id))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-temporal-document-put data))))
+    (is (= :unsupported-arrow-struct-key (:reason (arrow/decode-nullable-document-put data))))
+    (is (= 1 (bit-and 255 (aget ^bytes data from-valid))))
+    (is (= 2 (bit-and 255 (aget ^bytes data to-valid))))
+    (is (= [(assoc-in group [:documents 0 :xt/valid-from] epoch)]
+           (:groups (decode (#'fixture/edit-long data from 0)))))
+    (is (= [(update-in group [:documents 0] dissoc :xt/valid-from)]
+           (:groups (decode (#'fixture/edit-byte data from-valid 0)))))
+    (is (= [(assoc-in group [:documents 2 :xt/valid-to] epoch)]
+           (:groups (decode (#'fixture/edit-byte data to-valid 6)))))
+    (let [plain (#'fixture/retained-operation-bytes node plain-id)]
+      (is (= :matched (:iid-correspondence (decode plain))))
+      (is (= (:groups (arrow/decode-temporal-document-put plain)) (:groups (decode plain)))))
+    (doseq [[bad reason] [[(#'fixture/edit-long data from Long/MIN_VALUE) :unsupported-arrow-timestamp-range]
+                          [(#'fixture/edit-long data (+ to 8) Long/MAX_VALUE) :unsupported-arrow-timestamp-range]
+                          [(#'fixture/edit-byte data outer-valid 1) :unsupported-arrow-put-bounds]
+                          [(#'fixture/edit-byte data iids 0) :document-iid-mismatch]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]]]
+      (let [r (decode bad)]
+        (is (= :unsupported (:status r)) (pr-str (dissoc r :groups)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :groups)))
+        (is (not (contains? r :iid-correspondence)))))))
+
+(deftest selected-nullable-temporal-documents-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-nullable-temporal-put-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        from (Instant/parse "1969-12-31T23:59:59.999999Z")
+        to (Instant/parse "2030-01-01T00:00:00Z")
+        utc (java.time.ZoneId/of "UTC")
+        docs [{:xt/id 1 :xt/valid-from from} {:xt/id 2 :xt/valid-to to}
+              {:xt/id 3} {:xt/id 4 :xt/valid-from nil :xt/valid-to nil}]
+        group {:kind :put-docs :table :public/foo :bounds {}
+               :documents [{:xt/id 1 :xt/valid-from (.atZone from utc)}
+                           {:xt/id 2 :xt/valid-to (.atZone to utc)} {:xt/id 3} {:xt/id 4}]
+               :iids ["4cd9b7672d7fbee8fb51fb1e049f6903" "420fce314175df402adbeae3cfbbb856"
+                      "9a83c6cb1126d93de4a30715b28f1f4b" "6ed5045938d710d075142228a0a53aed"]}]
+    (try
+      (let [[id plain-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitSourceBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! [(into [:put-docs :foo] docs)])
+                    plain-id (submit! [[:put-docs :foo {:xt/id 5 :xt/valid-from from}]])]
+                (check-nullable-temporal-documents! node id plain-id group)
+                [id plain-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) plain-id (Duration/ofSeconds 10))
+          (check-nullable-temporal-documents! node id plain-id group)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

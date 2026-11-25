@@ -3922,3 +3922,33 @@ bounds and nullable row-bound columns remain unsupported. Multiple put
 groups/tables, mixed operation sequences and aggregate document budgets
 remain open. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2686 — verify nullable retained document valid-time row fields
+
+Qualify observed nullable UTC microsecond _valid_from and _valid_to
+columns only at the document root, behind a new temporal put profile.
+Reuse the independent nullable scalar reader and existing bitmap,
+node count, value extent and timestamp range checks. Omit invalid
+bound slots and preserve present timestamps and IID correspondence.
+Earlier profiles remain unchanged; populated outer bounds and non-
+timestamp row-bound columns remain unsupported.
+
+Focused JVM: 42 tests / 2686 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites.
+Retained documents with distinct per-row bounds, omitted bounds and
+explicit nil match expected groups and provider observations before
+and after reopening. Mutate valid-time values and presence bits;
+reject out-of-range timestamps, populated outer bounds, mismatched
+IIDs and truncated streams without partial groups. An initial fixture
+with an entirely null-only bound column stopped XTDB ingestion with
+Invalid timestamp col type. Remove that fixture from the shared history
+and rerun all four namespaces; typed nullable columns remain covered.
+XTDB logged shutdown cancellation; the passing process exited zero.
+
+Selected nullable-temporal-document verified put profile v1. No inference
+of defaults, interval validity, successful execution or original null
+versus absent identity. All-null bound columns remain unsupported and
+were not independently decoded. Multiple put groups/tables, mixed
+operations and aggregate document budgets remain open. No production
+wiring, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.
