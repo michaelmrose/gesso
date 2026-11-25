@@ -15,6 +15,7 @@
             [gesso.model.inductive-plan :as inductive]
             [gesso.model.inductive-plan-test]
             [xtdb.api :as xt]
+            [xtdb.db-catalog :as db]
             [xtdb.node :as xtn]))
 
 (defn- admission!
@@ -655,10 +656,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v13)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v14)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v14 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v15 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:unclassified] (mapv :classification (:steps prefix))))
@@ -764,7 +765,7 @@
                                              :puts [[:put-docs :gesso_commands record]]})]
               (xt/execute-tx node (envelope/bind-transition-envelope! (ops "good")))
               (let [prefix (history/audit-chunk! handle admission 8)]
-                (is (= :selected-mapped-ledger-chunk-v14 (:profile prefix)))
+                (is (= :selected-mapped-ledger-chunk-v15 (:profile prefix)))
                 (is (= :observed-interval-checked (:status prefix)))
                 (is (= [:matched] (mapv :recorded-envelope (:steps prefix))))
                 (is (= [:matched] (mapv :intended-guard-prefix (:steps prefix))))
@@ -892,5 +893,46 @@
               (xt/execute-tx node [["ASSERT TRUE"]])
               (let [later (history/audit-chunk! handle admission 8 (:checkpoint extended))]
                 (is (= {:observed-mapped-stutter 2 :unclassified 1} (:counts later)))
+                (is (= (:first-unclassified extended) (:first-unclassified later))))))
+          (finally (release)))))))
+
+(deftest aborted-stutters-require-retained-restricted-attempt-and-outcome
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (let [handle (xtdb/adapter-connectable! node)
+                aborted (xt/submit-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]
+                                           ["ASSERT FALSE"]])
+                id (:tx-id aborted)
+                _ (.awaitTxBlocking (db/primary-db node) id (java.time.Duration/ofSeconds 10))
+                prefix (history/audit-chunk! handle admission 1)
+                checked (xtdb/check-recorded-abort! handle id)]
+            (is (= :observed-interval-checked (:status prefix)))
+            (is (= [:aborted-stutter] (mapv :classification (:steps prefix))))
+            (is (= :restricted-envelope (get-in prefix [:steps 0 :aborted-operations])))
+            (is (= {:status :matched :profile envelope/profile :authority :none :certificate :not-issued
+                    :tx-id id :committed? false :aborted-operations :restricted-envelope} checked))
+            (is (empty? (xt/q node "SELECT * FROM unmapped")))
+            (doseq [[observation expected] [[{:status :unavailable :reason :source-message-not-retained}
+                                             :historical-abort-envelope-unavailable]
+                                            [{:status :unsupported :reason :unsupported-operation-kind}
+                                             :historical-abort-envelope-unsupported]]]
+              (with-redefs [source-log/observe-source-message! (fn [& _] observation)]
+                (is (= expected (get-in (history/audit! handle admission 8) [:steps 0 :reason])))))
+            (let [committed (:tx-id (xt/execute-tx node [["ASSERT TRUE"]]))]
+              (is (= :transaction-outcome-mismatch (:reason (xtdb/check-recorded-abort! handle committed)))))
+            (let [unsupported (xt/submit-tx node [["ASSERT FALSE"] [:delete-docs :requests "r1"]])
+                  _ (.awaitTxBlocking (db/primary-db node) (:tx-id unsupported) (java.time.Duration/ofSeconds 10))
+                  extended (history/audit-chunk! handle admission 8 (:checkpoint prefix))]
+              (is (= :unclassified-steps (:status extended)))
+              (is (= :historical-abort-envelope-unsupported (get-in extended [:first-unclassified :reason])))
+              (is (= {:aborted-stutter 1 :observed-mapped-stutter 1 :unclassified 1} (:counts extended)))
+              (xt/execute-tx node [["ASSERT TRUE"]])
+              (let [later (history/audit-chunk! handle admission 8 (:checkpoint extended))]
                 (is (= (:first-unclassified extended) (:first-unclassified later))))))
           (finally (release)))))))

@@ -205,11 +205,8 @@
       (reject! :unsupported-observed-envelope))
     ops))
 
-(defn check-recorded-stutter!
-  "Qualify a committed, retained assertion-only transaction. No document
-   writes, other SQL or unsupported operations are admitted. This is a
-   decoded operation check, conditional on provider semantics and retention."
-  [node tx-id]
+(defn- check-recorded-stuttering-attempt!
+  [node tx-id committed?]
   (let [report (fn [status reason]
                  (cond-> {:status status :profile profile :authority :none :certificate :not-issued}
                    reason (assoc :reason reason)))]
@@ -222,17 +219,20 @@
           (cond
             (not= log-profile (:provider-profile observed)) (report :unsupported :source-profile-mismatch)
             (not= tx-id (:tx-id observed)) (report :mismatch :source-transaction-identity-mismatch)
-            (some #(= :put-docs (:kind %)) (:operations observed)) (report :mismatch :stutter-contains-write)
+            (and committed? (some #(= :put-docs (:kind %)) (:operations observed))) (report :mismatch :stutter-contains-write)
             :else
             (let [ops (observed-restricted-operations! (:operations observed))
                   outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
               (cond
-                (not (every? #(string? (first %)) ops)) (report :mismatch :stutter-contains-write)
+                (and committed? (not (every? #(string? (first %)) ops))) (report :mismatch :stutter-contains-write)
                 (empty? outcomes) (report :unavailable :transaction-outcome-unavailable)
                 (not (and (= 1 (count outcomes)) (boolean? (:committed (first outcomes)))))
                 (report :unsupported :invalid-transaction-outcome)
-                (not= [{:committed true}] outcomes) (report :mismatch :transaction-outcome-mismatch)
-                :else (assoc (report :matched nil) :tx-id tx-id :stutter-operations :assertion-only))))
+                (not= [{:committed committed?}] outcomes) (report :mismatch :transaction-outcome-mismatch)
+                :else (if committed?
+                        (assoc (report :matched nil) :tx-id tx-id :stutter-operations :assertion-only)
+                        (assoc (report :matched nil) :tx-id tx-id :committed? false
+                               :aborted-operations :restricted-envelope)))))
           (report :unsupported :unexpected-source-observation)))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -242,6 +242,21 @@
           (report :unsupported (:reason (ex-data e)))
           (report :unavailable :envelope-check-failed)))
       (catch Exception _ (report :unavailable :envelope-check-failed)))))
+
+(defn check-recorded-stutter!
+  "Qualify a committed, retained assertion-only transaction. No document
+   writes, other SQL or unsupported operations are admitted. This is a
+   decoded operation check, conditional on provider semantics and retention."
+  [node tx-id]
+  (check-recorded-stuttering-attempt! node tx-id true))
+
+(defn check-recorded-abort!
+  "Qualify an exact retained restricted ASSERT/put-docs attempt and a
+   separately observed aborted outcome. Attempted writes need not be
+   authorized: this is neither intended-envelope correspondence nor proof
+   of rollback, abort cause, or provider execution semantics."
+  [node tx-id]
+  (check-recorded-stuttering-attempt! node tx-id false))
 
 (defn- selected-put-entries [operations tables]
   ;; Compare full decoded documents with multiplicity. Grouping disjoint

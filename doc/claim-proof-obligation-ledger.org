@@ -1559,3 +1559,31 @@ The check is conditional on the retained decoder and assertion semantics,
 not a proof of provider execution or arbitrary SQL read-only behavior.
 Aborted attempts and infrastructure transitions still need independent
 retained-operation correspondence. No CLM-R2 premise is retired.
+
+* v2599 — qualify retained aborted stutters
+
+Require the exact retained source message for an aborted stutter as well
+as unchanged selected snapshots and valid-time continuity. Reuse the
+restricted ASSERT/put-docs round-trip decoder and independently query the
+provider's recorded false committed outcome. Refuse missing, unsupported,
+wrong-identity or inconsistent observations. Unlike committed stutters,
+restricted attempted puts are permitted even outside selected tables:
+classification as an abort is not admission or writer authorization.
+Record bounded status only. Advance history, checkpoints and conditional
+operational reports to v15; v14 and earlier checkpoints require rescanning.
+
+JVM initialization/history and operational-report suites: 25 tests / 573
+assertions, zero failures or errors. Actual embedded XTDB negative controls
+exercise an unselected put preceding a failed assertion, an unsupported
+aborted deletion, a committed transaction presented as aborted, and sticky
+unclassified findings. Missing/unsupported source observations are also
+injected. The v2598 corrected regression is covered by the complete run.
+Full opt-in physical Claim source-log suite: 3 tests / 1124 assertions,
+zero failures or errors. Each observed aborted Claim attempt satisfies the
+new retained restricted-envelope check. Full mapped-projection, project,
+Chromium and independent proof gates were not rerun.
+
+This is conditional aborted-stutter evidence, not proof of rollback or
+abort cause, intended attempted operations, provider execution or writer
+authority. Infrastructure retained-operation correspondence remains open.
+No CLM-R2 premise is retired.

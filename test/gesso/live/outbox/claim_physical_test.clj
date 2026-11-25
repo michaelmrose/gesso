@@ -682,6 +682,7 @@
                                     (filter #(= :committed (:result %)) @submissions)))
                           (set (map (juxt :command-id :tx-id) (:verified-mapped-transition groups)))))
                    (is (= 1 (count (:aborted-stutter groups))))
+                   (is (every? #(= :restricted-envelope (:aborted-operations %)) (:aborted-stutter groups)))
                    (when *claim-source-log-observer?*
                      (let [check! (requiring-resolve 'gesso.assurance.xtdb-source-log-pilot/check-claim-envelope!)
                            aborted (filterv #(= :xtdb/assert-failed (:result %)) @submissions)
@@ -723,10 +724,10 @@
                      (is (= report (:report (host/history-status started))))
                      (is (= :declared (:publication-expectation-profile report)))
                      (is (= :declared (:residual-assertion-profile report)))
-                     (is (= :v14-declared-expectations-checked
+                     (is (= :v15-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :residual-assertion-correspondence])))
-                     (is (= :v14-declared-expectations-checked
+                     (is (= :v15-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
                      (let [operational (host/assurance-status started)]

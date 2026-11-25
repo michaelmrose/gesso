@@ -1,6 +1,7 @@
 (ns gesso.live.outbox.history-coverage
   "Bounded, read-only audit of the selected mapped host's visible ledger.
    Committed mapped stutters require retained assertion-only operations.
+   Aborted stutters require retained restricted operations and abort outcome.
    A mapped stutter is not a proof of an infrastructure writer's authority.
    Check sampled endpoints and refuse intervening visible valid-time
    boundaries at the pinned prior system basis. Historical retention,
@@ -243,6 +244,19 @@
                                    :historical-stutter-envelope-mismatch)
                        :historical-stutter-envelope-invalid-result)))))
 
+(defn- classify-aborted-stutter! [node base]
+  (let [checked (xtdb/check-recorded-abort! node (:tx-id base))]
+    (if (and (= :matched (:status checked)) (= envelope/profile (:profile checked))
+             (= (:tx-id base) (:tx-id checked)) (false? (:committed? checked))
+             (= :restricted-envelope (:aborted-operations checked)))
+      (assoc base :classification :aborted-stutter :aborted-operations :restricted-envelope)
+      (assoc base :classification :unclassified
+             :reason (case (:status checked)
+                       :unavailable :historical-abort-envelope-unavailable
+                       :unsupported :historical-abort-envelope-unsupported
+                       :mismatch :historical-abort-envelope-mismatch
+                       :historical-abort-envelope-invalid-result)))))
+
 (defn- classify-step! [node admission source-id tables opts prior current]
   (let [time (ledger-time current)
         previous-time (ledger-time prior)
@@ -265,7 +279,7 @@
       (= before after)
       (if (:committed current)
         (classify-committed-stutter! node base)
-        (assoc base :classification :aborted-stutter))
+        (classify-aborted-stutter! node base))
 
       (not (:committed current))
       (assoc base :classification :unclassified :reason :aborted-step-changed-observed-rows)
@@ -379,7 +393,7 @@
         {:keys [basis rows]} (observe-range! scope nil max-steps false)
         steps (classify-range! scope rows)]
     (require-current-scope! scope)
-    {:profile :selected-mapped-ledger-coverage-v14 :authority :none
+    {:profile :selected-mapped-ledger-coverage-v15 :authority :none
      :status (if (some #(= :unclassified (:classification %)) steps)
                :unclassified-steps :observed-interval-checked)
      :initialization (:initial scope) :through-basis basis :steps steps
@@ -395,7 +409,7 @@
 (defn- checkpoint-state! [scope checkpoint]
   (when (some? checkpoint)
     (let [prior (locking checkpoints (.get checkpoints checkpoint))]
-      (when-not (and prior (= :selected-mapped-history-checkpoint-v14 (:profile prior))
+      (when-not (and prior (= :selected-mapped-history-checkpoint-v15 (:profile prior))
                      (identical? (:token scope) (:token prior))
                      (identical? (:admission scope) (:admission prior))
                      (= (:initial scope) (:initial prior)))
@@ -424,12 +438,12 @@
          anchor (peek rows)
          through (xtdb/basis (:xt/id anchor) (ledger-time anchor))
          next-state (assoc (select-keys scope [:token :initial :admission])
-                           :profile :selected-mapped-history-checkpoint-v14
+                           :profile :selected-mapped-history-checkpoint-v15
                            :anchor anchor :counts counts :first-unclassified first-unclassified)
          next-checkpoint (HistoryCheckpoint.)]
      (require-current-scope! scope)
      (locking checkpoints (.put checkpoints next-checkpoint next-state))
-     {:profile :selected-mapped-ledger-chunk-v14 :authority :none
+     {:profile :selected-mapped-ledger-chunk-v15 :authority :none
       :status (cond first-unclassified :unclassified-steps
                     caught-up? :observed-interval-checked
                     :else :partial-interval)
@@ -471,13 +485,13 @@
   "Export an issued checkpoint as authenticated, plain EDN data. The trusted
    owner must persist it and a separate 32-byte secret key, unique to this
    database and trusted audit/decoder implementation. Change deployment-id
-   (or rotate the key) when that implementation changes. Versions 1 through 13
-   cannot be restored: they lack retained committed-stutter checks.
+   (or rotate the key) when that implementation changes. Versions 1 through 14
+   cannot be restored: they lack retained aborted-stutter checks.
    No writer authority."
   [connectable admission checkpoint key deployment-id]
   (let [scope (audit-scope! connectable admission 1)
         prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
-        payload {:profile :selected-mapped-history-checkpoint-v14
+        payload {:profile :selected-mapped-history-checkpoint-v15
                  :scope (durable-scope scope deployment-id)
                  :anchor (update (:anchor prior) :system-time str)
                  :counts (:counts prior)
@@ -496,7 +510,7 @@
   (let [scope (audit-scope! connectable admission 1)
         {:keys [payload mac]} sealed]
     (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
-                   (map? payload) (= :selected-mapped-history-checkpoint-v14 (:profile payload))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v15 (:profile payload))
                    (string? mac) (re-matches #"[0-9a-f]{64}" mac)
                    (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
                                           (checkpoint-mac key payload)))
@@ -508,7 +522,7 @@
                                      (update :system-time #(Instant/parse %)))
           checkpoint (HistoryCheckpoint.)
           state (assoc (select-keys scope [:token :initial :admission])
-                       :profile :selected-mapped-history-checkpoint-v14
+                       :profile :selected-mapped-history-checkpoint-v15
                        :anchor anchor :counts (:counts payload) :first-unclassified first-unclassified)]
       ;; Verify the anchor at a pinned frontier; no classification or extension.
       (observe-range! scope anchor 1 true)

@@ -239,6 +239,11 @@
   [connectable tx-id]
   (envelope/check-recorded-stutter! (physical-connectable! connectable) tx-id))
 
+(defn check-recorded-abort!
+  "Qualify a retained restricted aborted attempt through the opaque adapter."
+  [connectable tx-id]
+  (envelope/check-recorded-abort! (physical-connectable! connectable) tx-id))
+
 (defn current-submission-policy-token
   "Observe the current opaque policy generation through a live handle or
    physical node. The token grants no submission or registration authority."
