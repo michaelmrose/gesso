@@ -216,3 +216,12 @@
             (struct-kind? kind) (struct-reader! (second kind) batch node-index buffers start n)
             :else (scalar-reader! kind buffers start n)))))
 
+
+(defn sql-argument-reader!
+  "Preserve a qualified absent top-level column value as positional nil.
+   The struct reader continues to omit absent document fields."
+  [kind batch node-index buffers start n]
+  (let [reader (value-reader! kind batch node-index buffers start n)]
+    (fn [row]
+      (let [v (reader row)]
+        (when-not (identical? absent-field v) v)))))

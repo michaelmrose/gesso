@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-arrow-operations :as arrow]
             [gesso.assurance.reference-arrow-operations-test :as fixture]
+            [gesso.assurance.reference-arrow-struct-test :as struct-fixture]
             [gesso.assurance.xtdb-source-log :as provider]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
@@ -237,4 +238,101 @@
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (first (peek rejected)) (Duration/ofSeconds 15))
           (check-mixed-recursive-lists! node id depth-id scalar-id rejected rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(def ^:private nullable-query
+  "ASSERT (? IS NULL AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL)")
+
+(def ^:private retained-nullable-query
+  "ASSERT ($1 IS NULL AND $2 IS NOT NULL AND $3 IS NOT NULL AND $4 IS NOT NULL AND $5 IS NOT NULL AND $6 IS NOT NULL AND $7 IS NOT NULL AND $8 IS NOT NULL)")
+
+(defn- check-mixed-nullable! [node id utc-id old-id rejected rows utc]
+  (let [decode arrow/decode-mixed-nullable-sql-put
+        data (#'fixture/retained-operation-bytes node id)
+        expected (into (mapv #(hash-map :kind :sql :query retained-nullable-query :args %) rows)
+                       [foo sql-true bar])
+        r (decode data)
+        buffers (#'fixture/buffer-starts data)
+        start (nth buffers 8)
+        b (doto (java.nio.ByteBuffer/wrap data) (.order java.nio.ByteOrder/LITTLE_ENDIAN))
+        end (+ start (.getInt b (+ (nth buffers 7) 4)))
+        args (Arrays/copyOfRange data start end)
+        [int-valid int-values bool-valid _ text-valid text-offsets _ :as arg-buffers] (#'fixture/buffer-starts args)
+        list-valid (nth arg-buffers 14)
+        null-node (#'struct-fixture/node-position args 0)
+        int-node (#'struct-fixture/node-position args 1)]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :operations)))
+    (is (= arrow/mixed-nullable-sql-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= expected (:operations r)))
+    (is (= [3 1 1 1] (:logged-operation-spans r)))
+    (is (= :unsupported-sql-argument (:reason (provider/observe-source-message! node id))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-mixed-recursive-list-sql-put data))))
+    (is (= (assoc-in expected [0 :args 1] 99)
+           (:operations (decode (#'fixture/edit-long data (+ start int-values) 99)))))
+    ;; Null fixed-width padding is not a logical value. Valid false and
+    ;; present empty text/vector must not become nil merely by truthiness.
+    (is (= expected (:operations (decode (#'fixture/edit-long data (+ start int-values 8) 99)))))
+    (is (= (assoc-in expected [1 :args 1] 0)
+           (:operations (decode (#'fixture/edit-byte data (+ start int-valid) 7)))))
+    (is (= (assoc-in expected [0 :args 2] nil)
+           (:operations (decode (#'fixture/edit-byte data (+ start bool-valid) 4)))))
+    (is (= (assoc-in expected [1 :args 7] [])
+           (:operations (decode (#'fixture/edit-byte data (+ start list-valid) 7)))))
+    (doseq [[bad reason] [[(#'fixture/edit-byte data (+ start list-valid) 4) :unsupported-arrow-nullable-list-extent]
+                          [(#'fixture/edit-long data (+ start null-node) 0) :unsupported-arrow-null-only-layout]
+                          [(#'fixture/edit-long data (+ start null-node 8) 0) :unsupported-arrow-null-only-layout]
+                          [(#'fixture/edit-long data (+ start int-node 8) 0) :arrow-null-count-mismatch]
+                          [(#'fixture/edit-byte data (+ start text-valid) 4) :unsupported-arrow-nullable-value-extent]
+                          [(#'fixture/edit-int data (+ start text-offsets 4) -1) :invalid-arrow-value-offsets]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]]]
+      (let [r (decode bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not-any? #(contains? r %) [:groups :operations :logged-operation-spans :iid-correspondence]))))
+    (let [r (decode (#'fixture/retained-operation-bytes node utc-id))]
+      (is (= :decoded (:status r)))
+      (is (= [foo {:kind :sql :query "ASSERT $1 IS NOT NULL" :args [utc]}
+              {:kind :sql :query "ASSERT $1 IS NOT NULL" :args [nil]} bar]
+             (:operations r)))
+      (is (= [1 2 1] (:logged-operation-spans r))))
+    (let [data (#'fixture/retained-operation-bytes node old-id)
+          old (arrow/decode-mixed-recursive-list-sql-put data)]
+      (is (= :decoded (:status old)))
+      (is (= (dissoc old :profile) (dissoc (decode data) :profile))))
+    (doseq [other-id rejected]
+      (let [r (decode (#'fixture/retained-operation-bytes node other-id))]
+        (is (= :unsupported (:status r)))
+        (is (not-any? #(contains? r %) [:groups :operations :logged-operation-spans :iid-correspondence]))))))
+
+(deftest selected-mixed-nullable-columns-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-mixed-nullable-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        p1 [:put-docs :foo {:xt/id 1 :name "a"}]
+        p2 [:put-docs :bar {:xt/id "x" :ok true}]
+        t (java.time.Instant/parse "2026-01-01T00:00:00.000001Z")
+        z (.atZone t (java.time.ZoneId/of "Z"))
+        utc (.atZone t (java.time.ZoneId/of "UTC"))
+        rows [[nil 7 false "café" :claim/open #uuid "00112233-4455-6677-8899-aabbccddeeff" z [[1 2]]]
+              [nil nil nil nil nil nil nil nil]
+              [nil -1 true "" :claim/done #uuid "ffffffff-ffff-ffff-ffff-ffffffffffff" z []]]]
+    (try
+      (let [[id utc-id old-id rejected]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitSourceBlocking database id (Duration/ofSeconds 15)) id))
+                    id (submit! (into (mapv #(into [nullable-query] %) rows) [p1 ["ASSERT TRUE"] p2]))
+                    utc-id (submit! [p1 ["ASSERT ? IS NOT NULL" utc] ["ASSERT ? IS NOT NULL" nil] p2])
+                    old-id (submit! [p1 ["ASSERT ? IS NOT NULL" [[1 2]]] p2])
+                    rejected [(submit! [p1 ["ASSERT ? IS NOT NULL" [1 nil]]])
+                              (submit! [p1 ["ASSERT ? IS NOT NULL" {:a 1}]])]]
+                (check-mixed-nullable! node id utc-id old-id rejected rows utc)
+                [id utc-id old-id rejected]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek rejected) (Duration/ofSeconds 15))
+          (check-mixed-nullable! node id utc-id old-id rejected rows utc)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

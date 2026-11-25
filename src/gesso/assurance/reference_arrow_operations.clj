@@ -5,7 +5,7 @@
    SQL and nested argument bytes are sensitive internal observations."
   (:require [gesso.assurance.reference-arrow-framing :refer [max-bytes max-rows require! message! field! buffers! offsets! value-bytes! present?]]
             [gesso.assurance.reference-arrow-schema :refer [scalar-kind!]]
-            [gesso.assurance.reference-arrow-values :refer [node-count buffer-count value-reader!]]
+            [gesso.assurance.reference-arrow-values :refer [node-count buffer-count value-reader! sql-argument-reader!]]
             [gesso.assurance.reference-document-iid :as iid]
             [gesso.assurance.reference-arrow-put :as put])
   (:import (java.nio ByteBuffer ByteOrder)
@@ -163,6 +163,15 @@
 (def ^:private integer-base (assoc base :profile integer-profile))
 (def ^:private max-argument-columns 64)
 
+(defn- argument-kind! [^Field field name allowed]
+  (let [nullable-columns? (contains? allowed :nullable-sql-columns)
+        allowed (disj allowed :nullable-sql-columns)]
+    (if (and nullable-columns? (.nullable field))
+      (if (= Type/Null (.typeType field))
+        (do (field! field name Type/Null true 0) :null-only-field)
+        [:nullable (scalar-kind! field name (conj allowed :nullable-field :nullable-list-fields))])
+      (scalar-kind! field name allowed))))
+
 (defn- scalar-rows! [bytes allowed]
   (if (nil? bytes)
     [[]]
@@ -176,7 +185,7 @@
         (require! (and (zero? (.remaining sb)) (= Endianness/Little (.endianness schema))
                        (zero? (.featuresLength schema)) (zero? (.customMetadataLength schema))
                        (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
-        (let [kinds (mapv #(scalar-kind! (.fields schema %) (str "?_" %) allowed) (range columns))
+        (let [kinds (mapv #(argument-kind! (.fields schema %) (str "?_" %) allowed) (range columns))
               starts (vec (reductions + 0 (map buffer-count kinds)))
               node-starts (vec (reductions + 0 (map node-count kinds)))]
           (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
@@ -188,8 +197,8 @@
             (let [buffers (buffers! batch bb (peek starts))
                   readers
                   (mapv (fn [i]
-                          (value-reader! (nth kinds i) batch (nth node-starts i)
-                                         buffers (nth starts i) n))
+                          ((if (contains? allowed :nullable-sql-columns) sql-argument-reader! value-reader!)
+                           (nth kinds i) batch (nth node-starts i) buffers (nth starts i) n))
                         (range columns))]
               (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
                         :unsupported-arrow-terminator)
@@ -976,3 +985,17 @@
    Diagnostic only; no SQL execution or provider refinement claim."
   [bytes]
   (decode-mixed-sql-put* bytes mixed-recursive-list-sql-put-profile recursive-list-rows!))
+
+(def mixed-nullable-sql-put-profile :xtdb-2.2.0-beta1/selected-mixed-nullable-sql-put-arrow-v1)
+
+(defn- nullable-sql-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :nullable-sql-columns}))
+
+(defn decode-mixed-nullable-sql-put
+  "Interpret selected mixed SQL/put streams with nullable top-level scalar
+   and recursive vector argument columns. Preserve nil as a positional
+   value, including bufferless Null columns. Nullable list children and
+   unqualified union legs reject. Diagnostic only; no admission claim."
+  [bytes]
+  (decode-mixed-sql-put* bytes mixed-nullable-sql-put-profile nullable-sql-rows!))

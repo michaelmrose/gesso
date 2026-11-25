@@ -4104,3 +4104,30 @@ columns, aggregate recursive value budgets and independent transaction
 correspondence integration remain open. No production wiring, certificate
 or CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2693 — interpret nullable top-level SQL columns in mixed streams
+
+Qualify nullable positional scalar and recursive vector arguments and
+bufferless Null columns in a separate mixed diagnostic profile. Translate
+qualified absent column values to positional nil, without changing the
+omission of absent document fields. Reuse the established validity, null
+count, variable extent, depth and list size checks. Earlier profiles,
+provider admission and reference-domain admission remain unchanged.
+
+Focused JVM: 48 tests / 3242 assertions, zero failures or errors across
+reference Arrow operations, struct, put, mixed and source payload suites.
+Real retained mixed transactions reconstruct exact expected arguments,
+order, invocation spans and IIDs before and after reopening. Cover all
+previous scalar families, all-null columns and nullable recursive lists;
+distinguish nil, false, empty text and empty lists. Reject malformed null
+counts, hidden variable extents, offsets, truncated framing, nullable list
+children and maps. Null fixed-width padding is not a logical value.
+Provider observation still rejects nil. First fixture failed because the
+nine-column writer emitted fields out of positional order; use smaller
+fixtures and leave reordered column qualification open. XTDB shutdown
+cancellation logged; final process exited zero.
+
+Selected mixed nullable SQL/put profile v1. Aggregate recursive value
+budgets, reordered columns and independent transaction correspondence
+remain open. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.
