@@ -3615,3 +3615,26 @@ Selected null-only scalar struct profile v1. Nullable containers,
 actual document-put semantics, IID correspondence and aggregate document
 budgets remain open. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2674 — decode selected nullable Arrow list fields
+
+Qualify nullable List fields only inside selected canonical-key structs.
+Validate the parent validity bitmap, null count, child extent and list
+selection using the existing bounded readers. Require every invalid
+entry to cover zero child elements; preserve present empty vectors and
+omit invalid fields. Preserve earlier profile restrictions and exclude
+nullable struct containers, nullable IDs and null list elements.
+
+Focused JVM: 27 tests / 1623 assertions, zero failures or errors across
+reference Arrow operations, struct and source payload suites. Retained
+nullable integer, untyped empty, heterogeneous and nested list fields
+match expected diagnostic maps before and after reopening. Mutate
+validity bits, child values, offsets and reported null counts; reject
+invalid slots with nonempty child spans and malformed framing. XTDB
+logged shutdown cancellation; the test process exited zero.
+
+Selected nullable-list struct profile v1. The retained null versus
+absent submission distinction remains unavailable. Actual document puts,
+nullable struct containers, IID correspondence and aggregate document
+budgets remain open. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.

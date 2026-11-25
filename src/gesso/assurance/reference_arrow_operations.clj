@@ -311,7 +311,16 @@
         (require! (every? #(or (present? validity %) (= (nth offsets %) (nth offsets (inc %))))
                           (range n))
                   :unsupported-arrow-nullable-value-extent)))
-    (let [reader (scalar-reader! kind buffers start n)]
+    (let [reader (if (list-kind? kind)
+                   (let [read-list (list-reader! (second kind) batch node-index buffers start n)
+                         ^ByteBuffer offsets (nth buffers (inc start))]
+                     (require! (every? #(or (present? validity %)
+                                           (= (.getInt offsets (* 4 %))
+                                              (.getInt offsets (* 4 (inc %)))))
+                                       (range n))
+                               :unsupported-arrow-nullable-list-extent)
+                     read-list)
+                   (scalar-reader! kind buffers start n))]
       (fn [row] (if (present? validity row) (reader row) absent-field)))))
 
 (defn- value-reader! [kind ^RecordBatch batch node-index buffers start n]
@@ -838,3 +847,29 @@
   "Expand selected diagnostic SQL groups with null-only struct fields."
   [bytes]
   (expand-fixed-operations bytes null-only-struct-base null-only-struct-rows!))
+
+(def nullable-list-struct-profile :xtdb-2.2.0-beta1/selected-nullable-list-struct-arrow-operations-v1)
+(def ^:private nullable-list-struct-base (assoc base :profile nullable-list-struct-profile))
+
+(defn- nullable-list-struct-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :struct-map :document-keys :empty-struct
+                        :nullable-struct-fields :null-only-fields :nullable-list-fields}))
+
+(defn decode-nullable-list-struct-arguments
+  "Decode selected nullable vector fields by omission, requiring invalid
+   entries to cover no child values. Present empty vectors remain present.
+   Diagnostic only; nullable struct containers and list elements reject."
+  [bytes]
+  (try
+    (assoc nullable-list-struct-base :status :decoded :rows (nullable-list-struct-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc nullable-list-struct-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc nullable-list-struct-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc nullable-list-struct-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-nullable-list-struct-operations
+  "Expand selected diagnostic SQL groups with nullable vector fields."
+  [bytes]
+  (expand-fixed-operations bytes nullable-list-struct-base nullable-list-struct-rows!))
