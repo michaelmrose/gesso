@@ -775,3 +775,37 @@ families, retention and trusted acquisition remain separate obligations.
 The full Claim envelope has not yet been qualified with this decoder.
 Production history and checkpoint semantics remain unchanged. No CLM-R2
 premise or certification authority is retired.
+
+* v2573 — complete Claim source-log envelope qualification
+
+The first integrated run exposed a provider serialization distinction:
+PGWire coalesces adjacent identical SQL statements into one logged SQL
+leg with multiple ordered Arrow argument rows, including repeated
+parameterless invocations. Decode every row in order, retaining the
+original operation spans alongside the expanded logical operation
+sequence. The focused regression checks batch multiplicity, order, and
+refusal of missing or permuted invocations. The restricted Claim verifier
+compares all decoded assertions and document puts, including the journal,
+publication intents and durable witness, to the captured submission.
+It separately queries the exact xt.txs outcome and refuses missing log
+messages, unguarded or changed envelopes, and wrong outcomes.
+
+The opt-in claim mode checks all nine actual Claim submissions in the
+complete physical Claim namespace across all four recovery modes. The
+five committed submissions use their returned transaction basis; each
+of the four aborted submissions is correlated with the unique aborted
+ledger step in its fixture, then checked by full envelope equality. This
+fixture-specific association is not a general aborted-submission receipt.
+The standalone pilot passed 3 tests / 44 assertions; the complete Claim
+namespace with log observation enabled passed 3 tests / 989 assertions.
+Both exited successfully with no failures or errors.
+
+The verifier is restricted to the fixture's ASSERT and unqualified
+canonical put-docs operations; temporal options and unsupported values
+refuse rather than being silently erased. The comparison is of decoded
+logical operations, not byte-identical caller input or proof of execution
+of each assertion. It does not inspect transaction-level options, prove
+provider read-basis semantics, authenticate writers, or establish durable
+log retention. Production history and checkpoint semantics are unchanged;
+ordinary tests do not enable the internal log observer. No CLM-R2 premise
+is retired. Ansatz, Chromium and the full project suite were not run.

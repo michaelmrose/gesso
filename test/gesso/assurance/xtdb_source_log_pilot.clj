@@ -37,20 +37,25 @@
     (instance? java.util.List v) (mapv decode-value! v)
     :else (reject! :unsupported-sql-argument)))
 
-(defn- sql-arguments! [al bytes]
+(defn- sql-argument-rows! [al bytes]
   (if (nil? bytes)
-    []
+    [[]]
     (do
       (when-not (bytes? bytes) (reject! :unsupported-argument-bytes))
       (one-batch! al bytes
                   (fn [^Relation rel]
-                    (let [columns (mapv (fn [i] (str "?_" i)) (range (count (.getVectors rel))))]
-                      (when-not (and (= 1 (.getRowCount rel))
+                    (let [columns (mapv (fn [i] (str "?_" i)) (range (count (.getVectors rel))))
+                          n (.getRowCount rel)]
+                      (when-not (and (pos? n)
                                      (= (set columns) (set (map #(.getName ^VectorReader %) (.getVectors rel)))))
                         (reject! :unsupported-argument-relation))
-                      (mapv (fn [column]
-                              (decode-value! (.getObject (.vectorFor rel column) 0
-                                                         IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))) columns)))))))
+                      ;; PGWire coalesces adjacent equal statements, including
+                      ;; parameterless statements. Preserve every row in order.
+                      (mapv (fn [i]
+                              (mapv (fn [column]
+                                      (decode-value! (.getObject (.vectorFor rel column) i
+                                                                 IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))) columns))
+                            (range n))))))))
 
 (defn- document-value! [v]
   (cond
@@ -91,7 +96,7 @@
 
 (defn observe-source-message!
   "Read one retained source message at an exact epoch-qualified tx id.
-   Recover SQL text, single-row typed parameters, and supported decoded
+   Recover SQL text, ordered typed argument rows, and supported decoded
    document puts. Reject unsupported legs. This does NOT attest commit,
    writer identity, execution, or byte-identical caller input."
   [node tx-id]
@@ -112,7 +117,7 @@
             (if-not (instance? SourceMessage$Tx message)
               {:status :unavailable :reason :not-a-transaction-message}
               (let [al (.getAllocator database)
-                    ops (one-batch! al (.getTxOps ^SourceMessage$Tx message)
+                    groups (one-batch! al (.getTxOps ^SourceMessage$Tx message)
                                     (fn [^Relation rel]
                                       (when-not (= ["tx-ops"] (mapv #(.getName ^VectorReader %) (.getVectors rel)))
                                         (reject! :unexpected-transaction-relation))
@@ -124,11 +129,13 @@
                                                          (when-not (and (string? query)
                                                                         (every? #{:query :args} (keys payload)))
                                                            (reject! :invalid-sql))
-                                                         {:kind :sql :query query :args (sql-arguments! al args)})
-                                                  :put-docs (put-documents! (.getValue op))
+                                                         (mapv (fn [row] {:kind :sql :query query :args row})
+                                                               (sql-argument-rows! al args)))
+                                                  :put-docs [(put-documents! (.getValue op))]
                                                   (reject! :unsupported-operation-kind))))
                                             (.toMaps rel IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))))]
-                {:status :source-message-observed :tx-id tx-id :operations ops
+                {:status :source-message-observed :tx-id tx-id :operations (into [] cat groups)
+                 :logged-operation-spans (mapv count groups)
                  :scope :retained-primary-source-log-decoded-sql-and-document-puts
                  :authority :none :certificate :not-issued}))))))))
 
@@ -144,6 +151,43 @@
 (defn- expected-put [table docs]
   {:kind :put-docs :table table :documents docs
    :iids (mapv #(iid-hex (:xt/id %)) docs) :bounds {}})
+
+(defn- expected-claim-operation! [op]
+  ;; This is the fixture's restricted transaction language. Do not silently
+  ;; erase temporal options, nulls, or unsupported table aliases to force a
+  ;; match. General caller-envelope normalization remains unqualified.
+  (cond
+    (and (vector? op) (string? (first op))
+         (re-find #"^ASSERT " (first op)))
+    (expected-log-sql! op)
+
+    (and (vector? op) (= :put-docs (first op))
+         (simple-keyword? (second op))
+         (re-matches #"[a-z][a-z0-9_]*" (name (second op)))
+         (< 2 (count op)) (every? map? (drop 2 op)))
+    (expected-put (keyword "public" (name (second op)))
+                  (mapv document-value! (drop 2 op)))
+
+    :else (reject! :unsupported-claim-operation)))
+
+(defn check-claim-envelope!
+  "Compare the complete restricted Claim submission with an exact retained
+   log observation and its separate provider outcome. Diagnostic only."
+  [node tx-id ops committed?]
+  (let [expected (mapv expected-claim-operation! ops)
+        observed (observe-source-message! node tx-id)
+        outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
+    (when-not (= :source-message-observed (:status observed))
+      (reject! :claim-source-message-unavailable))
+    (when-not (= expected (:operations observed))
+      (throw (ex-info "Claim source-log envelope differs from submitted operations."
+                      {:reason :claim-envelope-mismatch :tx-id tx-id
+                       :expected expected :observed (:operations observed)})))
+    (when-not (= [{:committed committed?}] outcomes)
+      (reject! :claim-transaction-outcome-mismatch))
+    {:status :checked-decoded-claim-envelope
+     :tx-id tx-id :committed? committed? :operation-count (count expected)
+     :authority :none :certificate :not-issued}))
 
 (deftest retained-source-log-distinguishes-guarded-unguarded-and-aborted-transactions
   (let [lookup #(deref (ns-resolve 'gesso.model.mapped-projection-test %))
@@ -173,6 +217,25 @@
           (is (= :none (:authority observed)))
           (is (= :not-issued (:certificate observed))))
         (is (= (conj expected put) (:operations g)))
+        ;; The envelope verifier must refuse an unguarded record even
+        ;; when its committed marker matches the guarded transaction.
+        (let [ops (conj prefix marker)
+              reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+          (is (= :checked-decoded-claim-envelope
+                 (:status (check-claim-envelope! node (:tx-id guarded) ops true))))
+          (is (= :claim-envelope-mismatch
+                 (reason #(check-claim-envelope! node (:tx-id unguarded) ops true))))
+          (is (= :claim-envelope-mismatch
+                 (reason #(check-claim-envelope! node (:tx-id guarded)
+                            (conj prefix (assoc-in marker [2 :written] false)) true))))
+          (is (= :claim-transaction-outcome-mismatch
+                 (reason #(check-claim-envelope! node (:tx-id guarded) ops false))))
+          (is (= :checked-decoded-claim-envelope
+                 (:status (check-claim-envelope! node (:tx-id aborted) [["ASSERT FALSE"] marker] false))))
+          (is (= :claim-transaction-outcome-mismatch
+                 (reason #(check-claim-envelope! node (:tx-id aborted) [["ASSERT FALSE"] marker] true))))
+          (is (= :claim-source-message-unavailable
+                 (reason #(check-claim-envelope! node (+ 1000 (:tx-id aborted)) ops true)))))
         (is (= [put] (:operations u)))
         (is (= [{:kind :sql :query "ASSERT FALSE" :args []} put] (:operations a)))
         (is (true? (committed? (:tx-id guarded))))
@@ -215,7 +278,29 @@
         (is (= :none (:authority baseline)))
         (is (= :not-issued (:certificate baseline)))))))
 
-(defn -main [& _]
-  (let [{:keys [fail error]} (run-tests 'gesso.assurance.xtdb-source-log-pilot)]
+(deftest retained-source-log-expands-consecutive-sql-invocations-in-order
+  (with-open [node (xtn/start-node {})]
+    (let [ops [["ASSERT ? = ?" 1 1] ["ASSERT ? = ?" 2 2]
+               ["ASSERT TRUE"] ["ASSERT TRUE"]
+               ["ASSERT ? = ?" :open :open] ["ASSERT ? = ?" "open" "open"]
+               [:put-docs :probe {:xt/id "a" :value 1}]]
+          tx-id (:tx-id (xt/execute-tx node ops))
+          observation (observe-source-message! node tx-id)
+          reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+      (is (= [2 2 2 1] (:logged-operation-spans observation)))
+      (is (= (mapv expected-claim-operation! ops) (:operations observation)))
+      (is (= :checked-decoded-claim-envelope (:status (check-claim-envelope! node tx-id ops true))))
+      (is (= :claim-envelope-mismatch
+             (reason #(check-claim-envelope! node tx-id (assoc ops 0 (nth ops 1) 1 (first ops)) true))))
+      (is (= :claim-envelope-mismatch
+             (reason #(check-claim-envelope! node tx-id (vec (rest ops)) true)))))))
+
+(defn -main [& args]
+  (let [{:keys [fail error]}
+        (if (= ["claim"] (vec args))
+          (let [flag (requiring-resolve 'gesso.live.outbox.claim-physical-test/*claim-source-log-observer?*)]
+            (with-bindings {flag true}
+              (run-tests 'gesso.live.outbox.claim-physical-test)))
+          (run-tests 'gesso.assurance.xtdb-source-log-pilot))]
     (shutdown-agents)
     (System/exit (if (zero? (+ fail error)) 0 1))))

@@ -51,6 +51,8 @@
           (recur))))))
 
 (def ^:dynamic *claim-browser-observer?* false)
+;; Internal provider API is deliberately excluded from the ordinary gate.
+(def ^:dynamic *claim-source-log-observer?* false)
 
 (deftest distinct-claim-commands-contend-for-one-primary-assignment
   (doseq [bound [(semantics/bound-inductive-source!)]
@@ -654,6 +656,25 @@
                                     (filter #(= :committed (:result %)) @submissions)))
                           (set (map (juxt :command-id :tx-id) (:verified-mapped-transition groups)))))
                    (is (= 1 (count (:aborted-stutter groups))))
+                   (when *claim-source-log-observer?*
+                     (let [check! (requiring-resolve 'gesso.assurance.xtdb-source-log-pilot/check-claim-envelope!)
+                           aborted (filterv #(= :xtdb/assert-failed (:result %)) @submissions)
+                           aborted-steps (:aborted-stutter groups)]
+                       ;; The fixture has exactly one aborted Claim submission
+                       ;; and exactly one aborted ledger step per recovery mode.
+                       ;; Never use command id alone: recovery reuses it.
+                       (is (= 1 (count aborted) (count aborted-steps)))
+                       (doseq [{:keys [framed-ops result commit-basis]} @submissions
+                               :let [committed? (= :committed result)
+                                     tx-id (if committed? (xtdb/basis-tx-id commit-basis)
+                                               (:tx-id (first aborted-steps)))
+                                     report (check! node tx-id framed-ops committed?)]]
+                         (is (= :checked-decoded-claim-envelope (:status report)))
+                         (is (= tx-id (:tx-id report)))
+                         (is (= committed? (:committed? report)))
+                         (is (= (count framed-ops) (:operation-count report)))
+                         (is (= :none (:authority report)))
+                         (is (= :not-issued (:certificate report))))))
                    (is (= 4 (count (:verified-infrastructure-transition groups))))
                    (is (= {:lease-acquisition 2 :dispatch-acknowledgment 2}
                           (frequencies (map :maintenance (:verified-infrastructure-transition groups)))))
