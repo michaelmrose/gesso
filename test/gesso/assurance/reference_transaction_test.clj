@@ -362,6 +362,55 @@
       (is (not (contains? r :state)))
       (is (not (contains? r :committed?))))))
 
+(def ^:private vector-binding (journal-binding "vectors" "helper-vectors" :request/claim))
+(def ^:private vector-items [1 :claim/open "claim/open" false uuid-a])
+(def ^:private vector-row
+  (resolution/command-record vector-binding {:details {:items vector-items :empty []}} "t1"))
+(def ^:private vector-guards
+  (frame/formatted-prestate-assertions!
+   {:target-map {:outcome [:journal-slot "helper-vectors" :request/claim]}}
+   {} [vector-row]))
+(def ^:private vector-guard (last vector-guards))
+(def ^:private vector-cases
+  (let [restore (journal-put vector-row)
+        changed (fn [field v]
+                  (journal-put (assoc-in vector-row [:gesso.command/outcome :details field] v)))]
+    [[false vector-guards]
+     [true (into [restore] vector-guards)]
+     [false [(changed :items (assoc vector-items 0 2)) vector-guard put-other]]
+     [false [(changed :items (assoc vector-items 1 "claim/open")) vector-guard]]
+     [false [(changed :items (assoc vector-items 2 :claim/open)) vector-guard]]
+     [false [(changed :items (assoc vector-items 3 true)) vector-guard]]
+     [false [(changed :items (assoc vector-items 4 uuid-b)) vector-guard]]
+     [false [(changed :items (pop vector-items)) vector-guard]]
+     [false [(changed :items (conj vector-items 1)) vector-guard]]
+     [false [(changed :items [1 "claim/open" :claim/open false uuid-a]) vector-guard]]
+     [false [(changed :empty [1]) vector-guard]]
+     [true vector-guards]
+     [true [restore vector-guard]]]))
+
+(deftest independent-journal-vector-guards
+  (let [final (reduce (fn [state [expected ops]]
+                        (let [r (reference/execute state ops)]
+                          (is (= :predicted (:status r)) (pr-str r))
+                          (is (= expected (:committed? r)) (pr-str ops))
+                          (when-not expected (is (= state (:state r))))
+                          (:state r))) initial vector-cases)]
+    (is (= vector-row (get-in final [:gesso_commands "vectors"]))))
+  (let [vector-index (first (keep-indexed #(when (= vector-items %2) %1) vector-guard))]
+    (is (integer? vector-index))
+    (doseq [guard [(update vector-guard 0 str/replace "[1]" "[0]")
+                   (update vector-guard 0 str/replace "[1]" "[2]")
+                   (assoc vector-guard (inc vector-index) 42)
+                   (assoc vector-guard vector-index (assoc vector-items 0 2))
+                   (assoc vector-guard vector-index [nil])
+                   (assoc vector-guard vector-index [[1]])
+                   (pop vector-guard)]]
+      (let [r (reference/execute initial [["ASSERT FALSE"] guard])]
+        (is (= :unsupported (:status r)))
+        (is (not (contains? r :state)))
+        (is (not (contains? r :committed?)))))))
+
 (deftest unsupported-reference-input-does-not-predict
   (doseq [ops [[] [(table-count -1)] [(table-count 16385)]
                [["ASSERT ? = (SELECT COUNT(*) FROM gesso_refcard)" nil]]
@@ -453,7 +502,8 @@
                           (map second mapped-cases)
                           (map second nested-cases)
                           (map second slot-cases)
-                          (map second recursive-cases)))]
+                          (map second recursive-cases)
+                          (map second vector-cases)))]
         (when-let [ops (first cases)]
           (let [predicted (reference/execute state ops)
                 id (:tx-id (xt/submit-tx node ops))

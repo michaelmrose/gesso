@@ -4,7 +4,7 @@
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
   (:require [clojure.string :as str]))
 
-(def profile :selected-current-state-transaction-v8)
+(def profile :selected-current-state-transaction-v9)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -233,8 +233,8 @@
               (vals (get working :gesso_commands)))]
     (= expected (count (filter true? matches)))))
 
-;; Selected occupied journal guard: recursive map counts and scalar leaves.
-;; Vector element predicates are not part of this fragment yet.
+;; Selected occupied journal guard: recursive maps, scalar leaves and
+;; whole scalar vectors with complete indexed comparison triples.
 (def ^:private journal-value-pattern
   #"ASSERT 1 = \(SELECT COUNT\(\*\) FROM gesso_commands WHERE \(gesso\$command\$binding\)\.principal\.gesso\$choreo\$identity\$value = \? AND \(gesso\$command\$binding\)\.operation = \? AND (.+)\)")
 
@@ -263,6 +263,27 @@
         (recur parent (conj tail (journal-column! col)))
         (reject! :unsupported-reference-journal-path)))))
 
+(defn- scalar-triple? [pairs path v]
+  (and (leaf? v)
+       (= [(str path " = ?") v] (first pairs))
+       (= [(str "STR(" path ") = STR(?)") v] (second pairs))
+       (= [(str "STR(ARRAY[" path "]) = STR(ARRAY[?])") v]
+          (nth pairs 2 nil))
+       (= (equality-domain v) (equality-domain (second (first pairs)))
+          (equality-domain (second (second pairs)))
+          (equality-domain (second (nth pairs 2 nil))))))
+
+(defn- journal-vector-tail! [pairs path values]
+  ;; Require whole equality AND every one-based element triple, in order.
+  (when-not (and (nil? (meta values)) (<= (count values) 256)
+                 (every? leaf? values))
+    (reject! :unsupported-reference-journal-vector))
+  (reduce (fn [remaining [i v]]
+            (when-not (scalar-triple? remaining (str "(" path ")[" (inc i) "]") v)
+              (reject! :unsupported-reference-journal-vector-element))
+            (nthnext remaining 3))
+          (next pairs) (map-indexed vector values)))
+
 (defn- journal-checks! [clauses args]
   (loop [pairs (seq (map vector clauses args)) checks []]
     (if-let [[clause v] (first pairs)]
@@ -276,14 +297,14 @@
                 (recur (nnext pairs) (conj checks [:map-count k v])))
             (recur (next pairs) (conj checks [:map-count k v]))))
         (let [[_ path] (re-matches #"(.+) = \?" clause)]
-          (when-not (and path (leaf? v)
-                         (= [(str "STR(" path ") = STR(?)") v] (second pairs))
-                         (= [(str "STR(ARRAY[" path "]) = STR(ARRAY[?])") v]
-                            (nth pairs 2 nil))
-                         (= (equality-domain v) (equality-domain (second (second pairs)))
-                            (equality-domain (second (nth pairs 2 nil)))))
-            (reject! :unsupported-reference-journal-leaf))
-          (recur (nthnext pairs 3) (conj checks [:scalar (journal-guard-path! path) v]))))
+          (when-not path (reject! :unsupported-reference-journal-leaf))
+          (if (vector? v)
+            (recur (journal-vector-tail! pairs path v)
+                   (conj checks [:vector (journal-guard-path! path) v]))
+            (do (when-not (scalar-triple? pairs path v)
+                  (reject! :unsupported-reference-journal-leaf))
+                (recur (nthnext pairs 3)
+                       (conj checks [:scalar (journal-guard-path! path) v]))))))
       checks)))
 
 (defn- journal-value-assertion! [op [_ predicate]]
@@ -295,6 +316,20 @@
       (reject! :unsupported-reference-journal-value-assertion))
     {:kind :assert-journal-value :principal principal :operation operation
      :checks (journal-checks! clauses args)}))
+
+(defn- journal-vector-matches! [actual expected]
+  (when-not (vector? actual)
+    (reject! :unsupported-reference-journal-vector-domain))
+  ;; Check overlapping elements even when lengths differ. Only the
+  ;; tested keyword/string distinction may cross scalar domains.
+  (let [matches (mapv (fn [a b]
+                        (let [ad (equality-domain a) bd (equality-domain b)]
+                          (cond
+                            (= ad bd) (= a b)
+                            (= #{ad bd} #{:string :keyword}) false
+                            :else (reject! :unsupported-reference-journal-vector-domain))))
+                      actual expected)]
+    (and (= (count actual) (count expected)) (every? true? matches))))
 
 (defn- journal-value-matches! [working {:keys [principal operation checks]}]
   (let [matching (filterv (fn [row]
@@ -313,6 +348,8 @@
                                                     (if (map? actual)
                                                       (= expected (count actual))
                                                       (reject! :unsupported-reference-journal-map-domain))
+                                                    (= :vector kind)
+                                                    (journal-vector-matches! actual expected)
                                                     (= (equality-domain actual) (equality-domain expected))
                                                     (= actual expected)
                                                     (= #{(equality-domain actual) (equality-domain expected)}

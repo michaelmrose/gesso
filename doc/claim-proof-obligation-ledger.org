@@ -1968,3 +1968,26 @@ not vector-element predicate semantics, general SQL, temporal execution
 or a universal provider refinement theorem. No production assurance
 status changes and no CLM-R2 premise is retired. Full project, physical
 Claim, Chromium and independent proof gates were not rerun.
+
+* v2613 — model independent journal scalar-vector guards
+
+Recognize whole-vector equality only when followed by every expected
+one-based indexed scalar comparison triple in order, with matching
+bound operands. Empty vectors require no element clauses. Evaluate
+length, order and exact supported element equality against tentative
+journal state. Reject altered indexes, incomplete triples, inconsistent
+bindings, unsupported vector values and unsupported reached operand
+domains. Reference profile v9; history v19 unchanged.
+
+Final reference JVM namespace: 11 tests / 1610 assertions, zero failures
+or errors. Thirteen additional differential transactions use generated
+occupied-slot guards and nested scalar vectors, including empty vectors,
+changed integers, booleans and UUIDs, keyword/string distinctions,
+reordering, length changes and atomic rollback. Pure regressions reject
+altered guard forms before execution. A test-only missing delimiter was
+corrected before the passing run. No provider readback feeds predictions.
+
+This is finite empirical correspondence for selected journal vectors,
+not general SQL or universal provider refinement. No production assurance
+status changes and no CLM-R2 premise is retired. Full project, physical
+Claim, Chromium and independent proof gates were not rerun.
