@@ -69,30 +69,28 @@
         policy-admissions (atom [])
         preparations (semantics/build-prepared-admission! bound)
         checked-candidates (atom {})
-        ;; Independent diagnostic: acceptance writes have the same mapped
-        ;; document targets for either helper. Refusal writes only a journal
-        ;; row and therefore has no document-frame prefix. Keep the exact
-        ;; original footprint checker unchanged.
+        ;; Independently reconstruct the generated document prefix from
+        ;; each alternative's supplied prestate. Refusal guards the same
+        ;; mapped documents even though it writes only the command journal.
         base-ops! (fn [ops]
                     (let [evidence-op (peek ops)
-                          evidence (peek evidence-op)
-                          ops (if (= :gesso_transition_evidence (second evidence-op))
-                                (do (when-not (= ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" (:xt/id evidence)]
-                                                 (first ops))
-                                      (throw (ex-info "Incorrect evidence guard" {})))
-                                    (subvec ops 1 (dec (count ops))))
-                                ops)
-                          prefix (mapv tx/format-assertion
-                                       (frame/prestate-assertions!
-                                        (plan/check-target-mapping! (semantics/source "helper-1" :accept)
-                                                                    semantics/target-map)
-                                        (:document-rows @initial-state)))
-                          accepting? (some #(and (= :put-docs (first %)) (= :requests (second %))) ops)]
-                      (if accepting?
-                        (do (when-not (and (<= (count prefix) (count ops))
-                                           (= prefix (subvec ops 0 (count prefix))))
-                              (throw (ex-info "Incorrect observed Claim frame prefix" {})))
-                            (subvec ops (count prefix)))
+                          evidence (peek evidence-op)]
+                      (if (= :gesso_transition_evidence (second evidence-op))
+                        (let [_ (when-not (= ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" (:xt/id evidence)]
+                                             (first ops))
+                                  (throw (ex-info "Incorrect evidence guard" {})))
+                              ops (subvec ops 1 (dec (count ops)))
+                              accepting? (some #(and (= :put-docs (first %)) (= :requests (second %))) ops)
+                              prefix (mapv tx/format-assertion
+                                           (frame/prestate-assertions!
+                                            (plan/check-target-mapping!
+                                             (semantics/source "helper-1" (if accepting? :accept :refuse))
+                                             semantics/target-map)
+                                            (:document-rows (if accepting? @initial-state @recovery-state))))]
+                          (when-not (and (<= (count prefix) (count ops))
+                                         (= prefix (subvec ops 0 (count prefix))))
+                            (throw (ex-info "Incorrect observed Claim frame prefix" {})))
+                          (subvec ops (count prefix)))
                         ops)))
         execute-adapter xtdb/execute-tx!
         execute xtdb/execute-tx-from!
@@ -577,7 +575,7 @@
                    (is (every? #(= :exact-generated-prefix (:frame-prefix %)) (vals @checked-candidates)))
                    (doseq [{:keys [identity ops framed-ops]} @submissions]
                      (is (= ops (base-ops! framed-ops)))
-                     (is (= (if (= :accept (keyword (name (:alternative identity)))) 5 2)
+                     (is (= (if (= :accept (keyword (name (:alternative identity)))) 9 10)
                             (- (count framed-ops) (count ops)))))
                    (doseq [{:keys [identity]} expected]
                      (is (= (:state (if (= :accept (keyword (name (:alternative identity))))

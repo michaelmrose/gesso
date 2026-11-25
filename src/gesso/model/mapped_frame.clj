@@ -77,12 +77,14 @@
 
 (defn prestate-assertions!
   "Derive canonical atomic pre-write assertions for every mapped document
-   write target from a checked mapping and its supplied complete rows. An
+   target (including read-only and framed documents) from a checked mapping
+   and its supplied complete rows. An
    existing row requires equality of every non-ID field AND exact field
    count; an absent nullable target requires document absence. Only non-null
    scalar fields and canonical SQL column identities are supported here.
    The caller must have checked projection and complete row acquisition and
    must insert these assertions before any write in the same transaction.
+   Journal slots are not covered by this document prefix.
    This is restricted predicate lowering, not general SQL refinement,
    authenticated acquisition, or enforcement at the installed gateway."
   [mapping document-rows]
@@ -115,7 +117,10 @@
           (do
             (when required? (reject! :missing-required-frame-row))
             [(tx/assert-document-absent table id)]))))
-    (sort-by pr-str (filter #(= :document (first %)) (:write-targets mapping))))))
+    (sort-by pr-str (into #{} (keep (fn [[kind table id]]
+                                      (when (#{:document :nullable-document} kind)
+                                        [:document table id])))
+                          (vals (:target-map mapping)))))))
 
 (defn require-prestate-assertions!
   "Check that the exact lowered frame assertions occur in a supplied

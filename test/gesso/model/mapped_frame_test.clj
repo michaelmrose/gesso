@@ -81,3 +81,42 @@
       (is (= :committed (execute-result node candidate)))
       (is (= after (request-row)))
       (is (= assignment (assignment-row))))))
+
+(deftest read-only-mapped-documents-are-guarded-before-any-write
+  (let [mapping (plan/check-target-mapping!
+                 {:subject {:kind :operation :id :example/change :interface {:operation :example/change}}
+                  :state-types {:example/status {:type :keyword}
+                                :example/active {:type :boolean}
+                                :example/other {:type :string :nullable? true}}
+                  :input-types {} :guard {:readers #{:example/active}
+                                         :expression [:= [:read :example/active] [:literal true]]}
+                  :reads #{:example/active} :writes #{:example/status}
+                  :replacements {:example/status [:literal :claimed]}
+                  :frame #{:example/active :example/other}}
+                 {:example/status [:document :requests "r1" :status]
+                  :example/active [:document :memberships "m1" :active]
+                  :example/other [:nullable-document :assignments "a1" :helper]})
+        request {:xt/id "r1" :status :open}
+        member {:xt/id "m1" :active true :revision 0}
+        docs {:requests [request] :memberships [member] :assignments []}
+        prefix (mapv tx/format-assertion (frame/prestate-assertions! mapping docs))
+        after (assoc request :status :claimed)
+        candidate (conj prefix [:put-docs :requests after])]
+    (is (= #{[:document :requests "r1"]} (:write-targets mapping)))
+    (is (= 5 (count prefix)))
+    (is (= :missing-required-frame-row
+           (reason #(frame/prestate-assertions! mapping (assoc docs :memberships [])))))
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node [[:put-docs :requests request] [:put-docs :memberships member]])
+      (doseq [changed [(assoc member :active false) (assoc member :revision 1)]]
+        (xt/execute-tx node [[:put-docs :memberships changed]])
+        (is (= :assert-failed (execute-result node candidate)))
+        (is (= [request] (xt/q node ["SELECT * FROM requests"]))))
+      (xt/execute-tx node [[:put-docs :memberships member]
+                           [:put-docs :assignments {:xt/id "a1" :helper "p2"}]])
+      (is (= :assert-failed (execute-result node candidate)))
+      (is (= [request] (xt/q node ["SELECT * FROM requests"])))
+      (xt/execute-tx node [[:delete-docs :assignments "a1"]])
+      (is (= :committed (execute-result node candidate)))
+      (is (= [after] (xt/q node ["SELECT * FROM requests"])))
+      (is (= [member] (xt/q node ["SELECT * FROM memberships"]))))))
