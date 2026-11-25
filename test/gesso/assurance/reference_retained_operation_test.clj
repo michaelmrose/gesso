@@ -13,7 +13,7 @@
            (xtdb.api.log Log SourceMessage$FlushBlock)))
 
 (defn- no-match! [r]
-  (is (not-any? #(contains? r %) [:operation-correspondence :operation-message-id
+  (is (not-any? #(contains? r %) [:operation-correspondence :operation-message-id :operation-message-ids
                                  :payload-correspondence :payload-fingerprint
                                  :operations :tx-ops :message :bytes :processed-message-id]))
   (is (= :none (:authority r)))
@@ -183,4 +183,98 @@
           (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
           (check-retained! node ids)
           (check-processed-retained! node ids)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-history! [node ids]
+  (let [observe! #(coverage/observe-local-retained-history! node)
+        processed! #(coverage/observe-local-processed-retained-history! node)
+        compare! operation/compare-operation-bytes!
+        calls (atom 0)
+        r (with-redefs [operation/compare-operation-bytes!
+                        (fn [node bytes] (swap! calls inc) (compare! node bytes))]
+            (processed!))]
+    (is (= (count ids) @calls))
+    (is (= :observed (:status r)) (pr-str r))
+    (is (= coverage/local-processed-retained-history-profile (:processed-retained-history-profile r)))
+    (is (= coverage/retained-history-profile (:retained-history-profile r)))
+    (is (= ids (:operation-message-ids r) (:transaction-ids r)))
+    (is (= (if (seq ids) :matched :not-applicable) (:operation-correspondence r)))
+    (is (= :matched (:payload-correspondence r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= (:last-message-id r) (:processed-message-id r)))
+    (is (= (observe!) (dissoc r :processed-retained-history-profile :processed-profile :processed-message-id)))
+    (is (not-any? #(contains? r %) [:operation-message-id :operations :tx-ops :payload-fingerprint]))
+    (when (seq ids)
+      (reset! calls 0)
+      (with-redefs [operation/compare-operation-bytes!
+                    (fn [node bytes]
+                      (if (= (count ids) (swap! calls inc))
+                        {:status :mismatch :reason :operation-correspondence-mismatch}
+                        (compare! node bytes)))]
+        (let [r (processed!)]
+          (is (= :mismatch (:status r)))
+          (is (= (peek ids) (:message-id r)))
+          (is (= :retained-operation-not-matched (:reason r)))
+          (no-match! r)))
+      (let [sample (observe!)]
+        (doseq [bad [(assoc sample :operation-message-ids (pop ids))
+                     (assoc sample :operation-correspondence :not-applicable)
+                     (assoc sample :transaction-ids (vec (reverse ids))
+                                   :operation-message-ids (vec (reverse ids)))]]
+          (with-redefs [coverage/observe-local-retained-history! (constantly bad)]
+            (let [r (processed!)]
+              (is (= :unsupported (:status r)))
+              (is (= :invalid-processed-retained-history (:reason r)))
+              (no-match! r)))))
+      (let [frontier {:submitted (:last-message-id r) :processed -1 :ingestion-failed? false}]
+        (with-redefs-fn {#'coverage/read-local-frontier! (constantly frontier)}
+          (fn [] (let [r (processed!)]
+                   (is (= :source-processing-incomplete (:reason r)))
+                   (no-match! r)))))
+      (let [read! @#'coverage/read-local-payloads!
+            seen (atom 0)]
+        (with-redefs-fn {#'coverage/read-local-payloads!
+                        (fn [file frames]
+                          (let [sample (read! file frames)]
+                            (if (= 2 (swap! seen inc)) (pop sample) sample)))}
+          (fn [] (let [r (processed!)]
+                   (is (= :source-payload-changed-during-observation (:reason r)))
+                   (no-match! r)))))
+      (let [read! @#'coverage/read-local-payloads!]
+        (with-redefs-fn {#'coverage/read-local-payloads! (fn [file frames] (pop (read! file frames)))}
+          (fn [] (let [r (processed!)]
+                   (is (= :source-payload-coverage-gap (:reason r)))
+                   (no-match! r))))))
+    (is (= r (processed!)))))
+
+(deftest bounded-retained-operation-history
+  (let [root (Files/createTempDirectory "gesso-retained-history-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        put [:put-docs :foo {:xt/id 1 :name "a"}]]
+    (try
+      (let [ids (with-open [node (xtn/start-node config)]
+                  (let [database (db/primary-db node)
+                        ^Log log (.getSourceLog database)
+                        flush-id (.getMsgId (.appendMessageBlocking log (SourceMessage$FlushBlock. Long/MAX_VALUE)))
+                        _ (.awaitSourceBlocking database flush-id (Duration/ofSeconds 15))
+                        _ (check-history! node [])
+                        ids (mapv #(:tx-id (xt/submit-tx node %))
+                                  [[put] [["ASSERT TRUE"]] [put ["ASSERT ? IS NOT NULL" [[1 2] []]]]])]
+                    (.awaitSourceBlocking database (peek ids) (Duration/ofSeconds 15))
+                    (check-history! node ids)
+                    ids))]
+        (with-open [node (xtn/start-node config)]
+          (let [database (db/primary-db node)]
+            (.awaitSourceBlocking database (peek ids) (Duration/ofSeconds 15))
+            (check-history! node ids)
+            (let [bad-id (:tx-id (xt/submit-tx node [["ASSERT ? IS NULL" nil]]))]
+              (.awaitSourceBlocking database bad-id (Duration/ofSeconds 15))
+              (let [r (coverage/observe-local-processed-retained-history! node)]
+                (is (= :unsupported (:status r)))
+                (is (= bad-id (:message-id r)))
+                (is (= :retained-operation-not-matched (:reason r)))
+                (no-match! r))
+              (is (= :observed (:status (coverage/observe-local-processed-retained-operation! node (first ids)))))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

@@ -4276,3 +4276,26 @@ unsupported argument instead. No change to execution semantics or
 reference-domain admission. Full history operation correspondence,
 transaction outcomes, production wiring, certificate and CLM-R2 premise
 retirement remain open. Full project and formal gates were not rerun.
+
+* v2700 — compare every transaction in the bounded retained history
+
+Add whole-history local and processed-local operation correspondence
+profiles. Compare each framed transaction within the same envelope and
+stability observation; accumulate actual successful coordinates and
+require exact ordered equality with classified transaction identities.
+Reject cardinality gaps before traversing payloads. Maintenance retains
+envelope checks only; no transaction history reports :not-applicable.
+Any operation, envelope, byte or frontier failure discards partial
+matches. Preserve selected-transaction and earlier coverage behavior.
+
+Focused JVM: 65 tests / 4370 assertions, zero failures or errors across
+all eight prior regression namespaces. Real persistent maintenance-only,
+put-only, SQL-only and mixed history matches before and after reopening.
+Reject a late unsupported transaction, injected final mismatch, missing
+or reordered IDs, false not-applicable report, lagging frontier and
+truncated acquisition or reread. Earlier selected transaction still
+matches despite a later unsupported operation. Existing per-record and
+whole-log ceilings retained. XTDB shutdown cancellation logged; process
+exited zero. No execution outcomes, authenticated provenance, production
+admission, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.

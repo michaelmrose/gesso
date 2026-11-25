@@ -240,28 +240,40 @@
 
 (defn- compare-local-payloads [report frames bytes records node target]
   ;; Compare only after coordinates, order and cardinality have matched.
-  ;; The selected operation comparison uses the independently decoded
-  ;; envelope at the same coordinate, never a second retained-log lookup.
+  ;; Operation comparisons use the envelope at the same coordinate.
   (cond
     (not= :observed (:status report)) report
-    (and (some? target) (not (some #{target} (:transaction-ids report))))
+    (not= (count frames) (count bytes) (count records))
+    (local-result :unavailable :source-payload-coverage-gap)
+    (and (some? target) (not= :all target) (not (some #{target} (:transaction-ids report))))
     (assoc (local-result :unsupported :retained-transaction-not-framed) :message-id target)
     :else
-    (or (some (fn [[[offset _ _] bytes ^Log$Record record]]
-                (let [decoded (payload/decode-payload bytes)]
-                  (if-not (= :decoded (:status decoded))
-                    (assoc (local-result :unsupported :unsupported-source-payload)
-                           :message-id offset :decode-reason (:reason decoded))
-                    (if-let [field (payload-mismatch (:message decoded) (.getMessage record))]
-                      (assoc (local-result :mismatch :source-payload-mismatch)
-                             :message-id offset :field field)
-                      (when (= target offset)
-                        (compare-selected-operation node offset (:message decoded)))))))
-              (map vector frames bytes records))
-        (cond-> (assoc report :payload-correspondence :matched)
-          (some? target) (assoc :operation-correspondence :matched
-                                :operation-message-id target
-                                :operation-profile operation/profile)))))
+    (loop [samples (seq (map vector frames bytes records)) matched []]
+      (if-let [[[offset _ _] body ^Log$Record record] (first samples)]
+        (let [decoded (payload/decode-payload body)
+              message (:message decoded)]
+          (if-not (= :decoded (:status decoded))
+            (assoc (local-result :unsupported :unsupported-source-payload)
+                   :message-id offset :decode-reason (:reason decoded))
+            (if-let [field (payload-mismatch message (.getMessage record))]
+              (assoc (local-result :mismatch :source-payload-mismatch)
+                     :message-id offset :field field)
+              (if (or (= target offset) (and (= :all target) (= :transaction (:kind message))))
+                (if-let [failure (compare-selected-operation node offset message)]
+                  failure
+                  (recur (next samples) (conj matched offset)))
+                (recur (next samples) matched)))))
+        (let [report (assoc report :payload-correspondence :matched)]
+          (cond
+            (= :all target)
+            (if (= matched (:transaction-ids report))
+              (assoc report :operation-correspondence (if (seq matched) :matched :not-applicable)
+                     :operation-message-ids matched :operation-profile operation/profile)
+              (local-result :unavailable :retained-operation-coverage-gap))
+            (some? target)
+            (assoc report :operation-correspondence :matched
+                   :operation-message-id target :operation-profile operation/profile)
+            :else report))))))
 
 (def payload-binding-profile :xtdb-2.2.0-beta1/selected-local-payload-binding-v1)
 
@@ -436,4 +448,48 @@
     (assoc sample :processed-retained-operation-profile local-processed-retained-operation-profile
            :processed-profile local-processed-profile
            :retained-operation-profile retained-operation-profile
+           :payload-profile local-payload-profile :decoder-profile payload/profile)))
+
+(def retained-history-profile
+  :xtdb-2.2.0-beta1/selected-retained-operation-history-v1)
+
+(defn observe-local-retained-history!
+  "Compare every framed transaction's operations within one bounded local
+   log observation. Maintenance receives envelope checks only. Empty
+   transaction history has no operation obligation. No partial matches,
+   execution, atomic snapshot, or certification."
+  [node]
+  (assoc (observe-local* node true false :all)
+         :retained-history-profile retained-history-profile
+         :payload-profile local-payload-profile :decoder-profile payload/profile))
+
+(def local-processed-retained-history-profile
+  :xtdb-2.2.0-beta1/selected-local-processed-retained-history-v1)
+
+(defn observe-local-processed-retained-history!
+  "Bracket complete selected retained operation history correspondence
+   with stable fully processed source frontiers. No execution outcome or
+   independent watcher semantics."
+  [node]
+  (let [sample (observe-local-processed* node observe-local-retained-history!)
+        ids (:transaction-ids sample)
+        sample (if (and (= :observed (:status sample))
+                        (not (and (= local-profile (:profile sample))
+                                  (= local-processed-profile (:processed-profile sample))
+                                  (= retained-history-profile (:retained-history-profile sample))
+                                  (= :matched (:payload-correspondence sample))
+                                  (= operation/profile (:operation-profile sample))
+                                  (vector? ids)
+                                  (= ids (:operation-message-ids sample))
+                                  (= (if (seq ids) :matched :not-applicable) (:operation-correspondence sample))
+                                  (= (count ids) (count (distinct ids)))
+                                  (= ids (filterv (set ids) (:record-offsets sample)))
+                                  (every? #(and (integer? %) (<= 0 % (:processed-message-id sample))) ids)
+                                  (= :none (:authority sample))
+                                  (= :not-issued (:certificate sample)))))
+                 (local-result :unsupported :invalid-processed-retained-history)
+                 sample)]
+    (assoc sample :processed-retained-history-profile local-processed-retained-history-profile
+           :processed-profile local-processed-profile
+           :retained-history-profile retained-history-profile
            :payload-profile local-payload-profile :decoder-profile payload/profile)))
