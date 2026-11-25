@@ -10,14 +10,15 @@
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
-  (:import (java.time Duration)
+  (:import (java.time Duration Instant ZoneId ZonedDateTime)
+           (java.util Arrays HexFormat)
            (org.apache.arrow.memory BufferAllocator)
            (xtdb TaggedValue)
            (xtdb.api.log Log Log$Record SourceMessage$Tx)
            (xtdb.api.query IKeyFn$KeyFn)
            (xtdb.arrow Relation VectorReader)
            (xtdb.database Database)
-           (xtdb.util MsgIdUtil)))
+           (xtdb.util Iid MsgIdUtil)))
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported source log observation." {:reason reason})))
@@ -51,10 +52,48 @@
                               (decode-value! (.getObject (.vectorFor rel column) 0
                                                          IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))) columns)))))))
 
+(defn- document-value! [v]
+  (cond
+    (or (map? v) (instance? java.util.Map v))
+    (into {} (map (fn [[k child]]
+                    (when-not (keyword? k) (reject! :unsupported-document-key))
+                    [k (document-value! child)])) v)
+    (instance? java.util.List v) (mapv document-value! v)
+    (instance? ZonedDateTime v) v
+    (instance? Instant v) v
+    :else (decode-value! v)))
+
+(defn- iid-hex [id]
+  (.formatHex (HexFormat/of) (Iid/getAsIid id)))
+
+(defn- put-documents! [payload]
+  ;; The logged table is a tagged union leg, not the caller's table alias.
+  ;; Current API writes valid-time options into individual document rows;
+  ;; retain outer bounds too if present instead of dropping them.
+  (let [{:keys [iids documents]} payload]
+    (when-not (and (every? #{:iids :documents :xt/valid-from :xt/valid-to} (keys payload))
+                   (instance? TaggedValue documents) (instance? java.util.List iids))
+      (reject! :unsupported-put-docs-payload))
+    (let [table (.getTag ^TaggedValue documents)
+          raw (.getValue ^TaggedValue documents)]
+      (when-not (and (qualified-keyword? table) (instance? java.util.List raw)
+                     (seq raw) (= (count raw) (count iids)))
+        (reject! :unsupported-document-relation))
+      (let [docs (mapv document-value! raw)]
+        (doseq [[doc iid] (map vector docs iids)]
+          (when-not (and (map? doc) (contains? doc :xt/id)
+                         (bytes? iid) (= 16 (alength ^bytes iid))
+                         (Arrays/equals ^bytes iid ^bytes (Iid/getAsIid (:xt/id doc))))
+            (reject! :document-iid-mismatch)))
+        {:kind :put-docs :table table :documents docs
+         :iids (mapv #(.formatHex (HexFormat/of) ^bytes %) iids)
+         :bounds (document-value! (select-keys payload [:xt/valid-from :xt/valid-to]))}))))
+
 (defn observe-source-message!
   "Read one retained source message at an exact epoch-qualified tx id.
-   Recover SQL text and single-row typed parameters; record non-SQL legs
-   only. This does NOT attest commit, writer identity or execution."
+   Recover SQL text, single-row typed parameters, and supported decoded
+   document puts. Reject unsupported legs. This does NOT attest commit,
+   writer identity, execution, or byte-identical caller input."
   [node tx-id]
   (let [^Database database (db/primary-db node)
         ^Log log (.getSourceLog database)]
@@ -80,14 +119,17 @@
                                       (mapv (fn [row]
                                               (let [^TaggedValue op (:tx-ops row)]
                                                 (when-not (instance? TaggedValue op) (reject! :unexpected-operation))
-                                                (if (= :sql (.getTag op))
-                                                  (let [{:keys [query args]} (.getValue op)]
-                                                    (when-not (string? query) (reject! :invalid-sql))
-                                                    {:kind :sql :query query :args (sql-arguments! al args)})
-                                                  {:kind (.getTag op)})))
+                                                (case (.getTag op)
+                                                  :sql (let [{:keys [query args] :as payload} (.getValue op)]
+                                                         (when-not (and (string? query)
+                                                                        (every? #{:query :args} (keys payload)))
+                                                           (reject! :invalid-sql))
+                                                         {:kind :sql :query query :args (sql-arguments! al args)})
+                                                  :put-docs (put-documents! (.getValue op))
+                                                  (reject! :unsupported-operation-kind))))
                                             (.toMaps rel IKeyFn$KeyFn/KEBAB_CASE_KEYWORD))))]
                 {:status :source-message-observed :tx-id tx-id :operations ops
-                 :scope :retained-primary-source-log-sql-and-operation-kinds
+                 :scope :retained-primary-source-log-decoded-sql-and-document-puts
                  :authority :none :certificate :not-issued}))))))))
 
 (defn- expected-log-sql! [[sql & args]]
@@ -99,6 +141,10 @@
     (when-not (= @n (count args)) (reject! :unsupported-placeholder-shape))
     {:kind :sql :query query :args (vec args)}))
 
+(defn- expected-put [table docs]
+  {:kind :put-docs :table table :documents docs
+   :iids (mapv #(iid-hex (:xt/id %)) docs) :bounds {}})
+
 (deftest retained-source-log-distinguishes-guarded-unguarded-and-aborted-transactions
   (let [lookup #(deref (ns-resolve 'gesso.model.mapped-projection-test %))
         original (lookup 'source) targets (lookup 'targets) docs (lookup 'rows)
@@ -106,7 +152,8 @@
         journal [((lookup 'record) "old" "p2" {:values [1 :open "open" true uuid]})]
         prefix (frame/formatted-prestate-assertions! (plan/check-target-mapping! original targets) docs journal)
         expected (mapv expected-log-sql! prefix)
-        marker [:put-docs :guard_probe {:xt/id "probe" :written true}]]
+        marker [:put-docs :guard_probe {:xt/id "probe" :written true}]
+        put (expected-put :public/guard_probe [(peek marker)])]
     (with-open [node (xtn/start-node {})]
       (xt/execute-tx node [[:put-docs :requests (first (:requests docs))]
                            [:put-docs :gesso_commands (first journal)]])
@@ -125,15 +172,48 @@
           (is (= (:tx-id tx) (:tx-id observed)))
           (is (= :none (:authority observed)))
           (is (= :not-issued (:certificate observed))))
-        (is (= (conj expected {:kind :put-docs}) (:operations g)))
-        (is (= [{:kind :put-docs}] (:operations u)))
-        (is (= [{:kind :sql :query "ASSERT FALSE" :args []} {:kind :put-docs}] (:operations a)))
+        (is (= (conj expected put) (:operations g)))
+        (is (= [put] (:operations u)))
+        (is (= [{:kind :sql :query "ASSERT FALSE" :args []} put] (:operations a)))
         (is (true? (committed? (:tx-id guarded))))
         (is (true? (committed? (:tx-id unguarded))))
         (is (false? (committed? (:tx-id aborted))))
         (is (= :unavailable (:status (observe-source-message! node (+ 1000 (:tx-id aborted))))))
         (is (= :unsupported-log-identity
                (:reason (observe-source-message! node (MsgIdUtil/offsetToMsgId 1 0)))))))))
+
+(deftest retained-document-puts-preserve-decoded-envelope-and-temporal-bounds
+  (let [lookup #(deref (ns-resolve 'gesso.model.mapped-projection-test %))
+        uuid (java.util.UUID/fromString "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        command ((lookup 'record) "c1" "p1" {:nested {:value :open :empty {} :list [1 "open" uuid]}})
+        start (Instant/parse "2020-01-01T00:00:00Z")
+        end (Instant/parse "2021-01-01T00:00:00Z")
+        doc {:xt/id "a" :some/ns-key {:value :open :empty {}}}
+        other (assoc doc :xt/id "b")
+        with-bounds #(assoc % :xt/valid-from (.atZone start (ZoneId/of "UTC"))
+                              :xt/valid-to (.atZone end (ZoneId/of "UTC")))
+        puts [[:put-docs {:into :probe :valid-from start :valid-to end} doc other]
+              [:put-docs :gesso_commands command]]
+        expected [(expected-put :public/probe (mapv with-bounds [doc other]))
+                  (expected-put :public/gesso_commands [command])]]
+    (with-open [node (xtn/start-node {})]
+      (let [observe (fn [ops] (observe-source-message! node (:tx-id (xt/execute-tx node ops))))
+            baseline (observe puts)]
+        (is (= :source-message-observed (:status baseline)))
+        (is (= expected (:operations baseline)))
+        (doseq [changed [(assoc-in puts [0 2 :some/ns-key :value] "open")
+                         (assoc-in puts [0 2 :xt/id] "c")
+                         (assoc-in puts [0 1 :into] :other_probe)
+                         (assoc-in puts [0 1 :valid-to] (Instant/parse "2022-01-01T00:00:00Z"))
+                         (assoc puts 0 (assoc (first puts) 2 other 3 doc))
+                         (assoc-in puts [1 2 :gesso.command/outcome :result] :rejected)
+                         (vec (reverse puts))]]
+          (is (not= expected (:operations (observe changed)))))
+        ;; Arrow map decoding omits explicit null fields. This observation
+        ;; describes the provider's visible decoded rows, not caller bytes.
+        (is (= expected (:operations (observe (assoc-in puts [0 2 :nullable] nil)))))
+        (is (= :none (:authority baseline)))
+        (is (= :not-issued (:certificate baseline)))))))
 
 (defn -main [& _]
   (let [{:keys [fail error]} (run-tests 'gesso.assurance.xtdb-source-log-pilot)]

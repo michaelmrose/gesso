@@ -748,3 +748,30 @@ identity, complete executed envelope, SQL refinement or certificate is
 established. Full DML decoding, transaction-outcome correlation and a
 trusted retention/acquisition boundary are needed before using this
 observation as historical assurance evidence. No CLM-R2 premise is retired.
+
+* v2572 — decoded document puts in retained source-log envelopes
+
+Extend the opt-in source-log pilot to decode the ordered put-docs union
+legs, including the provider's qualified table tag, complete supported
+visible document values, document order and logged internal identifiers.
+Check each 16-byte iid against the installed provider's iid function for
+its decoded document id. Preserve nested maps, vectors, scalar values,
+UUIDs and decoded temporal values; retain the operation-level valid-time
+bounds if present. The installed API expands explicit put valid-time
+options into individual document rows. The regression compares those
+logged bounds as zoned timestamps without discarding their zone.
+Unsupported operation legs and unsupported decoded value types refuse
+rather than being represented by operation kind alone.
+
+The physical regressions compare the entire supported SQL/put sequence
+and distinguish changes to table, document identity, nested value type,
+valid-time end, row ordering, journal outcome and operation ordering.
+An explicit null field is omitted by the provider's decoded Arrow map;
+therefore the observation describes decoded visible entries, not exact
+caller bytes, arbitrary SQL normalization or the full physical Arrow
+schema. IID verification uses the provider function, not an independent
+proof of its encoding. The log's transaction metadata, other operation
+families, retention and trusted acquisition remain separate obligations.
+The full Claim envelope has not yet been qualified with this decoder.
+Production history and checkpoint semantics remain unchanged. No CLM-R2
+premise or certification authority is retired.
