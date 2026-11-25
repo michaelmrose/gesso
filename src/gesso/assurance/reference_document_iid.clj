@@ -15,3 +15,15 @@
   (let [input (.getBytes (str "i" (Long/toString (long id))) StandardCharsets/UTF_8)
         digest (.digest (MessageDigest/getInstance "SHA-256") input)]
     (.formatHex (HexFormat/of) digest 0 16)))
+
+(defn string-iid
+  "Derive the selected string IID from UTF-8 of s followed by the exact
+   string. No normalization or replacement of malformed UTF-16. This
+   diagnostic domain is bounded and does not imply reference admission."
+  [id]
+  (require! (and (string? id) (<= (count id) 4096)
+                 (.canEncode (.newEncoder StandardCharsets/UTF_8) ^CharSequence id))
+            :unsupported-reference-string-id)
+  (let [input (.getBytes (str "s" id) StandardCharsets/UTF_8)
+        digest (.digest (MessageDigest/getInstance "SHA-256") input)]
+    (.formatHex (HexFormat/of) digest 0 16)))

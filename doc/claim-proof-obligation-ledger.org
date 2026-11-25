@@ -3734,3 +3734,29 @@ verification, nullable actual puts, explicit bounds, multiple groups and
 aggregate document budgets remain open. No production wiring, certificate
 or CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2679 — independently verify retained string document IIDs
+
+Inspect the installed XTDB IID string encoding and independently derive
+lowercase hex of the first 16 SHA-256 bytes over UTF-8 s followed by the
+exact string. Bound the selected diagnostic domain to 4096 UTF-16 code
+units and reject malformed surrogate sequences before encoding. Preserve
+empty strings, whitespace, embedded NUL and distinct Unicode spellings
+without normalization. This is not reference transaction admission.
+Require every retained IID to match its string document ID; preserve the
+integer-only and unchecked envelope profiles.
+
+Focused JVM: 33 tests / 1958 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. Nine
+known-answer vectors computed independently with Python hashlib match
+persistent retained puts and provider observations before and after
+reopening. Reject mutated IDs, IIDs, swapped IIDs, malformed UTF-8,
+truncation and other ID families without partial groups. Consistently
+modified pairs remain valid correspondence, not authenticity evidence.
+XTDB logged shutdown cancellation; the test process exited zero.
+
+Selected string-IID put profile v1. Keyword and UUID IID verification,
+nullable actual puts, explicit bounds, multiple groups and aggregate
+document budgets remain open. No production wiring, certificate or
+CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.
