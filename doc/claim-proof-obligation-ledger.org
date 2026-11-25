@@ -4743,3 +4743,27 @@ still normalizes attempted operations in isolation, not against running
 state. Combined provider acquisition/comparison remains open. No production
 admission, certificate or CLM-R2 premise retirement. Other regression
 namespaces and independent formal gates were not rerun.
+
+* v2719 — compare clock-aware retained execution end to end
+
+Compose the qualified clocked history sample with independent clocked
+replay and bounded all-time provider observations. Compare exact ledger
+identities, assigned times, boolean outcomes, attempted operation envelopes
+and selected historical rectangles. Also compare actual error codes and
+failed assertion indices, distinguishing a pre-execution clock rejection
+from an assertion abort. Reread ledger and outcome classifications and
+require identical qualified retained samples before and after. Return only
+diagnostic results; preserve existing strict and equal-time APIs.
+
+Focused JVM: 37 tests / 3549 assertions, zero failures or errors in two
+batches: replay input 7 / 644; temporal, provider and retained operation
+30 / 2905. Persistent clocked history matches before and after reopening.
+A separate real fixture distinguishes an older clock-rejected attempt
+containing a false assertion from an admitted assertion abort. Reject
+wrong error kind, assertion index, forged clock decision and changed
+outcome or retained sample. Initial run exposed the unqualified provider
+error code :invalid-system-time rather than :xtdb/invalid-system-time;
+corrected the exact expectation and reran. State-dependent equal-time
+assertions remain unqualified. Quiescence and authenticated provenance
+remain premises. No production admission, certificate or CLM-R2 premise
+retirement. Other regression namespaces and formal gates not rerun.

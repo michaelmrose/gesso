@@ -345,6 +345,44 @@
           #(fail! (observe!) :source-frontier-changed-during-observation))))
     (is (= sample (observe!)))))
 
+(defn- check-clocked-execution! [node]
+  (let [compare! #(reference/compare-local-processed-retained-clocked-execution! node #{:probe})
+        report (compare!)
+        observe! coverage/observe-local-processed-retained-clocked-inputs!
+        sample (observe! node)
+        read! @#'reference/read-clocked-outcomes!
+        fail! (fn [r status reason]
+                (is (= status (:status r)) (pr-str r))
+                (is (= reason (:reason r)))
+                (is (not-any? #(contains? r %) [:checks :clock-correspondence :outcome-correspondence
+                                                :clocked-replay-inputs :payload-fingerprint])))]
+    (is (= :matched (:status report)) (pr-str report))
+    (is (= reference/retained-clocked-execution-profile (:retained-clocked-execution-profile report)))
+    (is (= :matched (:clock-correspondence report) (:outcome-correspondence report)))
+    (is (= {:ledger true :retained-envelopes true :selected-history true :outcome-kind true} (:checks report)))
+    (is (= 4 (:transaction-count report)))
+    (is (= :none (:authority report)))
+    (is (= :not-issued (:certificate report)))
+    (is (= :not-established (:provider-refinement report)))
+    (is (not-any? #(contains? report %) [:clocked-replay-inputs :payload-fingerprint :history :rectangles]))
+    (with-redefs-fn {#'reference/read-clocked-outcomes!
+                     (fn [node ids] (assoc-in (read! node ids) [2 :error-code] :xtdb/assert-failed))}
+      #(fail! (compare!) :mismatch :clocked-outcome-mismatch))
+    (let [seen (atom 0)]
+      (with-redefs-fn {#'reference/read-clocked-outcomes!
+                       (fn [node ids] (cond-> (read! node ids) (= 2 (swap! seen inc))
+                                        (assoc-in [2 :error-code] :xtdb/assert-failed)))}
+        #(fail! (compare!) :unavailable :ledger-changed-during-observation)))
+    (let [seen (atom 0)]
+      (with-redefs [coverage/observe-local-processed-retained-clocked-inputs!
+                    (fn [_] (cond-> sample (= 2 (swap! seen inc))
+                              (assoc-in [:clocked-replay-inputs 0 :transaction :ops 0 2 :value] 99)))]
+        (fail! (compare!) :unavailable :source-log-changed-during-comparison)))
+    (with-redefs [coverage/observe-local-processed-retained-clocked-inputs!
+                  (constantly (assoc-in sample [:clocked-replay-inputs 2 :clock :decision] :execute))]
+      (fail! (compare!) :unsupported :unsupported-clocked-expectation))
+    (is (= report (compare!)))))
+
 (defn- check-clock-decisions! [node ids t]
   (let [log (.getSourceLog (db/primary-db node))
         frames (with-open [file (RandomAccessFile. (.toFile (#'coverage/local-log-path log)) "r")]
@@ -362,6 +400,7 @@
         times [t t (.plusNanos t 1000) (.plusNanos t 2000)]
         ledger (#'reference/read-ledger! node)]
     (check-clocked-history! node clocked)
+    (check-clocked-execution! node)
     (let [r (temporal/replay-clocked (:clocked-replay-inputs (coverage/observe-local-processed-retained-clocked-inputs! node)))
           history (:history r)
           rejected (nth history 2)]
@@ -504,3 +543,36 @@
         (is (= :unsupported (:status r)))
         (is (= reason (:reason r)))
         (is (not-any? #(contains? r %) [:system-time :decision :time-source]))))))
+
+(deftest clocked-execution-distinguishes-rejection-from-assertion-abort
+  (let [root (Files/createTempDirectory "gesso-clocked-outcomes-" (make-array FileAttribute 0))
+        clock (java.time.Clock/fixed (Instant/parse "2026-01-01T00:00:00Z") (ZoneId/of "UTC"))
+        config {:log [:local {:path (str root "/log") :instant-src clock}]
+                :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-02T00:00:00Z")
+        put (fn [v] [:put-docs :probe {:xt/id "a" :value v}])]
+    (try
+      (with-open [node (xtn/start-node config)]
+        (let [ids (mapv (fn [[ops time]]
+                          (:tx-id (xt/submit-tx node ops (cond-> {} time (assoc :system-time time)))))
+                        [[[(put 1)] t]
+                         [[(put 2) ["ASSERT FALSE"]] (.minusSeconds t 1)]
+                         [[(put 3) ["ASSERT FALSE"]] nil]])
+              _ (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
+              compare! #(reference/compare-local-processed-retained-clocked-execution! node #{:probe})
+              report (compare!)
+              read! @#'reference/read-clocked-outcomes!]
+          (is (= :matched (:status report)) (pr-str report))
+          (is (= [{:committed? true} {:committed? false :error-code :invalid-system-time}
+                  {:committed? false :error-code :xtdb/assert-failed :failed-assertion-index 1}]
+                 (read! node ids)))
+          (doseq [change [#(assoc-in % [1 :error-code] :xtdb/assert-failed)
+                          #(assoc-in % [2 :error-code] :invalid-system-time)
+                          #(assoc-in % [2 :failed-assertion-index] 0)]]
+            (with-redefs-fn {#'reference/read-clocked-outcomes! (fn [node ids] (change (read! node ids)))}
+              (fn [] (let [r (compare!)]
+                       (is (= :mismatch (:status r)))
+                       (is (= :clocked-outcome-mismatch (:reason r)))
+                       (is (not (contains? r :clock-correspondence)))))))
+          (is (= report (compare!)))))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

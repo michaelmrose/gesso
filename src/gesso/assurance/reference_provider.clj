@@ -444,3 +444,125 @@
                       :outcome-correspondence :matched :replay-input-profile replay-input/profile
                       :operation-profile operation/profile
                       :processed-retained-replay-inputs-profile coverage/processed-retained-replay-inputs-profile)))))))
+
+(def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v1)
+
+(defn- observe-clocked-history! [node]
+  (let [sample (coverage/observe-local-processed-retained-clocked-inputs! node)
+        inputs (:clocked-replay-inputs sample)]
+    (cond
+      (not= :observed (:status sample)) sample
+      (not (and (valid-bound-history? sample)
+                (= coverage/processed-retained-clocked-inputs-profile (:processed-retained-clocked-inputs-profile sample))
+                (= replay-input/clocked-input-profile (:clocked-replay-input-profile sample))
+                (vector? inputs) (<= (count inputs) 256)
+                (= (:transaction-ids sample) (mapv #(get-in % [:transaction :tx-id]) inputs))))
+      {:status :unavailable :reason :invalid-processed-retained-clocked-binding}
+      (empty? inputs) {:status :unsupported :reason :empty-retained-clocked-history}
+      :else sample)))
+
+(defn- predicted-clocked-outcomes [history]
+  (mapv (fn [entry]
+          (cond
+            (:committed? entry) {:committed? true}
+            (= :invalid-system-time (:rejection entry))
+            {:committed? false :error-code :invalid-system-time}
+            :else {:committed? false :error-code :xtdb/assert-failed
+                   :failed-assertion-index (:failed-assertion-index entry)})) history))
+
+(defn- read-clocked-outcomes! [node ids]
+  (mapv (fn [id]
+          (let [rows (xt/q node ["SELECT committed, error FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ? LIMIT 2" id])
+                {:keys [committed error]} (first rows)
+                data (ex-data error)]
+            (when-not (and (= 1 (count rows)) (boolean? committed)
+                           (if committed (nil? error) (keyword? (:xtdb.error/code data))))
+              (observation-reject! :invalid-clocked-outcome-row))
+            (cond-> {:committed? committed}
+              (not committed) (assoc :error-code (:xtdb.error/code data))
+              (= :xtdb/assert-failed (:xtdb.error/code data))
+              (assoc :failed-assertion-index (:tx-op-idx data))))) ids))
+
+(defn- compare-clocked-observations! [node inputs tables]
+  (let [prediction (temporal/replay-clocked inputs)
+        history (:history prediction)
+        transactions (mapv :transaction inputs)
+        ids (mapv :tx-id transactions)]
+    (if-not (and (= :predicted (:status prediction)) (= temporal/clocked-profile (:profile prediction))
+                 (= :none (:authority prediction)) (= :not-issued (:certificate prediction))
+                 (= ids (mapv :tx-id history))
+                 (set? tables) (<= 1 (count tables) 128) (every? table-name? tables)
+                 (every? tables (map :table (:rectangles prediction)))
+                 (every? tables (for [tx transactions op (:ops tx) :when (= :put-docs (first op))]
+                                  (if (map? (second op)) (:into (second op)) (second op)))))
+      (acquisition-result :unsupported :unsupported-clocked-expectation)
+      (try
+        (let [ledger (read-ledger! node)]
+          (if-not (= ledger (mapv #(select-keys % [:tx-id :system-time :committed?]) history))
+            (acquisition-result :mismatch :ledger-sequence-mismatch)
+            (let [outcomes (read-clocked-outcomes! node ids)
+                  envelopes (mapv #(read-envelope! node %1 %2 %3) ledger transactions history)
+                  rectangles (read-rectangles! node tables)
+                  final-outcomes (read-clocked-outcomes! node ids)
+                  final-ledger (read-ledger! node)]
+              (cond
+                (or (not= ledger final-ledger) (not= outcomes final-outcomes))
+                (acquisition-result :unavailable :ledger-changed-during-observation)
+                (not= (predicted-clocked-outcomes history) outcomes)
+                (acquisition-result :mismatch :clocked-outcome-mismatch)
+                (not= (canonical-rectangles (:rectangles prediction)) (canonical-rectangles rectangles))
+                (acquisition-result :mismatch :selected-history-mismatch)
+                (some #(= :mismatch (:status %)) envelopes)
+                (acquisition-result :mismatch :retained-envelope-mismatch)
+                (some #(= :unavailable (:status %)) envelopes)
+                (acquisition-result :unavailable :retained-envelope-unavailable)
+                (not (and (= (count transactions) (count envelopes))
+                          (every? (fn [[tx row e]]
+                                    (and (= :matched (:status e)) (= (expected-envelope-profile tx) (:profile e))
+                                         (= envelope/diagnostic-outcome-profile (:outcome-observation-profile e))
+                                         (= :none (:authority e)) (= :not-issued (:certificate e))
+                                         (= (:tx-id row) (:tx-id e)) (= (:committed? row) (:committed? e))))
+                                  (map vector transactions ledger envelopes))))
+                (acquisition-result :unsupported :unqualified-clocked-envelope)
+                :else (assoc base :status :matched :acquisition-profile acquisition-profile
+                             :checks {:ledger true :retained-envelopes true :selected-history true :outcome-kind true}
+                             :transaction-count (count inputs))))))
+        (catch InterruptedException e
+          (.interrupt (Thread/currentThread))
+          (throw e))
+        (catch clojure.lang.ExceptionInfo e
+          (if (::observation-rejected (ex-data e))
+            (acquisition-result :unsupported (:reason (ex-data e)))
+            (acquisition-result :unavailable :observation-failed)))
+        (catch Exception _ (acquisition-result :unavailable :observation-failed))))))
+
+(defn compare-local-processed-retained-clocked-execution!
+  "Independently predict clock-qualified selected retained history and compare
+   exact ledger, rejection/abort classification, attempted operation envelopes
+   and selected all-time rectangles. Bracket with identical qualified samples.
+   Quiescence remains a premise; no raw samples, authentication or certificate."
+  [node tables]
+  (let [tag #(assoc % :retained-clocked-execution-profile retained-clocked-execution-profile)
+        fail (fn [status reason]
+               (tag (acquisition-result (if (#{:unsupported :unavailable :mismatch} status) status :unavailable)
+                                        (if (keyword? reason) reason :clocked-execution-comparison-failed))))
+        before (observe-clocked-history! node)]
+    (if-not (= :observed (:status before))
+      (fail (:status before) (:reason before))
+      (let [inputs (:clocked-replay-inputs before)
+            r (compare-clocked-observations! node inputs tables)
+            after (observe-clocked-history! node)]
+        (cond
+          (not= :observed (:status after)) (fail (:status after) (:reason after))
+          (not= before after) (fail :unavailable :source-log-changed-during-comparison)
+          (not= :matched (:status r)) (fail (:status r) (:reason r))
+          (not (and (= profile (:profile r)) (= acquisition-profile (:acquisition-profile r))
+                    (= {:ledger true :retained-envelopes true :selected-history true :outcome-kind true} (:checks r))
+                    (= (count inputs) (:transaction-count r)) (= :none (:authority r))
+                    (= :not-issued (:certificate r)) (= :not-established (:provider-refinement r))))
+          (fail :unsupported :invalid-clocked-execution-comparison)
+          :else (tag (assoc r :source-coverage :matched :operation-correspondence :matched
+                            :payload-correspondence :matched :processed-frontier :matched
+                            :outcome-correspondence :matched :clock-correspondence :matched
+                            :temporal-profile temporal/clocked-profile
+                            :processed-retained-clocked-inputs-profile coverage/processed-retained-clocked-inputs-profile)))))))
