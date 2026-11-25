@@ -3380,3 +3380,28 @@ recursive and nullable composites, untyped empty lists, document puts
 and aggregate reference document budgets remain open. No production
 wiring, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2664 — decode selected heterogeneous Arrow lists
+
+Qualify the installed dense union list child with implicit zero-based
+leg IDs and distinct named int64, UTF-8, Boolean, keyword and UUID
+scalar legs. Independently validate each child node and buffer extent,
+require sequential per-leg indexes and exact consumption of every
+child entry, and preserve element order and the existing list bounds.
+Retain homogeneous temporal lists and all earlier profile restrictions.
+
+Focused JVM: 17 tests / 970 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Retained mixed
+five-type vectors and scalar columns match expected rows, operations
+and spans before and after reopening. Mutate child values, union tags,
+negative, skipped and repeated indexes, list offsets and UTF-8. Reject
+null, nested and temporal union legs without partial results. Initial
+run failed 18 assertions because Byte tags were used directly as
+Clojure vector lookup keys; convert to int before lookup and update.
+XTDB logged shutdown cancellation; the passing process exited zero.
+
+Selected dense-union scalar-list profile v1. Other union schemas,
+nullable or recursive composites, untyped empty lists, document puts
+and aggregate reference document budgets remain open. No production
+wiring, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.

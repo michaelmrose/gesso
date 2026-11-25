@@ -211,6 +211,28 @@
 (def ^:private integer-base (assoc base :profile integer-profile))
 (def ^:private max-argument-columns 64)
 
+(declare scalar-kind!)
+
+(def ^:private union-leg-kinds
+  {"i64" :integer "utf8" :string "bool" :boolean "keyword" :keyword "uuid" :uuid})
+
+(defn- union-kind! [^Field f]
+  (let [n (.childrenLength f)
+        ^Union u (.type f (Union.))]
+    (field! f "$data$" Type/Union false n)
+    (require! (and (<= 2 n (count union-leg-kinds)) u
+                   (= UnionMode/Dense (.mode u)) (zero? (.typeIdsLength u)))
+              :unsupported-arrow-list-union)
+    (let [kinds (mapv (fn [i]
+                        (let [^Field leg (.children f i)
+                              name (.name leg)
+                              kind (get union-leg-kinds name)]
+                          (require! kind :unsupported-arrow-list-union-leg)
+                          (scalar-kind! leg name #{kind})))
+                      (range n))]
+      (require! (= n (count (distinct kinds))) :unsupported-arrow-list-union-leg)
+      [:union kinds])))
+
 (defn- scalar-kind! [^Field f field-name allowed]
   (let [type (.typeType f)
         extension? (pos? (.customMetadataLength f))
@@ -231,6 +253,7 @@
                    :else (require! false :unsupported-arrow-field)))
                (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
                      Type/Timestamp :timestamp Type/List (cond
+                                                           (contains? allowed :union-list) :union-list
                                                            (contains? allowed :temporal-list) :temporal-list
                                                            (contains? allowed :scalar-list) :scalar-list
                                                            :else :int64-list)} type))]
@@ -239,7 +262,7 @@
       (require! (and (= field-name (.name f)) (not (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
-      (field! f field-name type false (if (#{:int64-list :scalar-list :temporal-list} kind) 1 0)))
+      (field! f field-name type false (if (#{:int64-list :scalar-list :temporal-list :union-list} kind) 1 0)))
     (when (= :integer kind)
       (let [^Int t (.type f (Int.))]
         (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
@@ -247,12 +270,16 @@
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
         (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
     (cond
-      (#{:int64-list :scalar-list :temporal-list} kind)
-      [:list (scalar-kind! (.children f 0) "$data$"
-                           (case kind
-                             :int64-list #{:integer}
-                             :scalar-list #{:integer :boolean :string :keyword :uuid}
-                             :temporal-list #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc}))]
+      (#{:int64-list :scalar-list :temporal-list :union-list} kind)
+      (let [^Field child (.children f 0)]
+        [:list (if (and (= :union-list kind) (= Type/Union (.typeType child)))
+                 (union-kind! child)
+                 (scalar-kind! child "$data$"
+                               (case kind
+                                 :int64-list #{:integer}
+                                 :scalar-list #{:integer :boolean :string :keyword :uuid}
+                                 (:temporal-list :union-list)
+                                 #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc})))])
       (= :timestamp kind)
       (let [^Timestamp t (.type f (Timestamp.))
             zone (when t (.timezone t))]
@@ -281,12 +308,18 @@
             :unsupported-arrow-keyword)
   (keyword s))
 
-(defn- list-kind? [kind] (vector? kind))
+(defn- list-kind? [kind] (and (vector? kind) (= :list (first kind))))
+(defn- union-kind? [kind] (and (vector? kind) (= :union (first kind))))
+
+(defn- node-count [kind]
+  (cond (list-kind? kind) (inc (node-count (second kind)))
+        (union-kind? kind) (inc (count (second kind)))
+        :else 1))
 
 (defn- buffer-count [kind]
-  (if (list-kind? kind)
-    (+ 2 (buffer-count (second kind)))
-    (if (#{:string :keyword} kind) 3 2)))
+  (cond (list-kind? kind) (+ 2 (buffer-count (second kind)))
+        (union-kind? kind) (+ 2 (reduce + (map buffer-count (second kind))))
+        :else (if (#{:string :keyword} kind) 3 2)))
 
 (defn- scalar-reader! [kind buffers start n]
   (let [^ByteBuffer values (nth buffers (inc start))]
@@ -321,13 +354,42 @@
                       :unsupported-integer-buffer-layout)
             #(.getLong values (* 8 %))))))
 
+(defn- union-reader! [kinds ^RecordBatch batch node-index buffers start n]
+  (let [^ByteBuffer tags (nth buffers start)
+        ^ByteBuffer indexes (nth buffers (inc start))
+        starts (vec (reductions + (+ start 2) (map buffer-count kinds)))
+        counts (mapv #(.length (.nodes batch (+ node-index 1 %))) (range (count kinds)))]
+    (require! (and (= n (.limit tags)) (= (* 4 n) (.limit indexes))
+                   (every? #(<= 1 % n) counts) (= n (reduce + counts)))
+              :unsupported-arrow-list-union-layout)
+    (let [readers (mapv (fn [i kind]
+                          (let [node (.nodes batch (+ node-index 1 i))
+                                pos (nth starts i)]
+                            (require! (and (zero? (.nullCount node))
+                                           (zero? (.limit ^ByteBuffer (nth buffers pos))))
+                                      :unsupported-arrow-list-union-layout)
+                            (scalar-reader! kind buffers pos (nth counts i))))
+                        (range (count kinds)) kinds)
+          consumed (reduce (fn [seen i]
+                             (let [tag (int (.get tags i)) index (.getInt indexes (* 4 i))]
+                               (require! (and (<= 0 tag (dec (count kinds)))
+                                              (= index (nth seen tag))
+                                              (< index (nth counts tag)))
+                                         :unsupported-arrow-list-union-selection)
+                               (update seen tag inc)))
+                           (vec (repeat (count kinds) 0)) (range n))]
+      (require! (= consumed counts) :unsupported-arrow-list-union-selection)
+      (fn [i] ((nth readers (int (.get tags i))) (.getInt indexes (* 4 i)))))))
+
 (defn- list-reader! [kind ^RecordBatch batch node-index buffers start n]
   (let [child (.nodes batch (inc node-index))
         child-count (.length child)
         ^ByteBuffer offsets (nth buffers (inc start))
-        ^ByteBuffer child-validity (nth buffers (+ start 2))]
+        union? (union-kind? kind)]
     (require! (and (<= 0 child-count (min (quot max-bytes 8) (* 256 n)))
-                   (zero? (.nullCount child)) (zero? (.limit child-validity))
+                   (if union? (= -1 (.nullCount child))
+                       (and (zero? (.nullCount child))
+                            (zero? (.limit ^ByteBuffer (nth buffers (+ start 2))))))
                    (= (* 4 (inc n)) (.limit offsets)))
               :unsupported-arrow-list-buffer-layout)
     ;; Preserve the original integer-list buffer rejection reason.
@@ -339,7 +401,9 @@
                 :invalid-arrow-list-offsets)
       (require! (every? #(<= (- (second %) (first %)) 256) (partition 2 1 xs))
                 :arrow-list-element-limit)
-      (let [read-child (scalar-reader! kind buffers (+ start 2) child-count)]
+      (let [read-child (if union?
+                         (union-reader! (second kind) batch (inc node-index) buffers (+ start 2) child-count)
+                         (scalar-reader! kind buffers (+ start 2) child-count))]
         (fn [row]
           (mapv read-child (range (nth xs row) (nth xs (inc row)))))))))
 
@@ -358,7 +422,7 @@
                        (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
         (let [kinds (mapv #(scalar-kind! (.fields schema %) (str "?_" %) allowed) (range columns))
               starts (vec (reductions + 0 (map buffer-count kinds)))
-              node-starts (vec (reductions + 0 (map #(if (list-kind? %) 2 1) kinds)))]
+              node-starts (vec (reductions + 0 (map node-count kinds)))]
           (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
                 ^RecordBatch batch (.header bm (RecordBatch.))
                 n (.length batch)]
@@ -636,3 +700,27 @@
    temporal children. No heterogeneous, nested or nullable children."
   [bytes]
   (expand-fixed-operations bytes temporal-list-base temporal-list-rows!))
+
+(def union-list-profile :xtdb-2.2.0-beta1/selected-dense-union-scalar-list-arrow-operations-v1)
+(def ^:private union-list-base (assoc base :profile union-list-profile))
+
+(defn- union-list-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc :union-list}))
+
+(defn decode-union-list-arguments
+  "Decode homogeneous vectors and selected heterogeneous vectors of int64,
+   Boolean, UTF-8, keyword and UUID values. Require dense canonical child
+   selections; no null, temporal union leg or recursive child support."
+  [bytes]
+  (try
+    (assoc union-list-base :status :decoded :rows (union-list-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc union-list-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc union-list-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc union-list-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-union-list-operations
+  "Expand selected SQL groups including bounded dense-union scalar lists."
+  [bytes]
+  (expand-fixed-operations bytes union-list-base union-list-rows!))

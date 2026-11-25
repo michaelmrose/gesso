@@ -762,3 +762,63 @@
           (.awaitSourceBlocking (db/primary-db node) other-id (Duration/ofSeconds 10))
           (check-temporal-list-retained! node id other-id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-union-list-retained! [node id other-ids rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-union-list-operations data)
+        expected (mapv #(hash-map :kind :sql :query "ASSERT ($1 IS NOT NULL AND ($2 = 0))" :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ offsets tags indexes _ ints _ _ strings] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/union-list-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-union-list-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-temporal-list-operations data))))
+    (is (= (assoc-in rows [0 0 0] 99)
+           (:rows (arrow/decode-union-list-arguments (edit-long args ints 99)))))
+    (is (= (assoc-in rows [0 0 1] "z")
+           (:rows (arrow/decode-union-list-arguments (edit-byte args strings 122)))))
+    (doseq [[bad reason] [[(edit-byte args tags 127) :unsupported-arrow-list-union-selection]
+                          [(edit-byte args tags 255) :unsupported-arrow-list-union-selection]
+                          [(edit-int args indexes -1) :unsupported-arrow-list-union-selection]
+                          [(edit-int args indexes 1) :unsupported-arrow-list-union-selection]
+                          [(edit-int args (+ indexes 12) 0) :unsupported-arrow-list-union-selection]
+                          [(edit-int args offsets 1) :invalid-arrow-list-offsets]
+                          [(edit-byte args strings 255) :invalid-arrow-utf8]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-union-list-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (doseq [other-id other-ids]
+      (let [r (arrow/decode-union-list-operations (retained-operation-bytes node other-id))]
+        (is (= :unsupported (:status r)))
+        (is (not (contains? r :operations)))))))
+
+(deftest selected-union-lists-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-union-list-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows [[[1 "x" true 2 :open #uuid "00112233-4455-6677-8899-aabbccddeeff"] 0]
+              [["y" 3 false] -1] [[] 1]]]
+    (is (= [[]] (:rows (arrow/decode-union-list-arguments nil))))
+    (try
+      (let [[id other-ids]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! (mapv #(into ["ASSERT (? IS NOT NULL AND (? = 0))"] %) rows))
+                    other-ids [(submit! [["ASSERT ? IS NOT NULL" [1 nil]]])
+                               (submit! [["ASSERT ? IS NOT NULL" [1 [2]]]])
+                               (submit! [["ASSERT ? IS NOT NULL" [1 (java.time.Instant/parse "2026-01-01T00:00:00Z")]]])]]
+                (check-union-list-retained! node id other-ids rows)
+                [id other-ids]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek other-ids) (Duration/ofSeconds 10))
+          (check-union-list-retained! node id other-ids rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
