@@ -297,6 +297,14 @@
                          (when-not (identical? absent-field v) [k v]))))
             (map vector keys readers)))))
 
+(defn- struct-padding? [v]
+  ;; Selected retained parent-null padding, not a general Arrow rule.
+  (cond (map? v) (every? struct-padding? (vals v))
+        (vector? v) (empty? v)
+        (string? v) (empty? v)
+        (integer? v) (zero? v)
+        :else (false? v)))
+
 (defn- nullable-reader! [kind ^RecordBatch batch node-index buffers start n]
   (let [node (.nodes batch node-index)
         ^ByteBuffer validity (nth buffers start)]
@@ -311,7 +319,14 @@
         (require! (every? #(or (present? validity %) (= (nth offsets %) (nth offsets (inc %))))
                           (range n))
                   :unsupported-arrow-nullable-value-extent)))
-    (let [reader (if (list-kind? kind)
+    (let [reader (cond
+                   (struct-kind? kind)
+                   (let [read-struct (struct-reader! (second kind) batch node-index buffers start n)]
+                     (doseq [row (range n) :when (not (present? validity row))]
+                       (require! (struct-padding? (read-struct row))
+                                 :unsupported-arrow-nullable-struct-padding))
+                     read-struct)
+                   (list-kind? kind)
                    (let [read-list (list-reader! (second kind) batch node-index buffers start n)
                          ^ByteBuffer offsets (nth buffers (inc start))]
                      (require! (every? #(or (present? validity %)
@@ -320,7 +335,7 @@
                                        (range n))
                                :unsupported-arrow-nullable-list-extent)
                      read-list)
-                   (scalar-reader! kind buffers start n))]
+                   :else (scalar-reader! kind buffers start n))]
       (fn [row] (if (present? validity row) (reader row) absent-field)))))
 
 (defn- value-reader! [kind ^RecordBatch batch node-index buffers start n]
@@ -873,3 +888,29 @@
   "Expand selected diagnostic SQL groups with nullable vector fields."
   [bytes]
   (expand-fixed-operations bytes nullable-list-struct-base nullable-list-struct-rows!))
+
+(def nullable-map-struct-profile :xtdb-2.2.0-beta1/selected-nullable-map-struct-arrow-operations-v1)
+(def ^:private nullable-map-struct-base (assoc base :profile nullable-map-struct-profile))
+
+(defn- nullable-map-struct-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
+                        :empty-list :recursive-list :struct-map :document-keys :empty-struct
+                        :nullable-struct-fields :null-only-fields :nullable-list-fields :nullable-map-fields}))
+
+(defn decode-nullable-map-struct-arguments
+  "Decode selected nullable struct fields by omission, requiring hidden
+   child values to be absent or selected zero/false/empty padding.
+   Present empty maps remain present. Diagnostic only."
+  [bytes]
+  (try
+    (assoc nullable-map-struct-base :status :decoded :rows (nullable-map-struct-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc nullable-map-struct-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc nullable-map-struct-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc nullable-map-struct-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-nullable-map-struct-operations
+  "Expand selected diagnostic SQL groups with nullable structured-map fields."
+  [bytes]
+  (expand-fixed-operations bytes nullable-map-struct-base nullable-map-struct-rows!))

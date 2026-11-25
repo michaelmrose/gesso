@@ -78,7 +78,8 @@
                                                            :else :int64-list)} type))]
     (require! (contains? allowed kind) :unsupported-arrow-field)
     (require! (or (not nullable?) (#{:integer :boolean :string :keyword :uuid :timestamp} kind)
-                  (and (= :empty-list kind) (contains? allowed :nullable-list-fields)))
+                  (and (= :empty-list kind) (contains? allowed :nullable-list-fields))
+                  (and (= :struct-map kind) (contains? allowed :nullable-map-fields)))
               :unsupported-arrow-nullable-field)
     (if (#{:keyword :uuid} kind)
       (require! (and (= field-name (.name f)) (= (boolean nullable?) (.nullable f))

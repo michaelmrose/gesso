@@ -3638,3 +3638,28 @@ absent submission distinction remains unavailable. Actual document puts,
 nullable struct containers, IID correspondence and aggregate document
 budgets remain open. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2675 — decode selected nullable Arrow map fields
+
+Qualify nullable Struct fields only within selected canonical-key structs.
+Validate their bitmap, null count and recursively qualified child layouts.
+Observed parent-null rows can contain valid child slots with default
+values; require reconstructed hidden children to be absent or recursively
+zero/false/empty padding. Reject non-padding values rather than silently
+discarding them. Preserve present empty maps and earlier profile limits.
+This selected padding policy is not a universal Arrow rule.
+
+Focused JVM: 28 tests / 1688 assertions, zero failures or errors across
+reference Arrow operations, struct and source payload suites. Retained
+nullable and nested maps with scalar and list children match expected
+diagnostic maps before and after reopening. Mutate parent validity,
+hidden integer and Boolean values, empty-map validity and null counts;
+reject non-padding hidden values, nullable IDs and top-level arguments.
+XTDB logged shutdown cancellation; the test process exited zero.
+
+Selected nullable-map struct profile v1. Unobserved hidden padding types
+remain unsupported; invalid scalar slots are still interpreted by
+omission. Explicit null versus absent submission identity is unavailable.
+Actual document puts, IID correspondence and aggregate document budgets
+remain open. No production wiring, certificate or CLM-R2 premise retirement.
+Full project and independent formal gates were not rerun.
