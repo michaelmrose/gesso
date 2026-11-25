@@ -2,7 +2,8 @@
   "Independent finite bitemporal replay of selected document puts.
    System times are supplied as inputs, never inferred from provider results."
   (:require [clojure.string :as str]
-            [gesso.assurance.reference-transaction :as current])
+            [gesso.assurance.reference-transaction :as current]
+            [gesso.assurance.reference-clock :as clock])
   (:import (java.time Instant ZonedDateTime)))
 
 (def profile :selected-bitemporal-transaction-v11)
@@ -202,53 +203,94 @@
 
 (def equal-time-profile :selected-bitemporal-equal-time-transaction-v1)
 
+(def clocked-profile :selected-bitemporal-clocked-transaction-v1)
+
+(defn- clocked-transactions! [inputs]
+  (when-not (and (vector? inputs) (nil? (meta inputs)) (<= 1 (count inputs) 256))
+    (reject! :unsupported-clocked-sequence))
+  (loop [remaining (seq inputs) prior nil prior-id -1 txs []]
+    (if (seq remaining)
+      (let [r (first remaining)
+            _ (when-not (map? r) (reject! :unsupported-clocked-transaction))
+            {:keys [transaction frame-micros requested-system-time]} r
+            _ (when-not (map? transaction) (reject! :unsupported-clocked-transaction))
+            {:keys [tx-id system-time ops]} transaction
+            decision (clock/resolve-retained-clock frame-micros requested-system-time prior)]
+        (when-not (and (map? r) (nil? (meta r))
+                       (= #{:status :profile :authority :certificate :transaction :clock
+                            :requested-system-time :frame-micros} (set (keys r)))
+                       (= :decoded (:status r)) (= clock/clocked-input-profile (:profile r))
+                       (= :none (:authority r)) (= :not-issued (:certificate r))
+                       (map? transaction) (nil? (meta transaction))
+                       (= #{:tx-id :system-time :ops} (set (keys transaction)))
+                       (integer? tx-id) (< prior-id tx-id Long/MAX_VALUE)
+                       (= :resolved (:status decision)) (= decision (:clock r))
+                       (= system-time (:system-time decision)))
+          (reject! :unsupported-clocked-transaction))
+        (recur (next remaining) system-time tx-id
+               (conj txs {:system-time system-time :ops ops :tx-id tx-id
+                          :requested-system-time requested-system-time
+                          :clock-decision (:decision decision)})))
+      txs)))
+
 (defn- replay*
   "Replay from empty state. Each transaction is {:system-time Instant :ops
    vector}. System times increase, with ties admitted only by the
-   equal-time profile. Valid intervals are
+   equal-time and clocked profiles. Valid intervals are
    half-open and microsecond-aligned, with omitted starts at the supplied
    system time and omitted ends unbounded. Abort retains the prior snapshot.
    Selected assertions read tentative documents at the transaction system
    time (no current-time override), including selected worker clock, row-version and lease-expiry guards.
    Validate all operation shapes before
    replay. Rectangles retain the issuing system time and exclusive supersession
-   time. No provider observations, implicit clock or authority are admitted."
-  [transactions equal-time?]
-  (let [report {:profile (if equal-time? equal-time-profile profile) :authority :none :certificate :not-issued}]
+   time. No provider observations or authority are admitted."
+  [inputs mode]
+  (let [clocked? (= :clocked mode)
+        equal-time? (not= :strict mode)
+        report {:profile (case mode :clocked clocked-profile :equal equal-time-profile profile)
+                :authority :none :certificate :not-issued}]
     (try
-      (when-not (and (vector? transactions) (nil? (meta transactions))
-                     (<= 1 (count transactions) 256))
-        (reject! :unsupported-temporal-sequence))
-      (doseq [[i {:keys [system-time ops] :as tx}] (map-indexed vector transactions)]
-        (when-not (and (map? tx) (nil? (meta tx))
-                       (= #{:system-time :ops} (set (keys tx)))
-                       (instant? system-time)
-                       (or (zero? i)
-                           (let [prior (:system-time (nth transactions (dec i)))]
-                             (or (before? prior system-time) (and equal-time? (= prior system-time)))))
-                       (vector? ops) (nil? (meta ops)) (<= 1 (count ops) 256))
-          (reject! :unsupported-temporal-transaction)))
-      (let [normalized (mapv (fn [{:keys [system-time ops] :as tx}]
-                               (assoc tx :ops (mapv #(normalize-op! system-time %) ops)))
-                             transactions)]
-        (when (and equal-time?
-                   (some (fn [op] (and (string? (first op))
-                                       (not (#{"ASSERT TRUE" "ASSERT FALSE" "ASSERT ? = ?"} (first op)))))
-                         (mapcat :ops normalized)))
-          (reject! :unsupported-equal-time-assertion))
-        (let [{:keys [history segments closed]}
-              (reduce (fn [{:keys [history] :as prior} {:keys [system-time ops]}]
-                        (let [{:keys [state committed? failed-assertion-index]}
-                              (execute-transaction! prior system-time ops)]
-                          (assoc state :history
-                                 (conj history (cond-> {:system-time system-time
-                                                        :committed? committed?
-                                                        :segments (:segments state)}
-                                                 (not committed?)
-                                                 (assoc :failed-assertion-index failed-assertion-index))))))
-                      {:history [] :segments {} :closed []} normalized)]
-          (assoc report :status :predicted :history history
-                 :rectangles (into closed (active-rectangles segments)))))
+      (let [transactions (if clocked? (clocked-transactions! inputs) inputs)]
+        (when-not (and (vector? transactions) (nil? (meta transactions))
+                       (<= 1 (count transactions) 256))
+          (reject! :unsupported-temporal-sequence))
+        (doseq [[i {:keys [system-time ops] :as tx}] (map-indexed vector transactions)]
+          (when-not (and (map? tx) (nil? (meta tx))
+                         (= (if clocked? #{:system-time :ops :tx-id :requested-system-time :clock-decision}
+                              #{:system-time :ops}) (set (keys tx)))
+                         (instant? system-time)
+                         (or (zero? i)
+                             (let [prior (:system-time (nth transactions (dec i)))]
+                               (or (before? prior system-time) (and equal-time? (= prior system-time)))))
+                         (vector? ops) (nil? (meta ops)) (<= 1 (count ops) 256))
+            (reject! :unsupported-temporal-transaction)))
+        (let [normalized (mapv (fn [{:keys [system-time ops] :as tx}]
+                                 (assoc tx :ops (mapv #(normalize-op! system-time %) ops)))
+                               transactions)]
+          (when (and equal-time?
+                     (some (fn [op] (and (string? (first op))
+                                         (not (#{"ASSERT TRUE" "ASSERT FALSE" "ASSERT ? = ?"} (first op)))))
+                           (mapcat :ops normalized)))
+            (reject! :unsupported-equal-time-assertion))
+          (let [{:keys [history segments closed]}
+                (reduce (fn [{:keys [history] :as prior} {:keys [system-time ops clock-decision] :as tx}]
+                          (let [clock-rejected? (= :reject-before-execution clock-decision)
+                                {:keys [state committed? failed-assertion-index]}
+                                (if clock-rejected? {:state prior :committed? false}
+                                    (execute-transaction! prior system-time ops))]
+                            (assoc state :history
+                                   (conj history (cond-> {:system-time system-time
+                                                          :committed? committed?
+                                                          :segments (:segments state)}
+                                                   clocked?
+                                                   (merge (select-keys tx [:tx-id :requested-system-time :clock-decision]))
+                                                   clock-rejected?
+                                                   (assoc :rejection :invalid-system-time)
+                                                   (and (not committed?) (not clock-rejected?))
+                                                   (assoc :failed-assertion-index failed-assertion-index))))))
+                        {:history [] :segments {} :closed []} normalized)]
+            (assoc report :status :predicted :history history
+                   :rectangles (into closed (active-rectangles segments))))))
       (catch clojure.lang.ExceptionInfo e
         (if (::unsupported (ex-data e))
           (assoc report :status :unsupported :reason (:reason (ex-data e)))
@@ -257,7 +299,7 @@
 (defn replay
   "Replay the selected strictly increasing system-time domain."
   [transactions]
-  (replay* transactions false))
+  (replay* transactions :strict))
 
 (defn replay-equal-time
   "Replay ordered transactions with nondecreasing system times. The last
@@ -267,12 +309,22 @@
    Only puts and literal/equality assertions are admitted; state-dependent
    and clock guards are unqualified. Separate diagnostic, not clock admission."
   [transactions]
-  (replay* transactions true))
+  (replay* transactions :equal))
+
+(defn replay-clocked
+  "Replay selected clock-qualified attempted operations from empty state.
+   Recompute the complete clock chain; reject malformed or unordered inputs.
+   A clock-rejected attempt advances history time but never applies its
+   operations or evaluates assertions against the running state. Validate
+   its operation grammar too. Equal-time state-dependent assertions remain
+   outside this profile. Input provenance is not established by this API."
+  [inputs]
+  (replay* inputs :clocked))
 
 (defn visible-at
   "Project complete visible document maps at a system and valid instant."
   [report system-time valid-time]
-  (when (and (#{profile equal-time-profile} (:profile report)) (= :predicted (:status report))
+  (when (and (#{profile equal-time-profile clocked-profile} (:profile report)) (= :predicted (:status report))
              (instant? system-time) (instant? valid-time))
     (project-visible (:segments (last (take-while #(not (before? system-time (:system-time %)))
                                                 (:history report))))

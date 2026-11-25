@@ -4718,3 +4718,28 @@ This is internal sensitive acquisition only; no clock-aware execution or
 ledger comparison yet. Equal-time state-dependent assertions remain
 unsupported. No production admission, certificate or CLM-R2 premise
 retirement. Other regression namespaces and formal gates not rerun.
+
+* v2718 — independently replay clock-rejected attempts
+
+Extract the pinned pure clock resolver into a shared namespace, retaining
+legacy input aliases. Add a separate clocked temporal replay profile that
+recomputes the ordered clock chain, validates attempted operation grammar,
+and preserves transaction identity, requested time and clock decision.
+Clock rejection advances the history at the assigned time without entering
+the execution transition; preserve preceding segments and distinguish
+invalid-system-time rejection from a failed assertion index. Permit
+selected equal-time puts and literal/equality assertions, but not broader
+state-dependent assertions. Preserve strict and equal-time replay APIs.
+
+Focused JVM: 36 tests / 3493 assertions, zero failures or errors in two
+completed batches: replay input 6 / 588; temporal, provider and retained
+operation 30 / 2905. Acquired persistent clocked history predicts exact
+ledger identities, times, outcomes and selected all-time rectangles before
+and after reopening. Instrument the execution transition to verify the
+clock-rejected attempt is skipped; distinguish an ordinary assertion abort.
+Reject malformed, missing, reordered/duplicate and forged clock inputs and
+unsupported attempted operations without returning history. Validation
+still normalizes attempted operations in isolation, not against running
+state. Combined provider acquisition/comparison remains open. No production
+admission, certificate or CLM-R2 premise retirement. Other regression
+namespaces and independent formal gates were not rerun.

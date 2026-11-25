@@ -362,6 +362,51 @@
         times [t t (.plusNanos t 1000) (.plusNanos t 2000)]
         ledger (#'reference/read-ledger! node)]
     (check-clocked-history! node clocked)
+    (let [r (temporal/replay-clocked (:clocked-replay-inputs (coverage/observe-local-processed-retained-clocked-inputs! node)))
+          history (:history r)
+          rejected (nth history 2)]
+      (is (= :predicted (:status r)) (pr-str r))
+      (is (= temporal/clocked-profile (:profile r)))
+      (is (= :none (:authority r)))
+      (is (= :not-issued (:certificate r)))
+      (is (= ledger (mapv #(select-keys % [:tx-id :system-time :committed?]) history)))
+      (is (= requests (mapv :requested-system-time history)))
+      (is (= (mapv :decision reports) (mapv :clock-decision history)))
+      (is (= :invalid-system-time (:rejection rejected)))
+      (is (not (contains? rejected :failed-assertion-index)))
+      (is (= (:segments (nth history 1)) (:segments rejected)))
+      (is (= (#'reference/canonical-rectangles (:rectangles r))
+             (#'reference/canonical-rectangles (#'reference/read-rectangles! node #{:probe}))))
+      (is (= #{"a" "b" "d"} (set (keys (:probe (temporal/visible-at r (peek times) (peek times)))))))
+      ;; Count executions of the state transition, not grammar validation.
+      (let [execute! @#'temporal/execute-transaction! calls (atom [])]
+        (with-redefs-fn {#'temporal/execute-transaction!
+                         (fn [prior time ops] (swap! calls conj time) (execute! prior time ops))}
+          #(is (= r (temporal/replay-clocked clocked))))
+        (is (= [(first times) (second times) (peek times)] @calls)))
+      (let [attempts (update-in clocked [3 :transaction :ops] conj ["ASSERT FALSE"])
+            result (temporal/replay-clocked attempts)
+            abort (peek (:history result))]
+        (is (= :predicted (:status result)))
+        (is (= false (:committed? abort)))
+        (is (= 1 (:failed-assertion-index abort)))
+        (is (not (contains? abort :rejection)))
+        (is (= (:segments rejected) (:segments abort))))
+      (doseq [bad [(assoc clocked 1 nil)
+                   (assoc clocked 1 false)
+                   (assoc clocked 1 {})
+                   (assoc-in clocked [1 :transaction] :invalid)
+                   (assoc-in clocked [1 :transaction :tx-id] (first ids))
+                   (assoc-in clocked [2 :clock :decision] :execute)
+                   (assoc-in clocked [2 :requested-system-time] t)
+                   (assoc-in clocked [2 :frame-micros] nil)
+                   (assoc-in clocked [2 :transaction :system-time] t)
+                   (assoc-in clocked [2 :transaction :ops] [[:unknown]])
+                   (update-in clocked [1 :transaction :ops] conj ["ASSERT CURRENT_TIMESTAMP < ?" (.plusSeconds t 1)])
+                   []]]
+        (let [failure (temporal/replay-clocked bad)]
+          (is (= :unsupported (:status failure)) (pr-str failure))
+          (is (not-any? #(contains? failure %) [:history :rectangles])))))
     (is (every? #(= :decoded (:status %)) clocked))
     (is (every? #(= input/clocked-input-profile (:profile %)) clocked))
     (is (every? #(= :none (:authority %)) clocked))
