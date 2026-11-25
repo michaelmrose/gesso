@@ -256,6 +256,34 @@
       {:failure (assoc (local-result :unsupported :retained-replay-input-not-qualified)
                        :message-id offset :decode-reason (:reason r))})))
 
+(defn- qualified-clocked-input? [offset micros requested prior r]
+  (let [clock (replay-input/resolve-retained-clock micros requested prior)]
+    (and (= :decoded (:status r)) (= replay-input/clocked-input-profile (:profile r))
+         (= :none (:authority r)) (= :not-issued (:certificate r))
+         (= #{:status :profile :authority :certificate :transaction :clock
+              :requested-system-time :frame-micros} (set (keys r)))
+         (= micros (:frame-micros r)) (= requested (:requested-system-time r))
+         (= :resolved (:status clock)) (= clock (:clock r))
+         (qualified-replay-input? offset (:transaction r))
+         (= (:system-time clock) (get-in r [:transaction :system-time])))))
+
+(defn- project-clocked-input [offset micros body requested prior]
+  (let [r (replay-input/decode-clocked-replay-input offset body micros prior)]
+    (if (qualified-clocked-input? offset micros requested prior r)
+      {:input r}
+      {:failure (assoc (local-result :unsupported :retained-clocked-input-not-qualified)
+                       :message-id offset)})))
+
+(defn- qualified-clocked-history? [ids inputs]
+  (and (vector? inputs) (<= (count inputs) max-replay-transactions)
+       (= ids (mapv #(get-in % [:transaction :tx-id]) inputs))
+       (loop [prior nil remaining (seq inputs)]
+         (if-let [r (first remaining)]
+           (and (qualified-clocked-input? (get-in r [:transaction :tx-id])
+                                          (:frame-micros r) (:requested-system-time r) prior r)
+                (recur (get-in r [:transaction :system-time]) (next remaining)))
+           true))))
+
 (defn- increasing-replay-times? [inputs]
   (every? (fn [[a b]] (.isBefore ^Instant (:system-time a) ^Instant (:system-time b)))
           (partition 2 1 inputs)))
@@ -264,12 +292,13 @@
   ;; Compare only after coordinates, order and cardinality have matched.
   ;; Operation comparisons and replay projection use the same framed bytes.
   (let [replay? (= :replay target)
-        all? (or replay? (= :all target))]
+        clocked? (= :clocked-replay target)
+        all? (or replay? clocked? (= :all target))]
     (cond
       (not= :observed (:status report)) report
       (not= (count frames) (count bytes) (count records))
       (local-result :unavailable :source-payload-coverage-gap)
-      (and replay? (> (count (:transaction-ids report)) max-replay-transactions))
+      (and (or replay? clocked?) (> (count (:transaction-ids report)) max-replay-transactions))
       (local-result :unsupported :retained-replay-transaction-limit)
       (and (some? target) (not all?) (not (some #{target} (:transaction-ids report))))
       (assoc (local-result :unsupported :retained-transaction-not-framed) :message-id target)
@@ -287,10 +316,13 @@
                 (if (or (= target offset) (and all? (= :transaction (:kind message))))
                   (if-let [failure (compare-selected-operation node offset message)]
                     failure
-                    (let [{:keys [input failure]} (when replay? (project-replay-input offset micros body (:system-time (peek inputs))))]
+                    (let [{:keys [input failure]} (cond
+                                                 replay? (project-replay-input offset micros body (:system-time (peek inputs)))
+                                                 clocked? (project-clocked-input offset micros body (:system-time message)
+                                                                                (get-in (peek inputs) [:transaction :system-time])))]
                       (if failure failure
                           (recur (next samples) (conj matched offset)
-                                 (cond-> inputs replay? (conj input))))))
+                                 (cond-> inputs (or replay? clocked?) (conj input))))))
                   (recur (next samples) matched inputs)))))
           (let [report (assoc report :payload-correspondence :matched)]
             (cond
@@ -302,10 +334,13 @@
                 (local-result :unavailable :retained-replay-input-coverage-gap)
                 (and replay? (not (increasing-replay-times? inputs)))
                 (local-result :unsupported :retained-replay-system-time-order)
+                (and clocked? (not (qualified-clocked-history? matched inputs)))
+                (local-result :unsupported :retained-clocked-history-not-qualified)
                 :else
                 (cond-> (assoc report :operation-correspondence (if (seq matched) :matched :not-applicable)
                                :operation-message-ids matched :operation-profile operation/profile)
-                  replay? (assoc :replay-inputs inputs :replay-input-profile replay-input/profile)))
+                  replay? (assoc :replay-inputs inputs :replay-input-profile replay-input/profile)
+                  clocked? (assoc :clocked-replay-inputs inputs :clocked-replay-input-profile replay-input/clocked-input-profile)))
               (some? target)
               (assoc report :operation-correspondence :matched
                      :operation-message-id target :operation-profile operation/profile)
@@ -579,3 +614,30 @@
                    :processed-retained-history-binding-profile processed-retained-history-binding-profile
                    :payload-binding-profile payload-binding-profile)
       (not= :observed (:status sample)) (dissoc :replay-inputs :payload-fingerprint))))
+
+(def processed-retained-clocked-inputs-profile
+  :xtdb-2.2.0-beta1/selected-processed-retained-clocked-inputs-v1)
+
+(defn observe-local-processed-retained-clocked-inputs!
+  "Internal sensitive sample of ordered clock-qualified attempts. Bind each
+   decision to the actual frame and requested time, including the assigned
+   time of a clock-rejected attempt. Maintenance does not advance the clock.
+   Require stable complete history and processed frontiers; no execution
+   prediction, publication or authenticated provenance."
+  [node]
+  (let [sample (observe-processed-retained-history*
+                node #(assoc (observe-local* % true true :clocked-replay)
+                             :retained-history-profile retained-history-profile
+                             :payload-profile local-payload-profile
+                             :decoder-profile payload/profile))
+        sample (if (and (= :observed (:status sample))
+                        (not (and (= replay-input/clocked-input-profile (:clocked-replay-input-profile sample))
+                                  (qualified-clocked-history? (:transaction-ids sample) (:clocked-replay-inputs sample))
+                                  (string? (:payload-fingerprint sample))
+                                  (re-matches #"[0-9a-f]{64}" (:payload-fingerprint sample)))))
+                 (local-result :unsupported :invalid-processed-retained-clocked-inputs)
+                 sample)]
+    (cond-> (assoc sample :processed-retained-clocked-inputs-profile processed-retained-clocked-inputs-profile
+                   :processed-retained-history-binding-profile processed-retained-history-binding-profile
+                   :payload-binding-profile payload-binding-profile)
+      (not= :observed (:status sample)) (dissoc :clocked-replay-inputs :payload-fingerprint))))

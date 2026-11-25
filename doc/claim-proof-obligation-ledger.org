@@ -4695,3 +4695,26 @@ is not yet acquired as a qualified complete clocked history or executed
 as a clock-aware replay. Equal-time state-dependent assertions remain
 unsupported. No production admission, certificate or CLM-R2 premise
 retirement. Other regression namespaces and formal gates not rerun.
+
+* v2717 — acquire complete clock-qualified retained history
+
+Add a separate internal processed-history acquisition target for clocked
+replay inputs. Within the same framed payload and operation observation,
+check each projection's identity, actual frame timestamp and requested
+envelope time, then recompute the clock decision from the preceding
+assigned transaction time. Recheck the ordered clock chain; preserve
+attempted operations even on clock rejection. Maintenance contributes no
+input. Bind the complete sample to the existing content fingerprint and
+stable processed frontiers; discard samples on failed qualification.
+Preserve the legacy strictly increasing replay acquisition contract.
+
+Focused JVM: 24 tests / 1759 assertions, zero failures or errors in two
+completed batches: replay input 6 / 502, provider and retained operation
+18 / 1257. Persistent maintenance-only and equal, backward and implicit
+clock histories match before and after reopening. Reject altered profile,
+frame time, requested time, decision, assigned time, identity, failed
+projection, transaction ceiling, changed byte reread and changed frontier.
+This is internal sensitive acquisition only; no clock-aware execution or
+ledger comparison yet. Equal-time state-dependent assertions remain
+unsupported. No production admission, certificate or CLM-R2 premise
+retirement. Other regression namespaces and formal gates not rerun.

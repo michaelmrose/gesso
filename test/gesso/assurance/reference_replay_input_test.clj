@@ -297,6 +297,54 @@
           (check-implicit-history! node ids future txs)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
 
+(defn- check-clocked-history! [node expected]
+  (let [observe! #(coverage/observe-local-processed-retained-clocked-inputs! node)
+        decode! input/decode-clocked-replay-input
+        sample (observe!)
+        ids (mapv #(get-in % [:transaction :tx-id]) expected)
+        fail! (fn [r reason]
+                (is (not= :observed (:status r)))
+                (is (= reason (:reason r)))
+                (is (not (contains? r :clocked-replay-inputs)))
+                (no-replay-sample! r))]
+    (is (= :observed (:status sample)) (pr-str (dissoc sample :clocked-replay-inputs :payload-fingerprint)))
+    (is (= coverage/processed-retained-clocked-inputs-profile (:processed-retained-clocked-inputs-profile sample)))
+    (is (= input/clocked-input-profile (:clocked-replay-input-profile sample)))
+    (is (= expected (:clocked-replay-inputs sample)))
+    (is (= ids (:transaction-ids sample) (:operation-message-ids sample)))
+    (is (= (coverage/observe-local-processed-retained-history-bound! node)
+           (dissoc sample :processed-retained-clocked-inputs-profile :clocked-replay-input-profile :clocked-replay-inputs)))
+    (when (seq expected)
+      (doseq [change [#(assoc % :profile :wrong)
+                      #(update % :frame-micros inc)
+                      #(assoc % :requested-system-time Instant/EPOCH)
+                      #(assoc-in % [:clock :decision] :reject-before-execution)
+                      #(update-in % [:transaction :system-time] (fn [t] (.plusNanos t 1000)))
+                      #(update-in % [:transaction :tx-id] inc)
+                      #(assoc % :status :unsupported)]]
+        (with-redefs [input/decode-clocked-replay-input
+                      (fn [id bytes micros prior]
+                        (cond-> (decode! id bytes micros prior) (= id (peek ids)) change))]
+          (let [r (observe!)]
+            (is (= (peek ids) (:message-id r)))
+            (fail! r :retained-clocked-input-not-qualified))))
+      (with-redefs-fn {#'coverage/max-replay-transactions 2}
+        #(fail! (observe!) :retained-replay-transaction-limit))
+      (let [read! @#'coverage/read-local-payloads!
+            seen (atom 0)]
+        (with-redefs-fn {#'coverage/read-local-payloads!
+                         (fn [file frames]
+                           (let [b (read! file frames)]
+                             (if (= 2 (swap! seen inc)) (pop b) b)))}
+          #(fail! (observe!) :source-payload-changed-during-observation)))
+      (let [read! @#'coverage/read-local-frontier!
+            seen (atom 0)]
+        (with-redefs-fn {#'coverage/read-local-frontier!
+                         (fn [node]
+                           (cond-> (read! node) (= 2 (swap! seen inc)) (update :processed dec)))}
+          #(fail! (observe!) :source-frontier-changed-during-observation))))
+    (is (= sample (observe!)))))
+
 (defn- check-clock-decisions! [node ids t]
   (let [log (.getSourceLog (db/primary-db node))
         frames (with-open [file (RandomAccessFile. (.toFile (#'coverage/local-log-path log)) "r")]
@@ -313,6 +361,7 @@
                                     (get-in (peek rs) [:transaction :system-time])))) [] ids)
         times [t t (.plusNanos t 1000) (.plusNanos t 2000)]
         ledger (#'reference/read-ledger! node)]
+    (check-clocked-history! node clocked)
     (is (every? #(= :decoded (:status %)) clocked))
     (is (every? #(= input/clocked-input-profile (:profile %)) clocked))
     (is (every? #(= :none (:authority %)) clocked))
@@ -369,6 +418,9 @@
     (try
       (let [ids (with-open [node (xtn/start-node config)]
                   (let [database (db/primary-db node)
+                        flush-id (.getMsgId (.appendMessageBlocking (.getSourceLog database) (xtdb.api.log.SourceMessage$FlushBlock. Long/MAX_VALUE)))
+                        _ (.awaitSourceBlocking database flush-id (Duration/ofSeconds 15))
+                        _ (check-clocked-history! node [])
                         ids (mapv (fn [[id requested]]
                                     (:tx-id (xt/submit-tx node [[:put-docs :probe {:xt/id id :value 1}]]
                                                           (cond-> {} requested (assoc :system-time requested)))))
