@@ -3405,3 +3405,29 @@ nullable or recursive composites, untyped empty lists, document puts
 and aggregate reference document budgets remain open. No production
 wiring, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2665 — decode selected temporal dense-union Arrow lists
+
+Extend the selected heterogeneous scalar-list interpreter to the
+observed timestamp-tz-micro-utc leg. Require exact leg identity,
+microsecond unit and UTC timezone metadata, preserving reference date
+bounds, sequential child selection and the existing vector limits.
+Preserve the earlier non-temporal union profile and homogeneous Z/UTC
+profiles. Physical probes showed that both mixed Z/UTC and Z-only
+submissions in a heterogeneous list become a UTC-labelled union leg;
+interpret retained identity, not a lost original submission identity.
+
+Focused JVM: 18 tests / 1091 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Retained mixed
+integer, timestamp and Boolean vectors match independently specified
+UTC values, operation spans and provider observations before and after
+reopening. Exercise pre-epoch and boundary instants, value mutation,
+invalid leg name, tags, indexes, list offsets and truncated framing.
+Reject temporal union legs in the earlier non-temporal profile.
+
+Selected temporal dense-union scalar-list profile v1. Unobserved
+union timezone representations, untyped empty lists, nullable and
+recursive composites, document puts and aggregate reference document
+budgets remain open. No production wiring, certificate or CLM-R2
+premise retirement. Full project and independent formal gates were
+not rerun.

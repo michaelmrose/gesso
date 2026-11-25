@@ -822,3 +822,62 @@
           (.awaitSourceBlocking (db/primary-db node) (peek other-ids) (Duration/ofSeconds 10))
           (check-union-list-retained! node id other-ids rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+
+(defn- check-temporal-union-retained! [node id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-temporal-union-list-operations data)
+        expected (mapv #(hash-map :kind :sql :query "ASSERT $1 IS NOT NULL" :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ offsets tags indexes _ _ _ timestamps] (buffer-starts args)
+        leg-name (find-byte-sequence args "timestamp-tz-micro-utc")
+        utc (java.time.ZoneId/of "UTC")]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/temporal-union-list-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-temporal-union-list-arguments args))))
+    (is (= :unsupported-arrow-list-union-leg (:reason (arrow/decode-union-list-operations data))))
+    (is (= (assoc-in rows [0 0 1] (.atZone java.time.Instant/EPOCH utc))
+           (:rows (arrow/decode-temporal-union-list-arguments (edit-long args timestamps 0)))))
+    (doseq [[bad reason] [[(edit-long args timestamps Long/MIN_VALUE) :unsupported-arrow-timestamp-range]
+                          [(edit-long args timestamps Long/MAX_VALUE) :unsupported-arrow-timestamp-range]
+                          [(edit-byte args leg-name 120) :unsupported-arrow-list-union-leg]
+                          [(edit-byte args tags 127) :unsupported-arrow-list-union-selection]
+                          [(edit-int args (+ indexes 4) 1) :unsupported-arrow-list-union-selection]
+                          [(edit-int args offsets 1) :invalid-arrow-list-offsets]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-temporal-union-list-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))))
+
+(deftest selected-temporal-union-lists-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-temporal-union-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        a (java.time.Instant/parse "1969-12-31T23:59:59.999999Z")
+        b (java.time.Instant/parse "0001-01-01T00:00:00Z")
+        c (java.time.Instant/parse "9998-12-31T23:59:59.999999Z")
+        utc (java.time.ZoneId/of "UTC")
+        rows [[[1 (.atZone a utc) (.atZone b utc) true]]
+              [[(.atZone c utc) 3 false]] [[]]]
+        mixed [[[1 a (.atZone b utc) true]] [[c 3 false]] [[]]]
+        z-only [[[1 a b true]] [[c 3 false]] [[]]]]
+    (is (= [[]] (:rows (arrow/decode-temporal-union-list-arguments nil))))
+    (try
+      (let [ids (with-open [node (xtn/start-node config)]
+                  (let [database (db/primary-db node)
+                        submit! (fn [input]
+                                  (let [id (:tx-id (xt/submit-tx node (mapv #(into ["ASSERT ? IS NOT NULL"] %) input)))]
+                                    (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                        ids (mapv submit! [mixed z-only])]
+                    (doseq [id ids] (check-temporal-union-retained! node id rows))
+                    ids))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 10))
+          (doseq [id ids] (check-temporal-union-retained! node id rows))))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

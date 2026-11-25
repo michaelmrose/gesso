@@ -216,19 +216,24 @@
 (def ^:private union-leg-kinds
   {"i64" :integer "utf8" :string "bool" :boolean "keyword" :keyword "uuid" :uuid})
 
-(defn- union-kind! [^Field f]
-  (let [n (.childrenLength f)
+(defn- union-kind! [^Field f temporal?]
+  (let [leg-kinds (cond-> union-leg-kinds
+                    temporal? (assoc "timestamp-tz-micro-utc" :timestamp-utc))
+        n (.childrenLength f)
         ^Union u (.type f (Union.))]
     (field! f "$data$" Type/Union false n)
-    (require! (and (<= 2 n (count union-leg-kinds)) u
+    (require! (and (<= 2 n (count leg-kinds)) u
                    (= UnionMode/Dense (.mode u)) (zero? (.typeIdsLength u)))
               :unsupported-arrow-list-union)
     (let [kinds (mapv (fn [i]
                         (let [^Field leg (.children f i)
                               name (.name leg)
-                              kind (get union-leg-kinds name)]
+                              kind (get leg-kinds name)]
                           (require! kind :unsupported-arrow-list-union-leg)
-                          (scalar-kind! leg name #{kind})))
+                          (let [actual (scalar-kind! leg name (if (= :timestamp-utc kind)
+                                                               #{:timestamp :timestamp-utc} #{kind}))]
+                            (require! (= kind actual) :unsupported-arrow-list-union-leg)
+                            actual)))
                       (range n))]
       (require! (= n (count (distinct kinds))) :unsupported-arrow-list-union-leg)
       [:union kinds])))
@@ -253,6 +258,7 @@
                    :else (require! false :unsupported-arrow-field)))
                (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
                      Type/Timestamp :timestamp Type/List (cond
+                                                           (contains? allowed :temporal-union-list) :temporal-union-list
                                                            (contains? allowed :union-list) :union-list
                                                            (contains? allowed :temporal-list) :temporal-list
                                                            (contains? allowed :scalar-list) :scalar-list
@@ -262,7 +268,7 @@
       (require! (and (= field-name (.name f)) (not (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
-      (field! f field-name type false (if (#{:int64-list :scalar-list :temporal-list :union-list} kind) 1 0)))
+      (field! f field-name type false (if (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list} kind) 1 0)))
     (when (= :integer kind)
       (let [^Int t (.type f (Int.))]
         (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
@@ -270,15 +276,15 @@
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
         (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
     (cond
-      (#{:int64-list :scalar-list :temporal-list :union-list} kind)
+      (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list} kind)
       (let [^Field child (.children f 0)]
-        [:list (if (and (= :union-list kind) (= Type/Union (.typeType child)))
-                 (union-kind! child)
+        [:list (if (and (#{:union-list :temporal-union-list} kind) (= Type/Union (.typeType child)))
+                 (union-kind! child (= :temporal-union-list kind))
                  (scalar-kind! child "$data$"
                                (case kind
                                  :int64-list #{:integer}
                                  :scalar-list #{:integer :boolean :string :keyword :uuid}
-                                 (:temporal-list :union-list)
+                                 (:temporal-list :union-list :temporal-union-list)
                                  #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc})))])
       (= :timestamp kind)
       (let [^Timestamp t (.type f (Timestamp.))
@@ -724,3 +730,27 @@
   "Expand selected SQL groups including bounded dense-union scalar lists."
   [bytes]
   (expand-fixed-operations bytes union-list-base union-list-rows!))
+
+(def temporal-union-list-profile :xtdb-2.2.0-beta1/selected-temporal-dense-union-scalar-list-arrow-operations-v1)
+(def ^:private temporal-union-list-base (assoc base :profile temporal-union-list-profile))
+
+(defn- temporal-union-list-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc :temporal-union-list}))
+
+(defn decode-temporal-union-list-arguments
+  "Decode selected heterogeneous scalar lists including the retained UTC
+   microsecond timestamp leg. Decode retained zone identity, not submitted
+   zone identity. Homogeneous Z and UTC lists remain supported."
+  [bytes]
+  (try
+    (assoc temporal-union-list-base :status :decoded :rows (temporal-union-list-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc temporal-union-list-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc temporal-union-list-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc temporal-union-list-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-temporal-union-list-operations
+  "Expand selected SQL groups including heterogeneous scalar and UTC timestamp lists."
+  [bytes]
+  (expand-fixed-operations bytes temporal-union-list-base temporal-union-list-rows!))
