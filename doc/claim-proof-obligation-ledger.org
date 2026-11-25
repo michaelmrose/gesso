@@ -430,3 +430,38 @@ existing assurance report boundary. Retain explicit open obligations for
 initialization coverage, independent SQL/transaction semantics, complete
 physical writer mediation, rule soundness, browser convergence, HumanHelp
 and liveness. No original CLM obligation or package is retired here.
+
+* v2550 — selected mapped prestate guard refinement
+
+The v2548–v2549 prefix is derived from the complete supplied mapped rows,
+including framed/read-only documents and both command journal slots. The
+same preparation supplies the projected abstract prestate and the exact
+pre-write assertions. An admitted transaction preserves its original
+canonical suffix. These checks do not independently prove SQL semantics.
+
+For a checked mapping M, let R be the prepared complete selected rows,
+P_M(R) their abstract projection, G_M(R) the generated guard prefix, and
+D the actual transaction-internal pre-write state. The required safety
+implication is:
+
+#+begin_example
+  execute_assertions(G_M(R), D) = pass
+    => P_M(selected_rows(D)) = P_M(R)
+#+end_example
+
+This implication must hold under the admitted XTDB value/column codec,
+slot selection and row acquisition semantics at the transaction's actual
+read basis. Its converse is not required for safety: exact row guards
+may reject changes outside the abstract projection. Sound refusal and
+progress for unsupported values require separate treatment.
+
+The physical refusal-prefix regression deliberately changes the request,
+assignment, each membership, the occupied journal outcome or cardinality,
+and the previously empty slot. It requires atomic refusal without a
+new loser record, and acceptance after restoring the exact prepared rows.
+This is finite correspondence evidence for the selected closed fixture,
+not a proof of the implication above. CLM-R2 remains open; in particular
+SQL/codec refinement, transaction-internal read basis, writer mediation,
+historical retention, and production HumanHelp correspondence remain
+unestablished. Neither historical verification nor a matching prefix
+alone discharges these premises.

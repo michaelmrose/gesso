@@ -28,6 +28,7 @@
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.read-frontier :as frontier]
             [gesso.model.command :as model-command]
+            [gesso.model.command-resolution :as resolution]
             [xtdb.node :as xtn]
             [ring.util.codec :as codec]
             [xtdb.api :as xt])
@@ -799,6 +800,61 @@
               :journal/one nil :journal/two nil :membership/one true :membership/two false}
              (:state latest)))
       (is (neg? (xtdb/compare-bases (:basis observed) (:basis latest)))))))
+
+(deftest claim-refusal-prefix-compares-the-entire-mapped-prestate
+  ;; This is a differential physical test of the restricted lowering, not
+  ;; an independent proof of XTDB SQL/codec semantics or writer closure.
+  (let [request {:xt/id "r1" :status :claimed :revision 1}
+        assignment {:xt/id "primary-r1" :request-id "r1" :helper "helper-1"}
+        member1 {:xt/id "helper-1" :active true :revision 0}
+        member2 {:xt/id "helper-2" :active true :revision 0}
+        journal (fn [id helper outcome]
+                  (resolution/command-record
+                   {:command-id (identity/command-id id)
+                    :principal (identity/principal helper)
+                    :operation :request/claim :arguments {:request-id "r1"}}
+                   outcome "t1"))
+        accepted (journal "winner" "helper-1" {:outcome :request/claimed :helper "helper-1"})
+        refused (journal "loser" "helper-2" {:outcome :request/not-claimable :reason :already-claimed})
+        restore [[:put-docs :requests request]
+                 [:put-docs :request_assignments assignment]
+                 [:put-docs :memberships member1 member2]
+                 [:put-docs :gesso_commands accepted]
+                 [:delete-docs :gesso_commands "loser" "duplicate"]]
+        mapping (plan/check-target-mapping! (semantics/source "helper-2" :refuse) semantics/target-map)
+        attempt! (fn [node ops]
+                   (try (xt/execute-tx node ops) :committed
+                        (catch Exception e
+                          (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                            :assert-failed (throw e)))))]
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node restore)
+      (let [snapshot (semantics/snapshot-at-frontier! node)
+            prefix (frame/formatted-prestate-assertions! mapping (:document-rows snapshot)
+                                                       (vec (vals (:records snapshot))))
+            candidate (conj prefix [:put-docs :gesso_commands refused])]
+        (is (= :claimed (get-in snapshot [:state :request/status])))
+        (is (= :accepted (get-in snapshot [:state :journal/one])))
+        (is (nil? (get-in snapshot [:state :journal/two])))
+        (doseq [[label mutation]
+                [[:request [[:put-docs :requests (assoc request :revision 2)]]]
+                 [:assignment [[:delete-docs :request_assignments "primary-r1"]]]
+                 [:winner-membership [[:put-docs :memberships (assoc member1 :active false)]]]
+                 [:loser-membership [[:put-docs :memberships (assoc member2 :revision 1)]]]
+                 [:occupied-outcome [[:put-docs :gesso_commands
+                                       (assoc-in accepted [:gesso.command/outcome :helper] "helper-2")]]]
+                 [:occupied-missing [[:delete-docs :gesso_commands "winner"]]]
+                 [:occupied-duplicate [[:put-docs :gesso_commands
+                                          (journal "duplicate" "helper-1" (:gesso.command/outcome accepted))]]]
+                 [:empty-slot [[:put-docs :gesso_commands
+                                  (journal "duplicate" "helper-2" (:gesso.command/outcome refused))]]]]]
+          (xt/execute-tx node mutation)
+          (is (= :assert-failed (attempt! node candidate)) (name label))
+          (is (empty? (xt/q node ["SELECT * FROM gesso_commands WHERE _id = ?" "loser"])) (name label))
+          (xt/execute-tx node restore))
+        (is (= :committed (attempt! node candidate)))
+        (is (= [refused] (xt/q node ["SELECT * FROM gesso_commands WHERE _id = ?" "loser"])))
+        (is (= :rejected (get-in (semantics/snapshot-at-frontier! node) [:state :journal/two])))))))
 
 (defn -main [& args]
   (when (seq args) (throw (ex-info "Unexpected Claim browser gate arguments" {})))
