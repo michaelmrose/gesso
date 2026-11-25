@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-replay-input :as input]
+            [gesso.assurance.reference-arrow-operations :as arrow]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-source-payload :as payload]
             [gesso.assurance.reference-temporal :as temporal]
@@ -59,7 +60,8 @@
                     expected (mapv (fn [i ops] {:tx-id (submit! i ops) :system-time (.plusSeconds t i) :ops ops})
                                    (range) txs)
                     rejected [(submit! 3 [["ASSERT ? IS NOT NULL" 1]])
-                              (submit! 4 [[:put-docs {:into :probe :valid-from t} {:xt/id "b" :value 1}]])
+                              (submit! 4 [[:put-docs :probe {:xt/id "b" :xt/valid-from t}
+                                                   {:xt/id "c"}]])
                               (:tx-id (xt/submit-tx node [["ASSERT TRUE"]]))]]
                 (.awaitSourceBlocking database (peek rejected) (Duration/ofSeconds 15))
                 (check-inputs! node expected rejected)
@@ -166,4 +168,66 @@
                 (is (= :retained-replay-input-not-qualified (:reason r)))
                 (no-replay-sample! r))
               (is (= :observed (:status (coverage/observe-local-processed-retained-history! node))))))))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-valid-time-inputs! [node expected]
+  (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
+        bytes (read-bytes node)
+        id (:tx-id (first expected))
+        body (get bytes id)
+        decode! #(input/decode-replay-input id body)
+        arrow! arrow/decode-bounded-operations
+        prediction (temporal/replay (mapv #(dissoc % :tx-id) expected))]
+    (is (= :observed (:status sample)) (pr-str (dissoc sample :replay-inputs :payload-fingerprint)))
+    (is (= expected (:replay-inputs sample)))
+    (is (= :matched (:operation-correspondence sample)))
+    (is (= :predicted (:status prediction)))
+    (is (= [true true true false] (mapv :committed? (:history prediction))))
+    (doseq [tx expected]
+      (let [r (input/decode-replay-input (:tx-id tx) (get bytes (:tx-id tx)))]
+        (is (= :decoded (:status r)))
+        (is (= input/profile (:profile r)))
+        (is (= tx (:transaction r)))))
+    ;; Retained facts with different bounds are not silently coalesced.
+    (doseq [alter [(fn [r] (update-in r [:operations 0 :documents 1] dissoc :xt/valid-from))
+                   (fn [r] (assoc-in r [:operations 0 :documents 0 :xt/valid-from] nil))
+                   (fn [r] (assoc-in r [:operations 0 :bounds] {:xt/valid-from Instant/EPOCH}))
+                   (fn [r] (update-in r [:operations 0 :documents]
+                                     #(mapv (fn [d] (assoc d :xt/valid-to (:xt/valid-from d))) %)))
+                   (fn [r] (update-in r [:operations 0 :documents]
+                                     #(mapv (fn [d] (update d :xt/valid-from
+                                                          (fn [v] (.withZoneSameInstant v (ZoneId/of "Asia/Tokyo"))))) %)))]]
+      (with-redefs [arrow/decode-bounded-operations (comp alter arrow!)]
+        (let [r (decode!)]
+          (is (= :unsupported (:status r)))
+          (is (= :unsupported-replay-operation (:reason r)))
+          (is (not (contains? r :transaction))))))))
+
+(deftest uniform-valid-time-replay-from-retained-history
+  (let [root (Files/createTempDirectory "gesso-replay-valid-time-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        from (Instant/parse "1969-12-31T23:59:59.999999Z")
+        to (.plusSeconds t 100)
+        txs [[[:put-docs {:into :probe :valid-from from :valid-to to}
+               {:xt/id "a" :value 1} {:xt/id "b" :value 1}]]
+             [[:put-docs {:into :probe :valid-from t} {:xt/id "a" :value 2}]]
+             [[:put-docs {:into :probe :valid-to to} {:xt/id "b" :value 3}]]
+             [[:put-docs {:into :probe :valid-from from :valid-to to} {:xt/id "a" :value 4}]
+              ["ASSERT FALSE"]]]]
+    (try
+      (let [expected (with-open [node (xtn/start-node config)]
+                       (let [database (db/primary-db node)
+                             expected (mapv (fn [i ops]
+                                              (let [time (.plusSeconds t i)]
+                                                {:tx-id (:tx-id (xt/submit-tx node ops {:system-time time}))
+                                                 :system-time time :ops ops}))
+                                            (range) txs)]
+                         (.awaitSourceBlocking database (:tx-id (peek expected)) (Duration/ofSeconds 15))
+                         (check-valid-time-inputs! node expected)
+                         expected))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
+          (check-valid-time-inputs! node expected)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

@@ -4389,3 +4389,25 @@ explicit-time replay domain only; quiescence, atomic acquisition,
 authenticated provenance and universal refinement remain unestablished.
 No production admission, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2705 — project uniform retained document valid-time bounds
+
+Qualify row-level UTC valid-from and valid-to fields emitted by the pinned
+XTDB writer. Require identical bound presence and values across each
+physical put group; preserve grouping, strip only the qualified temporal
+fields from document data, and project exact Instant options. Missing
+bounds retain temporal interpreter defaults. Reject heterogeneous bounds,
+unqualified zones, outer bounds and invalid intervals without partial
+inputs. Version replay projection and processed replay acquisition.
+
+Focused JVM: 70 tests / 4769 assertions, zero failures or errors across
+nine namespaces; replay input suite 3 tests / 218 assertions. Real retained
+multi-document finite, from-only and to-only groups match projected inputs
+before and after reopening; include pre-epoch microsecond bounds and an
+aborted bounded put. Reject injected heterogeneous bounds, nulls, outer
+bounds, invalid intervals and zones. The first regression launcher lacked
+a clojure.test require; corrected launcher passed. Existing provider
+envelope comparison still rejects temporal put options; full direct
+execution correspondence for these operations remains open. No production
+admission, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates were not rerun.

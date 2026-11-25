@@ -3,10 +3,27 @@
   (:require [gesso.assurance.reference-arrow-operations :as arrow]
             [gesso.assurance.reference-source-payload :as payload]
             [gesso.assurance.reference-temporal :as temporal])
-  (:import (java.time Instant ZoneId)))
+  (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v1)
+(def profile :selected-retained-replay-input-v2)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
+
+(defn- project-put [table documents]
+  ;; XTDB writes valid-time options into each row. Keep the physical
+  ;; group intact; heterogeneous row bounds are a separate obligation.
+  (let [bound-keys [:xt/valid-from :xt/valid-to]
+        row-bounds (mapv #(select-keys % bound-keys) documents)
+        bounds (first row-bounds)]
+    (when (and (apply = row-bounds)
+               (every? #(and (instance? ZonedDateTime %)
+                             (= (ZoneId/of "UTC") (.getZone ^ZonedDateTime %)))
+                       (vals bounds)))
+      (let [table (keyword (name table))
+            opts (reduce-kv (fn [opts k v]
+                              (assoc opts (keyword (name k)) (.toInstant ^ZonedDateTime v)))
+                            {:into table} bounds)]
+        (into [:put-docs (if (empty? bounds) table opts)]
+              (map #(apply dissoc % bound-keys) documents))))))
 
 (defn- project-operation [{:keys [kind query args table documents bounds] :as op}]
   (case kind
@@ -17,14 +34,15 @@
     :put-docs (when (and (= #{:kind :table :documents :iids :bounds} (set (keys op)))
                          (keyword? table) (= "public" (namespace table)) (= {} bounds)
                          (vector? documents) (seq documents)
-                         (every? #(and (map? %) (not-any? (partial contains? %) [:xt/valid-from :xt/valid-to])) documents))
-                (into [:put-docs (keyword (name table))] documents))
+                         (every? map? documents))
+                (project-put table documents))
     nil))
 
 (defn decode-replay-input
   "Project one independently decoded transaction envelope to the selected
    temporal input domain. Require explicit system time, UTC default zone,
-   absent or default xtdb user, no user metadata, ordinary puts and exact literal/equality assertions.
+   absent or default xtdb user, no user metadata, ordinary puts, uniform row-level valid-time bounds and exact
+   literal/equality assertions.
    The physical coordinate is supplied, not authenticated. No provider
    observations or outcomes are consulted. Internal sensitive input only."
   [tx-id bytes]
