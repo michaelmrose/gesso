@@ -411,6 +411,56 @@
           (is (= {:status :unavailable :reason :envelope-check-failed :profile envelope/binding-profile
                   :authority :none :certificate :not-issued} (check durable))))))))
 
+(deftest retained-residual-assertions-require-complete-prewrite-multiset
+  (with-open [node (xtn/start-node {})]
+    (let [prefix [["ASSERT ? = ?" 1 1]]
+          extra ["ASSERT ? = ?" 2 2]
+          other ["ASSERT ? = ?" 3 3]
+          mismatch :intended-residual-assertions-mismatch]
+      (doseq [[mode expected] [[:valid nil] [:reordered nil] [:empty nil]
+                               [:omitted mismatch] [:duplicate mismatch]
+                               [:wrong-args mismatch] [:unexpected mismatch]
+                               [:late mismatch] [:prefix-repeat mismatch]]]
+        (let [id (name mode)
+              witness {:xt/id id :profile-version 4 :guard-prefix-fingerprint "guard"}
+              intent {:xt/id id :topic :probe}
+              guard ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)" id]
+              writes {:tables #{:probe :gesso_commands :gesso_live_outbox}
+                      :puts [[:put-docs :probe {:xt/id id :value :open}]
+                             [:put-docs :gesso_live_outbox intent]]}
+              expected-extra (if (= :empty mode) [] [extra other])
+              residual (case mode
+                         :valid [extra other]
+                         :reordered [other extra]
+                         :empty []
+                         :omitted [extra]
+                         :duplicate [extra other extra]
+                         :wrong-args [extra ["ASSERT ? = ?" 4 4]]
+                         :unexpected [extra other ["ASSERT TRUE"]]
+                         :late [extra]
+                         :prefix-repeat [extra other (first prefix)])
+              ops (into (into (conj prefix guard) residual) (:puts writes))
+              ops (cond-> ops (= :late mode) (conj other))
+              bound (envelope/bind-transition-envelope!
+                     (conj ops [:put-docs :gesso_transition_evidence witness]))
+              tx-id (:tx-id (xt/execute-tx node bound))
+              durable (first (xt/q node ["SELECT * FROM gesso_transition_evidence WHERE _id = ?" id]))
+              check #(envelope/check-recorded-transition! node tx-id durable prefix writes %)
+              result (check expected-extra)]
+          (is (= :matched (:status (envelope/check-recorded-transition! node tx-id durable prefix writes))) (name mode))
+          (is (= expected (:reason result)) (name mode))
+          (is (= (if expected :mismatch :matched) (:status result)) (name mode))
+          (is (= (when-not expected :matched) (:intended-residual-assertions result)) (name mode))
+          (when (= :valid mode)
+            (doseq [bad [nil [guard] [[:put-docs :probe {:xt/id id}]]]]
+              (is (= :invalid-intended-residual-assertions (:reason (check bad)))))
+            (is (= :unsupported-placeholder-shape (:reason (check [["ASSERT ? = ?" 2]]))))
+            (is (= :invalid-intended-residual-assertions
+                   (:reason (envelope/check-recorded-transition!
+                             node tx-id durable prefix
+                             {:tables #{:probe :gesso_commands} :puts [(first (:puts writes))]}
+                             expected-extra))))))))))
+
 (defn -main [& args]
   (let [{:keys [fail error]}
         (if (= ["claim"] (vec args))

@@ -241,13 +241,30 @@
                                         _ (range n)]
                                     [outbox-absence-sql (:xt/id doc)]))})))
 
+(defn- expected-residual-assertions! [assertions writes]
+  (when-not (and (:outbox? writes) (vector? assertions)
+                 (<= (count assertions) 16384)
+                 (every? #(and (vector? %) (string? (first %))
+                               (not= outbox-absence-sql (first %))) assertions))
+    (reject! :invalid-intended-residual-assertions))
+  ;; Validate the same restricted SQL/argument language as the retained log.
+  (when (seq assertions) (expected-operations! assertions))
+  (merge-with + (frequencies assertions) (:outbox-guards writes)))
+
+(defn- residual-assertions-match? [ops prefix-count expected]
+  (let [tail (subvec ops prefix-count)
+        sql? #(string? (first %))]
+    (= expected
+       (frequencies (take-while sql? tail))
+       (frequencies (filter sql? tail)))))
+
 (defn- check-recorded-transition*
   "Check a committed transition's decoded source-log envelope against its
    independently acquired, pinned durable v4 witness. No caller operation
    vector is required. The final logged witness must match exactly, its
    binding must recompute, and the ledger must independently show commit.
    This checks decoded correspondence, not writer authority or execution."
-  [node tx-id witness require-prefix? prefix require-writes? writes]
+  [node tx-id witness require-prefix? prefix require-writes? writes require-residual? assertions]
   (let [report (fn [status reason]
                  (cond-> {:status status :profile binding-profile :authority :none :certificate :not-issued}
                    reason (assoc :reason reason)))]
@@ -264,6 +281,7 @@
         :else
         (let [expected-prefix (when require-prefix? (expected-operations! prefix))
               expected-writes (when require-writes? (expected-selected-puts! writes))
+              expected-residual (when require-residual? (expected-residual-assertions! assertions expected-writes))
               observed (source-log/observe-source-message! node tx-id)]
           (case (:status observed)
             :unavailable (report :unavailable (:reason observed))
@@ -297,6 +315,9 @@
                              (outbox-guard-entries (take-while #(string? (first %)) ops))
                              (outbox-guard-entries ops)))
                   (report :mismatch :publication-outbox-guard-mismatch)
+                  (and require-residual?
+                       (not (residual-assertions-match? ops (count expected-prefix) expected-residual)))
+                  (report :mismatch :intended-residual-assertions-mismatch)
                   :else
                   (let [outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
                     (cond
@@ -309,7 +330,8 @@
                               require-prefix? (assoc :intended-guard-prefix :matched)
                               require-writes? (assoc :intended-mapped-writes :matched
                                                      :transition-evidence-write :matched)
-                              (:outbox? expected-writes) (assoc :publication-outbox :matched)))))))
+                              (:outbox? expected-writes) (assoc :publication-outbox :matched)
+                              require-residual? (assoc :intended-residual-assertions :matched)))))))
             (report :unsupported :unexpected-source-observation))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -328,11 +350,16 @@
    The five-argument form also checks complete selected-table puts with
    multiplicity against independent expectations. Including the outbox
    table also requires exactly its expected prewrite absence guards.
-   Publication semantic intent and remaining assertion/writer authority
-   are not established."
+   The six-argument form additionally requires all remaining assertions
+   (except the separately derived outbox guards) as a complete vector.
+   Their multiplicity and prewrite placement must match; order within this
+   residual group is not checked. This does not derive assertion intent,
+   establish semantic equivalence or prove writer authority."
   ([node tx-id witness]
-   (check-recorded-transition* node tx-id witness false nil false nil))
+   (check-recorded-transition* node tx-id witness false nil false nil false nil))
   ([node tx-id witness prefix]
-   (check-recorded-transition* node tx-id witness true prefix false nil))
+   (check-recorded-transition* node tx-id witness true prefix false nil false nil))
   ([node tx-id witness prefix writes]
-   (check-recorded-transition* node tx-id witness true prefix true writes)))
+   (check-recorded-transition* node tx-id witness true prefix true writes false nil))
+  ([node tx-id witness prefix writes assertions]
+   (check-recorded-transition* node tx-id witness true prefix true writes true assertions)))

@@ -1336,3 +1336,31 @@ within the installed local adapter boundary, not closure over arbitrary
 raw writers or proof of provider execution. Remaining assertion intent,
 complete envelope correspondence and physical writer authority are open.
 No CLM-R2 premise is retired.
+
+* v2591 — compare the complete residual assertion multiset
+
+Add an opt-in six-argument recorded-transition checker through the
+existing restricted envelope and opaque adapter APIs. After the ordered
+intended prefix, require exact equality of the remaining SQL assertions
+with a supplied complete vector plus the already derived outbox absence
+assertions. Require all residual assertions before the first document put;
+check multiplicity over the entire suffix to refuse late assertions.
+Validate the expectation in the same restricted SQL and argument language.
+An explicit empty vector is meaningful; missing expectations, non-SQL
+operations and separately supplied canonical outbox guards are refused.
+Preserve the existing three-, four- and five-argument checks.
+
+JVM source-log pilot: 9 tests / 191 assertions, zero failures or errors.
+Actual retained committed transactions exercise matching, reordered and
+empty residual expectations, and missing, repeated, extra, wrong-argument,
+late and repeated-prefix assertions. The prior diagnostic check accepts
+those negative controls, demonstrating the stronger comparison's scope.
+The full physical Claim and project regression suites, Chromium and
+separate proof gates were not rerun.
+
+Residual ordering within the prewrite group is not established. This
+primitive compares a supplied expectation; it does not independently
+derive one from admitted semantics. Historical and preventive admission
+remain unchanged, with history/checkpoint profile v11. Source-bound
+assertion derivation, complete write-table closure, provider execution
+refinement and writer authority remain open. No CLM-R2 premise is retired.
