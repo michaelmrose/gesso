@@ -15,11 +15,13 @@
             [gesso.model.inductive-plan :as inductive]
             [gesso.model.resolved-operation :as resolved]
             [gesso.model.tx :as model-tx]
-            [gesso.model.command :as model-command])
+            [gesso.model.command :as model-command]
+            [xtdb.basis :as basis])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.nio ByteBuffer]
            [java.security MessageDigest]
            [java.util UUID WeakHashMap]
+           [java.time ZonedDateTime]
            [java.lang.ref WeakReference]))
 
 (defn- reject! [reason data]
@@ -308,6 +310,18 @@
                (compare-and-set! (:available? scope) true false))
       (:checked scope))))
 
+(defn- mapped-rows! [node admission opts]
+  (let [tables (into #{} (keep (fn [[kind table]]
+                                 (when (#{:document :nullable-document} kind) table)))
+                     (vals (:target-map (inductive/describe-mapped-admission admission))))]
+    {:docs (into {} (map (fn [table]
+                           (when-not (and (simple-keyword? table)
+                                          (re-matches #"[a-z][a-z0-9_]*" (name table)))
+                             (reject! :invalid-mapped-readback-table {}))
+                           [table (xtdb/q-from node [(str "SELECT * FROM " (name table))] opts)]))
+                 (sort tables))
+     :journal (xtdb/q-from node ["SELECT * FROM gesso_commands"] opts)}))
+
 (defn- check-committed-poststate! [ctx {:keys [admission checked evidence]} receipt]
   (try
     (let [basis (xtdb/tx-result-basis (:tx-result receipt))
@@ -316,16 +330,7 @@
           opts (assoc (frontier/query-options! node)
                       :snapshot-token (xtdb/basis-snapshot-token basis)
                       :current-time (xtdb/basis-system-time basis))
-          tables (into #{} (keep (fn [[kind table]]
-                                   (when (#{:document :nullable-document} kind) table)))
-                       (vals (:target-map (inductive/describe-mapped-admission admission))))
-          docs (into {} (map (fn [table]
-                               (when-not (and (simple-keyword? table)
-                                              (re-matches #"[a-z][a-z0-9_]*" (name table)))
-                                 (reject! :invalid-mapped-readback-table {}))
-                               [table (xtdb/q-from node [(str "SELECT * FROM " (name table))] opts)]))
-                     (sort tables))
-          journal (xtdb/q-from node ["SELECT * FROM gesso_commands"] opts)]
+          {:keys [docs journal]} (mapped-rows! node admission opts)]
       (when-not (= [evidence] (xtdb/q-from node ["SELECT * FROM gesso_transition_evidence WHERE _id = ?"
                                                 (:xt/id evidence)] opts))
         (reject! :mapped-transition-evidence-mismatch {}))
@@ -408,6 +413,48 @@
       (reject! :invalid-command-record-observation {}))
     (resolution/reconcile binding (first rows) may-disclose?)))
 
+(defn- reconcile-mapped-command! [ctx may-disclose? admission]
+  ;; Do not inspect evidence or historical domain state until the ordinary
+  ;; disclosure and exact-binding decision permits replay.
+  (let [binding (command-binding! ctx)
+        id (resolution/record-id binding)
+        query ["SELECT *, _system_from FROM gesso_commands WHERE _id = ?" id]
+        rows (frontier/q-from! ctx query)
+        row (first rows)
+        record (some-> row (dissoc :xt/system-from))]
+    (when-not (and (vector? rows) (<= (count rows) 1) (every? map? rows))
+      (reject! :invalid-command-record-observation {}))
+    (let [prior (resolution/reconcile binding record may-disclose?)]
+      (if (= :replay (:status prior))
+        (let [time (:xt/system-from row)
+              _ (when-not (instance? ZonedDateTime time)
+                  (reject! :missing-mapped-command-commit-time {}))
+              instant (.toInstant ^ZonedDateTime time)
+              node (xtdb/connectable-from ctx)
+              evidence-query ["SELECT *, _system_from FROM gesso_transition_evidence WHERE _id = ?" id]
+              current (frontier/q-from! ctx evidence-query)
+              evidence-row (first current)
+              _ (when-not (and (vector? current) (= 1 (count current))
+                               (= time (:xt/system-from evidence-row)))
+                  (reject! :missing-or-displaced-mapped-transition-evidence {}))
+              opts (assoc (frontier/query-options! node)
+                          :snapshot-token (basis/->time-basis-str {xtdb/default-database-name [instant]})
+                          :current-time instant)
+              _ (when-not (and (= [row] (xtdb/q-from node query opts))
+                               (= current (xtdb/q-from node evidence-query opts)))
+                  (reject! :historical-mapped-record-mismatch {}))
+              {:keys [docs journal]} (mapped-rows! node admission opts)]
+          (inductive/check-historical-mapped-poststate!
+           admission record (dissoc evidence-row :xt/system-from) docs journal)
+          (assoc prior :mapped-readback {:system-time instant :authority :none
+                                          :physical-correspondence :checked-historical-projection}))
+        prior))))
+
+(defn- reconcile-selected! [ctx may-disclose? admission]
+  (if admission
+    (reconcile-mapped-command! ctx may-disclose? admission)
+    (reconcile-command! ctx may-disclose?)))
+
 (defn reconcile-settlement!
   "Return a validated replay operation result for the original optimistic
    server, not a transport settlement. The invocation must match its bound
@@ -425,7 +472,7 @@
                                (reconcile-command! ctx may-disclose?)
                                project!))
 
-(defn- recover-after-execute! [ctx may-disclose? failure after-abort!]
+(defn- recover-after-execute! [ctx may-disclose? failure after-abort! admission]
   (when (= ::mapped-postcommit-failure (:error/type (ex-data failure)))
     (throw failure))
   ;; An interrupted request must not start another provider call.
@@ -433,7 +480,7 @@
     (.interrupt (Thread/currentThread)))
   (when (.isInterrupted (Thread/currentThread))
     (throw failure))
-  (let [prior (try (reconcile-command! ctx may-disclose?)
+  (let [prior (try (reconcile-selected! ctx may-disclose? admission)
                    (catch Exception read-error
                      (when (instance? InterruptedException read-error)
                        (.interrupt (Thread/currentThread)))
@@ -488,7 +535,7 @@
       (try {:status :incorporated :outcome outcome
             :transaction (execute-resolved-plan! ctx plan)}
            (catch Exception second-failure
-             (recover-after-execute! ctx may-disclose? second-failure nil))))))
+             (recover-after-execute! ctx may-disclose? second-failure nil admission))))))
 
 (defn- require-target-options! [options]
   (let [table? (contains? options :construction-contract)
@@ -629,8 +676,9 @@
    Optional :mapped-admission is an issued inductive mapped admission. It
    requires the complete canonical contract and frames and consumes the
    selected preparation after ordinary model/publication compilation, before
-   either initial or guarded-abort physical submission. Replay does not use
-   it. Local admission failures propagate without transaction recovery.
+   either initial or guarded-abort physical submission. Authorized replay
+   checks the source-bound durable evidence at the original commit time.
+   Local admission failures propagate without transaction recovery.
    The host must still mediate other physical writers; this selection alone
    does not qualify the installed XTDB submission policy.
    Neither ordinary contract verifies projection. Raw SQL
@@ -654,7 +702,7 @@
   (require-mapped-admission! options)
   (when-not (= (command-binding! ctx) (adapter/require-context operation invocation))
     (reject! :mismatched-command-binding {}))
-  (let [prior (reconcile-command! ctx may-disclose?)
+  (let [prior (reconcile-selected! ctx may-disclose? mapped-admission)
         result
         (if (and (= :submit mode) (= :unresolved (:status prior)))
           (let [contract (admit-contract! ctx options)
@@ -679,7 +727,8 @@
                                                                       (if abort-contract
                                                                         (admit-contract! ctx (assoc abort-contract :single-command-per-principal? single-command-per-principal?))
                                                                         contract)
-                                                                      mapped-admission))))))
+                                                                      mapped-admission))
+                                           mapped-admission))))
           prior)]
     (adapter/project-resolution! invocation result project!)))
 

@@ -26,6 +26,7 @@
             [gesso.assurance.proof.initial-constructor :as constructor]
             [gesso.assurance.transition :as transition]
             [gesso.assurance.subject :as subject]
+            [gesso.choreo.identity :as identity]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-preparation :as preparation]
             [gesso.model.mapped-frame :as frame]
@@ -510,6 +511,18 @@
     {:state actual :initialization-fingerprint (:initialization-fingerprint checked)
      :authority :none :physical-correspondence :checked-supplied-projection}))
 
+(defn- transition-evidence [description alternative mapping command-id state]
+  {:xt/id command-id :profile-version 1
+     :catalog-fingerprint (:catalog-fingerprint description)
+     :induction-fingerprint (:induction-fingerprint description)
+     :mapping-fingerprint (:fingerprint mapping)
+     :transition-fingerprint (:transition-fingerprint mapping)
+     :alternative alternative
+     :poststate-fingerprint (:fingerprint
+                            (original-initial-identity
+                             {:kind :rule :id ::mapped-poststate
+                              :interface {:state state}}))})
+
 (defn mapped-transition-evidence!
   "Describe the expected poststate of an admitted framed candidate. This
    record is an expectation, not proof of physical verification. The executor
@@ -525,16 +538,32 @@
                    (map? (:after candidate))
                    (identical? original-initial-identity subject/describe-subject))
       (reject! :invalid-mapped-transition-evidence [] {}))
-    {:xt/id (:command-id identity) :profile-version 1
-     :catalog-fingerprint (:catalog-fingerprint description)
-     :induction-fingerprint (:induction-fingerprint description)
-     :mapping-fingerprint (:fingerprint mapping)
-     :transition-fingerprint (:transition-fingerprint mapping)
-     :alternative alternative
-     :poststate-fingerprint (:fingerprint
-                            (original-initial-identity
-                             {:kind :rule :id ::mapped-poststate
-                              :interface {:state (:after candidate)}}))}))
+    (transition-evidence description alternative mapping (:command-id identity) (:after candidate))))
+
+(defn check-historical-mapped-poststate!
+  "Recompute the expected evidence from the original mapping and supplied
+   historical rows. The caller must establish the exact command commit time
+   and same-transaction evidence. This grants no transaction authority."
+  [admission record evidence document-rows journal-rows]
+  (let [{:keys [source description]} (registered-mapped! admission)
+        alternative (:alternative evidence)
+        mapping (get-in description [:operation-mappings alternative])
+        original (some (fn [{:keys [id construction]}]
+                         (when (= id alternative) construction))
+                       (get-in source [:inductive-source :catalog :operations]))
+        binding (:gesso.command/binding record)
+        slot [:journal-slot (identity/raw-value (:principal binding)) (:operation binding)]]
+    (when-not (and original mapping (string? (:xt/id record))
+                   (contains? (:write-targets mapping) slot)
+                   (some #(= record %) journal-rows)
+                   (identical? original-initial-projection projection/project-state!)
+                   (identical? original-initial-identity subject/describe-subject))
+      (reject! :invalid-historical-mapped-evidence [] {}))
+    (let [actual (original-initial-projection original (:target-map source)
+                                               document-rows journal-rows (:decode-outcome! source))]
+      (when-not (= evidence (transition-evidence description alternative mapping (:xt/id record) actual))
+        (reject! :historical-mapped-poststate-mismatch [] {}))
+      {:authority :none :physical-correspondence :checked-historical-projection})))
 
 (defn check-mapped-poststate!
   "Compare the complete supplied projection with the admitted transition's

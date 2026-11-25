@@ -440,6 +440,9 @@
             (is (= (live-xtdb/tx-result-basis (get-in result [:transaction :tx-result]))
                    (get-in result [:transaction :mapped-readback :basis])))
             (is (= 4 (:item-count (request-row))))
+            (is (= :checked-historical-projection
+                   (get-in (exec (call "valid")) [:mapped-readback :physical-correspondence])))
+            (is (= 4 (:item-count (request-row))))
             (xt/execute-tx node [[:put-docs :requests after]]))
           (is (= after (request-row)))
           (is (= [assignment] (xt/q node ["SELECT * FROM assignments"])))
@@ -484,5 +487,52 @@
             (is (= [{:xt/id "mismatch"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
             (is (= #{"valid" "mismatch"}
                    (set (map :xt/id (xt/q node ["SELECT _id FROM gesso_transition_evidence"])))))
-            (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))
+            (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+            ;; A transient failed observation is recoverable by a good read.
+            (with-redefs [live-xtdb/q-from
+                          (fn [provider query opts]
+                            (let [result (q provider query opts)]
+                              (if (and (:snapshot-token opts) (= ["SELECT * FROM requests"] query))
+                                (assoc-in result [0 :item-count] 99) result)))]
+              (is (= :historical-mapped-poststate-mismatch (reason #(exec (call "mismatch"))))))
+            (with-redefs [adapter/project-resolution! (fn [_ result _] result)]
+              (is (= :replay (:status (exec (call "mismatch"))))))
+            (let [witness (first (xt/q node ["SELECT * FROM gesso_transition_evidence WHERE _id = ?" "mismatch"]))
+                  prior-constructs @constructs
+                  prior-claims (count @claimed)]
+              ;; Non-disclosure precedes evidence inspection.
+              (xt/execute-tx node [[:delete-docs :gesso_transition_evidence "mismatch"]])
+              (is (= :missing-or-displaced-mapped-transition-evidence
+                     (reason #(exec (call "mismatch")))))
+              (let [denied (publication/build-executor (assoc opts :may-disclose? (constantly false)))]
+                (is (= :unavailable
+                       (try (denied (call "mismatch")) nil
+                            (catch Exception e (get-in (ex-data e) [:error/details :status]))))))
+              (xt/execute-tx node [[:put-docs :gesso_transition_evidence witness]])
+              (is (= :missing-or-displaced-mapped-transition-evidence
+                     (reason #(exec (call "mismatch")))))
+              ;; Raw fixture writes emulate corruption outside mediation.
+              (xt/execute-tx node [[:delete-docs :gesso_commands "mismatch"]
+                                   [:put-docs :gesso_commands (record "corrupt" "p1")]
+                                   [:put-docs :gesso_transition_evidence (assoc witness :xt/id "corrupt")]
+                                   [:put-docs :requests (assoc after :item-count 99)]])
+              (xt/execute-tx node [[:put-docs :requests after]])
+              (is (= :historical-mapped-poststate-mismatch (reason #(exec (call "corrupt")))))
+              (is (= prior-constructs @constructs))
+              (is (= prior-claims (count @claimed))))
+            ;; A lost execute receipt must use the same historical replay
+            ;; gate in recovery, not an ordinary journal-only lookup.
+            (xt/execute-tx node [[:put-docs :requests before]
+                                 [:delete-docs :assignments "a1"]
+                                 [:delete-docs :gesso_commands "corrupt"]])
+            (let [execute live-xtdb/execute-tx-from!
+                  result (with-redefs [live-xtdb/execute-tx-from!
+                                       (fn [ctx ops & [opts]]
+                                         (execute ctx ops opts)
+                                         (throw (ex-info "Lost receipt" {})))
+                                       adapter/project-resolution! (fn [_ result _] result)]
+                           (exec (call "recover")))]
+              (is (= :replay (:status result)))
+              (is (= :checked-historical-projection (get-in result [:mapped-readback :physical-correspondence])))
+              (is (= after (request-row)))))))
         (finally (when-let [release @release-policy] (release)))))))
