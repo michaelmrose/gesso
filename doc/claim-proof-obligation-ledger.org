@@ -2204,3 +2204,29 @@ deadlines and actual stored lease metadata across arbitrary executions,
 and universal provider refinement remain open. No production assurance
 status changes and no CLM-R2 premise is retired. Full project, physical
 Claim, Chromium and independent proof gates were not rerun.
+
+* v2622 — model publication UUID absence guards
+
+Recognize the exact fixed-table zero-count UUID absence assertion emitted
+by outbox preparation. Evaluate against tentative visible outbox rows,
+rejecting non-UUID operands and reached mixed identity domains. Keep other
+count selectors within their existing string identity domain. Temporal
+replay inherits the new assertion through its independent current-state
+projection. Current-state profile v12; temporal v9; history v19 unchanged.
+
+Combined reference JVM: 37 tests / 4353 assertions, zero failures or
+errors. Eight additional embedded XTDB transactions use actual publication
+preparation guards and multi-intent writes with selected domain writes.
+Compare outcomes, 90 bitemporal points across two tables and complete
+selected history rectangles. Regressions cover duplicate IDs, a collision
+in the second guard, rollback of both domain and outbox writes, tentative
+visibility, and reuse of an ID whose bounded historical row is no longer
+visible. Unsupported operands and malformed suffixes fail closed. No
+provider readback feeds reference replay.
+
+This is finite empirical physical guard correspondence, not a guarantee
+of lifetime UUID uniqueness, concurrent writer completeness or complete
+publication admission. Manifest/source guards, observed lease metadata
+correspondence and universal provider refinement remain open. No production
+assurance status changes and no CLM-R2 premise is retired. Full project,
+physical Claim, Chromium and independent proof gates were not rerun.

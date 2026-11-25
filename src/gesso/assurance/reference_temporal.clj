@@ -4,7 +4,7 @@
   (:require [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-bitemporal-transaction-v8)
+(def profile :selected-bitemporal-transaction-v9)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))

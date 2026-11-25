@@ -5,7 +5,7 @@
   (:require [clojure.string :as str])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-current-state-transaction-v11)
+(def profile :selected-current-state-transaction-v12)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -166,6 +166,20 @@
                        (and (id? id) (= :string (equality-domain id)))))
       (reject! :unsupported-reference-count-assertion))
     {:kind kind :table table :id id :expected expected}))
+
+(def ^:private publication-absence-sql
+  "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)")
+
+(defn- publication-absence! [op]
+  (when-not (and (= 2 (count op)) (uuid? (second op)))
+    (reject! :unsupported-reference-publication-identity))
+  {:kind :assert-publication-absence :id (second op)})
+
+(defn- publication-absent? [working id]
+  (let [rows (get working :gesso_live_outbox)]
+    (when-not (every? uuid? (keys rows))
+      (reject! :unsupported-reference-publication-id-domain))
+    (not (contains? rows id))))
 
 (defn- count-matches? [working {:keys [kind table id expected]}]
   (let [rows (get working table)]
@@ -397,6 +411,7 @@
     (= "ASSERT ? = ?" (first op)) (equality-kind! op)
     (and (string? (first op)) (re-matches read-pattern (first op)))
     (read-assertion! op)
+    (= publication-absence-sql (first op)) (publication-absence! op)
     (and (string? (first op)) (re-matches count-pattern (first op)))
     (count-assertion! op :assert-row-count (re-matches count-pattern (first op)))
     (and (string? (first op)) (re-matches field-count-pattern (first op)))
@@ -420,7 +435,7 @@
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-or-uuid-id document}}. Puts replace entire documents in order;
    literal, homogeneous parameter equality, selected row-read, count,
-   mapped scalar and selected journal slot/value assertions can abort and return
+   mapped scalar, publication absence and selected journal slot/value assertions can abort and return
    the original state. Reads see the tentative state
    produced by preceding operations. The full vector is structurally validated
    before evaluation, including operations after a false guard; reached reads
@@ -456,6 +471,11 @@
                          :state state :failed-assertion-index i))
                 :assert-journal-value
                 (if (journal-value-matches! working kind)
+                  (recur working (inc i))
+                  (assoc report :status :predicted :committed? false
+                         :state state :failed-assertion-index i))
+                :assert-publication-absence
+                (if (publication-absent? working (:id kind))
                   (recur working (inc i))
                   (assoc report :status :predicted :committed? false
                          :state state :failed-assertion-index i))

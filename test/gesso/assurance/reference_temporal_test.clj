@@ -579,3 +579,67 @@
                  (into {} (map (juxt :xt/id identity)) rows)))))
       (is (= (frequencies (coalesce-valid (:rectangles r)))
              (frequencies (coalesce-valid (provider-rectangles node outbox/intent-table))))))))
+
+(def ^:private third-intent-id #uuid "00000000-0000-0000-0000-000000000003")
+(defn- publication [ids]
+  (outbox/prepare! {:intent-ids ids :source-id "reference-source"
+                    :operation :request/claim :purpose :gesso.live/refresh}
+                   (mapv (fn [id] {:topic :request :id (str id) :change/kind :updated}) ids)))
+(defn- publication-ops [ids domain-doc]
+  (let [{:keys [guard-ops tx-op]} (publication ids)]
+    (into guard-ops [[:put-docs :temporalprobe domain-doc] tx-op])))
+(def ^:private publication-transactions
+  (mapv (fn [n ops] {:system-time (sys n) :ops ops}) (range 1 9)
+        [[[:put-docs {:into outbox/intent-table :valid-from (sys 4) :valid-to (sys 6)}
+           (first (:intents (publication [intent-id])))]]
+         (publication-ops [other-intent-id] a)
+         (publication-ops [other-intent-id] b)
+         (publication-ops [third-intent-id intent-id] b)
+         (into (publication-ops [third-intent-id] b) [["ASSERT FALSE"]])
+         (publication-ops [intent-id third-intent-id] b)
+         (publication-ops [third-intent-id] c)
+         (into [[:put-docs :temporalprobe c]] (:guard-ops (publication [intent-id])))]))
+
+(deftest independent-publication-uuid-absence
+  (let [r (temporal/replay publication-transactions)]
+    (is (= :predicted (:status r)))
+    (is (= [true true false false false true false false] (mapv :committed? (:history r))))
+    (is (= [nil nil 0 1 3 nil 0 1] (mapv :failed-assertion-index (:history r))))
+    (is (= a (get-in (temporal/visible-at r (sys 5) (sys 5)) [:temporalprobe "a"])))
+    (is (= b (get-in (temporal/visible-at r (sys 8) (sys 8)) [:temporalprobe "a"])))
+    (is (= #{intent-id other-intent-id third-intent-id}
+           (set (keys (get (temporal/visible-at r (sys 8) (sys 8)) outbox/intent-table))))))
+  (let [{:keys [guard-ops tx-op]} (publication [intent-id])
+        guard (first guard-ops)
+        r (current/execute {} [tx-op guard])]
+    (is (= false (:committed? r)))
+    (is (= {} (:state r)))
+    (is (= 1 (:failed-assertion-index r)))
+    (doseq [op [(pop guard) (conj guard true) (assoc guard 1 nil)
+                (assoc guard 1 (str intent-id))
+                (assoc guard 0 "ASSERT 0 = (SELECT COUNT(*) FROM gesso_other WHERE _id = ?)")]]
+      (let [r (current/execute {} [["ASSERT FALSE"] op])]
+        (is (= :unsupported (:status r)))
+        (is (not (contains? r :state)))
+        (is (not (contains? r :committed?)))))
+    (let [r (current/execute {} [[:put-docs outbox/intent-table {:xt/id "legacy" :value 1}] guard])]
+      (is (= :unsupported (:status r)))
+      (is (not (contains? r :state))))))
+
+(deftest independently-predicted-publication-absence-matches-xtdb
+  (let [r (temporal/replay publication-transactions)]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector publication-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (doseq [s (range 0 9) v (range 0 10) table [outbox/intent-table :temporalprobe]]
+        (let [rows (xt/q node [(str "SELECT * FROM " (name table) " FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ?")
+                               (sys v) (sys s)])]
+          (is (= (count rows) (count (set (map :xt/id rows)))))
+          (is (= (get (temporal/visible-at r (sys s) (sys v)) table {})
+                 (into {} (map (juxt :xt/id identity)) rows)))))
+      (is (= (frequencies (coalesce-valid (:rectangles r)))
+             (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) [outbox/intent-table :temporalprobe]))))))))
