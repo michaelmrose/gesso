@@ -264,7 +264,7 @@
    vector is required. The final logged witness must match exactly, its
    binding must recompute, and the ledger must independently show commit.
    This checks decoded correspondence, not writer authority or execution."
-  [node tx-id witness require-prefix? prefix require-writes? writes require-residual? assertions]
+  [node tx-id witness require-prefix? prefix require-writes? writes require-residual? assertions close-writes?]
   (let [report (fn [status reason]
                  (cond-> {:status status :profile binding-profile :authority :none :certificate :not-issued}
                    reason (assoc :reason reason)))]
@@ -282,6 +282,11 @@
         (let [expected-prefix (when require-prefix? (expected-operations! prefix))
               expected-writes (when require-writes? (expected-selected-puts! writes))
               expected-residual (when require-residual? (expected-residual-assertions! assertions expected-writes))
+              allowed-tables (when close-writes?
+                               (when-not (:outbox? expected-writes)
+                                 (reject! :incomplete-closed-write-expectation))
+                               (conj (:tables expected-writes) :public/gesso_live_outbox
+                                     :public/gesso_transition_evidence))
               observed (source-log/observe-source-message! node tx-id)]
           (case (:status observed)
             :unavailable (report :unavailable (:reason observed))
@@ -315,6 +320,10 @@
                              (outbox-guard-entries (take-while #(string? (first %)) ops))
                              (outbox-guard-entries ops)))
                   (report :mismatch :publication-outbox-guard-mismatch)
+                  (and close-writes?
+                       (some #(and (= :put-docs (:kind %))
+                                   (not (contains? allowed-tables (:table %)))) (:operations observed)))
+                  (report :mismatch :unexpected-write-table)
                   (and require-residual?
                        (not (residual-assertions-match? ops (count expected-prefix) expected-residual)))
                   (report :mismatch :intended-residual-assertions-mismatch)
@@ -331,7 +340,8 @@
                               require-writes? (assoc :intended-mapped-writes :matched
                                                      :transition-evidence-write :matched)
                               (:outbox? expected-writes) (assoc :publication-outbox :matched)
-                              require-residual? (assoc :intended-residual-assertions :matched)))))))
+                              require-residual? (assoc :intended-residual-assertions :matched)
+                              close-writes? (assoc :write-table-closure :matched)))))))
             (report :unsupported :unexpected-source-observation))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -356,10 +366,20 @@
    residual group is not checked. This does not derive assertion intent,
    establish semantic equivalence or prove writer authority."
   ([node tx-id witness]
-   (check-recorded-transition* node tx-id witness false nil false nil false nil))
+   (check-recorded-transition* node tx-id witness false nil false nil false nil false))
   ([node tx-id witness prefix]
-   (check-recorded-transition* node tx-id witness true prefix false nil false nil))
+   (check-recorded-transition* node tx-id witness true prefix false nil false nil false))
   ([node tx-id witness prefix writes]
-   (check-recorded-transition* node tx-id witness true prefix true writes false nil))
+   (check-recorded-transition* node tx-id witness true prefix true writes false nil false))
   ([node tx-id witness prefix writes assertions]
-   (check-recorded-transition* node tx-id witness true prefix true writes true assertions)))
+   (check-recorded-transition* node tx-id witness true prefix true writes true assertions false)))
+
+(defn check-closed-recorded-transition!
+  "Require complete write-table closure as well as the selected write checks.
+   The expectation must include the outbox table even when empty. The final
+   evidence table is accounted for separately. Nil assertions explicitly
+   select undeclared residual semantics; a vector selects residual checking.
+   This closes decoded puts for this transaction, not all database writers."
+  [node tx-id witness prefix writes assertions]
+  (check-recorded-transition* node tx-id witness true prefix true writes
+                              (some? assertions) assertions true))

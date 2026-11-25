@@ -655,10 +655,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v11)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v12)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v12 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v13 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))
@@ -762,13 +762,14 @@
                                              :puts [[:put-docs :gesso_commands record]]})]
               (xt/execute-tx node (envelope/bind-transition-envelope! (ops "good")))
               (let [prefix (history/audit-chunk! handle admission 8)]
-                (is (= :selected-mapped-ledger-chunk-v12 (:profile prefix)))
+                (is (= :selected-mapped-ledger-chunk-v13 (:profile prefix)))
                 (is (= :observed-interval-checked (:status prefix)))
                 (is (= [:matched] (mapv :recorded-envelope (:steps prefix))))
                 (is (= [:matched] (mapv :intended-guard-prefix (:steps prefix))))
                 (is (= [:matched] (mapv :intended-mapped-writes (:steps prefix))))
                 (is (= [:matched] (mapv :transition-evidence-write (:steps prefix))))
                 (is (= [:matched] (mapv :publication-outbox (:steps prefix))))
+                (is (= [:matched] (mapv :write-table-closure (:steps prefix))))
                 (is (= [:canonical-derived] (mapv :publication-records (:steps prefix))))
                 (is (= :not-declared (:publication-expectation-profile prefix)))
                 (is (= :not-declared (:residual-assertion-profile prefix)))

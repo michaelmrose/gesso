@@ -673,6 +673,7 @@
                    (is (= :declared (:publication-expectation-profile audit)))
                    (is (= :declared (:residual-assertion-profile audit)))
                    (is (every? #(= :matched (:residual-assertion-expectation %)) (:verified-mapped-transition groups)))
+                   (is (every? #(= :matched (:write-table-closure %)) (:verified-mapped-transition groups)))
                    (is (every? #(= :matched (:publication-expectation %)) (:verified-mapped-transition groups)))
                    (is (= (cond-> #{id} valid? (conj loser-id))
                           (set (map :command-id (:verified-mapped-transition groups)))))
@@ -722,10 +723,10 @@
                      (is (= report (:report (host/history-status started))))
                      (is (= :declared (:publication-expectation-profile report)))
                      (is (= :declared (:residual-assertion-profile report)))
-                     (is (= :v12-declared-expectations-checked
+                     (is (= :v13-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :residual-assertion-correspondence])))
-                     (is (= :v12-declared-expectations-checked
+                     (is (= :v13-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
                      (let [operational (host/assurance-status started)]

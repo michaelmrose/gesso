@@ -228,6 +228,12 @@
   ([connectable tx-id witness prefix writes assertions]
    (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness prefix writes assertions)))
 
+(defn check-closed-recorded-transition-envelope!
+  "Check complete retained write-table closure through the exact opaque adapter."
+  [connectable tx-id witness prefix writes assertions]
+  (envelope/check-closed-recorded-transition! (physical-connectable! connectable)
+                                               tx-id witness prefix writes assertions))
+
 (defn current-submission-policy-token
   "Observe the current opaque policy generation through a live handle or
    physical node. The token grants no submission or registration authority."

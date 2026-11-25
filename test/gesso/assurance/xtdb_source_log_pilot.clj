@@ -461,6 +461,29 @@
                              {:tables #{:probe :gesso_commands} :puts [(first (:puts writes))]}
                              expected-extra))))))))))
 
+(deftest closed-recorded-envelope-refuses-unselected-put-tables
+  (with-open [node (xtn/start-node {})]
+    (let [prefix [["ASSERT TRUE"]]
+          writes {:tables #{:probe :gesso_commands :gesso_live_outbox}
+                  :puts [[:put-docs :probe {:xt/id "p" :value 1}]]}]
+      (doseq [[id extra] [["valid" []]
+                          ["hidden" [[:put-docs :unselected {:xt/id "u" :value 2}]]]
+                          ["manifest" [[:put-docs :gesso_publication_manifests {:xt/id "m" :value 3}]]]]]
+        (let [bound (envelope/bind-transition-envelope!
+                     (conj (into (into prefix (:puts writes)) extra)
+                           [:put-docs :gesso_transition_evidence {:xt/id id :profile-version 4}]))
+              tx-id (:tx-id (xt/execute-tx node bound))
+              witness (peek (peek bound))]
+          (is (= :matched (:status (envelope/check-recorded-transition! node tx-id witness prefix writes []))))
+          (doseq [assertions [nil []]]
+            (let [checked (envelope/check-closed-recorded-transition! node tx-id witness prefix writes assertions)]
+              (is (= (if (seq extra) :mismatch :matched) (:status checked)))
+              (is (= (when (seq extra) :unexpected-write-table) (:reason checked)))
+              (is (= (when-not (seq extra) :matched) (:write-table-closure checked)))))
+          (is (= :incomplete-closed-write-expectation
+                 (:reason (envelope/check-closed-recorded-transition! node tx-id witness prefix
+                                                                    (update writes :tables disj :gesso_live_outbox) nil)))))))))
+
 (defn -main [& args]
   (let [{:keys [fail error]}
         (if (= ["claim"] (vec args))

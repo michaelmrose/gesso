@@ -1230,6 +1230,8 @@
                                                     mapping (assoc-in docs [:requests 0 :hidden] "other") [])))]
     (doseq [[mode reason] [[:valid nil]
                            [:valid-outbox nil]
+                           [:extra-write-table :historical-unexpected-write-table]
+                           [:residual-extra-write-table :historical-unexpected-write-table]
                            [:residual-empty nil]
                            [:residual-extra :historical-intended-residual-assertions-mismatch]
                            [:residual-late :historical-intended-residual-assertions-mismatch]
@@ -1303,6 +1305,9 @@
                   [guards puts] (split-with #(string? (first %)) framed-ops)
                   published (into (conj (vec guards) outbox-guard) (conj (vec puts) outbox-put))
                   actual-base (case mode
+                                :extra-write-table (conj framed-ops [:put-docs :unselected {:xt/id "other" :value 1}])
+                                :residual-extra-write-table (conj (into [] (remove #{["ASSERT TRUE"]}) framed-ops)
+                                                                  [:put-docs :unselected {:xt/id "other" :value 1}])
                                 :residual-empty (into [] (remove #{["ASSERT TRUE"]}) framed-ops)
                                 :residual-extra framed-ops
                                 :residual-late (conj (into [] (remove #{["ASSERT TRUE"]}) framed-ops) ["ASSERT TRUE"])
@@ -1330,7 +1335,8 @@
                                :late-outbox-guard :extra-outbox-guard)
                               (peek (peek (envelope/bind-transition-envelope!
                                           (conj actual-base [:put-docs :gesso_transition_evidence witness]))))
-                              (:residual-empty :residual-extra :residual-late
+                              (:extra-write-table :residual-extra-write-table
+                               :residual-empty :residual-extra :residual-late
                                :self-bound-hidden-change :self-bound-duplicate-put
                                :self-bound-missing-evidence-guard :self-bound-wrong-evidence-guard
                                :self-bound-duplicate-evidence)
@@ -1374,15 +1380,19 @@
                 (is (= 1 (count (:steps chunk))))
                 (is (= (if reason :unclassified :verified-mapped-transition) (:classification step)) (name mode))
                 (is (= reason (:reason step)) (name mode))
+                (when-not reason
+                  (is (= :matched (:write-table-closure step)))
+                  (is (= :v13-mapped-steps-checked
+                         (get-in report [:physical-induction :premises :mapped-write-table-closure]))))
                 (is (= (if declared? :declared :not-declared) (:publication-expectation-profile chunk)))
                 (is (= (if residual? :declared :not-declared) (:residual-assertion-profile chunk)))
                 (when-not reason
                   (is (= (if residual? :matched :not-declared) (:residual-assertion-expectation step)))
-                  (is (= (if residual? :v12-declared-expectations-checked :open)
+                  (is (= (if residual? :v13-declared-expectations-checked :open)
                          (get-in report [:physical-induction :premises :residual-assertion-correspondence]))))
                 (when-not reason
                   (is (= (if declared? :matched :not-declared) (:publication-expectation step)))
-                  (is (= (if declared? :v12-declared-expectations-checked :open)
+                  (is (= (if declared? :v13-declared-expectations-checked :open)
                          (get-in report [:physical-induction :premises :publication-expectation-correspondence]))))
                 (is (= (if reason :unclassified-steps :observed-interval-checked) (:status chunk) (:status whole)))
                 (is (= (if reason :not-established :conditional-observed-prefix-argument)

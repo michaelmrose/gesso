@@ -1502,3 +1502,30 @@ The selected adapter now requires both declared preventive expectations;
 this is not raw writer closure or provider execution refinement. Complete
 write-table closure, residual ordering within the prewrite group and
 writer authority remain open. No CLM-R2 premise is retired.
+
+* v2597 — close retained mapped transaction write tables
+
+Require the closed retained-envelope comparator for every historically
+verified mapped transition, independently of whether residual assertions
+are declared. The selected mapped and command tables, the always-accounted
+outbox table and the separately checked sole transition evidence write
+form the complete permitted decoded put inventory. Refuse any put to an
+unselected table, even if the witness binding and selected state changes
+match. Preserve the lower-arity diagnostic comparison APIs. Report the
+matched closure status and advance history, checkpoint and operational
+prefix profiles to v13; authenticated v12 and earlier require rescanning.
+
+Focused JVM validation: 10 tests / 1014 assertions, zero failures or errors.
+Actual embedded XTDB negative controls exercise unselected writes with
+and without declared residual assertions, an extra manifest-table put,
+and incomplete expected table inventory. The previous diagnostic checks
+can accept the self-bound negative controls. Full opt-in physical Claim
+with source-log observation: 3 tests / 1120 assertions, zero failures or
+errors. Every verified mapped Claim transition satisfies table closure.
+Full project, Chromium and separate proof gates were not rerun.
+
+This closes decoded puts of individually verified mapped transitions, not
+all database transactions. Selected-snapshot stutters and infrastructure
+transitions still need their own retained-operation correspondence.
+Provider execution refinement, residual assertion ordering and physical
+writer authority remain open. No CLM-R2 premise is retired.
