@@ -2016,3 +2016,30 @@ execution, or universal provider refinement. No production assurance
 status changes and no CLM-R2 premise is retired. Current-state regression,
 full project, physical Claim, Chromium and independent proof gates were
 not rerun in this revision.
+
+* v2615 — model default and unbounded valid-time puts
+
+Normalize ordinary table-keyword puts and selected options-map puts to
+half-open intervals. With no explicit current-time override, omitted
+starts use the supplied transaction system time and omitted ends are
+unbounded. Extend interval overlay and point visibility without a
+finite infinity sentinel. A bounded correction inside an unbounded
+interval preserves the unaffected suffix; an open-ended correction
+supersedes scheduled future values. Validate all operations before
+replay, rejecting explicit null bounds, invalid intervals and unknown
+options. Temporal profile v2; current-state v9 and history v19 unchanged.
+
+Temporal JVM: 6 tests / 838 assertions, zero failures or errors. Nine
+additional embedded XTDB transactions compare outcomes and complete
+visible row maps at 140 system/valid-time point combinations, including
+future schedules, default starts, omitted ends, retrospective correction,
+bounded correction of an unbounded interval, cross-table default puts
+and rollback. Earlier system snapshots remain independently available.
+No provider observation feeds the reference model.
+
+This is selected finite point-query correspondence, not complete history
+rectangle correspondence, explicit current-time override semantics,
+transaction-internal temporal guards or universal provider refinement.
+No production assurance status changes and no CLM-R2 premise is retired.
+Current-state, full project, physical Claim, Chromium and independent
+proof gates were not rerun.

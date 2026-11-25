@@ -59,7 +59,7 @@
                [{:system-time (sys 1) :ops [(put :temporalprobe 4 4 a)]}]
                [{:system-time (sys 1) :ops [(put :temporalprobe 5 4 a)]}]
                [{:system-time (sys 1) :ops [(assoc-in (put :temporalprobe 1 2 a) [1 :valid-from] (.plusNanos (day 1) 1))]}]
-               [{:system-time (sys 1) :ops [["ASSERT FALSE"] [:put-docs :temporalprobe a]]}]
+               [{:system-time (sys 1) :ops [["ASSERT FALSE"] [:put-docs {:into :temporalprobe :valid-from nil} a]]}]
                [{:system-time (sys 1) :ops [(put :temporalprobe 1 2 a b)]}]
                [{:system-time (sys 1) :ops [(put :temporalprobe 1 2 (assoc a :value nil))]}]]]
     (let [r (temporal/replay txs)]
@@ -88,3 +88,72 @@
       (doseq [s (range 0 8) v (range -1 12)]
         (is (= (temporal/visible-at r (sys s) (day v))
                (provider-at node (sys s) (day v))) (str "system " s " valid " v))))))
+
+(def ^:private open-transactions
+  (mapv (fn [n ops] {:system-time (sys n) :ops ops}) (range 1 10)
+        [[[:put-docs {:into :temporalprobe :valid-from (sys 4) :valid-to (sys 7)} a]]
+         [[:put-docs :temporalprobe b]]
+         [[:put-docs {:into :temporalprobe :valid-from (sys 5) :valid-to (sys 6)} c]]
+         [[:put-docs {:into :temporalprobe :valid-to (sys 5)} a]]
+         [[:put-docs {:into :temporalprobe :valid-from (sys 0)} c]]
+         [[:put-docs :temporalprobe a] ["ASSERT FALSE"]]
+         [[:put-docs {:into :temporalprobe :valid-from (sys 8) :valid-to (sys 10)} a]]
+         [[:put-docs :temporalprobe b]]
+         [[:put-docs {:into :temporalother} d]]]))
+
+(deftest independent-default-and-unbounded-validity
+  (let [r (temporal/replay open-transactions)
+        at #(get-in (temporal/visible-at r (sys %1) (sys %2)) [:temporalprobe "a"])]
+    (is (= :predicted (:status r)))
+    (is (= [true true true true true false true true true] (mapv :committed? (:history r))))
+    (is (nil? (at 1 3)))
+    (is (= a (at 1 4)))
+    (is (nil? (at 1 7)))
+    (is (nil? (at 2 1)))
+    (is (= b (at 2 2)))
+    (is (= b (at 2 5)))
+    (is (= b (at 2 100)))
+    (is (= b (at 3 4)))
+    (is (= c (at 3 5)))
+    (is (= b (at 3 6)))
+    (is (= b (at 4 3)))
+    (is (= a (at 4 4)))
+    (is (= c (at 4 5)))
+    (is (= c (at 5 0)))
+    (is (= c (at 5 100)))
+    (is (= c (at 6 6)))
+    (is (= c (at 7 7)))
+    (is (= a (at 7 8)))
+    (is (= c (at 7 10)))
+    (is (= b (at 8 8)))
+    (is (= b (at 8 100)))
+    (is (= a (at 7 9)))
+    (is (nil? (get-in (temporal/visible-at r (sys 9) (sys 8)) [:temporalother "b"])))
+    (is (= d (get-in (temporal/visible-at r (sys 9) (sys 9)) [:temporalother "b"])))))
+
+(deftest rejects-invalid-default-and-unbounded-puts
+  (doseq [opts [{:into :temporalprobe :valid-from nil}
+                {:into :temporalprobe :valid-to nil}
+                {:into :temporalprobe :valid-to (sys 1)}
+                {:into :temporalprobe :valid-to (sys 0)}
+                {:into :temporalprobe :valid-from "2025-01-01"}
+                {:into :temporalprobe :extra true}
+                {:valid-from (sys 1)}
+                :invalid/table]]
+    (let [r (temporal/replay [{:system-time (sys 1)
+                              :ops [["ASSERT FALSE"] [:put-docs opts a]]}])]
+      (is (= :unsupported (:status r)) (pr-str opts))
+      (is (not (contains? r :history))))))
+
+(deftest independently-predicted-unbounded-points-match-xtdb
+  (let [r (temporal/replay open-transactions)]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector open-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (doseq [s (range 0 10) v (concat (range -1 12) [100])]
+        (is (= (temporal/visible-at r (sys s) (sys v))
+               (provider-at node (sys s) (sys v))) (str "system " s " valid " v))))))

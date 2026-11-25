@@ -1,10 +1,10 @@
 (ns gesso.assurance.reference-temporal
-  "Independent finite bitemporal replay of explicit bounded document puts.
+  "Independent finite bitemporal replay of selected document puts.
    System times are supplied as inputs, never inferred from provider results."
   (:require [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant)))
 
-(def profile :selected-bitemporal-transaction-v1)
+(def profile :selected-bitemporal-transaction-v2)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -14,29 +14,41 @@
 (defn- reject! [reason]
   (throw (ex-info "Unsupported temporal reference input" {::unsupported true :reason reason})))
 
-(defn- check-op! [op]
+(defn- before-end? [instant end]
+  ;; Internal nil represents an unbounded exclusive end, not a SQL null.
+  (or (nil? end) (before? instant end)))
+
+(defn- normalize-op! [system-time op]
   (when-not (and (vector? op) (nil? (meta op)))
     (reject! :unsupported-temporal-operation))
-  (when-not (or (= op ["ASSERT TRUE"]) (= op ["ASSERT FALSE"]))
-    (let [[kind opts & docs] op
-          {:keys [into valid-from valid-to]} opts]
+  (if (or (= op ["ASSERT TRUE"]) (= op ["ASSERT FALSE"]))
+    op
+    (let [[kind raw-opts & docs] op
+          opts (if (keyword? raw-opts) {:into raw-opts} raw-opts)]
       (when-not (and (= :put-docs kind) (map? opts) (nil? (meta opts))
-                     (= #{:into :valid-from :valid-to} (set (keys opts)))
-                     (instant? valid-from) (instant? valid-to)
-                     (before? valid-from valid-to)
-                     (= :predicted (:status (current/execute {} [(clojure.core/into [:put-docs into] docs)]))))
-        (reject! :unsupported-temporal-put))))
-  op)
+                     (contains? opts :into)
+                     (every? #{:into :valid-from :valid-to} (keys opts)))
+        (reject! :unsupported-temporal-put))
+      (let [table (:into opts)
+            from (get opts :valid-from system-time)
+            to (:valid-to opts)]
+        (when-not (and (instant? from)
+                       (or (not (contains? opts :valid-to)) (instant? to))
+                       (before-end? from to)
+                       (= :predicted (:status (current/execute {} [(into [:put-docs table] docs)]))))
+          (reject! :unsupported-temporal-put))
+        (into [:put-docs {:into table :valid-from from :valid-to to}] docs)))))
 
 (defn- overlay [segments from to doc]
   ;; Each segment is [inclusive-from exclusive-to complete-document].
+  ;; A nil end is positive infinity; every start is finite.
   (->> segments
        (mapcat (fn [[a b old :as segment]]
-                 (if (or (not (before? a to)) (not (before? from b)))
+                 (if (or (not (before-end? a to)) (not (before-end? from b)))
                    [segment]
                    (cond-> []
                      (before? a from) (conj [a from old])
-                     (before? to b) (conj [to b old])))))
+                     (and to (before-end? to b)) (conj [to b old])))))
        (cons [from to doc])
        (sort-by first) vec))
 
@@ -48,9 +60,9 @@
 
 (defn replay
   "Replay from empty state. Each transaction is {:system-time Instant :ops
-   vector}. All system times strictly increase; explicit valid intervals
-   are finite, half-open and microsecond-aligned. Only bounded puts and
-   literal assertions are supported. Abort retains the previous snapshot.
+   vector}. All system times strictly increase. Valid intervals are
+   half-open and microsecond-aligned, with omitted starts at the supplied
+   system time and omitted ends unbounded. Abort retains the prior snapshot.
    No provider observations, implicit clock or authority are admitted."
   [transactions]
   (let [report {:profile profile :authority :none :certificate :not-issued}]
@@ -64,9 +76,11 @@
                        (instant? system-time)
                        (or (zero? i) (before? (:system-time (nth transactions (dec i))) system-time))
                        (vector? ops) (nil? (meta ops)) (<= 1 (count ops) 256))
-          (reject! :unsupported-temporal-transaction))
-        (doseq [op ops] (check-op! op)))
-      (assoc report :status :predicted
+          (reject! :unsupported-temporal-transaction)))
+      (let [normalized (mapv (fn [{:keys [system-time ops] :as tx}]
+                               (assoc tx :ops (mapv #(normalize-op! system-time %) ops)))
+                             transactions)]
+        (assoc report :status :predicted
              :history (reduce (fn [history {:keys [system-time ops]}]
                                 (let [prior (or (:segments (peek history)) {})
                                       aborted? (some #{["ASSERT FALSE"]} ops)
@@ -76,7 +90,7 @@
                                                              prior ops))]
                                   (conj history {:system-time system-time
                                                  :committed? (not aborted?) :segments next-state})))
-                              [] transactions))
+                              [] normalized)))
       (catch clojure.lang.ExceptionInfo e
         (if (::unsupported (ex-data e))
           (assoc report :status :unsupported :reason (:reason (ex-data e)))
@@ -95,6 +109,6 @@
                                                      (when-let [[_ _ doc]
                                                                 (first (filter (fn [[a b _]]
                                                                                  (and (not (before? valid-time a))
-                                                                                      (before? valid-time b))) intervals))]
+                                                                                      (before-end? valid-time b))) intervals))]
                                                        [id doc]))) rows)]
                          (when (seq visible) [table visible])))) segments))))
