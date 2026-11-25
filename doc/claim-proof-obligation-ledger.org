@@ -4635,3 +4635,38 @@ first-read hypothesis; corrected and rerun. Equal-time state-dependent
 replay remains unsupported; physical scan/merge ordering needs further
 investigation. No production admission, certificate or CLM-R2 premise
 retirement. Other regression namespaces and formal gates were not rerun.
+
+* v2715 — characterize physical equal-time merge ties
+
+Inspect the pinned xtdb-core 2.2.0-beta1 JAR (SHA-256
+e81b66a71af40ebf921cfcacfc52906ca9550734adfd1d34cf7870e5d1a24804).
+EventRowPointer comparator orders unsigned IID halves then descending
+system-from, with no further tie-breaker. MemoryHashTrie and
+MutableMemoryHashTrie compare IID then descending row index within a
+leaf. Snapshot.Companion.open appends committed live table and open
+transaction table snapshots separately; scan.clj adds persisted segments
+and then live snapshots to merge planning. ScanCursor.tryAdvance polls
+one leaf pointer from a priority queue, calculates its polygon, emits
+nonzero intersecting put rectangles, advances that pointer and reinserts
+it when valid. PolygonCalculator.calculate updates a temporal ceiling
+in encounter order. The tied cross-leaf merge therefore does not define
+an independent logical latest-write precedence.
+
+Exercise actual pinned EventRowPointer, PriorityQueue and PolygonCalculator
+with synthetic leaf relations in the v2714 counterexample's order. Prior
+leaf [2,1] and tentative leaf [3] yield scan order [2,3,1] and visible
+value 3; tentative leaf [4,3] yields [2,4,1,3] and visible value 1.
+Reversing leaf insertion yields [4,2,3,1] and visible value 3. This
+reproduces the counterexample at the physical primitive level and shows
+leaf-order sensitivity, not an instrumented trace of the full provider
+scan or a guarantee that actual storage reorganizations change results.
+
+Focused JVM: 16 tests / 2619 assertions, zero failures or errors across
+reference-equal-time-merge-test, reference-equal-time-visibility-test
+(4/971 combined), and reference-temporal-test (12/1648). New physical
+characterization has 8 assertions. No replay or production admission
+change; equal-time state-dependent replay remains unsupported. Prefer a
+strict-clock assurance boundary over modeling unspecified merge ties;
+clock admission and retained rejection integration remain open. No
+certificate or CLM-R2 premise retirement. Other namespaces and formal
+gates were not rerun.
