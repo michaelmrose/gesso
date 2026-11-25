@@ -524,3 +524,22 @@
       (let [result (reference/execute (:state r) [op])]
         (is (= :unsupported (:status result)))
         (is (not (contains? result :state)))))))
+
+(deftest admitted-operation-table-dependencies
+  (doseq [[op expected] [[put-a #{:refprobe}]
+                         [["ASSERT TRUE"] #{}]
+                         [["ASSERT FALSE"] #{}]
+                         [["ASSERT ? = ?" 1 2] #{}]
+                         [(read-guard :refother "a" :value 2) #{:refother}]
+                         [(table-count 0) #{card-table}]
+                         [(id-count 0 "a") #{card-table}]
+                         [(field-count 2 "a") #{card-table}]
+                         [(mapped-guard [[:value :open]]) #{mapped-table}]
+                         [slot-empty #{:gesso_commands}]
+                         [recursive-value-guard #{:gesso_commands}]
+                         [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)" uuid-a] #{:gesso_live_outbox}]
+                         [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = ?)" "source"] #{:gesso_live_outbox}]
+                         [["ASSERT 0 = (SELECT COUNT(*) FROM \"probe\") -- comment"] nil]
+                         [(pop (mapped-guard [[:value :open]])) nil]
+                         [[:unknown] nil]]]
+    (is (= expected (reference/operation-tables op)) (pr-str op))))

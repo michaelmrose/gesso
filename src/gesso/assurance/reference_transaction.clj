@@ -449,6 +449,23 @@
       :put)
     :else (reject! :unsupported-reference-operation)))
 
+(defn operation-tables
+  "Return the table dependency set of one structurally admitted operation.
+   Empty means state-independent; nil means unsupported. Use the same
+   checked grammar as execution, including infrastructure assertions."
+  [op]
+  (try
+    (let [kind (check-op! op)]
+      (case (if (map? kind) (:kind kind) kind)
+        (:assert-true :assert-false) #{}
+        :put #{(second op)}
+        (:assert-read :assert-row-count :assert-field-count :assert-mapped) #{(:table kind)}
+        (:assert-journal-slot :assert-journal-value) #{:gesso_commands}
+        (:assert-publication-absence :assert-source-absence) #{:gesso_live_outbox}
+        nil))
+    (catch clojure.lang.ExceptionInfo e
+      (if (::unsupported (ex-data e)) nil (throw e)))))
+
 (defn execute
   "Interpret a complete, supported operation vector on a canonical map
    {table {string-or-uuid-id document}}. Puts replace entire documents in order;

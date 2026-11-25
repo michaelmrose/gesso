@@ -4788,3 +4788,29 @@ Read-only assertion table coverage and broader mapped Gesso guards remain
 open; selected table scope and quiescence premises unchanged. No production
 admission, certificate or CLM-R2 premise retirement. Other regression
 namespaces and independent formal gates were not rerun.
+
+* v2721 — require observation of assertion-dependent tables
+
+Derive required observation tables from the same checked operation grammar
+used by independent replay, including row and field counts, scalar and
+mapped reads, journal and publication guards, and temporal worker version
+guards. Pure clock and literal/equality assertions have no table dependency.
+Include all attempted operations, even after a failed assertion; require
+all read and write dependencies in the selected table set before provider
+ledger and rectangle acquisition. Preserve the caller's ability to select
+additional tables. Version the stricter diagnostic comparison profiles;
+no expansion of replay or production admission.
+
+Focused JVM: 53 tests / 5283 assertions, zero failures or errors in two
+completed batches: replay input and current transaction 22 / 2367;
+temporal, provider and retained operation 31 / 2916. Persistent history
+with an assertion-only empty table and an unreached assertion table matches
+before and after reopening. Omission of either read dependency or the
+written table rejects; invalid selections cannot reach provider SQL in
+quiescent or source-bound comparison. Observe all selected tables and
+detect an injected unexpected rectangle in the assertion-only table.
+Test dependency extraction for existing mapped, journal, publication,
+worker, and temporal put forms and malformed input. Observation coverage
+remains bounded and dependent on the existing acquisition and quiescence
+premises; no certificate or CLM-R2 premise retirement. Other regression
+namespaces and independent formal gates were not rerun.

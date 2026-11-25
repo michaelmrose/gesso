@@ -130,6 +130,30 @@
             (into [:put-docs {:into table :valid-from from :valid-to to}]
                   (map #(get-in decoded [:state table (:xt/id %)]) docs))))))))
 
+(defn required-observation-tables
+  "Derive all attempted read/write table dependencies from a qualified
+   temporal transaction sequence (not from reached reads or resulting
+   rectangles). Return nil on unsupported operation shapes. This is a
+   conservative observation scope, not a proof of history completeness."
+  [transactions]
+  (try
+    (when (and (vector? transactions) (nil? (meta transactions))
+               (<= 1 (count transactions) 256)
+               (every? #(and (map? %) (nil? (meta %)) (instant? (:system-time %))
+                             (vector? (:ops %)) (nil? (meta (:ops %)))
+                             (<= 1 (count (:ops %)) 256)) transactions))
+      (reduce (fn [tables [system-time op]]
+                (let [normalized (normalize-op! system-time op)
+                      deps (cond
+                             (= :put-docs (first normalized)) #{(:into (second normalized))}
+                             (contains? clock-guards (first normalized)) #{}
+                             (contains? version-guards (first normalized)) #{:gesso_live_outbox}
+                             :else (current/operation-tables normalized))]
+                  (if (set? deps) (into tables deps) (reduced nil))))
+              #{} (for [{:keys [system-time ops]} transactions op ops] [system-time op])))
+    (catch clojure.lang.ExceptionInfo e
+      (if (::unsupported (ex-data e)) nil (throw e)))))
+
 (defn- rectangle [table [from to doc origin] end]
   {:table table :document doc :valid-from from :valid-to to
    :system-from origin :system-to end})

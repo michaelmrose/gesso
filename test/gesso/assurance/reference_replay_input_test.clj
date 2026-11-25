@@ -636,3 +636,50 @@
           (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek expected)) (Duration/ofSeconds 15))
           (check-state-assertion-inputs! node expected)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest strict-retained-assertion-only-table-coverage
+  (let [root (Files/createTempDirectory "gesso-assertion-table-coverage-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        txs [{:system-time t :ops [[:put-docs :probe {:xt/id "a" :value 1}]
+                                  ["ASSERT 0 = (SELECT COUNT(*) FROM \"unwritten\")"]]}
+             {:system-time (.plusSeconds t 1) :ops [["ASSERT FALSE"]
+                                  ["ASSERT 0 = (SELECT COUNT(*) FROM \"unreached\" WHERE _id = ?)" "a"]]}]
+        tables #{:probe :unwritten :unreached}
+        check! (fn [node bound]
+                 (let [compare! #(reference/compare-local-processed-retained-replay-execution! node %)
+                       r (compare! tables)
+                       read! @#'reference/read-rectangles!
+                       scanned (atom [])]
+                   (is (= tables (temporal/required-observation-tables txs)))
+                   (is (= :matched (:status r)) (pr-str r))
+                   (is (= 2 (:transaction-count r)))
+                   (doseq [omitted [:unwritten :unreached :probe]]
+                     (let [selected (disj tables omitted)]
+                       (is (= :unsupported (:status (compare! selected))))
+                       (with-redefs [xt/q (fn [& _] (throw (AssertionError. "incomplete scope must not query")))]
+                         (is (= :unsupported (:status (reference/compare-quiescent-execution! node txs selected))))
+                         (is (= :unsupported (:status (reference/compare-source-bound-execution! node bound selected)))))
+                       (is (= :unsupported (:status (reference/compare-execution txs selected {}))))))
+                   (with-redefs-fn {#'reference/read-rectangles! (fn [node selected]
+                                                                 (swap! scanned conj selected)
+                                                                 (read! node selected))}
+                     #(is (= r (compare! tables))))
+                   (is (= [tables] @scanned))
+                   (with-redefs-fn {#'reference/read-rectangles! (fn [node selected]
+                                                                 (let [rows (read! node selected)]
+                                                                   (conj rows (assoc (first rows) :table :unwritten))))}
+                     #(is (= :mismatch (:status (compare! tables)))))))]
+    (try
+      (let [bound (with-open [node (xtn/start-node config)]
+                    (let [database (db/primary-db node)
+                          bound (mapv (fn [{:keys [system-time ops] :as tx}]
+                                        (assoc tx :tx-id (:tx-id (xt/submit-tx node ops {:system-time system-time})))) txs)]
+                      (.awaitSourceBlocking database (:tx-id (peek bound)) (Duration/ofSeconds 15))
+                      (check! node bound)
+                      bound))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek bound)) (Duration/ofSeconds 15))
+          (check! node bound)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

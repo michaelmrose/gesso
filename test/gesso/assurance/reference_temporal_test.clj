@@ -308,3 +308,20 @@
           (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
           (check-equal-time-history! node r ids)))
       (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
+
+(deftest required-temporal-observation-scope
+  (let [id #uuid "00000000-0000-0000-0000-000000000001"
+        version ["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)" id (sys 1)]
+        expired ["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP >= ?)" id (sys 1) (sys 2)]
+        active ["ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)" id (sys 1) (sys 3)]
+        scope #(temporal/required-observation-tables [{:system-time (sys 2) :ops %}])]
+    (is (= #{} (scope [["ASSERT CURRENT_TIMESTAMP < ?" (sys 3)] ["ASSERT TRUE"]])))
+    (doseq [guard [version expired active]]
+      (is (= #{:gesso_live_outbox} (scope [["ASSERT FALSE"] guard]))))
+    (is (= #{:temporalprobe :temporalother}
+           (scope [(put :temporalprobe 1 3 a)
+                   [:put-docs {:into :temporalother :row-valid-time? true} a]])))
+    (is (nil? (scope [(pop version)])))
+    (is (nil? (scope [["ASSERT FALSE"] [:unknown]])))
+    (doseq [bad [nil [] [{}] [{:system-time nil :ops [["ASSERT TRUE"]]}]]]
+      (is (nil? (temporal/required-observation-tables bad))))))
