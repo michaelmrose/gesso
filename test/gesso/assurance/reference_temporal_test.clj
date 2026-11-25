@@ -220,3 +220,71 @@
         (let [actual (mapcat #(provider-rectangles node %) [:temporalprobe :temporalother])]
           (is (= (frequencies (coalesce-valid (:rectangles r)))
                  (frequencies (coalesce-valid actual)))))))))
+
+(defn- value-guard [value]
+  ["ASSERT EXISTS (SELECT 1 FROM \"temporalprobe\" WHERE _id = ? AND \"value\" = ?)" "a" value])
+
+(defn- row-count [n]
+  ["ASSERT ? = (SELECT COUNT(*) FROM \"temporalprobe\" WHERE _id = ?)" n "a"])
+
+(def ^:private guarded-transactions
+  (mapv (fn [n ops] {:system-time (sys n) :ops ops}) (range 1 10)
+        [[[:put-docs {:into :temporalprobe :valid-from (sys 3) :valid-to (sys 6)} a]
+          (row-count 0)]
+         [(row-count 0) (put :temporalprobe 0 4 b) (row-count 0)]
+         [(value-guard 1) [:put-docs :temporalprobe b] (value-guard 2)]
+         [[:put-docs {:into :temporalprobe :valid-from (sys 5)} c]
+          (value-guard 2)]
+         [(value-guard 3) [:put-docs :temporalprobe a] (value-guard 3)]
+         [(value-guard 3) [:put-docs {:into :temporalprobe :valid-from (sys 4)
+                                     :valid-to (sys 6)} a] (value-guard 3)]
+         [[:put-docs :temporalprobe a] (value-guard 1) ["ASSERT ? = ?" 1 2]
+          [:put-docs :temporalother d]]
+         [(value-guard 3) [:put-docs :temporalother d] (row-count 1)]
+         [[:put-docs :temporalprobe b] (value-guard 2) (row-count 1)]]))
+
+(deftest independent-transaction-time-assertions
+  (let [r (temporal/replay guarded-transactions)
+        at #(get-in (temporal/visible-at r (sys %1) (sys %2)) [:temporalprobe "a"])]
+    (is (= :predicted (:status r)))
+    (is (= [true true true true false true false true true]
+           (mapv :committed? (:history r))))
+    (is (= [nil nil nil nil 2 nil 2 nil nil]
+           (mapv :failed-assertion-index (:history r))))
+    (is (= a (at 1 3)))
+    (is (nil? (at 2 2)))
+    (is (= b (at 3 4)))
+    (is (= c (at 4 5)))
+    (is (= c (at 5 5)))
+    (is (= a (at 6 5)))
+    (is (= c (at 6 6)))
+    (is (= c (at 7 7)))
+    (is (= b (at 9 9)))
+    (is (= (get-in r [:history 3 :segments]) (get-in r [:history 4 :segments])))
+    (is (= (get-in r [:history 5 :segments]) (get-in r [:history 6 :segments])))))
+
+(deftest rejects-unsupported-temporal-assertions
+  (doseq [ops [[[:put-docs :temporalprobe a] (value-guard "1")]
+               [["ASSERT FALSE"] ["ASSERT arbitrary"]]
+               [["ASSERT FALSE"] (row-count nil)]
+               [["ASSERT EXISTS (SELECT 1 FROM temporalprobe FOR VALID_TIME ALL)"]]]]
+    (let [r (temporal/replay [{:system-time (sys 1) :ops ops}])]
+      (is (= :unsupported (:status r)))
+      (is (not (contains? r :history)))
+      (is (not (contains? r :rectangles))))))
+
+(deftest independently-predicted-temporal-assertions-match-xtdb
+  (let [r (temporal/replay guarded-transactions)]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector guarded-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (doseq [s (range 0 10) v (range 0 11)]
+        (is (= (temporal/visible-at r (sys s) (sys v))
+               (provider-at node (sys s) (sys v))) (str "system " s " valid " v)))
+      (let [actual (mapcat #(provider-rectangles node %) [:temporalprobe :temporalother])]
+        (is (= (frequencies (coalesce-valid (:rectangles r)))
+               (frequencies (coalesce-valid actual))))))))

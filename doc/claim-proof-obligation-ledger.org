@@ -2071,3 +2071,28 @@ history SQL, deletion, erasure, current-time overrides or temporal guard
 execution. No production assurance status changes and no CLM-R2 premise
 is retired. Current-state, full project, physical Claim, Chromium and
 independent proof gates were not rerun.
+
+* v2617 — compose temporal replay with current-state assertions
+
+Evaluate each supported current-state assertion over the tentative
+valid-time projection at the supplied transaction system time. Reuse
+independent current-state execution rather than production SQL or provider
+observations. Normalize and validate all operation shapes before replay;
+reject unsupported reached operand domains. A failed assertion discards
+both tentative active segments and tentative closed rectangles and records
+the failed operation index. Temporal profile v4; current-state v9 and
+history v19 unchanged.
+
+Temporal JVM: 11 tests / 1236 assertions, zero failures or errors. Nine
+additional embedded XTDB transactions exercise row counts, row equality,
+parameter equality, future and past validity, exact boundary visibility,
+read-your-writes and rollback. Compare outcomes, complete visible maps at
+110 additional bitemporal points and the complete selected history
+rectangle inventory. Pure regressions also check failed assertion indexes
+and unsupported suffixes. No provider observation feeds reference replay.
+
+This is finite empirical correspondence for selected default-time guards,
+not explicit temporal SQL predicates, current-time overrides, worker
+temporal guards or universal provider refinement. No production assurance
+status changes and no CLM-R2 premise is retired. Current-state, full
+project, physical Claim, Chromium and independent proof gates were not rerun.

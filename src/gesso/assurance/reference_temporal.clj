@@ -4,7 +4,7 @@
   (:require [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant)))
 
-(def profile :selected-bitemporal-transaction-v3)
+(def profile :selected-bitemporal-transaction-v4)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -21,8 +21,10 @@
 (defn- normalize-op! [system-time op]
   (when-not (and (vector? op) (nil? (meta op)))
     (reject! :unsupported-temporal-operation))
-  (if (or (= op ["ASSERT TRUE"]) (= op ["ASSERT FALSE"]))
-    op
+  (if (string? (first op))
+    (do (when-not (= :predicted (:status (current/execute {} [op])))
+          (reject! :unsupported-temporal-assertion))
+        op)
     (let [[kind raw-opts & docs] op
           opts (if (keyword? raw-opts) {:into raw-opts} raw-opts)]
       (when-not (and (= :put-docs kind) (map? opts) (nil? (meta opts))
@@ -80,12 +82,40 @@
   (vec (for [[table rows] segments [_ intervals] rows segment intervals]
          (rectangle table segment nil))))
 
+(defn- project-visible [segments valid-time]
+  (into {} (keep (fn [[table rows]]
+                   (let [visible (into {} (keep (fn [[id intervals]]
+                                                 (when-let [[_ _ doc]
+                                                            (first (filter (fn [[a b _]]
+                                                                             (and (not (before? valid-time a))
+                                                                                  (before-end? valid-time b))) intervals))]
+                                                   [id doc]))) rows)]
+                     (when (seq visible) [table visible])))) segments))
+
+(defn- execute-transaction! [prior system-time ops]
+  ;; Assertions without explicit temporal clauses read tentative documents
+  ;; at the supplied transaction time, not all active intervals.
+  (loop [working prior i 0]
+    (if (= i (count ops))
+      {:state working :committed? true}
+      (let [op (nth ops i)]
+        (if (= :put-docs (first op))
+          (recur (apply-put working system-time op) (inc i))
+          (let [result (current/execute (project-visible (:segments working) system-time) [op])]
+            (when-not (= :predicted (:status result))
+              (reject! :unsupported-temporal-assertion-domain))
+            (if (:committed? result)
+              (recur working (inc i))
+              {:state prior :committed? false :failed-assertion-index i})))))))
+
 (defn replay
   "Replay from empty state. Each transaction is {:system-time Instant :ops
    vector}. All system times strictly increase. Valid intervals are
    half-open and microsecond-aligned, with omitted starts at the supplied
    system time and omitted ends unbounded. Abort retains the prior snapshot.
-   Rectangles retain the issuing system time and exclusive supersession
+   Selected assertions read tentative documents at the transaction system
+   time (no current-time override). Validate all operation shapes before
+   replay. Rectangles retain the issuing system time and exclusive supersession
    time. No provider observations, implicit clock or authority are admitted."
   [transactions]
   (let [report {:profile profile :authority :none :certificate :not-issued}]
@@ -105,16 +135,14 @@
                              transactions)]
         (let [{:keys [history segments closed]}
               (reduce (fn [{:keys [history] :as prior} {:keys [system-time ops]}]
-                        (let [aborted? (some #{["ASSERT FALSE"]} ops)
-                              next-state (if aborted? prior
-                                             (reduce (fn [s op]
-                                                       (if (= :put-docs (first op))
-                                                         (apply-put s system-time op) s))
-                                                     prior ops))]
-                          (assoc next-state :history
-                                 (conj history {:system-time system-time
-                                                :committed? (not aborted?)
-                                                :segments (:segments next-state)}))))
+                        (let [{:keys [state committed? failed-assertion-index]}
+                              (execute-transaction! prior system-time ops)]
+                          (assoc state :history
+                                 (conj history (cond-> {:system-time system-time
+                                                        :committed? committed?
+                                                        :segments (:segments state)}
+                                                 (not committed?)
+                                                 (assoc :failed-assertion-index failed-assertion-index))))))
                       {:history [] :segments {} :closed []} normalized)]
           (assoc report :status :predicted :history history
                  :rectangles (into closed (active-rectangles segments)))))
@@ -124,18 +152,10 @@
           (throw e))))))
 
 (defn visible-at
-  "Project complete visible document maps at a system and valid instant.
-   Query only a successful replay; no interval metadata is projected."
+  "Project complete visible document maps at a system and valid instant."
   [report system-time valid-time]
   (when (and (= profile (:profile report)) (= :predicted (:status report))
              (instant? system-time) (instant? valid-time))
-    (let [segments (:segments (last (take-while #(not (before? system-time (:system-time %)))
-                                               (:history report))))]
-      (into {} (keep (fn [[table rows]]
-                       (let [visible (into {} (keep (fn [[id intervals]]
-                                                     (when-let [[_ _ doc]
-                                                                (first (filter (fn [[a b _]]
-                                                                                 (and (not (before? valid-time a))
-                                                                                      (before-end? valid-time b))) intervals))]
-                                                       [id doc]))) rows)]
-                         (when (seq visible) [table visible])))) segments))))
+    (project-visible (:segments (last (take-while #(not (before? system-time (:system-time %)))
+                                                (:history report))))
+                     valid-time)))
