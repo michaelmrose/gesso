@@ -363,6 +363,10 @@
                                                 (:xt/id evidence)] opts))
         (reject! :mapped-transition-evidence-mismatch {}))
       (inductive/check-mapped-poststate! admission checked docs journal)
+      ;; Derive inputs again from the actual durable command and saved prestate;
+      ;; the preceding projection check below independently checks that prestate.
+      (inductive/check-historical-mapped-poststate!
+       admission (some #(when (= (:xt/id evidence) (:xt/id %)) %) journal) evidence docs journal)
       (let [prestate (check-preceding-mapped-state! node admission evidence opts
                                                      (xtdb/basis-system-time basis) (xtdb/basis-tx-id basis))]
         (assoc receipt :mapped-readback {:basis basis :authority :none

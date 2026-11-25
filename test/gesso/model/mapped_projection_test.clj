@@ -38,11 +38,13 @@
 (def ^:private rows {:requests [{:xt/id "r1" :item-count 2 :enabled false}]
                      :assignments []})
 
-(defn- record [id principal]
-  (resolution/command-record {:command-id (identity/command-id id)
-                              :principal (identity/principal principal)
-                              :operation :example/command :arguments {}}
-                             {:result :accepted} "t1"))
+(defn- record
+  ([id principal] (record id principal {}))
+  ([id principal arguments]
+   (resolution/command-record {:command-id (identity/command-id id)
+                               :principal (identity/principal principal)
+                               :operation :example/command :arguments arguments}
+                              {:result :accepted} "t1")))
 
 (defn- project [docs journal]
   (projection/project-state! source targets docs journal #(get-in % [:gesso.command/outcome :result])))
@@ -338,6 +340,33 @@
     (is (= :invalid-transition-witness
            (reason #(encode {(keyword "example" (apply str (repeat 2049 "x"))) 1}))))))
 
+(deftest mapped-input-selectors-derive-closed-typed-values
+  (let [derive (deref (ns-resolve 'gesso.model.inductive-plan 'derive-inputs!))
+        check (deref (ns-resolve 'gesso.model.inductive-plan 'check-input-derivations!))
+        original (assoc source :input-types {:input/flag {:type :boolean}
+                                             :input/count {:type :integer}
+                                             :input/principal {:type :string}
+                                             :input/nullable {:type :string :nullable? true}})
+        id :example/projection
+        catalog {:operations [{:id id :construction original}]}
+        selectors {:input/flag [:argument :flag] :input/count [:state :example/count]
+                   :input/principal [:principal] :input/nullable [:argument :nullable]}
+        binding (:gesso.command/binding (record "c1" "p1" {:flag false :nullable nil}))
+        before (project rows [])
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= {id selectors} (check catalog {:input-derivations {id selectors}})))
+    (is (= {:input/flag false :input/count 2 :input/principal "p1" :input/nullable nil}
+           (derive original selectors binding before)))
+    (is (= :missing-mapped-input-source
+           (reason #(derive original selectors (update binding :arguments dissoc :nullable) before))))
+    (is (= :missing-mapped-input-source
+           (reason #(derive original selectors binding (dissoc before :example/count)))))
+    (is (= :ill-typed-present-value
+           (reason #(derive original selectors (assoc-in binding [:arguments :flag] "false") before))))
+    (doseq [selector [[:literal true] [:principal :extra] [:argument] [:state :unknown/field] (fn [] true)]]
+      (is (= :invalid-mapped-input-selector
+             (reason #(check catalog {:input-derivations {id (assoc selectors :input/flag selector)}})))))))
+
 (deftest selected-publication-executor-submits-the-framed-canonical-plan
   (let [id :example/projection
         operation :example/command
@@ -370,15 +399,16 @@
         seen (atom [])
         ;; The footprint callback is a selected trusted fixture; the real
         ;; canonical model contracts independently constrain all domain puts.
-        admission (inductive/build-inductive-mapped-admission!
-                   {:inductive-source proof :target-map targets
+        admission-source {:inductive-source proof :target-map targets
+                    :input-derivations {id {:input/allowed [:argument :allowed]}}
                     :decode-outcome! #(get-in % [:gesso.command/outcome :result])
                     :transaction-footprint! (fn [ops]
                                               (swap! seen conj ops)
                                               {:alternative id
                                                :command-id (:xt/id (first (mapcat #(drop 2 %)
                                                                (filter #(= :gesso_commands (second %)) ops))))})
-                    :auxiliary-tables #{:gesso_live_outbox} :document-effects effects})
+                    :auxiliary-tables #{:gesso_live_outbox} :document-effects effects}
+        admission (inductive/build-inductive-mapped-admission! admission-source)
         constructs (atom 0)
         reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
     (let [release-policy (atom nil)]
@@ -386,7 +416,7 @@
         (with-open [node (xtn/start-node {})]
       (let [call (fn [command-id]
                    (let [binding {:command-id (identity/command-id command-id) :principal (identity/principal "p1")
-                                  :operation operation :arguments {}}
+                                  :operation operation :arguments {:allowed true}}
                          cmd (assoc binding :execution-id (identity/execution-id "e1"))
                          prepare (with-meta (fn [spec changes]
                                               (outbox/prepare! (assoc spec :intent-ids [(random-uuid)]
@@ -411,7 +441,7 @@
                                 (when-not (= :missing @mode)
                                   (admission :prepare! id (select-keys invocation [:command-id :principal :operation :arguments])
                                              {:document-rows docs :records {} :state (project docs [])}
-                                             {:input/allowed true}))
+                                             {:input/allowed (not= :wrong-input @mode)}))
                                 (when (= :stale @mode)
                                   (xt/execute-tx node [[:put-docs :requests (assoc before :hidden "intervening")]]))
                                 {:spec {:purpose :gesso.live/refresh}
@@ -438,6 +468,14 @@
             request-row #(first (xt/q node ["SELECT * FROM requests WHERE _id = ?" "r1"]))
             empty-writes? #(every? empty? (map (fn [table] (xt/q node [(str "SELECT _id FROM " table)]))
                                                ["assignments" "gesso_commands" "gesso_live_outbox" "gesso_transition_evidence"]))]
+        (is (= :incomplete-mapped-input-derivations
+               (reason #(inductive/build-inductive-mapped-admission! (dissoc admission-source :input-derivations)))))
+        (is (= :invalid-mapped-input-selector
+               (reason #(inductive/build-inductive-mapped-admission!
+                         (assoc-in admission-source [:input-derivations id :input/allowed] [:state :example/missing])))))
+        (is (= :changed-mapped-admission-registration
+               (reason #(inductive/require-current-mapped-admission!
+                         admission (assoc-in admission-source [:input-derivations id :input/allowed] [:state :example/enabled])))))
         (is (= :mapped-admission-requires-closed-contract
                (reason #(publication/build-executor (dissoc opts :outcome-contract!)))))
         (is (= :unregistered-mapped-admission
@@ -446,6 +484,10 @@
         (with-redefs [adapter/project-resolution! (fn [_ result _] result)]
           (is (= :missing-preparation (reason #(exec (call "missing")))))
           (is (empty-writes?))
+          (reset! mode :wrong-input)
+          (is (= :mapped-input-derivation-mismatch (reason #(exec (call "wrong-input")))))
+          (is (empty-writes?))
+          (is (not (admission :pending? id "wrong-input")))
           (reset! mode :stale)
           (is (= :xtdb/assert-failed
                  (try (exec (call "stale")) nil (catch Exception e (:xtdb.error/code (ex-data e))))))
@@ -488,10 +530,15 @@
                 verify #(inductive/check-historical-mapped-poststate!
                          admission (first journal) % current-docs journal)]
             (is (= witness (inductive/mapped-transition-evidence! admission checked)))
-            (is (= 2 (:profile-version witness)))
+            (is (= 3 (:profile-version witness)))
             (is (= [["input" "allowed" "boolean" "true"]] (:input-witness witness)))
             (is (some #{["example" "owner" "nil"]} (:prestate-witness witness)))
             (is (= :checked-supplied-witness (:abstract-relation (verify witness))))
+            (is (= :checked-command-and-prestate-selectors (:input-correspondence (verify witness))))
+            (let [altered (assoc-in (first journal) [:gesso.command/binding :arguments :allowed] false)]
+              (is (= :mapped-input-derivation-mismatch
+                     (reason #(inductive/check-historical-mapped-poststate!
+                               admission altered witness current-docs [altered])))))
             (is (= :invalid-historical-mapped-evidence
                    (reason #(verify (assoc witness :profile-version 1)))))
             (is (= :invalid-transition-witness
@@ -501,10 +548,14 @@
             ;; A self-consistent digest is not a semantic admission.
             (let [forged (inductive/mapped-transition-evidence!
                           admission (assoc-in checked [:candidate :inputs :input/allowed] false))]
-              (is (= :candidate-relation-mismatch (reason #(verify forged))))))
+              (is (= :mapped-input-derivation-mismatch (reason #(verify forged))))
+              (let [altered (assoc-in (first journal) [:gesso.command/binding :arguments :allowed] false)]
+                (is (= :candidate-relation-mismatch
+                       (reason #(inductive/check-historical-mapped-poststate!
+                                 admission altered forged current-docs [altered])))))))
           (is (not (admission :pending? id "valid")))
           (is (= :replay (:status (exec (call "valid")))))
-          (is (= 3 @constructs))
+          (is (= 4 @constructs))
           (is (= 2 (count @claimed)))
           (is (every? #(= :exact-generated-prefix (get-in % [:candidate :frame-prefix])) @claimed))
           (let [envelope (last @seen-envelopes)]
@@ -565,7 +616,7 @@
                      (reason #(exec (call "mismatch")))))
               ;; Raw fixture writes emulate corruption outside mediation.
               (xt/execute-tx node [[:delete-docs :gesso_commands "mismatch"]
-                                   [:put-docs :gesso_commands (record "corrupt" "p1")]
+                                   [:put-docs :gesso_commands (record "corrupt" "p1" {:allowed true})]
                                    [:put-docs :gesso_transition_evidence (assoc witness :xt/id "corrupt")]
                                    [:put-docs :requests (assoc after :item-count 99)]])
               (xt/execute-tx node [[:put-docs :requests after]])
@@ -575,7 +626,7 @@
               (xt/execute-tx node [[:delete-docs :gesso_commands "corrupt"]
                                    [:delete-docs :assignments "a1"]
                                    [:put-docs :requests (assoc before :item-count 99)]])
-              (xt/execute-tx node [[:put-docs :gesso_commands (record "precorrupt" "p1")]
+              (xt/execute-tx node [[:put-docs :gesso_commands (record "precorrupt" "p1" {:allowed true})]
                                    [:put-docs :gesso_transition_evidence (assoc witness :xt/id "precorrupt")]
                                    [:put-docs :requests after]
                                    [:put-docs :assignments assignment]])

@@ -29,6 +29,7 @@
             [gesso.assurance.subject :as subject]
             [gesso.choreo.identity :as identity]
             [gesso.model.certified-plan :as plan]
+            [gesso.model.command-resolution :as resolution]
             [gesso.model.mapped-preparation :as preparation]
             [gesso.model.mapped-frame :as frame]
             [gesso.model.mapped-projection :as projection]
@@ -306,8 +307,54 @@
 (def ^:private mapped-source-keys
   #{:inductive-source :target-map :decode-outcome! :transaction-footprint! :auxiliary-tables :document-effects})
 
+(defn- mapped-source-keys! [source]
+  (exact-map! source (cond-> mapped-source-keys
+                       (contains? source :input-derivations) (conj :input-derivations)) []))
+
+(defn- check-input-derivations! [catalog source]
+  (let [operations (:operations catalog)
+        derivations (if (contains? source :input-derivations)
+                      (:input-derivations source)
+                      (zipmap (map :id operations) (repeat {})))]
+    (when-not (and (plain-map? derivations) (nil? (meta derivations))
+                   (= (set (map :id operations)) (set (keys derivations))))
+      (reject! :incomplete-mapped-input-derivations [] {}))
+    (doseq [{:keys [id construction]} operations
+            :let [selectors (get derivations id)]]
+      (when-not (and (plain-map? selectors) (nil? (meta selectors))
+                     (= (set (keys (:input-types construction))) (set (keys selectors))))
+        (reject! :incomplete-mapped-input-derivations [id] {}))
+      (doseq [[input selector] selectors]
+        (when-not (and (vector? selector) (nil? (meta selector))
+                       (case (first selector)
+                         :argument (and (= 2 (count selector)) (keyword? (second selector)))
+                         :state (and (= 2 (count selector)) (contains? (:state-types construction) (second selector)))
+                         :principal (= [:principal] selector)
+                         false))
+          (reject! :invalid-mapped-input-selector [id input] {}))))
+    derivations))
+
+(defn- derive-inputs! [construction selectors binding before]
+  (let [binding (resolution/require-binding binding)
+        inputs (into {} (map (fn [[input [kind k]]]
+                               (let [value (case kind
+                                             :principal (identity/raw-value (:principal binding))
+                                             :argument (if (contains? (:arguments binding) k)
+                                                         (get (:arguments binding) k)
+                                                         (reject! :missing-mapped-input-source [input] {}))
+                                             :state (if (contains? before k) (get before k)
+                                                        (reject! :missing-mapped-input-source [input] {})))]
+                                 [input value]))) selectors)]
+    (values/observe-state! (:input-types construction) inputs)
+    inputs))
+
+(defn- require-derived-inputs! [construction selectors binding before supplied]
+  (when-not (= supplied (derive-inputs! construction selectors binding before))
+    (reject! :mapped-input-derivation-mismatch [] {}))
+  nil)
+
 (defn- checked-mapped-source! [source]
-  (exact-map! source mapped-source-keys [])
+  (mapped-source-keys! source)
   (when-not (and (fn? (:decode-outcome! source)) (fn? (:transaction-footprint! source))
                  (identical? original-mapped-check check-inductive-target-mapping!)
                  (identical? original-mapped-builder preparation/build-admission!))
@@ -327,7 +374,8 @@
       (when-not (and (map? effects) (= (set (keys mappings)) (set (keys effects))))
         (reject! :incomplete-document-effect-catalog [:document-effects] {}))
       (doseq [[id mapping] mappings] (frame/check-effects! mapping (get effects id)))
-      (assoc checked :auxiliary-tables auxiliary :document-effects effects))))
+      (assoc checked :auxiliary-tables auxiliary :document-effects effects
+             :input-derivations (check-input-derivations! (get-in source [:inductive-source :catalog]) source)))))
 
 (defn- inspect-transaction!
   [footprint! auxiliary {:keys [api tx-ops tx-options] :as submission}]
@@ -397,6 +445,9 @@
    :admit-framed! takes the original and actual envelopes, checks their exact
    relationship and consumes the preparation with the exact prefix check.
    The older :admit! is unframed; neither path submits a transaction.
+   Input-bearing alternatives require closed :input-derivations selectors
+   for every declared input. Input-free catalogs may omit that key. The
+   supplied preparation inputs must equal the derived typed valuation.
    The decoder, acquisition and footprint checker are trusted; no general SQL
    refinement or installed executor correspondence is established. Calls do not recheck the
    induction proof; use require-current-mapped-admission! at assembly review."
@@ -406,12 +457,21 @@
                                           (:target-map source) (:decode-outcome! source) (:document-effects source))
         footprint! (:transaction-footprint! source)
         auxiliary (:auxiliary-tables source)
+        operations (into {} (map (juxt :id :construction)) (get-in source [:inductive-source :catalog :operations]))
+        prepare! (fn [id binding snapshot inputs]
+                   (let [original (or (get operations id) (reject! :unknown-operation [id] {}))]
+                     (require-derived-inputs! original (get-in checked [:input-derivations id])
+                                              binding (:state snapshot) inputs)
+                     ;; The registry independently projects the supplied rows and
+                     ;; checks the binding before storing this exact preparation.
+                     ((:prepare! registry) id binding snapshot inputs)))
         admission (fn [action & args]
                     (case action
                       :admit! (apply admit-transaction! registry footprint! auxiliary args)
                       :frame-submission! (apply frame-submission! registry footprint! auxiliary args)
                       :admit-framed! (apply admit-framed-transaction! registry footprint! auxiliary args)
-                      (:prepare! :discard! :pending?) (apply (get registry action) args)
+                      :prepare! (apply prepare! args)
+                      (:discard! :pending?) (apply (get registry action) args)
                       (reject! :unknown-mapped-admission-action [action] {})))]
     (locking issued-mapped
       (.put issued-mapped admission {:source source :description (mapped-description checked)}))
@@ -556,12 +616,16 @@
 (def ^:private original-witness-relation projection/check-transition-relation!)
 
 (defn- transition-evidence [description alternative mapping command-id before inputs state]
-  {:xt/id command-id :profile-version 2
+  {:xt/id command-id :profile-version 3
    :catalog-fingerprint (:catalog-fingerprint description)
    :induction-fingerprint (:induction-fingerprint description)
    :mapping-fingerprint (:fingerprint mapping)
    :transition-fingerprint (:transition-fingerprint mapping)
    :alternative alternative
+   :input-derivation-fingerprint (:fingerprint
+                                  (original-initial-identity
+                                   {:kind :rule :id ::mapped-input-derivation
+                                    :interface {:selectors (get-in description [:input-derivations alternative])}}))
    :prestate-witness (encode-valuation before)
    :input-witness (encode-valuation inputs)
    :witness-fingerprint (:fingerprint
@@ -608,7 +672,7 @@
     (when-not (and original mapping (string? (:xt/id record))
                    (contains? (:write-targets mapping) slot)
                    (some #(= record %) journal-rows)
-                   (= 2 (:profile-version evidence))
+                   (= 3 (:profile-version evidence))
                    (identical? original-witness-relation projection/check-transition-relation!)
                    (identical? original-initial-projection projection/project-state!)
                    (identical? original-initial-identity subject/describe-subject))
@@ -619,9 +683,11 @@
           inputs (decode-valuation! (:input-witness evidence))]
       (when-not (= evidence (transition-evidence description alternative mapping (:xt/id record) before inputs actual))
         (reject! :historical-mapped-poststate-mismatch [] {}))
+      (require-derived-inputs! original (get-in description [:input-derivations alternative]) binding before inputs)
       (original-witness-relation original before inputs actual)
       {:authority :none :physical-correspondence :checked-historical-projection
-       :abstract-relation :checked-supplied-witness})))
+       :abstract-relation :checked-supplied-witness
+       :input-correspondence :checked-command-and-prestate-selectors})))
 
 (defn check-mapped-prestate!
   "Compare the durable prestate witness with a supplied physical projection.
@@ -635,7 +701,7 @@
         original (some (fn [{:keys [id construction]}]
                          (when (= id alternative) construction))
                        (get-in source [:inductive-source :catalog :operations]))]
-    (when-not (and original mapping (= 2 (:profile-version evidence))
+    (when-not (and original mapping (= 3 (:profile-version evidence))
                    (identical? original-initial-projection projection/project-state!))
       (reject! :invalid-historical-mapped-evidence [] {}))
     (let [actual (original-initial-projection original (:target-map source)
@@ -675,7 +741,7 @@
   [admission current-source]
   (let [{original :source prior :description} (registered-mapped! admission)
         old (:inductive-source original) now (:inductive-source current-source)]
-    (exact-map! current-source mapped-source-keys [])
+    (mapped-source-keys! current-source)
     (exact-map! now inductive-keys [:inductive-source])
     (when-not (and (= (:catalog old) (:catalog now))
                    (= (:current-graph old) (:current-graph now))
@@ -685,6 +751,7 @@
                    (identical? (:decode-outcome! original) (:decode-outcome! current-source))
                    (= (:auxiliary-tables original) (:auxiliary-tables current-source))
                    (= (:document-effects original) (:document-effects current-source))
+                   (= (:input-derivations original) (:input-derivations current-source))
                    (identical? (:transaction-footprint! original) (:transaction-footprint! current-source)))
       (reject! :changed-mapped-admission-registration [:current-source] {}))
     (let [fresh (mapped-description (checked-mapped-source! current-source))]
