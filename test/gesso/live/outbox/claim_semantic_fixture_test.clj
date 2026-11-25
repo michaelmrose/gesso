@@ -4,6 +4,8 @@
   (:require [clojure.test :refer [deftest is]]
             [gesso.live.outbox.claim-semantic-fixture :as claim]
             [gesso.assurance.proof.induction :as induction]
+            [gesso.model.certified-plan :as plan]
+            [gesso.model.inductive-plan :as mapped]
             [gesso.assurance.observed-correspondence :as correspondence]
             [gesso.assurance.proof.guarded-substitution :as guarded]
             [gesso.assurance.proof.unified-preservation :as unified]
@@ -212,3 +214,37 @@
                             [:literal "helper-2"])))
     (is (false? (:all-supplied-observations-match?
                  (check (assoc-in source [:observations 0 :after :membership/two] false)))))))
+
+(deftest multi-record-target-mapping-checks-original-catalog
+  (let [bound (claim/bound-inductive-source!)
+        source {:inductive-source bound :target-map claim/target-map}
+        result (mapped/check-inductive-target-mapping! source)
+        accept (claim/alternative-id "helper-1" :accept)
+        refuse (claim/alternative-id "helper-1" :refuse)
+        replay (claim/alternative-id "helper-1" :replay-accepted)
+        rows (:operation-mappings result)
+        reason (fn [m] (try (plan/check-target-mapping! (claim/source "helper-1" :accept) m) nil
+                           (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= (:declared-operation-ids (:catalog bound)) (set (keys rows))))
+    (is (= #{[:document :requests "r1"] [:document :request_assignments "primary-r1"]
+             [:journal-slot "helper-1" :request/claim]} (:write-targets (get rows accept))))
+    (is (= #{[:journal-slot "helper-1" :request/claim]} (:write-targets (get rows refuse))))
+    (is (empty? (:write-targets (get rows replay))))
+    (is (= (select-keys claim/target-map #{:membership/one :membership/two :journal/two})
+           (:frame-coordinates (get rows accept))))
+    (is (= (get rows accept) (plan/check-target-mapping! (claim/source "helper-1" :accept) claim/target-map)))
+    (is (= :not-issued (:executor result)))
+    (is (= :none (:authority result)))
+    (is (= :wrong-keys (reason (dissoc claim/target-map :journal/two))))
+    (is (= :aliased-target-coordinate (reason (assoc claim/target-map :journal/two (:journal/one claim/target-map)))))
+    (is (= :aliased-target-coordinate (reason (assoc claim/target-map :request/revision (:request/status claim/target-map)))))
+    (is (= :invalid-document-coordinate (reason (assoc claim/target-map :request/status [:document :requests "r1" :xt/id]))))
+    (is (= :invalid-document-coordinate (reason (assoc claim/target-map :request/status [:document :requests "r1" :status-name]))))
+    (is (= :invalid-journal-slot-coordinate (reason (assoc claim/target-map :request/revision [:journal-slot "helper-1" :request/claim]))))
+    (is (= :conflicting-document-presence
+           (reason (assoc claim/target-map :assignment/helper [:nullable-document :requests "r1" :helper]))))
+    (is (not= (:fingerprint (get rows accept))
+              (:fingerprint (plan/check-target-mapping! (claim/source "helper-1" :accept)
+                              (assoc claim/target-map :membership/two [:document :memberships "helper-3" :active])))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mapped/check-inductive-target-mapping! (assoc-in source [:inductive-source :certificate-handle] {}))))))

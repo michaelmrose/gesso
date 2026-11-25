@@ -41,6 +41,7 @@
   (:require [clojure.set :as set]
             [gesso.assurance.proof.transition :as abstract]
             [gesso.assurance.transition :as construction]
+            [gesso.assurance.subject :as subject]
             [gesso.model.certified-operation :as certified]
             [gesso.model.command :as command]
             [gesso.model.command-resolution :as resolution]
@@ -117,6 +118,73 @@
                  (= (count field-map) (count (set (vals field-map)))))
     (reject! :non-injective-or-invalid-field-map [:field-map] {}))
   field-map)
+
+(defn- physical-name? [x]
+  ;; Restrict this first mapping language to unqualified canonical SQL names;
+  ;; alternate spellings must not alias one physical field after normalization.
+  (and (keyword? x) (nil? (namespace x))
+       (boolean (re-matches #"[a-z][a-z0-9_]*" (name x)))))
+
+(defn- mapped-coordinate! [field descriptor coordinate]
+  (when-not (vector? coordinate)
+    (reject! :invalid-target-coordinate [:target-map field] {}))
+  (metadata-free! coordinate [:target-map field])
+  (let [[kind a b c] coordinate]
+    (case kind
+      (:document :nullable-document)
+      (when-not (and (= 4 (count coordinate))
+                     (physical-name? a) (not= :gesso_commands a)
+                     (string? b) (seq b) (physical-name? c)
+                     (or (= :document kind)
+                         (and (true? (:nullable? descriptor))
+                              (not (:optional? descriptor)))))
+        (reject! :invalid-document-coordinate [:target-map field] {}))
+      :journal-slot
+      (when-not (and (= 3 (count coordinate)) (string? a) (seq a)
+                     (qualified-operation? b) (= :keyword (:type descriptor))
+                     (true? (:nullable? descriptor)) (not (:optional? descriptor)))
+        (reject! :invalid-journal-slot-coordinate [:target-map field] {}))
+      (reject! :unsupported-target-coordinate [:target-map field] {}))
+    coordinate))
+
+(defn- coordinate-target [[kind a b]]
+  (if (= :journal-slot kind) [kind a b] [:document a b]))
+
+(defn check-target-mapping!
+  "Check a complete, injective multi-record projection of the original typed
+   construction. Coordinates are [:document table string-id field],
+   [:nullable-document table string-id field] (absence projects to nil), or
+   [:journal-slot string-principal operation] (nullable keyword outcome).
+   This is a mapping declaration, not a document decoder, SQL lowering, full
+   physical footprint, issued executor or certificate. In particular, a
+   frame field may share a document with written fields."
+  [original target-map]
+  (let [built (construction/build-guarded-replacement! original)]
+    (exact-map! target-map (:state-projection built) [:target-map])
+    (doseq [[field coordinate] target-map]
+      (mapped-coordinate! field (get-in original [:state-types field]) coordinate))
+    (let [coordinates (vals target-map)
+          addresses (map #(if (= :journal-slot (first %)) % (subvec % 1)) coordinates)
+          groups (group-by coordinate-target coordinates)]
+      (when-not (= (count coordinates) (count (set addresses)))
+        (reject! :aliased-target-coordinate [:target-map] {}))
+      (when-not (every? #(= 1 (count (set (map first %)))) (vals groups))
+        (reject! :conflicting-document-presence [:target-map] {}))
+      (let [reads (select-keys target-map (:reads built))
+            writes (select-keys target-map (:writes built))
+            frame (select-keys target-map (:frame built))
+            identity (subject/describe-subject
+                      {:kind :rule :id :gesso.model.certified-plan/target-mapping-v1
+                       :interface {:transition-fingerprint (:transition-fingerprint built)
+                                   :target-map target-map}})]
+        {:type ::checked-target-mapping :version 1 :fingerprint (:fingerprint identity)
+         :transition-fingerprint (:transition-fingerprint built)
+         :subject-fingerprint (:subject-fingerprint built)
+         :target-map target-map :read-coordinates reads :write-coordinates writes
+         :frame-coordinates frame :input-read-fields (set/difference (:reads built) (set (keys reads)))
+         :write-targets (set (map coordinate-target (vals writes)))
+         :scope :declared-abstract-field-projection-only
+         :physical-correspondence :not-established :certificate :not-issued :authority :none}))))
 
 (defn- checked-construction! [original field-map]
   (let [built (construction/build-guarded-replacement! original)]

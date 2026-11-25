@@ -263,3 +263,30 @@
         (when-not (= prior fresh)
           (reject! :stale-inductive-plan [:current-source] {}))
         fresh))))
+
+(def ^:private original-target-mapping plan/check-target-mapping!)
+
+(defn check-inductive-target-mapping!
+  "Recheck both live abstract handles and the exact shared target projection
+   against EVERY original catalog construction. No executor is issued."
+  [{:keys [inductive-source target-map] :as source}]
+  (exact-map! source #{:inductive-source :target-map} [])
+  (when-not (identical? original-target-mapping plan/check-target-mapping!)
+    (reject! :substituted-target-mapping-checker [] {}))
+  (let [{:keys [induction catalog]} (checked-report! inductive-source)
+        rows (into {} (map (juxt :operation-id identity)) (:operation-results catalog))
+        mappings (into {} (map (fn [{:keys [id construction]}]
+                                (let [checked (original-target-mapping construction target-map)
+                                      row (get rows id)]
+                                  (when-not (and (= (:transition-fingerprint checked) (:transition-fingerprint row))
+                                                 (= (:subject-fingerprint checked) (:subject-fingerprint row)))
+                                    (reject! :mapped-transition-mismatch [:target-map] {}))
+                                  [id checked]))) (:operations (:catalog inductive-source)))]
+    {:type ::inductive-target-mapping :version 1
+     :catalog-fingerprint (:fingerprint catalog)
+     :induction-fingerprint (get-in induction [:identity :induction-fingerprint])
+     :target-map target-map :operation-mappings mappings
+     :original-open-obligations (get-in induction [:classification :original-obligations :by-operation])
+     :scope :declared-abstract-field-projection-only
+     :executor :not-issued :physical-correspondence :not-established
+     :certificate :not-issued :authority :none}))

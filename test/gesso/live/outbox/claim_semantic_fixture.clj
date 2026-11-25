@@ -7,6 +7,7 @@
             [honey.sql :as hsql]
             [xtdb.util :as xt-util]
             [gesso.model.tx :as model-tx]
+            [gesso.model.certified-plan :as plan]
             [gesso.assurance.transition :as construction]
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.induction :as induction]
@@ -30,6 +31,15 @@
    :journal/two {:type :keyword :nullable? true}
    :membership/one {:type :boolean}
    :membership/two {:type :boolean}})
+
+(def target-map
+  {:request/status [:document :requests "r1" :status]
+   :request/revision [:document :requests "r1" :revision]
+   :assignment/helper [:nullable-document :request_assignments "primary-r1" :helper]
+   :membership/one [:document :memberships "helper-1" :active]
+   :membership/two [:document :memberships "helper-2" :active]
+   :journal/one [:journal-slot "helper-1" :request/claim]
+   :journal/two [:journal-slot "helper-2" :request/claim]})
 
 (defn alternative-id [helper alternative]
   (keyword (str "fixture.claim." helper) (name alternative)))
@@ -154,6 +164,7 @@
    operation slot absence, so distinct IDs cannot fill the same slot."
   [helper alternative id ops writes]
   (let [declaration (source helper alternative)
+        mapping (plan/check-target-mapping! declaration target-map)
         conditions (literal-conditions! declaration)
         [slot membership] (helpers helper)
         accept? (= :accept alternative)
@@ -167,19 +178,27 @@
                          (nil? (get conditions slot))
                          (or (not accept?) (nil? (:assignment/helper conditions)))))
         after (into {} (map (fn [[k expression]] [k (second expression)])) (:replacements declaration))
-        request (second (first (get writes :requests)))
-        assignment (second (first (get writes :request_assignments)))
+        [_ request-table request-id status-field] (get target-map :request/status)
+        [_ revision-table revision-id revision-field] (get target-map :request/revision)
+        [_ assignment-table assignment-id helper-field] (get target-map :assignment/helper)
+        [_ member-table member-id active-field] (get target-map membership)
+        [_ slot-principal slot-operation] (get target-map slot)
+        _ (require! (and (= request-table revision-table) (= request-id revision-id)
+                         (= helper member-id slot-principal)
+                         (= replacement-fields (set (keys (:write-coordinates mapping))))))
+        request (second (first (get writes request-table)))
+        assignment (second (first (get writes assignment-table)))
         intents (map second (get writes :gesso_live_outbox))
-        expected (cond-> [(current-assertion :requests "r1"
-                                             [[:revision (:request/revision conditions)]
+        expected (cond-> [(current-assertion request-table request-id
+                                             [[revision-field (:request/revision conditions)]
                                               [:updated-at (if accept? "t0" "t1")]
-                                              [:status (:request/status conditions)]])
+                                              [status-field (:request/status conditions)]])
                            (absence-assertion :gesso_commands id)
                            ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE (gesso$command$binding).principal.gesso$choreo$identity$value = ? AND (gesso$command$binding).operation = ?)"
-                            helper :request/claim]]
-                   accept? (into [(current-assertion :memberships helper
-                                                     [[:revision 0] [:updated-at "t0"] [:active (get conditions membership)]])
-                                  (absence-assertion :request_assignments "primary-r1")
+                            slot-principal slot-operation]]
+                   accept? (into [(current-assertion member-table member-id
+                                                     [[:revision 0] [:updated-at "t0"] [active-field (get conditions membership)]])
+                                  (absence-assertion assignment-table assignment-id)
                                   (format-assertion (model-tx/assert-one :requests
                                                                       [:and [:= :xt/id [:lift "r1"]]
                                                                        [:= :request/location-id [:lift "l1"]]]))])
@@ -190,8 +209,8 @@
                    (= (if accept? :accepted :rejected) (get after slot))
                    (or (not accept?)
                        (= (select-keys after [:request/status :request/revision :assignment/helper])
-                          {:request/status (:status request) :request/revision (:revision request)
-                           :assignment/helper (:helper assignment)}))))))
+                          {:request/status (get request status-field) :request/revision (get request revision-field)
+                           :assignment/helper (get assignment helper-field)}))))))
 
 (defn submitted-alternative!
   "Classify the selected actual synchronous submission, not a claimed plan.
