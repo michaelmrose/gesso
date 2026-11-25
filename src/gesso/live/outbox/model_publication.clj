@@ -308,6 +308,38 @@
                (compare-and-set! (:available? scope) true false))
       (:checked scope))))
 
+(defn- check-committed-poststate! [ctx {:keys [admission checked]} receipt]
+  (try
+    (let [basis (xtdb/tx-result-basis (:tx-result receipt))
+          _ (when-not basis (reject! :missing-mapped-commit-basis {}))
+          node (xtdb/connectable-from ctx)
+          opts (assoc (frontier/query-options! node)
+                      :snapshot-token (xtdb/basis-snapshot-token basis)
+                      :current-time (xtdb/basis-system-time basis))
+          tables (into #{} (keep (fn [[kind table]]
+                                   (when (#{:document :nullable-document} kind) table)))
+                       (vals (:target-map (inductive/describe-mapped-admission admission))))
+          docs (into {} (map (fn [table]
+                               (when-not (and (simple-keyword? table)
+                                              (re-matches #"[a-z][a-z0-9_]*" (name table)))
+                                 (reject! :invalid-mapped-readback-table {}))
+                               [table (xtdb/q-from node [(str "SELECT * FROM " (name table))] opts)]))
+                     (sort tables))
+          journal (xtdb/q-from node ["SELECT * FROM gesso_commands"] opts)]
+      (inductive/check-mapped-poststate! admission checked docs journal)
+      (assoc receipt :mapped-readback {:basis basis :authority :none
+                                       :physical-correspondence :checked-commit-basis-projection}))
+    (catch Exception cause
+      (when (instance? InterruptedException cause)
+        (.interrupt (Thread/currentThread)))
+      ;; The provider has already returned a committed receipt. Never run
+      ;; abort recovery or project successful correspondence after this error.
+      (throw (ex-info "Committed mapped transaction failed physical poststate verification."
+                      {:error/type ::mapped-postcommit-failure
+                       :failure/stage :post-commit-correspondence
+                       :commit/status :committed
+                       :tx-result (:tx-result receipt)} cause)))))
+
 (defn- execute-resolved-plan! [ctx {:keys [ops intents record frame-handoff]}]
   ;; A constructor may finish after its request has been cancelled. Check
   ;; at the last shared boundary before the physical submission, without
@@ -316,14 +348,17 @@
     (throw (InterruptedException. "Durable model submission interrupted")))
   (let [prior (.get framed-submission)]
     (when prior (reject! :nested-framed-submission {}))
-    (try
-      (when frame-handoff
-        (.set framed-submission
-              (assoc frame-handoff :connectable (xtdb/connectable-from ctx)
-                     :available? (atom true))))
-      (assoc (xtdb/execute-tx-from! ctx ops)
-             :outbox/intents intents :command/record record)
-      (finally (.remove framed-submission)))))
+    (let [receipt (try
+                    (when frame-handoff
+                      (.set framed-submission
+                            (assoc frame-handoff :connectable (xtdb/connectable-from ctx)
+                                   :available? (atom true))))
+                    (assoc (xtdb/execute-tx-from! ctx ops)
+                           :outbox/intents intents :command/record record)
+                    (finally (.remove framed-submission)))]
+      (if frame-handoff
+        (check-committed-poststate! ctx frame-handoff receipt)
+        receipt))))
 
 (defn transact-resolved!
   "Commit the canonical model command-result record, domain operations and
@@ -388,6 +423,8 @@
                                project!))
 
 (defn- recover-after-execute! [ctx may-disclose? failure after-abort!]
+  (when (= ::mapped-postcommit-failure (:error/type (ex-data failure)))
+    (throw failure))
   ;; An interrupted request must not start another provider call.
   (when (instance? InterruptedException failure)
     (.interrupt (Thread/currentThread)))

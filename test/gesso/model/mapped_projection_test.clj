@@ -425,7 +425,22 @@
           (is (not (admission :pending? id "stale")))
           (xt/execute-tx node [[:put-docs :requests before]])
           (reset! mode :valid)
-          (is (= :incorporated (:status (exec (call "valid")))))
+          (let [execute live-xtdb/execute-tx-from!
+                result (with-redefs [live-xtdb/execute-tx-from!
+                                     (fn [ctx ops & [opts]]
+                                       (let [receipt (execute ctx ops opts)]
+                                         ;; Change the current state after the genuine receipt.
+                                         ;; The verification must still see the committed snapshot.
+                                         (xt/execute-tx node [[:put-docs :requests (assoc after :item-count 4)]])
+                                         receipt))]
+                         (exec (call "valid")))]
+            (is (= :incorporated (:status result)))
+            (is (= :checked-commit-basis-projection
+                   (get-in result [:transaction :mapped-readback :physical-correspondence])))
+            (is (= (live-xtdb/tx-result-basis (get-in result [:transaction :tx-result]))
+                   (get-in result [:transaction :mapped-readback :basis])))
+            (is (= 4 (:item-count (request-row))))
+            (xt/execute-tx node [[:put-docs :requests after]]))
           (is (= after (request-row)))
           (is (= [assignment] (xt/q node ["SELECT * FROM assignments"])))
           (is (= [{:xt/id "valid"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
@@ -444,5 +459,26 @@
             (is (= 2 (count @claimed)))
             (is (= after (request-row)))
             (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_commands"]))))
-            (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))))
+            (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))))
+          ;; Reset the isolated fixture through raw XTDB for a second command.
+          (let [outbox-id (:xt/id (first (xt/q node ["SELECT _id FROM gesso_live_outbox"])))]
+            (xt/execute-tx node [[:put-docs :requests before]
+                                 [:delete-docs :assignments "a1"]
+                                 [:delete-docs :gesso_commands "valid"]
+                                 [:delete-docs :gesso_live_outbox outbox-id]]))
+          (let [q live-xtdb/q-from
+                failure (with-redefs [live-xtdb/q-from
+                                      (fn [provider query opts]
+                                        (let [result (q provider query opts)]
+                                          (if (and (:snapshot-token opts)
+                                                   (= ["SELECT * FROM requests"] query))
+                                            (assoc-in result [0 :item-count] 99)
+                                            result)))]
+                          (try (exec (call "mismatch")) nil (catch Exception e e)))]
+            (is (= :committed (:commit/status (ex-data failure))))
+            (is (= :post-commit-correspondence (:failure/stage (ex-data failure))))
+            (is (= :mapped-poststate-mismatch (:reason (ex-data (ex-cause failure)))))
+            (is (= after (request-row)))
+            (is (= [{:xt/id "mismatch"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
+            (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"])))))))
         (finally (when-let [release @release-policy] (release)))))))

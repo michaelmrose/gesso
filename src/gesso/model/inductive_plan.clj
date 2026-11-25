@@ -510,6 +510,30 @@
     {:state actual :initialization-fingerprint (:initialization-fingerprint checked)
      :authority :none :physical-correspondence :checked-supplied-projection}))
 
+(defn check-mapped-poststate!
+  "Compare the complete supplied projection with the admitted transition's
+   expected poststate, using the selected original operation and decoder.
+   This is a data check; only the executor can bind it to its own receipt.
+   It does not establish transaction-internal prestate or writer closure."
+  [admission {:keys [identity candidate]} document-rows journal-rows]
+  (let [{:keys [source description]} (registered-mapped! admission)
+        alternative (:alternative identity)
+        mapping (get-in description [:operation-mappings alternative])
+        original (some (fn [{:keys [id construction]}]
+                         (when (= id alternative) construction))
+                       (get-in source [:inductive-source :catalog :operations]))]
+    (when-not (and original mapping
+                   (= :exact-generated-prefix (:frame-prefix candidate))
+                   (= (:fingerprint mapping) (:mapping-fingerprint candidate))
+                   (= (:transition-fingerprint mapping) (:transition-fingerprint candidate))
+                   (identical? original-initial-projection projection/project-state!))
+      (reject! :invalid-mapped-poststate-candidate [] {}))
+    (let [actual (original-initial-projection original (:target-map source)
+                                              document-rows journal-rows (:decode-outcome! source))]
+      (when-not (= (:after candidate) actual)
+        (reject! :mapped-poststate-mismatch [] {}))
+      {:authority :none :physical-correspondence :checked-supplied-projection})))
+
 (defn require-current-mapped-admission!
   "Recheck the original live handles and mapping of this exact issued callable
    against a trusted current assembly source, including decoder and footprint identity.
