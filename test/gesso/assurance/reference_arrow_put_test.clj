@@ -803,3 +803,71 @@
           (.awaitSourceBlocking (db/primary-db node) (first (peek rejected)) (Duration/ofSeconds 15))
           (check-multi-group-puts! node id nine-id single-id rejected)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-multi-table-puts! [node id single-id too-many-id]
+  (let [decode arrow/decode-multi-table-put
+        data (#'fixture/retained-operation-bytes node id)
+        expected [{:kind :put-docs :table :public/foo :documents [{:xt/id 1 :name "a"}]
+                   :iids ["4cd9b7672d7fbee8fb51fb1e049f6903"] :bounds {}}
+                  {:kind :put-docs :table :public/bar :documents [{:xt/id "x" :ok true}]
+                   :iids ["9740c9dcdb4487d8cd63d2a544d8e657"] :bounds {}}
+                  {:kind :put-docs :table :public/foo :documents [{:xt/id 2 :name "b"} {:xt/id 3 :name "c"}]
+                   :iids ["420fce314175df402adbeae3cfbbb856" "9a83c6cb1126d93de4a30715b28f1f4b"] :bounds {}}]
+        r (decode data)
+        buffers (#'fixture/buffer-starts data)
+        [iids tags indexes iid-offsets foo-offsets bar-offsets bar-id outer-valid]
+        (mapv #(nth buffers %) [6 7 8 4 10 18 22 25])
+        observed (provider/observe-source-message! node id)]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+    (is (= arrow/multi-table-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= expected (:groups r) (:operations observed)))
+    (is (= [1 1 1] (:logged-operation-spans r) (:logged-operation-spans observed)))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-multi-group-put data))))
+    (let [field (#'fixture/find-byte-sequence data "public/bar")
+          duplicate (-> data (#'fixture/edit-byte (+ field 7) 102)
+                        (#'fixture/edit-byte (+ field 8) 111)
+                        (#'fixture/edit-byte (+ field 9) 111))]
+      (doseq [[bad reason] [[duplicate :unsupported-arrow-put-table]
+                            [(#'fixture/edit-byte data (inc tags) 2) :unsupported-arrow-put-selection]
+                            [(#'fixture/edit-int data (+ indexes 8) 0) :unsupported-arrow-put-selection]
+                            [(#'fixture/edit-int data (+ indexes 4) -1) :unsupported-arrow-put-selection]
+                            [(#'fixture/edit-int data (+ foo-offsets 4) 2) :unsupported-arrow-put-list-layout]
+                            [(#'fixture/edit-int data (+ bar-offsets 4) 0) :unsupported-arrow-put-list-layout]
+                            [(#'fixture/edit-int data (+ iid-offsets 8) 3) :unsupported-arrow-put-list-layout]
+                            [(#'fixture/edit-byte data bar-id 121) :document-iid-mismatch]
+                            [(#'fixture/edit-byte data (+ iids 16) 0) :document-iid-mismatch]
+                            [(#'fixture/edit-byte data outer-valid 2) :unsupported-arrow-put-bounds]
+                            [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]
+                            [(#'fixture/retained-operation-bytes node too-many-id) :unsupported-arrow-field]]]
+        (let [r (decode bad)]
+          (is (= :unsupported (:status r)) (pr-str (dissoc r :groups)))
+          (is (= reason (:reason r)) (pr-str r))
+          (is (not-any? #(contains? r %) [:groups :logged-operation-spans :iid-correspondence])))))
+    (let [single (#'fixture/retained-operation-bytes node single-id)]
+      (is (= :matched (:iid-correspondence (decode single))))
+      (is (= (:groups (arrow/decode-multi-group-put single)) (:groups (decode single)))))))
+
+(deftest selected-multi-table-puts-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-multi-table-put-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}]
+    (try
+      (let [[id single-id too-many-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitSourceBlocking database id (Duration/ofSeconds 15)) id))
+                    id (submit! [[:put-docs :foo {:xt/id 1 :name "a"}]
+                                 [:put-docs :bar {:xt/id "x" :ok true}]
+                                 [:put-docs :foo {:xt/id 2 :name "b"} {:xt/id 3 :name "c"}]])
+                    single-id (submit! [[:put-docs :foo {:xt/id 4}] [:put-docs :foo {:xt/id 5}]])
+                    too-many-id (submit! (mapv #(vector :put-docs (keyword (str "table_" %)) {:xt/id %}) (range 17)))]
+                (check-multi-table-puts! node id single-id too-many-id)
+                [id single-id too-many-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) too-many-id (Duration/ofSeconds 15))
+          (check-multi-table-puts! node id single-id too-many-id)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

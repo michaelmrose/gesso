@@ -3980,3 +3980,31 @@ Selected multi-group verified put profile v1. Multiple tables, mixed
 operation sequences and aggregate recursive value budgets remain open.
 No production wiring, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2688 — verify retained put groups targeting multiple tables
+
+Physical retained source observation establishes a dense documents union
+with a separate list of documents per table and a global IID list in
+operation order. Qualify distinct canonical table names, implicit tags,
+sequential table-local indexes and complete consumption of every leg.
+Require exact global IID and table-local document span correspondence,
+node and buffer extents, absent outer bounds and independently matched
+IIDs. Preserve physical group order and logged-operation-spans. Bound
+this new profile to 16 table legs in addition to the previous group and
+document limits. Earlier profiles retain their single-table restriction.
+
+Focused JVM: 44 tests / 2926 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites.
+Persistent interleaved foo/bar/foo puts with distinct schemas and ID
+families match expected groups and provider observations before and
+after reopening. Reject duplicate table names, invalid union selections,
+mismatched table-local/global extents, later-table IID mismatches,
+populated outer bounds, truncation and an actual 17-table stream. Confirm
+same-table compatibility. XTDB logged shutdown cancellation; the test
+process exited zero.
+
+Selected multi-table verified put profile v1. Mixed operation sequences
+and aggregate recursive value budgets remain open. No production wiring,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates were not rerun. The operations namespace is now 992 lines;
+extract put envelope interpretation before further substantial expansion.
