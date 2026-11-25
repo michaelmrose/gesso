@@ -710,3 +710,96 @@
           (.awaitSourceBlocking (db/primary-db node) plain-id (Duration/ofSeconds 10))
           (check-nullable-temporal-documents! node id plain-id group)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-multi-group-puts! [node id nine-id single-id rejected]
+  (let [decode arrow/decode-multi-group-put
+        data (#'fixture/retained-operation-bytes node id)
+        r (decode data)
+        expected [{:kind :put-docs :table :public/foo :documents [{:xt/id 1 :name "a"}]
+                   :iids ["4cd9b7672d7fbee8fb51fb1e049f6903"] :bounds {}}
+                  {:kind :put-docs :table :public/foo :documents [{:xt/id 2 :name "b"} {:xt/id 3 :name "c"}]
+                   :iids ["420fce314175df402adbeae3cfbbb856" "9a83c6cb1126d93de4a30715b28f1f4b"] :bounds {}}]
+        [tags indexes _ _ iid-offsets _ iids table-tags table-indexes _ doc-offsets _ _ ids
+         _ _ _ outer-valid outer-values] (#'fixture/buffer-starts data)
+        observed (provider/observe-source-message! node id)]
+    (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+    (is (= arrow/multi-group-put-profile (:profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :matched (:iid-correspondence r)))
+    (is (= expected (:groups r) (:operations observed)))
+    (is (= [1 1] (:logged-operation-spans r) (:logged-operation-spans observed)))
+    (is (= :unsupported-arrow-put-batch (:reason (arrow/decode-nullable-temporal-document-put data))))
+    (is (= :unsupported-arrow-put-batch (:reason (arrow/decode-put-envelope data))))
+    ;; Moving both boundaries preserves the flat documents but changes physical grouping.
+    (let [changed (-> data (#'fixture/edit-int (+ iid-offsets 4) 2)
+                       (#'fixture/edit-int (+ doc-offsets 4) 2))
+          result (decode changed)]
+      (is (= :matched (:iid-correspondence result)))
+      (is (= [2 1] (mapv (comp count :documents) (:groups result))))
+      (is (= (mapcat :documents expected) (mapcat :documents (:groups result)))))
+    (doseq [[bad reason] [[(#'fixture/edit-byte data (inc tags) 1) :unsupported-arrow-put-selection]
+                          [(#'fixture/edit-int data (+ indexes 4) 0) :unsupported-arrow-put-selection]
+                          [(#'fixture/edit-byte data (inc table-tags) 1) :unsupported-arrow-put-selection]
+                          [(#'fixture/edit-int data (+ table-indexes 4) -1) :unsupported-arrow-put-selection]
+                          [(#'fixture/edit-int data (+ iid-offsets 4) 2) :unsupported-arrow-put-list-layout]
+                          [(#'fixture/edit-int data (+ doc-offsets 8) 2) :unsupported-arrow-put-list-layout]
+                          [(-> data (#'fixture/edit-int (+ iid-offsets 4) 0) (#'fixture/edit-int (+ doc-offsets 4) 0)) :unsupported-arrow-put-list-layout]
+                          [(-> data (#'fixture/edit-int (+ iid-offsets 4) 4) (#'fixture/edit-int (+ doc-offsets 4) 4)) :unsupported-arrow-put-list-layout]
+                          [(#'fixture/edit-byte data outer-valid 2) :unsupported-arrow-put-bounds]
+                          [(#'fixture/edit-long data (+ outer-values 8) 1) :unsupported-arrow-put-bounds]
+                          [(#'fixture/edit-long data (+ ids 8) 99) :document-iid-mismatch]
+                          [(#'fixture/edit-byte data (+ iids 16) 0) :document-iid-mismatch]
+                          [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]]]
+      (let [r (decode bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not-any? #(contains? r %) [:groups :logged-operation-spans :iid-correspondence]))))
+    (let [nine (#'fixture/retained-operation-bytes node nine-id)
+          r (decode nine)
+          observed (provider/observe-source-message! node nine-id)]
+      (is (= :matched (:iid-correspondence r)))
+      (is (= (vec (repeat 9 1)) (:logged-operation-spans r) (:logged-operation-spans observed)))
+      (is (= (:operations observed) (:groups r)))
+      (is (= (range 10 19) (map (comp :xt/id first :documents) (:groups r))))
+      ;; Both outer-bound bitmaps span two bytes at nine groups.
+      (let [valid (nth (#'fixture/buffer-starts nine) 14)
+            bad (decode (#'fixture/edit-byte nine (inc valid) 1))]
+        (is (= :unsupported-arrow-put-bounds (:reason bad)))))
+    (let [single (#'fixture/retained-operation-bytes node single-id)
+          r (decode single)]
+      (is (= :matched (:iid-correspondence r)))
+      (is (= [1] (:logged-operation-spans r)))
+      (is (= (:groups (arrow/decode-nullable-temporal-document-put single)) (:groups r))))
+    (doseq [[other-id reason] rejected]
+      (let [r (decode (#'fixture/retained-operation-bytes node other-id))]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not-any? #(contains? r %) [:groups :logged-operation-spans :iid-correspondence]))))))
+
+(deftest selected-multi-group-puts-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-multi-group-put-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        put (fn [ids] (into [:put-docs :foo] (map #(hash-map :xt/id %) ids)))]
+    (try
+      (let [[id nine-id single-id rejected]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitSourceBlocking database id (Duration/ofSeconds 15)) id))
+                    id (submit! [[:put-docs :foo {:xt/id 1 :name "a"}]
+                                 [:put-docs :foo {:xt/id 2 :name "b"} {:xt/id 3 :name "c"}]])
+                    nine-id (submit! (mapv #(put [%]) (range 10 19)))
+                    single-id (submit! [[:put-docs :foo {:xt/id "single" :xt/valid-from (Instant/parse "2025-01-01T00:00:00Z")}]])
+                    rejected [[(submit! [[:put-docs :foo {:xt/id 1}] [:put-docs :bar {:xt/id 2}]]) :unsupported-arrow-field]
+                              [(submit! [[:put-docs :foo {:xt/id 1}] ["ASSERT TRUE"]]) :unsupported-arrow-field]
+                              [(submit! (mapv #(put [%]) (range 1000 1257))) :unsupported-arrow-put-batch]
+                              [(submit! [(put (range 2000 2257))]) :unsupported-arrow-put-list-layout]
+                              [(submit! (mapv put (partition-all 256 (range 3000 7097)))) :unsupported-arrow-put-nodes]]]
+                (check-multi-group-puts! node id nine-id single-id rejected)
+                [id nine-id single-id rejected]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (first (peek rejected)) (Duration/ofSeconds 15))
+          (check-multi-group-puts! node id nine-id single-id rejected)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

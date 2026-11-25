@@ -3952,3 +3952,31 @@ were not independently decoded. Multiple put groups/tables, mixed
 operations and aggregate document budgets remain open. No production
 wiring, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates were not rerun.
+
+* v2687 — verify multiple retained put groups targeting one table
+
+Physical retained source observation establishes that adjacent same-table
+puts retain separate operation rows. Qualify the shared single-leg
+operation and table unions for multiple rows, requiring sequential
+indexes, exact node/buffer extents and equal IID/document list offsets.
+Require nonempty group spans, complete flattened document consumption,
+absent outer bounds and independently matched IIDs across every group.
+Preserve physical group order and expose logged-operation-spans. Bound
+the selected profile to 256 groups, 256 documents per group and 4096
+flattened documents. Earlier single-group profiles remain restricted.
+
+Focused JVM: 43 tests / 2834 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites.
+Persistent two- and nine-group puts match provider observations before
+and after reopening. Check exact grouping, multi-byte outer validity,
+invalid tags/indexes, mismatched, empty or out-of-range group spans,
+later-group IID mismatches, populated outer bounds and truncation.
+Reject actual retained streams above each new count ceiling, multiple
+tables and mixed operation types. Consistent changes to both list
+offsets reconstruct different group boundaries; no authenticity claim.
+XTDB logged shutdown cancellation; the test process exited zero.
+
+Selected multi-group verified put profile v1. Multiple tables, mixed
+operation sequences and aggregate recursive value budgets remain open.
+No production wiring, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.
