@@ -7,7 +7,14 @@
             [gesso.model.mapped-frame :as frame]
             [gesso.model.certified-plan :as plan]
             [gesso.model.inductive-plan :as inductive]
-            [gesso.model.tx :as tx]))
+            [gesso.model.tx :as tx]
+            [gesso.model.command :as command]
+            [gesso.model.inductive-plan-test]
+            [gesso.live.outbox :as outbox]
+            [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.optimistic.resolved-operation :as adapter]
+            [xtdb.api :as xt]
+            [xtdb.node :as xtn]))
 
 (def ^:private source
   {:subject {:kind :operation :id :example/projection :interface {:operation :example/projection}}
@@ -304,3 +311,108 @@
       (is (= :missing-preparation (reason #(admit actual))))
       (is (= 1 (count (remove #(= (:tx-ops base) %) @seen))))
       (is (not-any? #(= ops %) @seen)))))
+
+(deftest selected-publication-executor-submits-the-framed-canonical-plan
+  (let [id :example/projection
+        operation :example/command
+        original (assoc source :writes #{:example/count :example/one :example/owner}
+                        :replacements {:example/count [:literal 3] :example/one [:literal :accepted]
+                                       :example/owner [:literal "p1"]}
+                        :frame #{:example/enabled :example/two})
+        invariant {:readers #{:example/count}
+                   :expression [:>= [:read :example/count] [:literal 0]]}
+        catalog {:id :example/framed-publication
+                 :initial-condition invariant :invariants {:example/nonnegative invariant}
+                 :declared-operation-ids #{id} :operations [{:id id :construction original}]}
+        proof ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
+        before (assoc (first (:requests rows)) :revision 0 :created-at "t0" :updated-at "t0" :hidden "keep")
+        after (assoc before :item-count 3 :revision 1 :updated-at "t1")
+        assignment {:xt/id "a1" :owner "p1" :revision 0 :created-at "t1" :updated-at "t1"}
+        docs {:requests [before] :assignments []}
+        version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at}
+        targets* #{[:requests "r1"] [:assignments "a1"]}
+        tables #{:requests :assignments :gesso_commands}
+        operations #{[:requests "r1" :update] [:assignments "a1" :create]}
+        checks #{[:requests "r1" :revision 0] [:requests "r1" :updated-at "t0"]}
+        values (into #{} (mapcat (fn [[table doc]] (map (fn [[k v]] [table (:xt/id doc) k v]) doc)))
+                     [[:requests after] [:assignments assignment]])
+        effects {id {[:document :requests "r1"] {:revision 1 :updated-at "t1"}
+                     [:document :assignments "a1"] (select-keys assignment [:revision :created-at :updated-at])}}
+        seen (atom [])
+        ;; The footprint callback is a selected trusted fixture; the real
+        ;; canonical model contracts independently constrain all domain puts.
+        admission (inductive/build-inductive-mapped-admission!
+                   {:inductive-source proof :target-map targets
+                    :decode-outcome! #(get-in % [:gesso.command/outcome :result])
+                    :transaction-footprint! (fn [ops]
+                                              (swap! seen conj ops)
+                                              {:alternative id
+                                               :command-id (:xt/id (first (mapcat #(drop 2 %)
+                                                               (filter #(= :gesso_commands (second %)) ops))))})
+                    :auxiliary-tables #{:gesso_live_outbox} :document-effects effects})
+        constructs (atom 0)
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (with-open [node (xtn/start-node {})]
+      (let [call (fn [command-id]
+                   (let [binding {:command-id (identity/command-id command-id) :principal (identity/principal "p1")
+                                  :operation operation :arguments {}}
+                         cmd (assoc binding :execution-id (identity/execution-id "e1"))
+                         prepare (with-meta (fn [spec changes]
+                                              (outbox/prepare! (assoc spec :intent-ids [(random-uuid)]
+                                                                     :source-id "frame-test" :operation operation
+                                                                     :command-id command-id) changes))
+                                   {::publication/binding (constantly binding) ::publication/topics #{:request}})]
+                     (assoc cmd :command cmd :ctx {:xtdb/connectable node publication/preparation-key prepare})))
+            mode (atom :missing)
+            opts {:operation operation :submission-mode! (constantly :submit)
+                  :mapped-admission admission :may-disclose? (constantly true)
+                  :construction-contract {:required-guard-tables #{} :allowed-guard-tables #{}
+                                          :required-write-tables tables :allowed-write-tables tables}
+                  :target-contract! (fn [& _] {:required-guard-targets #{} :allowed-guard-targets #{}
+                                              :required-write-targets targets* :allowed-write-targets targets*})
+                  :command-operation-contract! (fn [& _] {:required-command-operations operations :allowed-command-operations operations})
+                  :predicate-contract! (fn [& _] {:required-guard-checks #{} :allowed-guard-checks #{}
+                                                 :required-update-checks checks :allowed-update-checks checks})
+                  :post-state-contract! (fn [& _] {:required-post-state-values values :allowed-post-state-values values})
+                  :outcome-contract! (fn [& _] {:expected-outcome {:result :accepted}})
+                  :construct! (fn [invocation]
+                                (swap! constructs inc)
+                                (when-not (= :missing @mode)
+                                  (admission :prepare! id (select-keys invocation [:command-id :principal :operation :arguments])
+                                             {:document-rows docs :records {} :state (project docs [])} {}))
+                                (when (= :stale @mode)
+                                  (xt/execute-tx node [[:put-docs :requests (assoc before :hidden "intervening")]]))
+                                {:spec {:purpose :gesso.live/refresh}
+                                 :model-plan {:commands [(command/update-command :requests :update before after version)
+                                                         (command/create :assignments assignment version)]
+                                              :changes [{:topic :request :id "r1"}]}
+                                 :outcome {:result :accepted} :now "t1"})
+                  :project! (fn [& _] (throw (ex-info "Unexpected browser projection" {})))}
+            exec (publication/build-executor opts)
+            request-row #(first (xt/q node ["SELECT * FROM requests WHERE _id = ?" "r1"]))
+            empty-writes? #(every? empty? (map (fn [table] (xt/q node [(str "SELECT _id FROM " table)]))
+                                               ["assignments" "gesso_commands" "gesso_live_outbox"]))]
+        (is (= :mapped-admission-requires-closed-contract
+               (reason #(publication/build-executor (dissoc opts :outcome-contract!)))))
+        (is (= :unregistered-mapped-admission
+               (reason #(publication/build-executor (assoc opts :mapped-admission (fn [& _] true))))))
+        (xt/execute-tx node [[:put-docs :requests before]])
+        (with-redefs [adapter/project-resolution! (fn [_ result _] result)]
+          (is (= :missing-preparation (reason #(exec (call "missing")))))
+          (is (empty-writes?))
+          (reset! mode :stale)
+          (is (= :xtdb/assert-failed
+                 (try (exec (call "stale")) nil (catch Exception e (:xtdb.error/code (ex-data e))))))
+          (is (= "intervening" (:hidden (request-row))))
+          (is (empty-writes?))
+          (is (not (admission :pending? id "stale")))
+          (xt/execute-tx node [[:put-docs :requests before]])
+          (reset! mode :valid)
+          (is (= :incorporated (:status (exec (call "valid")))))
+          (is (= after (request-row)))
+          (is (= [assignment] (xt/q node ["SELECT * FROM assignments"])))
+          (is (= [{:xt/id "valid"}] (xt/q node ["SELECT _id FROM gesso_commands"])))
+          (is (= 1 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
+          (is (not (admission :pending? id "valid")))
+          (is (= :replay (:status (exec (call "valid")))))
+          (is (= 3 @constructs)))))))

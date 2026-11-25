@@ -12,6 +12,7 @@
             [gesso.live.optimistic.server :as server]
             [gesso.live.optimistic.resolved-operation :as adapter]
             [gesso.model.command-resolution :as resolution]
+            [gesso.model.inductive-plan :as inductive]
             [gesso.model.resolved-operation :as resolved]
             [gesso.model.tx :as model-tx]
             [gesso.model.command :as model-command])
@@ -383,7 +384,18 @@
       (after-abort! failure)
       :else (throw failure))))
 
-(defn- guarded-abort-outcome! [invocation may-disclose? construct! failure contract]
+(defn- frame-resolved-plan! [plan admission]
+  (if admission
+    (let [original {:api :execute-tx :tx-ops (:ops plan) :tx-options nil}
+          actual (admission :frame-submission! original)]
+      ;; Consume the exact preparation before physical submission. This is
+      ;; intentionally outside transaction recovery: a failed local admission
+      ;; is not an XTDB abort or evidence of an uncertain commit.
+      (admission :admit-framed! original actual)
+      (assoc plan :ops (:tx-ops actual)))
+    plan))
+
+(defn- guarded-abort-outcome! [invocation may-disclose? construct! failure contract admission]
   (let [ctx (:ctx invocation)
         {:keys [spec model-plan outcome now] :as construction} (construct! invocation)]
     (when (nil? construction) (throw failure))
@@ -395,7 +407,8 @@
     ;; The ordinary journal-only compiler excludes model commands, changes
     ;; and publication. A second abort may reconcile a winning record but
     ;; cannot invoke another constructor.
-    (let [plan (model-resolved-plan! ctx nil model-plan outcome now contract)]
+    (let [plan (frame-resolved-plan!
+                (model-resolved-plan! ctx nil model-plan outcome now contract) admission)]
       (try {:status :incorporated :outcome outcome
             :transaction (execute-resolved-plan! ctx plan)}
            (catch Exception second-failure
@@ -442,6 +455,15 @@
 (def ^:private contract-option-keys
   #{:construction-contract :target-contract! :command-operation-contract!
     :predicate-contract! :post-state-contract! :outcome-contract!})
+
+(defn- require-mapped-admission! [options]
+  (when (contains? options :mapped-admission)
+    (when-not (= contract-option-keys (set (keys (select-keys options contract-option-keys))))
+      (reject! :mapped-admission-requires-closed-contract {}))
+    ;; Only an exact issued callable is accepted. This is a local admission
+    ;; check, not a fresh proof or authentication of acquired rows.
+    (inductive/describe-mapped-admission (:mapped-admission options)))
+  options)
 
 (defn- require-abort-contract! [options]
   (when (contains? options :abort-contract)
@@ -528,17 +550,24 @@
    durable command to a string principal and operation, not command ID or
    arguments, for the lifetime of its current ledger record. Replay is
    unchanged. Other writers must obey the same restriction.
-   Neither contract verifies projection. Raw SQL
+   Optional :mapped-admission is an issued inductive mapped admission. It
+   requires the complete canonical contract and frames and consumes the
+   selected preparation after ordinary model/publication compilation, before
+   either initial or guarded-abort physical submission. Replay does not use
+   it. Local admission failures propagate without transaction recovery.
+   The host must still mediate other physical writers; this selection alone
+   does not qualify the installed XTDB submission policy.
+   Neither ordinary contract verifies projection. Raw SQL
    construction cannot satisfy this selected contract. Replay does not
    invoke the declaration or constructor. Callback policy is still trusted."
   [{:keys [ctx operation] :as invocation}
    {:keys [mode construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract single-command-per-principal?] :as options}]
+           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract single-command-per-principal? mapped-admission] :as options}]
   (when-not (and (map? options)
                  (#{#{:mode :construct! :may-disclose? :project!}
                     #{:mode :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys options)) :construction-contract :target-contract!
-                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract :single-command-per-principal?))
+                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract :single-command-per-principal? :mapped-admission))
                  (or (not (contains? options :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (#{:submit :reconcile} mode)
@@ -546,6 +575,7 @@
     (reject! :invalid-resolved-execution-options {}))
   (require-target-options! options)
   (require-abort-contract! options)
+  (require-mapped-admission! options)
   (when-not (= (command-binding! ctx) (adapter/require-context operation invocation))
     (reject! :mismatched-command-binding {}))
   (let [prior (reconcile-command! ctx may-disclose?)
@@ -561,7 +591,8 @@
                          (resolved-plan! ctx spec changes domain-ops outcome now))
                        #{:spec :model-plan :outcome :now}
                        (model-resolved-plan! ctx spec model-plan outcome now contract)
-                       (reject! :invalid-resolved-construction {}))]
+                       (reject! :invalid-resolved-construction {}))
+                plan (frame-resolved-plan! plan mapped-admission)]
             (try {:status :incorporated :outcome outcome
                   :transaction (execute-resolved-plan! ctx plan)}
                  (catch Exception failure
@@ -571,7 +602,8 @@
                                                                       construct-after-abort! %
                                                                       (if abort-contract
                                                                         (admit-contract! ctx (assoc abort-contract :single-command-per-principal? single-command-per-principal?))
-                                                                        contract)))))))
+                                                                        contract)
+                                                                      mapped-admission))))))
           prior)]
     (adapter/project-resolution! invocation result project!)))
 
@@ -591,12 +623,12 @@
    Only the exact returned function is recognized by host admission. This
    is local wiring validation, not certification of business policy."
   [{:keys [operation submission-mode! construct! may-disclose? project! construct-after-abort!
-           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract single-command-per-principal?] :as config}]
+           construction-contract target-contract! command-operation-contract! predicate-contract! post-state-contract! outcome-contract! abort-contract single-command-per-principal? mapped-admission] :as config}]
   (when-not (and (map? config)
                  (#{#{:operation :submission-mode! :construct! :may-disclose? :project!}
                     #{:operation :submission-mode! :construct! :may-disclose? :project! :construct-after-abort!}}
                   (disj (set (keys config)) :construction-contract :target-contract!
-                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract :single-command-per-principal?))
+                        :command-operation-contract! :predicate-contract! :post-state-contract! :outcome-contract! :abort-contract :single-command-per-principal? :mapped-admission))
                  (or (not (contains? config :construct-after-abort!))
                      (fn? construct-after-abort!))
                  (qualified-keyword? operation)
@@ -604,6 +636,7 @@
     (reject! :invalid-publication-executor-config {}))
   (require-target-options! config)
   (require-abort-contract! config)
+  (require-mapped-admission! config)
   (let [executor (fn [invocation]
                    (when-not (= (command-binding! (:ctx invocation))
                                 (adapter/require-context operation invocation))
@@ -628,7 +661,9 @@
                                  single-command-per-principal?
                                  (assoc :single-command-per-principal? true)
                                  abort-contract
-                                 (assoc :abort-contract abort-contract))))]
+                                 (assoc :abort-contract abort-contract)
+                                 mapped-admission
+                                 (assoc :mapped-admission mapped-admission))))]
     (locking registered-executors
       (.put registered-executors executor
             {:reference (WeakReference. executor) :operation operation}))
