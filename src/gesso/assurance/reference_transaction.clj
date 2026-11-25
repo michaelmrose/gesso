@@ -2,9 +2,10 @@
   "Independent, deliberately small execution semantics for a selected
    current-state transaction fragment. No XTDB, decoder, constructor or
    provider outcome is consulted. Not a temporal model or a proof of XTDB."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str])
+  (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-current-state-transaction-v10)
+(def profile :selected-current-state-transaction-v11)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -64,7 +65,26 @@
                                         (document-value? % (inc depth) budget)) v))
          :else false)))
 
-(defn- document? [doc]
+(def ^:private utc (ZoneId/of "UTC"))
+(def ^:private lease-key :gesso.live.outbox/lease-until)
+
+(defn- lease-timestamp? [x]
+  (let [i (cond
+            (instance? Instant x) x
+            (and (instance? ZonedDateTime x) (= utc (.getZone ^ZonedDateTime x)))
+            (.toInstant ^ZonedDateTime x))]
+    (and i (zero? (mod (.getNano ^Instant i) 1000))
+         (not (.isBefore ^Instant i (Instant/parse "0001-01-01T00:00:00Z")))
+         (.isBefore ^Instant i (Instant/parse "9999-01-01T00:00:00Z")))))
+
+(defn- normalize-document [table doc]
+  ;; The selected provider decoder exposes Instant writes as UTC ZonedDateTime.
+  ;; Keep this storage conversion separate from the scalar guard domains.
+  (if (and (= :gesso_live_outbox table) (instance? Instant (get doc lease-key)))
+    (update doc lease-key #(.atZone ^Instant % utc))
+    doc))
+
+(defn- document? [table doc]
   (and (map? doc) (nil? (meta doc))
        (or (uuid? (:xt/id doc))
            (and (id? (:xt/id doc)) (= :string (equality-domain (:xt/id doc)))))
@@ -72,7 +92,10 @@
        (let [budget (volatile! 8192)]
          (every? (fn [[k v]]
                    (or (= :xt/id k)
-                       (and (value-key? k) (document-value? v 0 budget)))) doc))))
+                       (and (value-key? k)
+                            (if (and (= :gesso_live_outbox table) (= lease-key k))
+                              (lease-timestamp? v)
+                              (document-value? v 0 budget))))) doc))))
 
 (defn- check-state! [state]
   (when-not (and (map? state) (nil? (meta state)) (<= (count state) 256)
@@ -80,7 +103,8 @@
                            (and (table? table) (map? rows) (nil? (meta rows))
                                 (seq rows) (<= (count rows) 16384)
                                 (every? (fn [[id doc]]
-                                          (and (document? doc) (= id (:xt/id doc)))) rows))) state))
+                                          (and (document? table doc) (= id (:xt/id doc))
+                                               (= doc (normalize-document table doc)))) rows))) state))
     (reject! :unsupported-reference-prestate)))
 
 ;; Exact selected row-read assertion, not a general SQL parser. Quoted
@@ -386,7 +410,7 @@
     (= :put-docs (first op))
     (let [docs (subvec op (min 2 (count op)))]
       (when-not (and (table? (second op)) (<= 1 (count docs) 16384)
-                     (every? document? docs)
+                     (every? #(document? (second op) %) docs)
                      (= (count docs) (count (distinct (map :xt/id docs)))))
         (reject! :unsupported-reference-put))
       :put)
@@ -441,7 +465,7 @@
                   (assoc report :status :predicted :committed? false
                          :state state :failed-assertion-index i))
                 :put (let [[_ table & docs] (nth ops i)]
-                       (recur (reduce (fn [s doc] (assoc-in s [table (:xt/id doc)] doc)) working docs)
+                       (recur (reduce (fn [s doc] (assoc-in s [table (:xt/id doc)] (normalize-document table doc))) working docs)
                               (inc i))))))))
       (catch clojure.lang.ExceptionInfo e
         (if (::unsupported (ex-data e))

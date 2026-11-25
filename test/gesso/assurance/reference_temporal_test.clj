@@ -1,6 +1,9 @@
 (ns gesso.assurance.reference-temporal-test
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.reference-transaction :as current]
+            [gesso.live.outbox :as outbox]
+            [gesso.live.outbox.acquisition :as acquisition]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
@@ -489,3 +492,90 @@
                  (into {} (map (juxt :xt/id identity)) rows)))))
       (is (= (frequencies (coalesce-valid (:rectangles r)))
              (frequencies (coalesce-valid (provider-rectangles node :gesso_live_outbox))))))))
+
+(def ^:private pending-intent
+  (first (:intents (outbox/prepare!
+                    {:intent-ids [intent-id] :source-id "reference-source"
+                     :operation :request/claim :purpose :gesso.live/refresh}
+                    [{:topic :request :id "request-1" :change/kind :updated}]))))
+(defn- worker-time [seconds] (.plusSeconds (sys 1) seconds))
+(defn- utc-time [instant] (.atZone ^Instant instant (java.time.ZoneId/of "UTC")))
+(def ^:private first-deadline (.plusNanos (worker-time 180) 1000))
+(def ^:private next-deadline (worker-time 360))
+(def ^:private acquire-claim
+  {:intent-id intent-id :lease-id other-intent-id :worker-id "worker-a"
+   :now (worker-time 1) :lease-until first-deadline})
+(def ^:private acquire-operations
+  (#'acquisition/acquire-ops (assoc pending-intent :xt/system-from (utc-time (worker-time 0)))
+                           acquire-claim))
+(def ^:private first-lease
+  (assoc (nth (last acquire-operations) 2) :gesso.live.outbox/lease-until (utc-time first-deadline)))
+(def ^:private next-lease
+  (assoc first-lease :gesso.live.outbox/lease-id intent-id
+         :gesso.live.outbox/lease-owner "worker-b"
+         :gesso.live.outbox/lease-until next-deadline))
+(def ^:private decoded-next-lease
+  (assoc next-lease :gesso.live.outbox/lease-until (utc-time next-deadline)))
+(def ^:private terminal-intent
+  (assoc decoded-next-lease :gesso.live.outbox/status :dispatch-accepted
+         :gesso.live.outbox/dispatch-receipt-id "receipt-1"
+         :gesso.live.outbox/dispatch-adapter :test/adapter))
+(def ^:private timestamp-transactions
+  (mapv (fn [seconds ops] {:system-time (worker-time seconds) :ops ops})
+        [0 1 2 3 181 182 183]
+        [[[:put-docs outbox/intent-table pending-intent]]
+         acquire-operations
+         [(lease-guard :active intent-id (worker-time 0) first-deadline)
+          [:put-docs outbox/intent-table next-lease]]
+         [(lease-guard :active intent-id (worker-time 1) (utc-time first-deadline))
+          [:put-docs outbox/intent-table next-lease] ["ASSERT FALSE"]]
+         (into [(lease-guard :expired intent-id (worker-time 1) (utc-time first-deadline))]
+               (concat (deadline-guards next-deadline) [[:put-docs outbox/intent-table next-lease]]))
+         [(lease-guard :active intent-id (worker-time 181) (utc-time next-deadline))
+          [:put-docs outbox/intent-table terminal-intent]]
+         [[:put-docs outbox/intent-table pending-intent] ["ASSERT FALSE"]]]))
+
+(deftest independent-timestamp-valued-outbox-storage
+  (let [r (temporal/replay timestamp-transactions)
+        at #(get-in (temporal/visible-at r (worker-time %1) (worker-time %2))
+                    [outbox/intent-table intent-id])]
+    (is (= :predicted (:status r)))
+    (is (= [true true false false true true false] (mapv :committed? (:history r))))
+    (is (= pending-intent (at 0 0)))
+    (is (= first-lease (at 1 1) (at 3 3) (at 183 180)))
+    (is (= decoded-next-lease (at 181 181)))
+    (is (= terminal-intent (at 183 183)))
+    (is (= first-deadline (.toInstant (:gesso.live.outbox/lease-until (at 1 1)))))
+    (is (= (get-in r [:history 5 :segments]) (get-in r [:history 6 :segments]))))
+  (let [r (current/execute {} [[:put-docs outbox/intent-table next-lease]])]
+    (is (= decoded-next-lease (get-in r [:state outbox/intent-table intent-id])))
+    (is (= (:state r) (:state (current/execute (:state r) [["ASSERT TRUE"]]))))))
+
+(deftest rejects-unsupported-outbox-timestamps
+  (doseq [value [nil "2025-01-01" (.plusNanos (worker-time 1) 1) Instant/MAX
+                 (.atZone (worker-time 1) (java.time.ZoneId/of "America/Los_Angeles"))]]
+    (let [op [:put-docs outbox/intent-table (assoc first-lease :gesso.live.outbox/lease-until value)]
+          r (temporal/replay [{:system-time (worker-time 0) :ops [["ASSERT FALSE"] op]}])]
+      (is (= :unsupported (:status r)) (pr-str value))
+      (is (not (contains? r :history)))))
+  (doseq [op [[:put-docs :temporalprobe (assoc a :value first-deadline)]
+              [:put-docs :temporalprobe (assoc a :gesso.live.outbox/lease-until first-deadline)]]]
+    (is (= :unsupported (:status (current/execute {} [op]))))))
+
+(deftest independently-predicted-outbox-timestamps-match-xtdb
+  (let [r (temporal/replay timestamp-transactions)]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector timestamp-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (doseq [s [0 1 2 3 181 182 183] v [0 1 2 3 180 181 182 183 360]]
+        (let [rows (xt/q node ["SELECT * FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ?"
+                               (worker-time v) (worker-time s)])]
+          (is (= (count rows) (count (set (map :xt/id rows)))))
+          (is (= (get (temporal/visible-at r (worker-time s) (worker-time v)) outbox/intent-table {})
+                 (into {} (map (juxt :xt/id identity)) rows)))))
+      (is (= (frequencies (coalesce-valid (:rectangles r)))
+             (frequencies (coalesce-valid (provider-rectangles node outbox/intent-table))))))))

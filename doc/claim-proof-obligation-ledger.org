@@ -2175,3 +2175,32 @@ column check; correspondence of that operand to actual lease metadata
 and timestamp-valued outbox storage remains open. No production assurance
 status changes and no CLM-R2 premise is retired. Full project, physical
 Claim, Chromium and independent proof gates were not rerun.
+
+* v2621 — model timestamp-valued outbox documents
+
+Admit the selected top-level outbox lease-until field as a microsecond-
+aligned Instant or UTC ZonedDateTime within a conservative calendar
+range. Normalize Instant writes independently to the decoded UTC
+ZonedDateTime representation. Require canonical decoded prestate and
+reuse the shared storage prediction in temporal put normalization.
+Do not extend scalar guard equality to timestamps or admit arbitrary
+nested timestamp fields. Temporal profile v8; current-state v11 and
+history v19 unchanged.
+
+Combined reference JVM: 35 tests / 3957 assertions, zero failures or
+errors. Seven additional embedded XTDB transactions use a production
+pending-intent constructor and actual acquisition operation constructor,
+followed by selected lease reclamation and terminal replacement fixtures.
+Compare outcomes, 63 bitemporal point queries and the complete selected
+outbox rectangle inventory, including timestamp precision, preservation,
+stale versions and rollback. A separate probe confirmed Instant decoding
+as UTC ZonedDateTime and preservation of non-UTC ZonedDateTime zones.
+No provider readback feeds reference replay.
+
+This is finite empirical storage and selected transaction correspondence,
+not complete worker lifecycle refinement. Non-UTC stored timestamps,
+publication UUID absence guards, correspondence between observed bound
+deadlines and actual stored lease metadata across arbitrary executions,
+and universal provider refinement remain open. No production assurance
+status changes and no CLM-R2 premise is retired. Full project, physical
+Claim, Chromium and independent proof gates were not rerun.

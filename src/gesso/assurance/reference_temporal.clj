@@ -4,7 +4,7 @@
   (:require [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-bitemporal-transaction-v7)
+(def profile :selected-bitemporal-transaction-v8)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -93,13 +93,15 @@
         (reject! :unsupported-temporal-put))
       (let [table (:into opts)
             from (get opts :valid-from system-time)
-            to (:valid-to opts)]
+            to (:valid-to opts)
+            decoded (current/execute {} [(into [:put-docs table] docs)])]
         (when-not (and (instant? from)
                        (or (not (contains? opts :valid-to)) (instant? to))
                        (before-end? from to)
-                       (= :predicted (:status (current/execute {} [(into [:put-docs table] docs)]))))
+                       (= :predicted (:status decoded)))
           (reject! :unsupported-temporal-put))
-        (into [:put-docs {:into table :valid-from from :valid-to to}] docs)))))
+        (into [:put-docs {:into table :valid-from from :valid-to to}]
+              (map #(get-in decoded [:state table (:xt/id %)]) docs))))))
 
 (defn- rectangle [table [from to doc origin] end]
   {:table table :document doc :valid-from from :valid-to to
