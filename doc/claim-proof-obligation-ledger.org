@@ -934,3 +934,42 @@ not rerun. Historical classification and checkpoints are unchanged;
 transaction metadata, expected-envelope provenance, writer identity,
 trusted retention/acquisition and provider execution refinement remain
 open. No CLM-R2 premise is retired.
+
+* v2578 — bind the expected complete restricted transition envelope
+
+The selected mapped publication executor binds the expected ordered SQL
+assertions and document puts after adding the framework-owned evidence
+absence guard and final evidence put, before handing the vector to the
+installed writer. The new :envelope-profile and :envelope-fingerprint
+fields in that final witness are the only fields omitted from the digest
+input, avoiding self-reference. All other supported operations, typed
+values, ordering, journal and publication payloads and witness fields
+remain identity-bearing. The digest uses the versioned restricted expected
+operation representation and bounded subject encoder, with container and
+UUID/temporal tags to avoid encoding aliases. Unsupported operations or
+encoder limits can refuse a selected mapped submission before execution.
+Transaction-level metadata is not included.
+
+This is an additive extension to the existing version-4 witness, not a
+new history classification profile. Historical pre/post checks refuse
+malformed binding fields but distinguish a legacy unbound witness
+(:not-recorded) from a well-shaped binding (:recorded-unchecked).
+The latter is not a historical source-log comparison. Removing both fields
+is still indistinguishable from an older v4 witness; mandatory historical
+binding and a new history/checkpoint qualification remain separate work.
+No writer authentication, transaction-internal read basis, or execution
+refinement is inferred from the digest. Physical correspondence reports
+expose the unchecked status and fingerprint; the existing abstract
+witness equality is retained after excluding only the validated extension.
+
+The mapped projection namespace passed 22 tests / 849 assertions. The
+standalone source-log pilot passed 7 tests / 122 assertions, including
+mutation of guards, domain writes, command outcomes, publication intents,
+operation order, UUID representations and other witness fields. A real
+bound envelope matches its source-log record; the unbound expectation
+does not. The complete opt-in physical Claim namespace passed 3 tests /
+1027 assertions, including all nine actual submitted envelopes and their
+bindings and committed readback/replay statuses. All three JVM runs
+exited 0 with no failures or errors. Independent JVM restart, Ansatz,
+Chromium and full project suites were not rerun. Performance of the new
+digest is not separately measured. No CLM-R2 premise is retired.

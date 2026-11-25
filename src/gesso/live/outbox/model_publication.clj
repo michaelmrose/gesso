@@ -2,6 +2,7 @@
   "Selected durable subject-to-model correspondence. No arbitrary change
    payload, predicate evaluation at replay, or implicit identity coercion."
   (:require [clojure.string :as str]
+            [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.live.application-preflight :as application]
             [gesso.live.model :as model]
             [gesso.choreo.identity :as identity]
@@ -548,9 +549,11 @@
             evidence (inductive/mapped-transition-evidence! admission checked)
             ;; The closed footprint excludes this framework-owned record.
             ;; Add it only after admission; bind the final vector to the handoff.
-            ops (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)"
-                        (:xt/id evidence)]]
-                      (conj (:tx-ops actual) [:put-docs :gesso_transition_evidence evidence]))
+            ops (envelope/bind-transition-envelope!
+                 (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)"
+                         (:xt/id evidence)]]
+                       (conj (:tx-ops actual) [:put-docs :gesso_transition_evidence evidence])))
+            evidence (peek (peek ops))
             submission (assoc actual :tx-ops ops)]
         (when-not (= (:xt/id evidence) (:xt/id (:record plan)))
           (reject! :mapped-transition-evidence-command-mismatch {}))

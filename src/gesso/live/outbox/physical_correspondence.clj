@@ -55,10 +55,11 @@
                   :alternative (:alternative evidence)
                   :system-time commit-time
                   :guard-profile (:guard-profile evidence)
+                  :expected-envelope (:expected-envelope semantic)
                   :fingerprints (select-keys evidence [:catalog-fingerprint :induction-fingerprint
                                                        :mapping-fingerprint :transition-fingerprint
                                                        :input-derivation-fingerprint :witness-fingerprint
-                                                       :poststate-fingerprint :guard-prefix-fingerprint])
+                                                       :poststate-fingerprint :guard-prefix-fingerprint :envelope-fingerprint])
                   :prestate prestate
                   :poststate (:physical-correspondence semantic)
                   :relation (:abstract-relation semantic)

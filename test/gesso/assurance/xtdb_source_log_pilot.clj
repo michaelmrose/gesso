@@ -312,6 +312,44 @@
           (is (= {:status :unavailable :reason :envelope-check-failed :profile envelope/profile
                   :authority :none :certificate :not-issued} (check ops true))))))))
 
+(deftest expected-transition-envelope-binding-covers-complete-restricted-sequence
+  (let [uuid (java.util.UUID/fromString "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        witness {:xt/id "c1" :profile-version 4 :guard-prefix-fingerprint "test-guard"}
+        original [["ASSERT ? = ?" 1 1]
+                  [:put-docs :requests {:xt/id "r1" :owner :open :extra [uuid "open"]}]
+                  [:put-docs :gesso_commands {:xt/id "c1" :result :accepted}]
+                  [:put-docs :gesso_live_outbox {:xt/id "intent" :topic :request}]
+                  [:put-docs :gesso_transition_evidence witness]]
+        bound (envelope/bind-transition-envelope! original)
+        persisted (peek (peek bound))]
+    (is (= :not-recorded (envelope/binding-status witness)))
+    (is (= :recorded-unchecked (envelope/binding-status persisted)))
+    (is (= witness (apply dissoc persisted envelope/binding-keys)))
+    (is (= original (assoc-in bound [4 2] witness)))
+    (is (= bound (envelope/bind-transition-envelope! original)))
+    (is (envelope/bound-transition-envelope? bound))
+    (is (envelope/bound-transition-envelope?
+         (assoc-in bound [1 2] (into (array-map) (reverse (seq (get-in bound [1 2])))))))
+    (doseq [changed [(assoc-in bound [0 1] 2)
+                     (assoc-in bound [1 1] :other_requests)
+                     (assoc-in bound [1 2 :owner] "open")
+                     (assoc-in bound [1 2 :extra 0] (str uuid))
+                     (assoc-in bound [1 2 :extra 0] [:uuid (str uuid)])
+                     (assoc-in bound [2 2 :result] :refused)
+                     (assoc-in bound [3 2 :topic] :other)
+                     (assoc bound 1 (nth bound 2) 2 (nth bound 1))
+                     (assoc-in bound [4 2 :guard-prefix-fingerprint] "other")
+                     (update-in bound [4 2] dissoc :envelope-profile)]]
+      (is (not (envelope/bound-transition-envelope? changed))))
+    (is (= :already-bound-transition-envelope
+           (try (envelope/bind-transition-envelope! bound) nil
+                (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))
+    (with-open [node (xtn/start-node {})]
+      (let [id (:tx-id (xt/execute-tx node bound))]
+        (is (= [persisted] (xt/q node "SELECT * FROM gesso_transition_evidence")))
+        (is (= :matched (:status (envelope/check-envelope! node id bound true))))
+        (is (= :mismatch (:status (envelope/check-envelope! node id original true))))))))
+
 (defn -main [& args]
   (let [{:keys [fail error]}
         (if (= ["claim"] (vec args))

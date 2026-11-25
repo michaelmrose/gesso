@@ -4,6 +4,7 @@
    retained decoded source log and a separate provider outcome. Neither
    an authenticated receipt nor proof of execution or writer identity."
   (:require [clojure.string :as str]
+            [gesso.assurance.subject :as subject]
             [gesso.assurance.xtdb-source-log :as source-log]
             [xtdb.api :as xt])
   (:import (java.time Instant ZonedDateTime)
@@ -78,6 +79,67 @@
                 (string? (first op)) (sql! op)
                 (= :put-docs (first op)) (put! op)
                 :else (reject! :unsupported-operation))) ops))))
+
+(def binding-profile :xtdb-2.2.0-beta1/expected-transition-envelope-v1)
+(def binding-keys [:envelope-profile :envelope-fingerprint])
+
+(defn binding-status
+  "Shape only. Older witnesses have no envelope binding; a present digest
+   is not yet evidence of actual submission or execution."
+  [witness]
+  (cond
+    (not-any? #(contains? witness %) binding-keys) :not-recorded
+    (and (= binding-profile (:envelope-profile witness))
+         (string? (:envelope-fingerprint witness))
+         (re-matches #"sha256:[0-9a-f]{64}" (:envelope-fingerprint witness))) :recorded-unchecked
+    :else :invalid))
+
+(defn- digest-value [v]
+  ;; Tag containers as well as non-EDN leaves: a literal vector cannot
+  ;; alias the encoding of a UUID or temporal value.
+  (cond
+    (map? v) [:map (into {} (map (fn [[k child]] [k (digest-value child)])) v)]
+    (vector? v) [:vector (mapv digest-value v)]
+    (uuid? v) [:uuid (str v)]
+    (instance? Instant v) [:instant (str v)]
+    (instance? ZonedDateTime v) [:zoned-date-time (str v)]
+    :else v))
+
+(defn- transition-witness! [ops]
+  (let [op (when (vector? ops) (peek ops))]
+    (when-not (and (vector? op) (= 3 (count op))
+                   (= [:put-docs :gesso_transition_evidence] (subvec op 0 2))
+                   (map? (peek op)) (= 4 (:profile-version (peek op))))
+      (reject! :invalid-transition-envelope-witness))
+    (peek op)))
+
+(defn- binding-evidence! [ops]
+  {:envelope-profile binding-profile
+   :envelope-fingerprint
+   (:fingerprint (subject/describe-subject
+                  {:kind :rule :id ::transition-envelope
+                   :interface {:profile binding-profile
+                               :operations (digest-value (expected-operations! ops))}}))})
+
+(defn bind-transition-envelope!
+  "Bind the expected ordered restricted envelope to its final v4 witness
+   before submission. The digest excludes ONLY its own two binding fields
+   in that final witness. Subject-encoder limits also apply. No transaction
+   metadata, source-log acquisition or writer authentication is asserted."
+  [ops]
+  (let [witness (transition-witness! ops)]
+    (when-not (= :not-recorded (binding-status witness))
+      (reject! :already-bound-transition-envelope))
+    (assoc-in ops [(dec (count ops)) 2] (merge witness (binding-evidence! ops)))))
+
+(defn bound-transition-envelope?
+  "Recompute the expected-envelope binding; not a source-log check."
+  [ops]
+  (let [witness (transition-witness! ops)]
+    (and (= :recorded-unchecked (binding-status witness))
+         (= (select-keys witness binding-keys)
+            (binding-evidence! (assoc-in ops [(dec (count ops)) 2]
+                                         (apply dissoc witness binding-keys)))))))
 
 (defn check-envelope!
   "Compare a nonempty vector of generated ASSERT and canonical public

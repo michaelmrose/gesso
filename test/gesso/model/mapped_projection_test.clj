@@ -10,6 +10,7 @@
             [gesso.assurance.proof.mapped-prestate-rules :as rules]
             [gesso.assurance.proof.mapped-prestate-partition :as partition]
             [gesso.assurance.operational-report :as operational-report]
+            [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.live.outbox.history-coverage :as history]
             [gesso.live.outbox.writer-policy :as policy]
             [gesso.model.certified-plan :as plan]
@@ -545,7 +546,19 @@
                 current-docs {:requests [after] :assignments [assignment]}
                 verify #(inductive/check-historical-mapped-poststate!
                          admission (first journal) % current-docs journal)]
-            (is (= witness (inductive/mapped-transition-evidence! admission checked)))
+            (is (= (apply dissoc witness envelope/binding-keys)
+                   (inductive/mapped-transition-evidence! admission checked)))
+            (let [ops (:tx-ops (last @seen-envelopes))]
+              (is (= witness (peek (peek ops))))
+              (is (envelope/bound-transition-envelope? ops))
+              (is (= :recorded-unchecked (:expected-envelope (verify witness))))
+              (is (= :not-recorded (:expected-envelope (verify (apply dissoc witness envelope/binding-keys)))))
+              (is (= :invalid-historical-mapped-evidence
+                     (reason #(verify (dissoc witness :envelope-profile)))))
+              (is (not (envelope/bound-transition-envelope?
+                        (assoc-in ops [0 1] "wrong-command"))))
+              (is (not (envelope/bound-transition-envelope?
+                        (assoc-in ops [(dec (count ops)) 2 :guard-prefix-fingerprint] "wrong")))))
             (is (= 4 (:profile-version witness)))
             (is (= frame/guard-profile (:guard-profile witness)))
             (is (= (select-keys (:candidate checked) [:guard-profile :guard-prefix-fingerprint])

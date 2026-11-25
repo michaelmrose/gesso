@@ -18,6 +18,7 @@
             [gesso.live.outbox.claim-browser-fixture :as browser]
             [gesso.live.outbox.claim-semantic-fixture :as semantics]
             [gesso.assurance.observed-correspondence :as correspondence]
+            [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.model.inductive-plan :as inductive-plan]
             [gesso.live.outbox.initialization :as initialization]
@@ -601,6 +602,8 @@
                        (is (= :not-issued (:certificate report)))
                        (is (= :gesso_transition_evidence (second (peek framed-ops))))
                        (is (= 4 (:profile-version witness)))
+                       (is (= :recorded-unchecked (envelope/binding-status witness)))
+                       (is (envelope/bound-transition-envelope? framed-ops))
                        (is (= (:command-id identity) (:xt/id witness)))
                        (is (= (:alternative identity) (:alternative witness)))
                        (is (= fingerprint (select-keys witness (keys fingerprint))))
@@ -624,6 +627,9 @@
                        (is (#{:incorporated :replay} status))
                        (is (some? w))
                        (is (= (:guard-profile w) (:guard-profile transition)))
+                       (is (= :recorded-unchecked (:expected-envelope transition)))
+                       (is (= (:envelope-fingerprint w)
+                              (get-in transition [:fingerprints :envelope-fingerprint])))
                        (is (= (:guard-prefix-fingerprint w)
                               (get-in transition [:fingerprints :guard-prefix-fingerprint])))
                        (is (= :checked-reconstructed-prefix

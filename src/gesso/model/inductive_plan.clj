@@ -27,6 +27,7 @@
             [gesso.assurance.proof.typed-value-semantics :as values]
             [gesso.assurance.transition :as transition]
             [gesso.assurance.subject :as subject]
+            [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.choreo.identity :as identity]
             [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
@@ -684,6 +685,7 @@
                    (contains? (:write-targets mapping) slot)
                    (some #(= record %) journal-rows)
                    (= 4 (:profile-version evidence))
+                   (not= :invalid (envelope/binding-status evidence))
                    (current-guard-evidence? evidence)
                    (identical? original-witness-relation projection/check-transition-relation!)
                    (identical? original-initial-projection projection/project-state!)
@@ -693,13 +695,15 @@
                                                document-rows journal-rows (:decode-outcome! source))
           before (decode-valuation! (:prestate-witness evidence))
           inputs (decode-valuation! (:input-witness evidence))]
-      (when-not (= evidence (transition-evidence description alternative mapping (:xt/id record) before inputs actual evidence))
+      (when-not (= (apply dissoc evidence envelope/binding-keys)
+                   (transition-evidence description alternative mapping (:xt/id record) before inputs actual evidence))
         (reject! :historical-mapped-poststate-mismatch [] {}))
       (require-derived-inputs! original (get-in description [:input-derivations alternative]) binding before inputs)
       (original-witness-relation original before inputs actual)
       {:authority :none :physical-correspondence :checked-historical-projection
        :abstract-relation :checked-supplied-witness
-       :input-correspondence :checked-command-and-prestate-selectors})))
+       :input-correspondence :checked-command-and-prestate-selectors
+       :expected-envelope (envelope/binding-status evidence)})))
 
 (defn check-mapped-prestate!
   "Compare the durable prestate witness with a supplied physical projection
@@ -715,6 +719,7 @@
                          (when (= id alternative) construction))
                        (get-in source [:inductive-source :catalog :operations]))]
     (when-not (and original mapping (= 4 (:profile-version evidence))
+                   (not= :invalid (envelope/binding-status evidence))
                    (current-guard-evidence? evidence)
                    (identical? original-initial-projection projection/project-state!))
       (reject! :invalid-historical-mapped-evidence [] {}))
