@@ -3175,3 +3175,29 @@ SQL arity and execution semantics, document operations and universal
 provider refinement remain open. No production wiring, certificate or
 CLM-R2 premise retirement. Full project and independent formal gates
 were not rerun.
+
+* v2656 — decode selected UTF-8 Arrow arguments
+
+Extend the positional scalar relation interpreter with nonnullable
+UTF-8 columns. Qualify the three-buffer layout, exact offset count,
+monotonic offsets and complete data extent. Decode each value strictly
+without Unicode normalization, preserving empty strings and mixed
+int64/Boolean/string columns. Retain the narrower profile restrictions,
+row and column bounds and coalesced invocation order. Reject malformed
+UTF-8 and offsets without returning partial rows or operations.
+
+Focused JVM: 9 tests / 522 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Physical retained
+mixed rows include empty, ASCII, accented, CJK, supplementary and
+combining characters; compare exact values, operations and spans with
+provider observations before and after reopening. A separate all-empty
+column exercises a zero-length data buffer. Mutate individual value
+bytes and offsets; reject invalid UTF-8 and truncated framing. Earlier
+int64 and Boolean profiles continue to reject string columns.
+
+Selected int64/Boolean/UTF-8 profile v1. Arrow metadata accessors remain
+a library dependency. Nullable columns, extension types, temporal and
+composite values, document operations, SQL arity and execution semantics,
+and universal provider refinement remain open. No production wiring,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates were not rerun.

@@ -209,7 +209,7 @@
 (def ^:private integer-base (assoc base :profile integer-profile))
 (def ^:private max-argument-columns 64)
 
-(defn- fixed-rows! [bytes allow-boolean?]
+(defn- scalar-rows! [bytes allowed]
   (if (nil? bytes)
     [[]]
     (do
@@ -224,42 +224,55 @@
                        (<= 0 columns max-argument-columns)) :unsupported-integer-schema)
         (let [kinds (mapv (fn [i]
                             (let [^Field f (.fields schema i)
-                                  kind (if (and allow-boolean? (= Type/Bool (.typeType f)))
-                                         Type/Bool Type/Int)]
-                              (field! f (str "?_" i) kind false 0)
-                              (if (= Type/Bool kind)
-                                :boolean
+                                  kind (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string}
+                                            (.typeType f))]
+                              (require! (contains? allowed kind) :unsupported-arrow-field)
+                              (field! f (str "?_" i) (.typeType f) false 0)
+                              (when (= :integer kind)
                                 (let [^Int t (.type f (Int.))]
                                   (require! (and t (= 64 (.bitWidth t)) (.isSigned t))
-                                            :unsupported-integer-type)
-                                  :integer))))
-                          (range columns))]
+                                            :unsupported-integer-type)))
+                              kind))
+                          (range columns))
+              starts (vec (reductions + 0 (map #(if (= :string %) 3 2) kinds)))]
           (let [[^Message bm ^ByteBuffer bb] (message! stream MessageHeader/RecordBatch)
                 ^RecordBatch batch (.header bm (RecordBatch.))
                 n (.length batch)]
             (require! (<= 1 n max-rows) :arrow-argument-row-limit)
             (require! (and (= columns (.nodesLength batch)) (nil? (.compression batch))
                            (zero? (.variadicBufferCountsLength batch))) :unsupported-integer-batch)
-            (let [buffers (buffers! batch bb (* 2 columns))]
-              (doseq [i (range columns)]
-                (let [node (.nodes batch i)
-                      ^ByteBuffer validity (nth buffers (* 2 i))
-                      ^ByteBuffer values (nth buffers (inc (* 2 i)))]
-                  (require! (and (= n (.length node)) (zero? (.nullCount node))
-                                 (zero? (.limit validity))
-                                 (= (if (= :boolean (nth kinds i)) (quot (+ n 7) 8) (* 8 n))
-                                    (.limit values)))
-                            :unsupported-integer-buffer-layout)))
+            (let [buffers (buffers! batch bb (peek starts))
+                  readers
+                  (mapv (fn [i]
+                          (let [node (.nodes batch i)
+                                start (nth starts i)
+                                kind (nth kinds i)
+                                ^ByteBuffer validity (nth buffers start)
+                                ^ByteBuffer values (nth buffers (inc start))]
+                            (require! (and (= n (.length node)) (zero? (.nullCount node))
+                                           (zero? (.limit validity))) :unsupported-integer-buffer-layout)
+                            (case kind
+                              :string
+                              (let [^ByteBuffer data (nth buffers (+ start 2))
+                                    offsets (offsets! values data n)]
+                                (fn [row]
+                                  (str (.decode (.newDecoder StandardCharsets/UTF_8)
+                                                (ByteBuffer/wrap (value-bytes! data offsets row))))))
+                              :boolean
+                              (do (require! (= (quot (+ n 7) 8) (.limit values))
+                                            :unsupported-integer-buffer-layout)
+                                  #(present? values %))
+                              :integer
+                              (do (require! (= (* 8 n) (.limit values))
+                                            :unsupported-integer-buffer-layout)
+                                  #(.getLong values (* 8 %))))))
+                        (range columns))]
               (require! (and (= 4 (.remaining stream)) (zero? (.getInt stream)))
                         :unsupported-arrow-terminator)
-              (mapv (fn [row]
-                      (mapv (fn [i]
-                              (let [^ByteBuffer values (nth buffers (inc (* 2 i)))]
-                                (if (= :boolean (nth kinds i))
-                                  (present? values row)
-                                  (.getLong values (* 8 row)))))
-                            (range columns)))
-                    (range n)))))))))
+              (mapv (fn [row] (mapv #(% row) readers)) (range n)))))))))
+
+(defn- fixed-rows! [bytes allow-boolean?]
+  (scalar-rows! bytes (if allow-boolean? #{:integer :boolean} #{:integer})))
 
 (defn- integer-rows! [bytes] (fixed-rows! bytes false))
 
@@ -289,6 +302,8 @@
           (assoc result-base :status :decoded :operations operations :logged-operation-spans spans))
         (catch clojure.lang.ExceptionInfo e
           (assoc result-base :status :unsupported :reason (:reason (ex-data e))))
+        (catch CharacterCodingException _
+          (assoc result-base :status :unsupported :reason :invalid-arrow-utf8))
         (catch Exception _ (assoc result-base :status :unsupported :reason :invalid-arrow-stream))))))
 
 (defn decode-integer-operations
@@ -315,3 +330,27 @@
    No nullable columns, SQL arity or execution semantics claim."
   [bytes]
   (expand-fixed-operations bytes boolean-base #(fixed-rows! % true)))
+
+(def string-profile :xtdb-2.2.0-beta1/selected-int64-boolean-utf8-arrow-operations-v1)
+(def ^:private string-base (assoc base :profile string-profile))
+
+(defn- string-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string}))
+
+(defn decode-string-arguments
+  "Decode selected nonnullable UTF-8, int64 and Boolean positional columns.
+   Validate exact offsets and decode each UTF-8 value strictly."
+  [bytes]
+  (try
+    (assoc string-base :status :decoded :rows (string-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc string-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc string-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc string-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-string-operations
+  "Expand selected SQL groups with UTF-8, Boolean, int64 or empty rows.
+   No nullable columns, coercion, SQL arity or execution semantics claim."
+  [bytes]
+  (expand-fixed-operations bytes string-base string-rows!))

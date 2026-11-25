@@ -293,3 +293,59 @@
           (.awaitSourceBlocking (db/primary-db node) string-id (Duration/ofSeconds 10))
           (check-boolean-retained! node id string-id rows)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-string-retained! [node id empty-id rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-string-operations data)
+        expected (mapv (fn [row] {:kind :sql :query "ASSERT ($1 = $2 AND ($3 = 0) AND $4)" :args row}) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ offsets values] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/string-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-string-arguments args))))
+    (is (= :unsupported (:status (arrow/decode-boolean-operations data))))
+    (is (= :unsupported (:status (arrow/decode-integer-operations data))))
+    ;; First row is empty, second starts with ASCII x. Mutate only its byte.
+    (is (= (assoc-in rows [1 0] "y")
+           (:rows (arrow/decode-string-arguments (edit-byte args values 121)))))
+    (doseq [[bad reason] [[(edit-int args offsets 1) :invalid-arrow-value-offsets]
+                          [(edit-int args (+ offsets 4) -1) :invalid-arrow-value-offsets]
+                          [(edit-int args (+ offsets (* 4 (count rows))) Integer/MAX_VALUE) :invalid-arrow-value-offsets]
+                          [(edit-byte args values 255) :invalid-arrow-utf8]
+                          [(edit-byte args values 195) :invalid-arrow-utf8]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-string-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (let [data (retained-operation-bytes node empty-id)
+          r (arrow/decode-string-operations data)]
+      (is (= :decoded (:status r)))
+      (is (= [{:kind :sql :query "ASSERT $1 = ''" :args [""]}]
+             (:operations r) (:operations (provider/observe-source-message! node empty-id)))))))
+
+(deftest selected-utf8-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-utf8-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows [["" "" 0 true] ["x" "x" 1 false] ["café" "café" -1 true]
+              ["漢字" "漢字" 0 true] ["😀" "😀" 0 true] ["é" "é" 0 false]]]
+    (is (= [[]] (:rows (arrow/decode-string-arguments nil))))
+    (try
+      (let [[id empty-id] (with-open [node (xtn/start-node config)]
+                            (let [database (db/primary-db node)
+                                  submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                                      (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                                  id (submit! (mapv #(into ["ASSERT (? = ? AND (? = 0) AND ?)"] %) rows))
+                                  empty-id (submit! [["ASSERT ? = ''" ""]])]
+                              (check-string-retained! node id empty-id rows)
+                              [id empty-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) empty-id (Duration/ofSeconds 10))
+          (check-string-retained! node id empty-id rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
