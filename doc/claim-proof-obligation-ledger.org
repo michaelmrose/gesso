@@ -3024,3 +3024,28 @@ establish atomic acquisition or prove retention, writer closure or
 universal provider refinement. No certificate, production assurance
 upgrade or CLM-R2 premise retirement. Full project, physical Claim,
 Chromium and independent proof gates were not rerun.
+
+* v2650 — bind selected retained payload observations
+
+Introduce a separate internal selected payload-binding profile. Hash
+ordered fixed-width frame coordinates, timestamps, lengths and payload
+bytes with SHA-256 only after selected envelope correspondence and
+within-observation stability checks succeed. Require matching complete
+samples around source-bound execution comparison; reject absent or
+malformed bindings and propagate unsupported observations. Preserve
+existing payload, coverage and processed-frontier APIs. No fingerprint
+or raw payload in the execution comparison report.
+
+Focused JVM: 13 tests / 512 assertions, zero failures or errors across
+reference provider and source-payload suites. Verify physical persistent
+execution and stable fingerprints before and after reopen; perturb
+content, coordinates, timestamps, partitioning, order and comparison
+samples, including unchanged coordinates with unequal fingerprints.
+Reject missing, malformed or unsupported binding observations.
+
+Fingerprint equality assumes collision resistance and stable acquisition;
+not an authenticated receipt, atomic snapshot, continuous stability,
+independent Arrow operation semantics or universal provider refinement.
+No processed-frontier requirement in this new comparison profile, no
+production wiring, certificate or CLM-R2 premise retirement. Full
+project, physical Claim, Chromium and independent proof gates not rerun.

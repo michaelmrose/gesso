@@ -270,13 +270,65 @@
               (is (= :source-log-changed-during-comparison (:reason r)))
               (is (not (contains? r :processed-frontier))))))))))
 
+(deftest payload-fingerprint-binds-framing-and-content
+  (let [fingerprint #'coverage/payload-fingerprint
+        frames [[0 100 2] [23 101 1]]
+        bodies [(byte-array [1 2]) (byte-array [3])]
+        original (fingerprint frames bodies)]
+    (is (re-matches #"[0-9a-f]{64}" original))
+    (is (= original (fingerprint frames (mapv #(aclone ^bytes %) bodies))))
+    (is (not= original (fingerprint frames [(byte-array [1 3]) (second bodies)])))
+    (is (not= original (fingerprint frames [(first bodies) (byte-array [4])])))
+    (is (not= original (fingerprint (assoc-in frames [0 1] 99) bodies)))
+    (is (not= original (fingerprint (assoc-in frames [1 0] 24) bodies)))
+    (is (not= original (fingerprint [[0 100 1] [22 101 2]] [(byte-array [1]) (byte-array [2 3])])))
+    (is (not= original (fingerprint (vec (reverse frames)) (vec (reverse bodies)))))
+    (is (not= original (fingerprint [] [])))))
+
+(defn- assert-bound-payload-comparison! [node bound]
+  (let [sample (coverage/observe-local-payload-bound-coverage! node)
+        plain (coverage/observe-local-payload-coverage! node)
+        r (reference/compare-local-payload-source-execution! node bound tables)]
+    (is (= :observed (:status sample)) (pr-str (dissoc sample :payload-fingerprint)))
+    (is (= plain (dissoc sample :payload-binding-profile :payload-fingerprint)))
+    (is (re-matches #"[0-9a-f]{64}" (:payload-fingerprint sample)))
+    (is (= :matched (:status r)) (pr-str r))
+    (is (= :matched (:source-coverage r)))
+    (is (= :matched (:payload-correspondence r)))
+    (is (= coverage/payload-binding-profile (:payload-binding-profile r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= :not-established (:provider-refinement r)))
+    (is (not (contains? r :payload-fingerprint)))
+    (is (not (contains? r :processed-frontier)))
+    (is (= :source-transaction-coverage-mismatch
+           (:reason (reference/compare-local-payload-source-execution! node (pop bound) tables))))
+    (doseq [[before after reason]
+            [[sample (update sample :payload-fingerprint #(str (if (= \0 (first %)) "1" "0") (subs % 1)))
+              :source-log-changed-during-comparison]
+             [(dissoc sample :payload-fingerprint) sample :invalid-source-payload-binding]
+             [sample (assoc sample :payload-fingerprint "bad") :invalid-source-payload-binding]
+             [(dissoc sample :payload-correspondence) sample :invalid-source-payload-binding]
+             [sample (dissoc sample :payload-binding-profile) :invalid-source-payload-binding]
+             [sample {:status :unsupported :reason :unsupported-source-payload} :unsupported-source-payload]]]
+      (let [samples (atom [before after])]
+        (with-redefs [coverage/observe-local-payload-bound-coverage!
+                      (fn [_] (let [s (first @samples)] (swap! samples subvec 1) s))]
+          (let [r (reference/compare-local-payload-source-execution! node bound tables)]
+            (is (= (if (= reason :unsupported-source-payload) :unsupported :unavailable) (:status r)))
+            (is (= reason (:reason r)))
+            (is (not (contains? r :payload-correspondence)))
+            (is (not (contains? r :source-coverage)))
+            (is (not (contains? r :payload-fingerprint)))))))
+    (:payload-fingerprint sample)))
+
 (deftest local-source-coverage-across-node-reopen
   (let [root (Files/createTempDirectory "gesso-reference-local-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}]
                 :storage [:local {:path (str root "/storage")}]}
         txs (transactions)]
     (try
-      (let [[bound initial]
+      (let [[bound initial initial-fingerprint]
             (with-open [node (xtn/start-node config)]
               (let [database (db/primary-db node)
                     ^Log log (.getSourceLog database)
@@ -318,11 +370,12 @@
                   (is (= :not-established (:provider-refinement r)))
                   (is (= :none (:authority r)))
                   (is (= :not-issued (:certificate r))))
-                [bound observed]))]
+                [bound observed (assert-bound-payload-comparison! node bound)]))]
         (with-open [node (xtn/start-node config)]
           (let [database (db/primary-db node)]
             (.awaitSourceBlocking database (:last-message-id initial) (Duration/ofSeconds 10))
             (is (= initial (coverage/observe-local-coverage! node)))
+            (is (= initial-fingerprint (assert-bound-payload-comparison! node bound)))
             (is (= :matched (:status (reference/compare-local-source-covered-execution! node bound tables))))
             (let [processed (coverage/observe-local-processed-coverage! node)
                   end (:last-message-id initial)

@@ -4,8 +4,10 @@
             [xtdb.db-catalog :as db])
   (:import (java.io RandomAccessFile)
            (java.lang ReflectiveOperationException)
+           (java.nio ByteBuffer)
            (java.nio.file Path)
-           (java.util Arrays)
+           (java.security MessageDigest)
+           (java.util Arrays HexFormat)
            (xtdb.time InstantUtil)
            (xtdb.api.log LocalLog InMemoryLog Log$Record SourceMessage$Tx
                          SourceMessage$FlushBlock SourceMessage$TriesAdded SourceMessage$BlockUploaded)
@@ -233,7 +235,22 @@
               (map vector frames bytes records))
         (assoc report :payload-correspondence :matched))))
 
-(defn- observe-local* [node payload?]
+(def payload-binding-profile :xtdb-2.2.0-beta1/selected-local-payload-binding-v1)
+
+(defn- payload-fingerprint [frames bytes]
+  ;; Fixed-width big-endian coordinates and lengths bind the ordered
+  ;; payloads, including maintenance. Internal equality sample, not a receipt.
+  (let [digest (MessageDigest/getInstance "SHA-256")]
+    (doseq [[[offset micros length] ^bytes body] (map vector frames bytes)]
+      (let [header (doto (ByteBuffer/allocate 24)
+                     (.putLong (long offset))
+                     (.putLong (long micros))
+                     (.putLong (long length)))]
+        (.update digest (.array header))
+        (.update digest body)))
+    (.formatHex (HexFormat/of) (.digest digest))))
+
+(defn- observe-local* [node payload? bind?]
   (if-not (db/<-node node)
     (local-result :unsupported :embedded-primary-log-required)
     (try
@@ -265,7 +282,9 @@
                         (or (not= framing (local-frames file))
                             (not= end (.getLatestSubmittedOffset log)))
                         (local-result :unavailable :source-log-changed-during-observation)
-                        :else report)))))))))
+                        :else (cond-> report
+                                (and bind? (= :observed (:status report)))
+                                (assoc :payload-fingerprint (payload-fingerprint frames bytes))))))))))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
         (throw e))
@@ -279,7 +298,7 @@
    field and stable quiescent file; not independent payload decoding,
    retention, an atomic snapshot, processed frontier or tamper detection."
   [node]
-  (observe-local* node false))
+  (observe-local* node false false))
 
 (defn observe-local-payload-coverage!
   "Additionally compare every selected independently decoded envelope with
@@ -288,8 +307,17 @@
    Return no raw payloads. No independent Arrow interpretation, processed
    frontier, atomic snapshot, cross-observation content binding or proof."
   [node]
-  (assoc (observe-local* node true) :payload-profile local-payload-profile
+  (assoc (observe-local* node true false) :payload-profile local-payload-profile
          :decoder-profile payload/profile))
+
+(defn observe-local-payload-bound-coverage!
+  "Internal sample binding ordered frame coordinates, timestamps, lengths
+   and raw payload content. Do not publish or persist the fingerprint as a
+   receipt. Equality assumes collision resistance and stable acquisition;
+   not authenticated provenance, atomic snapshot or independent Arrow semantics."
+  [node]
+  (assoc (observe-local* node true true) :payload-profile local-payload-profile
+         :decoder-profile payload/profile :payload-binding-profile payload-binding-profile))
 
 (def local-processed-profile :xtdb-2.2.0-beta1/selected-local-processed-frontier-v1)
 

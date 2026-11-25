@@ -255,3 +255,28 @@
                                     #(assoc % :source-coverage-profile coverage/local-profile
                                               :processed-profile coverage/local-processed-profile))]
     (cond-> r (= :matched (:source-coverage r)) (assoc :processed-frontier :matched))))
+
+(defn- observe-bound-payload! [node]
+  (let [sample (coverage/observe-local-payload-bound-coverage! node)]
+    (if (and (= :observed (:status sample))
+             (not (and (= coverage/local-profile (:profile sample))
+                       (= coverage/local-payload-profile (:payload-profile sample))
+                       (= coverage/payload-binding-profile (:payload-binding-profile sample))
+                       (= :matched (:payload-correspondence sample))
+                       (string? (:payload-fingerprint sample))
+                       (re-matches #"[0-9a-f]{64}" (:payload-fingerprint sample)))))
+      {:status :unavailable :reason :invalid-source-payload-binding}
+      sample)))
+
+(defn compare-local-payload-source-execution!
+  "Require independent selected envelope correspondence and equal framed
+   content fingerprints before and after source-bound execution comparison.
+   No fingerprint or raw payload escapes in the comparison result. This is
+   bounded diagnostic stability, not atomic observation, authenticated
+   provenance, a processed frontier or universal provider refinement."
+  [node expectations tables]
+  (let [r (compare-source-coverage* node expectations tables observe-bound-payload!
+                                    #(assoc % :source-coverage-profile coverage/local-profile
+                                              :payload-profile coverage/local-payload-profile
+                                              :payload-binding-profile coverage/payload-binding-profile))]
+    (cond-> r (= :matched (:source-coverage r)) (assoc :payload-correspondence :matched))))
