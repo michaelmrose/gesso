@@ -575,3 +575,30 @@ The initial regression also exposed the existing raw nested SQL identifier
 limitation for a field named keyword (a reserved token); the fixture uses
 non-reserved field names. Quoting or rejecting all reserved identifier
 spellings remains a separate lowering/availability issue.
+
+* v2565 — canonical decoded field identities and nested SQL quoting
+
+The installed XTDB normal-form conversion collapses distinct Clojure
+field spellings: for example :foo_bar and :foo-bar address one column,
+and :foo$bar, :foo.bar and :foo/bar address one namespaced column. Even
+an isolated alias can change the decoded key relative to the supplied
+prestate. Require each guarded document and journal map key to round-trip
+through the default KEBAB_CASE_KEYWORD result-key decoder. Retain existing
+collision detection and restricted normalized identifier syntax. This
+checks supplied decoded keys, not arbitrary writes or custom key functions.
+
+Quote each normalized journal field segment separately, including root
+columns, using double quotes after the identifier syntax check. Physical
+probes confirm quoted reserved tokens and namespaced fields at nested
+paths. The independent checker reconstructs the same segment quoting and
+canonical key requirement (version 4). The static slot selector and
+ordinary top-level HoneySQL formatting remain unchanged.
+
+The physical regression exercises reserved names and namespaced keys,
+rejects lone noncanonical aliases and simultaneous collisions in supplied
+rows, and requires rejection of changed nested values or field identities
+without a marker write. The restored canonical observation must commit.
+The round-trip check shares XTDB normalization and decoding; it is not
+an independent proof of the provider codec, nor a general SQL identifier
+formatter qualification. No CLM-R2 premise or certification authority is
+retired here.

@@ -1016,7 +1016,7 @@
                             :assert-failed (throw e)))))]
     (is (= :checked-exact-prefix
            (:status (lowering/check-prefix! source targets rows journal prefix))))
-    (is (= 3 (:version (lowering/check-prefix! source targets rows journal prefix))))
+    (is (= 4 (:version (lowering/check-prefix! source targets rows journal prefix))))
     (with-open [node (xtn/start-node {})]
       (xt/execute-tx node [[:put-docs :requests (first (:requests rows))]
                            [:put-docs :gesso_commands empty-args nested-empty]])
@@ -1091,6 +1091,60 @@
           (is (empty? (written)))
           (xt/execute-tx node restore)
           (is (:matches? (observed)))
+          (is (= :committed (attempt! node prefix))))
+        (is (= :committed (attempt! node ops)))
+        (is (= [marker] (written)))))))
+
+(deftest mapped-prefix-quotes-canonical-nested-field-identities
+  (let [mapping (plan/check-target-mapping! source targets)
+        occupied (record "old" "p2" {:keyword {:order 1 :some/ns-key 2 :select {:case 3}}})
+        journal [occupied]
+        args [:gesso.command/binding :arguments]
+        nested (conj args :keyword)
+        prefix (frame/formatted-prestate-assertions! mapping rows journal)
+        description (prestate/describe! source targets rows journal)
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+        marker {:xt/id "probe" :written true}
+        attempt! (fn [node ops]
+                   (try (xt/execute-tx node ops) :committed
+                        (catch Exception e
+                          (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                            :assert-failed (throw e)))))]
+    (is (= :checked-exact-prefix (:status (lowering/check-prefix! source targets rows journal prefix))))
+    (is (= 4 (:version (lowering/check-prefix! source targets rows journal prefix))))
+    ;; Reject lone aliases even when the selected row has no colliding key.
+    (doseq [alias [:some/ns_key :some$ns-key :some.ns-key :some/NS-KEY]]
+      (let [changed [(update-in occupied nested #(-> % (dissoc :some/ns-key) (assoc alias 2)))]]
+        (is (= :noncanonical-decoded-field
+               (reason #(frame/formatted-prestate-assertions! mapping rows changed))) (str alias))
+        (is (= :noncanonical-decoded-field
+               (reason #(lowering/check-prefix! source targets rows changed prefix))) (str alias))))
+    (let [changed [(assoc-in occupied (conj nested :some/ns_key) 2)]]
+      (is (= :aliased-document-key (reason #(frame/formatted-prestate-assertions! mapping rows changed))))
+      (is (= :unsupported-field (reason #(lowering/check-prefix! source targets rows changed prefix)))))
+    (let [docs (update-in rows [:requests 0] #(-> % (dissoc :item-count) (assoc :item_count 2)))]
+      (is (= :noncanonical-decoded-field (reason #(frame/formatted-prestate-assertions! mapping docs journal))))
+      (is (= :noncanonical-decoded-field (reason #(lowering/check-prefix! source targets docs journal prefix)))))
+    (with-open [node (xtn/start-node {})]
+      (let [restore [[:put-docs :requests (first (:requests rows))] [:put-docs :gesso_commands occupied]]
+            ops (conj prefix [:put-docs :guard_probe marker])
+            written #(xt/q node ["SELECT * FROM guard_probe WHERE _id = ?" "probe"])
+            actual #(xt/q node "SELECT * FROM gesso_commands")
+            matches? #(:matches? (prestate/observe! source targets rows journal description rows (actual)))]
+        (xt/execute-tx node restore)
+        (is (= journal (actual)))
+        (is (matches?))
+        (is (= :committed (attempt! node prefix)))
+        (doseq [changed [(assoc-in occupied (conj nested :order) 4)
+                         (assoc-in occupied (conj nested :some/ns-key) 5)
+                         (assoc-in occupied (into nested [:select :case]) 6)
+                         (update-in occupied nested #(-> % (dissoc :some/ns-key) (assoc :other/ns-key 2)))]]
+          (xt/execute-tx node [[:put-docs :gesso_commands changed]])
+          (is (false? (matches?)))
+          (is (= :assert-failed (attempt! node ops)))
+          (is (empty? (written)))
+          (xt/execute-tx node restore)
+          (is (= journal (actual)))
           (is (= :committed (attempt! node prefix))))
         (is (= :committed (attempt! node ops)))
         (is (= [marker] (written)))))))

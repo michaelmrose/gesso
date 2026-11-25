@@ -4,7 +4,8 @@
   (:require [clojure.string :as str]
             [gesso.assurance.proof.mapped-prestate-semantics :as semantics]
             [gesso.model.tx :as tx]
-            [xtdb.util :as xt-util]))
+            [xtdb.util :as xt-util])
+  (:import (xtdb.api.query IKeyFn$KeyFn)))
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid mapped prestate lowering."
@@ -23,6 +24,9 @@
                                   (or (not (str/starts-with? col "xt$")) (= :xt/id k))))
                            columns))
       (reject! :unsupported-field))
+    (when-not (every? (fn [[k col _]]
+                        (= k (.denormalize IKeyFn$KeyFn/KEBAB_CASE_KEYWORD col))) columns)
+      (reject! :noncanonical-decoded-field))
     columns))
 
 (defn- document-guards [[_ table id] [kind row]]
@@ -40,7 +44,8 @@
   (or (scalar? v) (uuid? v)))
 
 (defn- path-sql [path]
-  (reduce (fn [parent column] (str "(" parent ")." column)) path))
+  (reduce (fn [parent column] (str "(" parent ")." column))
+          (map #(str "\"" % "\"") path)))
 
 (defn- scalar-constraints [p v]
   [[(str p " = ?") v]
@@ -102,7 +107,7 @@
         expected (into [] (mapcat :assertions) groups)]
     (when-not (and (vector? prefix) (every? vector? prefix) (= expected prefix))
       (reject! :noncanonical-lowering-prefix))
-    {:type ::mapped-prestate-lowering :version 3
+    {:type ::mapped-prestate-lowering :version 4
      :mapping-fingerprint (:mapping-fingerprint description)
      :scope :source-relative-syntactic-prefix :status :checked-exact-prefix
      :groups groups :assertion-count (count expected)

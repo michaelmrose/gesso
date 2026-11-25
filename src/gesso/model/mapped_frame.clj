@@ -6,7 +6,8 @@
             [gesso.model.tx :as tx]
             [gesso.model.command-resolution :as resolution]
             [gesso.choreo.identity :as identity]
-            [xtdb.util :as xt-util]))
+            [xtdb.util :as xt-util])
+  (:import (xtdb.api.query IKeyFn$KeyFn)))
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid mapped document frame." {:error/type ::invalid-frame :reason reason})))
@@ -26,6 +27,13 @@
     (when (some #(and (str/starts-with? (name %) "xt$")
                      (not= % (xt-util/kw->normal-form-kw :xt/id))) normalized)
       (reject! :reserved-document-key))))
+
+(defn- canonical-decoded-keys! [ks]
+  (safe-keys! ks)
+  (doseq [k ks]
+    (let [column (name (xt-util/kw->normal-form-kw k))]
+      (when-not (= k (.denormalize IKeyFn$KeyFn/KEBAB_CASE_KEYWORD column))
+        (reject! :noncanonical-decoded-field)))))
 
 (defn check-effects!
   "Require a complete per-write-target map of exact supplemental values.
@@ -104,7 +112,7 @@
                             (vals (:target-map mapping)))]
         (if row
           (do
-            (safe-keys! (keys row))
+            (canonical-decoded-keys! (keys row))
             (let [checks (mapv (fn [[k v]]
                                  (when-not (and (re-matches #"[a-z][a-z0-9_$]*"
                                                            (name (xt-util/kw->normal-form-kw k)))
@@ -138,7 +146,9 @@
   (let [column (name (xt-util/kw->normal-form-kw k))]
     (when-not (re-matches #"[a-z_][a-z0-9_$]*" column)
       (reject! :unsupported-journal-frame-key))
-    (if parent (str "(" parent ")." column) column)))
+    ;; Quote every normalized segment, not the complete dotted path.
+    (let [quoted (str "\"" column "\"")]
+      (if parent (str "(" parent ")." quoted) quoted))))
 
 (defn- scalar-tests [path value]
   ;; Ordinary equality coerces some types. Scalar print distinguishes
@@ -157,7 +167,7 @@
   ;; This is a provider-specific fragment, not a portable type predicate.
   (cond
     (map? value)
-    (do (safe-keys! (keys value))
+    (do (canonical-decoded-keys! (keys value))
         (if (seq value)
           (into [[(str "LENGTH(" path ") = ?") (count value)]]
                 (mapcat (fn [[k v]] (journal-field-tests! (journal-field-sql! path k) v)))
@@ -175,7 +185,7 @@
     :else (reject! :unsupported-journal-frame-value)))
 
 (defn- occupied-slot-assertions! [where principal operation row]
-  (safe-keys! (keys row))
+  (canonical-decoded-keys! (keys row))
   (let [checks (mapcat (fn [[k v]] (journal-field-tests! (journal-field-sql! nil k) v))
                        (sort-by (comp str key) row))]
     [(tx/format-assertion (tx/assert-document-field-count :gesso_commands (:xt/id row) (count row)))
