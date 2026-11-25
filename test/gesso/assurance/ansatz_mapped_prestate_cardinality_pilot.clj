@@ -47,15 +47,40 @@
      :obligations (mapv (fn [[n group]] (obligation n (vec group)))
                         (sort-by key (group-by :cardinality sites)))}))
 
+(defn- general-cardinality-obligation []
+  ;; Quantify the cardinality itself rather than asking the tactic engine
+  ;; to prove a separate arithmetic fact for every map arity.
+  (-> (obligation 'n [])
+      (assoc :obligation-kind :arbitrary-encoded-map-residual-exclusion)
+      (dissoc :expected-cardinality :sites)
+      (update :parameters #(into ['n ':- 'Nat] %))))
+
+(defn- specialize-cardinality! [general ob]
+  (let [n (:expected-cardinality ob)
+        goal (proof-pilot! 'elaborate-source-proposition! ob)
+        proof (expr/app* (:proof general) (expr/lit-nat n))
+        env (ansatz/env)]
+    (when-not (kernel/verifies? env goal proof)
+      (throw (ex-info "Kernel rejected cardinality specialization."
+                      {:expected-cardinality n})))
+    {:description (dissoc ob :parameters :goal-form :proof-script)
+     :goal goal :proof proof
+     :dependencies (proof-pilot! 'qualify-proof-dependencies!
+                                (proof-pilot! 'inspect-proof-dependencies env goal proof))}))
+
 (defn check!
-  "Kernel-check the derived list lemmas and apply the existing proof dependency
-   policy. List order, unique field encoding, matching child values, and the
-   partition of an actual map into known and residual entries remain premises."
+  "Kernel-check one arbitrary-cardinality list lemma and specialize its
+   proof term at each source-derived size. Check every specialized goal
+   against the original obligation and apply the existing dependency policy.
+   List order, unique field encoding, matching child values and the actual
+   map entry partition remain premises."
   [original targets docs journal prefix]
   (let [{:keys [rule-description sites obligations]} (derive-obligations! original targets docs journal prefix)
-        checked (mapv #(proof-pilot! 'check-obligation! %) obligations)]
+        general (when (seq obligations)
+                  (proof-pilot! 'check-obligation! (general-cardinality-obligation)))
+        checked (mapv #(specialize-cardinality! general %) obligations)]
     {:type ::cardinality-pilot :rule-description rule-description
-     :sites sites :checked checked
+     :sites sites :checked checked :general-lemma general
      :scope :source-derived-sizes-of-encoded-list-partitions
      :proof-status (if (seq checked) :kernel-checked-conditional-cardinality :no-cardinality-obligations)
      :open-obligations (into (:open-obligations rule-description)
@@ -308,6 +333,40 @@
       (is (= :child-equality-open (get-in by-path [[slot []] :reason]))))
     (is (= :structural-premises-open (:status (run (assoc bags slot [])))))
     (is (thrown? clojure.lang.ExceptionInfo (run (dissoc bags slot))))))
+
+(deftest arbitrary-cardinality-proof-specializes-without-size-specific-tactics
+  (let [args (fixture!)
+        proof-var (ns-resolve 'gesso.assurance.ansatz-reservation-pilot 'check-obligation!)
+        original @proof-var
+        calls (atom [])
+        report (with-redefs-fn {proof-var (fn [ob] (swap! calls conj ob) (original ob))}
+                 #(apply check! args))
+        general (:general-lemma report)
+        ob (general-cardinality-obligation)
+        env (ansatz/env)]
+    (is (= [ob] @calls))
+    (is (= ['n ':- 'Nat] (subvec (:parameters ob) 0 3)))
+    (is (= (:goal general) (proof-pilot! 'elaborate-source-proposition! ob)))
+    (is (kernel/verifies? env (:goal general) (:proof general)))
+    (is (empty? (get-in general [:dependencies :non-safe])))
+    (is (empty? (get-in general [:dependencies :unresolved])))
+    (doseq [checked (:checked report)]
+      (let [n (get-in checked [:description :expected-cardinality])]
+        (is (= (:proof checked) (expr/app* (:proof general) (expr/lit-nat n))))
+        (is (kernel/verifies? env (:goal checked) (:proof checked)))))
+    ;; Cardinalities outside the fixture (including zero) use exactly the
+    ;; same universally quantified proof, with no additional tactic search.
+    (doseq [n [0 37 1000]]
+      (let [specialized (specialize-cardinality! general (obligation n []))]
+        (is (= (:proof specialized) (expr/app* (:proof general) (expr/lit-nat n))))
+        (is (kernel/verifies? env (:goal specialized) (:proof specialized)))))
+    (let [wrong (obligation 37 [])
+          wrong-goal (proof-pilot! 'elaborate-source-proposition! wrong)
+          different (:proof (specialize-cardinality! general (obligation 38 [])))]
+      (is (false? (kernel/verifies? env wrong-goal different))))
+    (is (contains? (:open-obligations report) :general-structural-soundness))
+    (is (= :not-established (:sql-refinement report)))
+    (is (= :not-issued (:certificate report)))))
 
 (defn -main [& _]
   (binding [ansatz/*verbose* false] (ansatz/load-init!))
