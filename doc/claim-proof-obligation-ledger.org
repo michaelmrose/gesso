@@ -2150,3 +2150,28 @@ not timestamp-valued lease storage, expired or active lease fencing,
 complete worker execution or universal provider refinement. No production
 assurance status changes and no CLM-R2 premise is retired. Full project,
 physical Claim, Chromium and independent proof gates were not rerun.
+
+* v2620 — model expired and active worker lease fences
+
+Extend the selected outbox row-version assertion with the exact bound
+worker lease-expiry predicates. Independently require matching UUID
+identity and issuing system time, then compare the supplied transaction
+clock against the observed deadline. Reclamation admits equality with
+that deadline; active fencing requires strictly earlier time. Validate
+all operands before replay and retain atomic rollback and failed indexes.
+Temporal profile v7; current-state v10 and history v19 unchanged.
+
+Combined reference JVM: 32 tests / 3800 assertions, zero failures or
+errors. Fourteen additional embedded XTDB transactions exercise active
+and expired deadlines, exact and microsecond-adjacent boundaries, stale
+versions, absent identities, new-deadline guard composition, tentative
+writes and rollback. Compare predicted outcomes, 240 bitemporal point
+queries and complete selected outbox history rectangles. No provider
+observation feeds reference replay.
+
+This establishes finite empirical correspondence for selected physical
+lease fences. The deadline is a bound observed operand, not a stored
+column check; correspondence of that operand to actual lease metadata
+and timestamp-valued outbox storage remains open. No production assurance
+status changes and no CLM-R2 premise is retired. Full project, physical
+Claim, Chromium and independent proof gates were not rerun.

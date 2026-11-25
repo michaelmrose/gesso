@@ -4,7 +4,7 @@
   (:require [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-bitemporal-transaction-v6)
+(def profile :selected-bitemporal-transaction-v7)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -40,8 +40,10 @@
     :future (before? system-time deadline)
     :within-five-minutes (not (before? (.plusSeconds ^Instant system-time 300) deadline))))
 
-(def ^:private version-guard
-  "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)")
+(def ^:private version-guards
+  {"ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ?)" :version
+   "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP >= ?)" :expired
+   "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP < ?)" :active})
 
 (defn- version-instant [x]
   (cond
@@ -49,12 +51,15 @@
     (instance? ZonedDateTime x) (.toInstant ^ZonedDateTime x)))
 
 (defn- check-version-guard! [system-time op]
-  (when-not (and (= 3 (count op)) (uuid? (second op))
-                 (clock-instant? system-time)
-                 (clock-instant? (version-instant (nth op 2))))
-    (reject! :unsupported-temporal-version-guard)))
+  (let [kind (get version-guards (first op))]
+    (when-not (and (= (if (= :version kind) 3 4) (count op))
+                   (uuid? (second op)) (clock-instant? system-time)
+                   (clock-instant? (version-instant (nth op 2)))
+                   (or (= :version kind)
+                       (clock-instant? (version-instant (nth op 3)))))
+      (reject! :unsupported-temporal-version-guard))))
 
-(defn- version-matches! [working system-time [_ id version]]
+(defn- version-matches! [working system-time [sql id version deadline]]
   (let [rows (get-in working [:segments :gesso_live_outbox])
         visible (fn [intervals]
                   (first (filter (fn [[a b _ _]]
@@ -62,7 +67,13 @@
                                         (before-end? system-time b))) intervals)))]
     (when (some (fn [[k intervals]] (and (not (uuid? k)) (visible intervals))) rows)
       (reject! :unsupported-temporal-version-id-domain))
-    (= (version-instant version) (nth (visible (get rows id)) 3 nil))))
+    (and (= (version-instant version) (nth (visible (get rows id)) 3 nil))
+         ;; The physical predicate binds the observed deadline; it does
+         ;; not itself read the stored lease-until column.
+         (case (get version-guards sql)
+           :version true
+           :expired (not (before? system-time (version-instant deadline)))
+           :active (before? system-time (version-instant deadline))))))
 
 (defn- normalize-op! [system-time op]
   (when-not (and (vector? op) (nil? (meta op)))
@@ -70,7 +81,7 @@
   (if (string? (first op))
     (do (cond
           (contains? clock-guards (first op)) (check-clock-guard! system-time op)
-          (= version-guard (first op)) (check-version-guard! system-time op)
+          (contains? version-guards (first op)) (check-version-guard! system-time op)
           :else (when-not (= :predicted (:status (current/execute {} [op])))
                   (reject! :unsupported-temporal-assertion)))
         op)
@@ -152,7 +163,7 @@
           (recur (apply-put working system-time op) (inc i))
           (let [matches? (cond
                            (contains? clock-guards (first op)) (clock-matches? system-time op)
-                           (= version-guard (first op)) (version-matches! working system-time op)
+                           (contains? version-guards (first op)) (version-matches! working system-time op)
                            :else (let [result (current/execute (project-visible (:segments working) system-time) [op])]
                              (when-not (= :predicted (:status result))
                                (reject! :unsupported-temporal-assertion-domain))
@@ -167,7 +178,7 @@
    half-open and microsecond-aligned, with omitted starts at the supplied
    system time and omitted ends unbounded. Abort retains the prior snapshot.
    Selected assertions read tentative documents at the transaction system
-   time (no current-time override), including selected worker clock and row-version guards.
+   time (no current-time override), including selected worker clock, row-version and lease-expiry guards.
    Validate all operation shapes before
    replay. Rectangles retain the issuing system time and exclusive supersession
    time. No provider observations, implicit clock or authority are admitted."

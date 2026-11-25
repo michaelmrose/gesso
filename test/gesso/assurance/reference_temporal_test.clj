@@ -422,3 +422,70 @@
                  (into {} (map (juxt :xt/id identity)) rows)))))
       (is (= (frequencies (coalesce-valid (:rectangles r)))
              (frequencies (coalesce-valid (provider-rectangles node :gesso_live_outbox))))))))
+
+(defn- lease-guard [kind id version deadline]
+  [(str "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ? AND _system_from = ? AND CURRENT_TIMESTAMP "
+        ({:expired ">=" :active "<"} kind) " ?)") id version deadline])
+
+(defn- micro-offset [n offset]
+  (.plusNanos (sys n) (* 1000 offset)))
+
+(def ^:private lease-transactions
+  (mapv (fn [n ops] {:system-time (sys n) :ops ops}) (range 1 15)
+        [[(intent-put 1)]
+         [(lease-guard :active intent-id (version-at 1) (micro-offset 2 1)) (intent-put 2)]
+         [(lease-guard :expired intent-id (sys 2) (micro-offset 3 1)) (intent-put 3)]
+         (into [(lease-guard :expired intent-id (sys 2) (version-at 4))]
+               (concat (deadline-guards (.plusSeconds (sys 4) 300)) [(intent-put 3)]))
+         [(lease-guard :active intent-id (sys 4) (sys 5)) (intent-put 4)]
+         [(lease-guard :expired intent-id (sys 2) (micro-offset 6 -1))]
+         [(lease-guard :active intent-id (sys 4) (micro-offset 7 1)) (intent-put 4)]
+         [(lease-guard :expired intent-id (sys 7) (micro-offset 8 -1)) (intent-put 5)]
+         [(lease-guard :active intent-id (sys 7) (micro-offset 9 1))]
+         [(lease-guard :expired other-intent-id (sys 8) (sys 10))]
+         [(intent-put 6) (lease-guard :active intent-id (sys 11) (micro-offset 11 1)) ["ASSERT FALSE"]]
+         [(intent-put 7) (lease-guard :expired intent-id (sys 12) (sys 12)) (intent-put 8)]
+         [(lease-guard :active intent-id (sys 12) (micro-offset 13 -1))]
+         [(lease-guard :active intent-id (sys 12) (version-at 15))]]))
+
+(deftest independent-worker-lease-fencing
+  (let [r (temporal/replay lease-transactions)]
+    (is (= :predicted (:status r)))
+    (is (= [true true false true false false true true false false false true false true]
+           (mapv :committed? (:history r))))
+    (is (= [nil nil 0 nil 0 0 nil nil 0 0 2 nil 0 nil]
+           (mapv :failed-assertion-index (:history r))))
+    (is (= {:xt/id intent-id :value 5}
+           (get-in (temporal/visible-at r (sys 11) (sys 11)) [:gesso_live_outbox intent-id])))
+    (is (= {:xt/id intent-id :value 8}
+           (get-in (temporal/visible-at r (sys 14) (sys 14)) [:gesso_live_outbox intent-id])))
+    (is (= (get-in r [:history 7 :segments]) (get-in r [:history 10 :segments])))
+    (is (= :none (:authority r)))))
+
+(deftest rejects-unsupported-worker-lease-guards
+  (let [guard (lease-guard :active intent-id (sys 1) (sys 2))]
+    (doseq [op [(pop guard) (conj guard true) (assoc guard 1 "id")
+                (assoc guard 2 nil) (assoc guard 3 nil) (assoc guard 3 "2025-01-01")
+                (assoc guard 3 (.plusNanos (sys 2) 1)) (assoc guard 3 Instant/MAX)]]
+      (let [r (temporal/replay [{:system-time (sys 1) :ops [["ASSERT FALSE"] op]}])]
+        (is (= :unsupported (:status r)) (pr-str op))
+        (is (not (contains? r :history)))
+        (is (not (contains? r :rectangles)))))))
+
+(deftest independently-predicted-worker-lease-fences-match-xtdb
+  (let [r (temporal/replay lease-transactions)]
+    (is (= :predicted (:status r)))
+    (with-open [node (xtn/start-node {})]
+      (doseq [[tx expected] (map vector lease-transactions (:history r))]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+          (is (= [{:committed (:committed? expected)}]
+                 (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+      (doseq [s (range 0 15) v (range 0 16)]
+        (let [rows (xt/q node ["SELECT * FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ?"
+                               (sys v) (sys s)])]
+          (is (= (count rows) (count (set (map :xt/id rows)))))
+          (is (= (get (temporal/visible-at r (sys s) (sys v)) :gesso_live_outbox {})
+                 (into {} (map (juxt :xt/id identity)) rows)))))
+      (is (= (frequencies (coalesce-valid (:rectangles r)))
+             (frequencies (coalesce-valid (provider-rectangles node :gesso_live_outbox))))))))
