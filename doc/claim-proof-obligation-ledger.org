@@ -718,3 +718,33 @@ admission authority is added. Closing provenance would require a trusted
 execution receipt bound to the actual committed transaction or an
 independently enforced exclusive writer boundary; a digest of a proposed
 prefix alone cannot supply either.
+
+* v2571 — retained XTDB source-log transaction observations
+
+The installed XTDB 2.2.0-beta1 internal database interface exposes the
+primary source log. Its readRecords range is epoch-qualified and
+half-open; an exact transaction-id read can recover a SourceMessage.Tx
+whose operations are encoded as an Arrow stream. SQL operation legs
+retain statement text and a separate Arrow stream of bound arguments.
+The JDBC path rewrites generated question-mark placeholders to numbered
+parameters. The opt-in pilot compares the normalized generated prefix
+with the retained SQL operations and typed argument rows, in order.
+It records non-SQL operation kinds but does not yet decode their payloads.
+
+The physical regression distinguishes a committed guarded submission,
+a committed unguarded submission with the same marker write, and an
+aborted submission. It recovers the entire generated mapped SQL prefix,
+including keywords, strings, integers, booleans, UUIDs and mixed vectors.
+The separate xt.txs outcome query is essential: a source log entry alone
+records submission, not successful execution. Missing messages and
+unsupported epochs provide no correspondence evidence. The internal
+in-memory log reads from a retained replay cache; indefinite retention,
+local and Kafka storage, remote acquisition, database identity and
+trusted source-log provenance require further qualification.
+
+The opt-in pilot passed 1 test / 20 assertions, no failures or errors.
+Production history and checkpoint semantics are unchanged. No writer
+identity, complete executed envelope, SQL refinement or certificate is
+established. Full DML decoding, transaction-outcome correlation and a
+trusted retention/acquisition boundary are needed before using this
+observation as historical assurance evidence. No CLM-R2 premise is retired.
