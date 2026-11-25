@@ -1003,3 +1003,36 @@ Historical classification and checkpoint profiles remain unchanged. Actual
 historical enforcement, original intended-envelope provenance, transaction
 metadata, writer authority and provider execution refinement remain open.
 No CLM-R2 premise is retired.
+
+* v2580 — require retained envelope comparison in mapped history
+
+Require the v2579 independent comparison after historical mapped prestate
+and poststate judgments, using the ledger transaction id and the pinned
+transition witness stripped only of system-from. A verified mapped step
+now requires :matched with the expected profile, id and fingerprint.
+Unavailable, unsupported, mismatched or unexpected results are unclassified;
+no source payload is included. An unavailable step is a sticky finding in
+that cursor; a fresh audit is needed to re-evaluate the prefix.
+
+Add a narrow adapter operation that resolves a live opaque handle internally
+and returns only the envelope check, without exposing its physical node.
+Advance whole/chunk history and both in-process and durable checkpoints to
+v5. Even correctly authenticated v4 cursors must be rescanned. Operational
+physical-prefix arguments require the v5 chunk profile and report recorded
+comparison separately from still-open historical writer provenance.
+
+Focused JVM validation: operational report 4 tests / 111 assertions;
+selected initialization/history 2 tests / 18 assertions; adversarial mapped
+history 1 test / 148 assertions, all green. Initial integration runs exposed
+an opaque-handle mismatch and a test double's missing observer arity; both
+were corrected. The integration fixture stubs the semantic judgments to
+exercise real source-log admission/refusal; the mapped-history regression
+uses the actual semantic checks. Missing bindings and removed guards now
+fail classification; a deliberately self-bound unguarded raw writer still
+passes the conditional comparison. This is an explicit negative control,
+not a proof of its authorization. Full Claim, Chromium, independent proof
+and full regression gates were not rerun for this revision.
+
+Intended-envelope provenance, source-log decoding/retention refinement,
+actual writer authority, transaction-internal reads and infrastructure
+writer qualification remain open. No CLM-R2 premise is retired.

@@ -20,6 +20,7 @@
         checked-time (xtdb/basis-system-time through)
         target-time (xtdb/basis-system-time target)]
     {:status (:status report)
+     :profile (:profile report)
      :through (basis-summary through)
      :sampled-target (basis-summary target)
      ;; IDs are log coordinates, not a count of pending transactions.
@@ -98,7 +99,7 @@
                       (:through-basis r)
                       (not (pos? (compare (:system-time initial)
                                          (xtdb/basis-system-time (:through-basis r))))))
-        clean? (and (= :selected-mapped-ledger-chunk-v4 (:profile r))
+        clean? (and (= :selected-mapped-ledger-chunk-v5 (:profile r))
                     (#{:observed-interval-checked :partial-interval} (:status history))
                     (= (:status r) (:status history))
                     (= (:caught-up? r) (= :observed-interval-checked (:status r)))
@@ -114,15 +115,18 @@
      :premises {:source-identity (if matching? :matched :open)
                 :abstract-induction (if abstract? :conditionally-checked :open)
                 :physical-initialization (if initial? :observed-projection-checked :open)
-                :historical-step-coverage (if clean? :clean-v4-prefix :open)
-                :visible-valid-time-continuity (if clean? :v4-prefix-checked :open)
-                ;; Reconstructed guard identity is not evidence of execution.
+                :historical-step-coverage (if clean? :clean-v5-prefix :open)
+                :visible-valid-time-continuity (if clean? :v5-prefix-checked :open)
+                :recorded-envelope-correspondence (if clean? :v5-mapped-steps-checked :open)
+                ;; Matching a recorded binding is not evidence of intended writer authority.
                 :historical-writer-provenance :not-established}
      :invariant-ids (if eligible? invariants #{})
      :through (when eligible? (get-in history [:coverage :through]))
      :open-obligations #{:historical-retention-and-checkpoint-integrity
                          :unrestricted-physical-writer-closure
                          :historical-mapped-writer-authentication
+                         :historical-intended-envelope-provenance
+                         :source-log-decoder-and-retention-refinement
                          :transaction-internal-read-basis-refinement
                          :valid-time-continuity-between-steps
                          :history-coverage-beyond-sampled-frontier

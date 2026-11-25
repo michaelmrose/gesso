@@ -10,6 +10,7 @@
    - thin q/plan-q task wrappers
    - thin submit-tx/execute-tx task wrappers
    - opt-in diagnostic capture at the actual adapter submission call sites
+   - narrow read-only recorded-envelope checks through opaque handles
    - portable XTDB-backed authoritative progression bases/requirements
    - authoritative request-frontier binding for Biff + Gesso contexts
    - trusted XTDB progression comparison and query-option translation
@@ -48,6 +49,7 @@
   (:require
    [clojure.string :as str]
    [gesso.live.progression :as progression]
+   [gesso.assurance.xtdb-envelope :as envelope]
    [missionary.core :as m]
    [xtdb.api :as xt]
    [xtdb.basis :as xt.basis])
@@ -212,6 +214,13 @@
                           {:reason :invalid-adapter-connectable})))
         node))
     value))
+
+(defn check-recorded-transition-envelope!
+  "Compare one retained transaction with a supplied durable witness through
+   the exact physical connectable. Never expose the node or raw log values.
+   Revoked adapter handles are refused before provider acquisition."
+  [connectable tx-id witness]
+  (envelope/check-recorded-transition! (physical-connectable! connectable) tx-id witness))
 
 (defn current-submission-policy-token
   "Observe the current opaque policy generation through a live handle or

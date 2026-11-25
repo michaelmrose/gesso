@@ -92,15 +92,17 @@
                   :all-declared-invariants-conditionally-inductive? true
                   :declared-invariant-ids #{:example/nonnegative}}
         snapshot (update sample :report assoc
-                         :profile :selected-mapped-ledger-chunk-v4
+                         :profile :selected-mapped-ledger-chunk-v5
                          :initialization {:system-time time :catalog-fingerprint "catalog"
                                           :case-fingerprint "case" :initialization-fingerprint "initial"
                                           :physical-correspondence :checked-supplied-projection})
         joined (report/describe-application abstract snapshot)
         arg (:physical-induction joined)]
     (is (= :conditional-observed-prefix-argument (:status arg)))
-    (is (= :v4-prefix-checked (get-in arg [:premises :visible-valid-time-continuity])))
+    (is (= :v5-prefix-checked (get-in arg [:premises :visible-valid-time-continuity])))
+    (is (= :v5-mapped-steps-checked (get-in arg [:premises :recorded-envelope-correspondence])))
     (is (= :not-established (get-in arg [:premises :historical-writer-provenance])))
+    (is (contains? (:open-obligations joined) :historical-intended-envelope-provenance))
     (is (contains? (:open-obligations joined) :historical-mapped-writer-authentication))
     (is (= #{:example/nonnegative} (:invariant-ids arg)))
     (is (= (get-in joined [:history :coverage :through]) (:through arg)))
@@ -112,6 +114,7 @@
                    [(assoc abstract :all-declared-invariants-conditionally-inductive? false) snapshot]
                    [abstract (assoc-in snapshot [:source :induction-fingerprint] "different")]
                    [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v3)]
+                   [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v4)]
                    [abstract (assoc-in snapshot [:report :initialization :catalog-fingerprint] "different")]
                    [abstract (assoc-in snapshot [:report :initialization :system-time] (.plusSeconds time 1))]
                    [abstract (assoc-in snapshot [:report :counts] {:unknown 1})]

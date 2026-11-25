@@ -3,6 +3,8 @@
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.operational-report :as operational-report]
+            [gesso.assurance.xtdb-envelope :as envelope]
+            [gesso.assurance.xtdb-source-log :as source-log]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
             [gesso.live.outbox.history-coverage :as history]
@@ -647,10 +649,10 @@
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v3)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v4)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v4 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v5 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
               (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))
@@ -727,4 +729,48 @@
               (is (= :not-established (get-in refused [:physical-induction :status])))
               (is (contains? (:open-obligations refused) :unclassified-historical-steps))
               (is (= :not-issued (:certificate refused)))))
+          (finally (release)))))))
+
+(deftest history-requires-retained-envelope-for-mapped-transition
+  ;; Exercise the history/envelope boundary with real retained transactions.
+  ;; Stub only semantic projection judgments: this is not a Claim proof.
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        ops (fn [id]
+              [["ASSERT ? = ?" 1 1]
+               [:put-docs :gesso_commands {:xt/id id}]
+               [:put-docs :gesso_transition_evidence
+                {:xt/id id :profile-version 4 :guard-prefix-fingerprint "guard"}]])]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (let [handle (xtdb/adapter-connectable! node)
+                read-source source-log/observe-source-message!]
+            (with-redefs [inductive/check-mapped-prestate! (constantly {})
+                          inductive/check-historical-mapped-poststate! (constantly {})]
+              (xt/execute-tx node (envelope/bind-transition-envelope! (ops "good")))
+              (let [prefix (history/audit-chunk! handle admission 8)]
+                (is (= :selected-mapped-ledger-chunk-v5 (:profile prefix)))
+                (is (= :observed-interval-checked (:status prefix)))
+                (is (= [:matched] (mapv :recorded-envelope (:steps prefix))))
+                (xt/execute-tx node (ops "missing"))
+                (xt/execute-tx node (assoc (envelope/bind-transition-envelope! (ops "altered")) 0 ["ASSERT ? = ?" 2 2]))
+                (let [unavailable-id (:tx-id (xt/execute-tx node (envelope/bind-transition-envelope! (ops "unavailable"))))
+                      extended (with-redefs [source-log/observe-source-message!
+                                             (fn [n id & limits]
+                                               (if (= id unavailable-id)
+                                                 {:status :unavailable :reason :source-message-not-retained}
+                                                 (apply read-source n id limits)))]
+                                 (history/audit-chunk! handle admission 8 (:checkpoint prefix)))]
+                  (is (= :unclassified-steps (:status extended)))
+                  (is (= [:historical-envelope-unsupported :historical-envelope-mismatch
+                          :historical-envelope-unavailable] (mapv :reason (:steps extended))))
+                  (is (= {:verified-mapped-transition 1 :unclassified 3} (:counts extended)))
+                  (is (= :historical-envelope-unsupported (get-in extended [:first-unclassified :reason])))
+                  (is (= :unclassified-steps (:status (history/audit-chunk! handle admission 8 (:checkpoint extended)))))
+                  (is (= :none (:authority extended)))
+                  (is (contains? (:open-obligations extended) :historical-intended-envelope-provenance))))))
           (finally (release)))))))

@@ -1229,7 +1229,9 @@
                            (frame/prefix-evidence! (frame/formatted-prestate-assertions!
                                                     mapping (assoc-in docs [:requests 0 :hidden] "other") [])))]
     (doseq [[mode reason] [[:valid nil]
-                           [:unguarded nil]
+                           [:unguarded :historical-envelope-mismatch]
+                           [:self-bound-unguarded nil]
+                           [:unbound :historical-envelope-unsupported]
                            [:other-prestate :historical-guard-prefix-mismatch]
                            [:legacy :invalid-historical-mapped-evidence]
                            [:wrong-profile :invalid-historical-mapped-evidence]]]
@@ -1245,9 +1247,17 @@
             (let [framed (admission :frame-submission! base)
                   checked (admission :admit-framed! base framed)
                   witness (inductive/mapped-transition-evidence! admission checked)
+                  bound (envelope/bind-transition-envelope!
+                         (conj (:tx-ops framed) [:put-docs :gesso_transition_evidence witness]))
+                  bound-witness (peek (peek bound))
+                  unguarded? (#{:unguarded :self-bound-unguarded} mode)
+                  unguarded-ops (into [] (filter #(= :put-docs (first %))) (:tx-ops base))
                   corrupted (case mode
-                              :valid witness
-                              :unguarded witness
+                              :valid bound-witness
+                              :unguarded bound-witness
+                              :self-bound-unguarded (peek (peek (envelope/bind-transition-envelope!
+                                                               (conj unguarded-ops [:put-docs :gesso_transition_evidence witness]))))
+                              :unbound witness
                               :other-prestate (assoc witness :guard-prefix-fingerprint other-fingerprint)
                               :legacy (-> witness (assoc :profile-version 3)
                                           (dissoc :guard-profile :guard-prefix-fingerprint))
@@ -1255,16 +1265,13 @@
                   initial (history/audit-chunk! node admission 8)]
               (is (= :conditional-observed-prefix-argument (get-in (describe initial) [:physical-induction :status])))
               (is (not= other-fingerprint (:guard-prefix-fingerprint witness)))
-              ;; Deliberate raw writer bypass. In the unguarded control,
-              ;; no assertion or admitted adapter invocation reaches XTDB.
-              ;; Historical row reconstruction cannot distinguish that
-              ;; execution from the guarded raw control.
-              (let [ops (conj (if (= :unguarded mode)
-                                (into [] (filter #(= :put-docs (first %))) (:tx-ops base))
-                                (:tx-ops framed))
+              ;; A removed guard contradicts the recorded complete envelope.
+              ;; A self-bound raw unguarded writer can still match: this
+              ;; comparison does not independently authenticate intent.
+              (let [ops (conj (if unguarded? unguarded-ops (:tx-ops framed))
                               [:put-docs :gesso_transition_evidence corrupted])
                     prior-observations @observations]
-                (when (= :unguarded mode)
+                (when unguarded?
                   (is (every? #(= :put-docs (first %)) ops))
                   (is (= :submission-policy-refused
                          (try (live-xtdb/execute-tx! node ops) nil
