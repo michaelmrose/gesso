@@ -21,6 +21,7 @@
         target-time (xtdb/basis-system-time target)]
     {:status (:status report)
      :profile (:profile report)
+     :publication-expectation-profile (:publication-expectation-profile report)
      :through (basis-summary through)
      :sampled-target (basis-summary target)
      ;; IDs are log coordinates, not a count of pending transactions.
@@ -99,7 +100,7 @@
                       (:through-basis r)
                       (not (pos? (compare (:system-time initial)
                                          (xtdb/basis-system-time (:through-basis r))))))
-        clean? (and (= :selected-mapped-ledger-chunk-v10 (:profile r))
+        clean? (and (= :selected-mapped-ledger-chunk-v11 (:profile r))
                     (#{:observed-interval-checked :partial-interval} (:status history))
                     (= (:status r) (:status history))
                     (= (:caught-up? r) (= :observed-interval-checked (:status r)))
@@ -115,14 +116,17 @@
      :premises {:source-identity (if matching? :matched :open)
                 :abstract-induction (if abstract? :conditionally-checked :open)
                 :physical-initialization (if initial? :observed-projection-checked :open)
-                :historical-step-coverage (if clean? :clean-v10-prefix :open)
-                :visible-valid-time-continuity (if clean? :v10-prefix-checked :open)
-                :recorded-envelope-correspondence (if clean? :v10-mapped-steps-checked :open)
-                :intended-guard-prefix-correspondence (if clean? :v10-mapped-steps-checked :open)
-                :intended-mapped-write-correspondence (if clean? :v10-mapped-steps-checked :open)
-                :transition-evidence-write-correspondence (if clean? :v10-mapped-steps-checked :open)
-                :publication-outbox-correspondence (if clean? :v10-mapped-steps-checked :open)
-                :publication-record-correspondence (if clean? :v10-mapped-steps-checked :open)
+                :historical-step-coverage (if clean? :clean-v11-prefix :open)
+                :visible-valid-time-continuity (if clean? :v11-prefix-checked :open)
+                :recorded-envelope-correspondence (if clean? :v11-mapped-steps-checked :open)
+                :intended-guard-prefix-correspondence (if clean? :v11-mapped-steps-checked :open)
+                :intended-mapped-write-correspondence (if clean? :v11-mapped-steps-checked :open)
+                :transition-evidence-write-correspondence (if clean? :v11-mapped-steps-checked :open)
+                :publication-outbox-correspondence (if clean? :v11-mapped-steps-checked :open)
+                :publication-record-correspondence (if clean? :v11-mapped-steps-checked :open)
+                :publication-expectation-correspondence
+                (if (and clean? (= :declared (:publication-expectation-profile r)))
+                  :v11-declared-expectations-checked :open)
                 ;; Matching a recorded binding is not evidence of intended writer authority.
                 :historical-writer-provenance :not-established}
      :invariant-ids (if eligible? invariants #{})
@@ -131,6 +135,7 @@
                          :unrestricted-physical-writer-closure
                          :historical-mapped-writer-authentication
                          :historical-intended-envelope-provenance
+                         :installed-publication-declaration-correspondence
                          :source-log-decoder-and-retention-refinement
                          :transaction-internal-read-basis-refinement
                          :valid-time-continuity-between-steps

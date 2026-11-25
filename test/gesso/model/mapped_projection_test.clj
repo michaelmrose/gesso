@@ -1212,14 +1212,14 @@
               :tx-ops [["ASSERT TRUE"] [:put-docs :requests (first (:requests after))]
                        [:put-docs :gesso_commands command]]}
         decoder #(get-in % [:gesso.command/outcome :result])
-        admission (inductive/build-inductive-mapped-admission!
-                   {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
+        admission-source {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
                     :target-map targets :decode-outcome! decoder
                     :transaction-footprint! (fn [ops]
                                               (when-not (= (:tx-ops base) ops)
                                                 (throw (ex-info "Unexpected footprint" {})))
                                               {:alternative id :command-id "c1"})
-                    :auxiliary-tables #{:gesso_live_outbox} :document-effects {id {[:document :requests "r1"] {}}}})
+                    :auxiliary-tables #{:gesso_live_outbox} :document-effects {id {[:document :requests "r1"] {}}}}
+        admission (inductive/build-inductive-mapped-admission! admission-source)
         source-id (select-keys (inductive/describe-mapped-admission admission)
                                [:catalog-fingerprint :induction-fingerprint])
         abstract (inductive/recheck-mapped-induction! admission)
@@ -1230,6 +1230,11 @@
                                                     mapping (assoc-in docs [:requests 0 :hidden] "other") [])))]
     (doseq [[mode reason] [[:valid nil]
                            [:valid-outbox nil]
+                           [:declared-valid nil]
+                           [:declared-missing :historical-publication-expectation-mismatch]
+                           [:declared-wrong-subject :historical-publication-expectation-mismatch]
+                           [:declared-no-publication nil]
+                           [:declared-unexpected :historical-publication-expectation-mismatch]
                            [:wrong-outbox-identity :historical-publication-identity-mismatch]
                            [:wrong-outbox-slot :historical-publication-identity-mismatch]
                            [:wrong-outbox-operation :historical-publication-record-mismatch]
@@ -1251,7 +1256,16 @@
                            [:legacy :invalid-historical-mapped-evidence]
                            [:wrong-profile :invalid-historical-mapped-evidence]]]
       (with-open [node (xtn/start-node {})]
-        (let [observations (atom [])
+        (let [declared? (.startsWith ^String (name mode) "declared-")
+              admission (if declared?
+                          (inductive/build-inductive-mapped-admission!
+                           (assoc admission-source :publication-derivations
+                                  {id (when-not (#{:declared-no-publication :declared-unexpected} mode)
+                                        {:purpose :example/test
+                                         :contributions [{:target [:document :requests "r1"]
+                                                          :topic :example/request :field :xt/id}]})}))
+                          admission)
+              observations (atom [])
               writer (policy/build-policy! node {:admission admission :initializer seed :observe! #(swap! observations conj %)}
                                            {:source-id "guard-history"})
               release (live-xtdb/register-submission-policy! node writer)]
@@ -1276,14 +1290,15 @@
                   publication (outbox/prepare! {:intent-ids [intent-id] :source-id "guard-history"
                                                 :operation (if (= :wrong-outbox-operation mode) :example/other :example/command)
                                                 :purpose :example/test :command-id "c1"}
-                                               [{:topic :example/request :id "r1"}])
+                                               [{:topic :example/request :id (if (= :declared-wrong-subject mode) "other" "r1")}])
                   outbox-guard (first (:guard-ops publication))
                   outbox-put (cond-> (:tx-op publication)
                                (= :extra-outbox-field mode) (assoc-in [2 :unexpected] true))
                   [guards puts] (split-with #(string? (first %)) framed-ops)
                   published (into (conj (vec guards) outbox-guard) (conj (vec puts) outbox-put))
                   actual-base (case mode
-                                (:valid-outbox :wrong-outbox-identity :wrong-outbox-slot
+                                (:declared-valid :declared-wrong-subject :declared-unexpected
+                                 :valid-outbox :wrong-outbox-identity :wrong-outbox-slot
                                  :wrong-outbox-operation :extra-outbox-field) published
                                 :duplicate-outbox (conj published outbox-put)
                                 :missing-outbox-guard (conj framed-ops outbox-put)
@@ -1300,7 +1315,8 @@
                                 :self-bound-duplicate-evidence (conj framed-ops [:put-docs :gesso_transition_evidence witness])
                                 (if unguarded? unguarded-ops framed-ops))
                   corrupted (case mode
-                              (:valid-outbox :wrong-outbox-identity :wrong-outbox-slot :wrong-outbox-operation :extra-outbox-field
+                              (:declared-valid :declared-wrong-subject :declared-unexpected
+                               :valid-outbox :wrong-outbox-identity :wrong-outbox-slot :wrong-outbox-operation :extra-outbox-field
                                :duplicate-outbox :missing-outbox-guard :wrong-outbox-guard
                                :late-outbox-guard :extra-outbox-guard)
                               (peek (peek (envelope/bind-transition-envelope!
@@ -1310,7 +1326,7 @@
                                :self-bound-duplicate-evidence)
                               (peek (peek (envelope/bind-transition-envelope!
                                           (conj actual-base [:put-docs :gesso_transition_evidence witness]))))
-                              :valid bound-witness
+                              (:valid :declared-missing :declared-no-publication) bound-witness
                               :unguarded bound-witness
                               :self-bound-unguarded (peek (peek (envelope/bind-transition-envelope!
                                                                (conj unguarded-ops [:put-docs :gesso_transition_evidence witness]))))
@@ -1348,6 +1364,11 @@
                 (is (= 1 (count (:steps chunk))))
                 (is (= (if reason :unclassified :verified-mapped-transition) (:classification step)) (name mode))
                 (is (= reason (:reason step)) (name mode))
+                (is (= (if declared? :declared :not-declared) (:publication-expectation-profile chunk)))
+                (when-not reason
+                  (is (= (if declared? :matched :not-declared) (:publication-expectation step)))
+                  (is (= (if declared? :v11-declared-expectations-checked :open)
+                         (get-in report [:physical-induction :premises :publication-expectation-correspondence]))))
                 (is (= (if reason :unclassified-steps :observed-interval-checked) (:status chunk) (:status whole)))
                 (is (= (if reason :not-established :conditional-observed-prefix-argument)
                        (get-in report [:physical-induction :status])))

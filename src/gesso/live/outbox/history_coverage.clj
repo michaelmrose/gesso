@@ -9,7 +9,8 @@
    operations following the framework evidence-absence guard, and compare
    complete selected mapped puts, the sole evidence write and observed outbox
    append/absence guards, canonical records and derived identity slots.
-   Publication semantic intent, remaining assertions
+   Declared publication expectations are checked against pinned appends.
+   Installed declaration correspondence, remaining assertions
    and writer identity remain unestablished."
   (:require [gesso.assurance.subject :as subject]
             [clojure.string :as str]
@@ -158,6 +159,23 @@
         (when-not (= expected (set (map :xt/id rows)))
           (reject! :historical-publication-identity-mismatch))))))
 
+(defn- publication-profile [admission]
+  (if (contains? (inductive/describe-mapped-admission admission) :publication-derivations)
+    :declared :not-declared))
+
+(defn- require-publication-expectation! [admission source-id command evidence before after]
+  (if (= :declared (publication-profile admission))
+    (let [{:keys [status intents]}
+          (inductive/reconstruct-mapped-publication! admission (:alternative evidence)
+                                                    source-id command (docs before) (docs after))]
+      (when-not (= :derived status)
+        (reject! :historical-publication-expectation-invalid))
+      (when-not (= (frequencies intents)
+                   (frequencies (plain-rows (apply dissoc (:outbox after) (keys (:outbox before))))))
+        (reject! :historical-publication-expectation-mismatch))
+      :matched)
+    :not-declared))
+
 (defn- include-publication-writes! [admission source-id command before after writes]
   (let [added (apply dissoc after (keys before))]
     (when (and (seq added)
@@ -241,12 +259,14 @@
                         admission (dissoc command :xt/system-from) evidence
                         (docs before) (docs after) (plain-rows (:journal after)))
                 writes (include-publication-writes! admission source-id (dissoc command :xt/system-from)
-                                                    (:outbox before) (:outbox after) writes)]
-            (require-recorded-envelope! node (:xt/id current) evidence prefix writes))
-          (assoc base :classification :verified-mapped-transition :command-id id
+                                                    (:outbox before) (:outbox after) writes)
+                publication (require-publication-expectation! admission source-id
+                              (dissoc command :xt/system-from) evidence before after)]
+            (require-recorded-envelope! node (:xt/id current) evidence prefix writes)
+            (assoc base :classification :verified-mapped-transition :command-id id
                  :recorded-envelope :matched :intended-guard-prefix :matched :intended-mapped-writes :matched
                  :transition-evidence-write :matched :publication-outbox :matched
-                 :publication-records :canonical-derived)
+                 :publication-records :canonical-derived :publication-expectation publication))
           (catch clojure.lang.ExceptionInfo e
             (assoc base :classification :unclassified :reason (or (:reason (ex-data e)) :transition-check-failed)))))
 
@@ -254,6 +274,7 @@
 
 (def ^:private open-obligations
   #{:historical-intended-envelope-provenance
+    :installed-publication-declaration-correspondence
     :source-log-decoder-and-retention-refinement
     :transaction-internal-read-basis-refinement
     :valid-time-continuity-between-steps
@@ -319,10 +340,11 @@
         {:keys [basis rows]} (observe-range! scope nil max-steps false)
         steps (classify-range! scope rows)]
     (require-current-scope! scope)
-    {:profile :selected-mapped-ledger-coverage-v10 :authority :none
+    {:profile :selected-mapped-ledger-coverage-v11 :authority :none
      :status (if (some #(= :unclassified (:classification %)) steps)
                :unclassified-steps :observed-interval-checked)
      :initialization (:initial scope) :through-basis basis :steps steps
+     :publication-expectation-profile (publication-profile admission)
      :open-obligations open-obligations}))
 
 ;; Opaque, immutable cursors are issued only after a successful chunk read.
@@ -333,7 +355,7 @@
 (defn- checkpoint-state! [scope checkpoint]
   (when (some? checkpoint)
     (let [prior (locking checkpoints (.get checkpoints checkpoint))]
-      (when-not (and prior (= :selected-mapped-history-checkpoint-v10 (:profile prior))
+      (when-not (and prior (= :selected-mapped-history-checkpoint-v11 (:profile prior))
                      (identical? (:token scope) (:token prior))
                      (identical? (:admission scope) (:admission prior))
                      (= (:initial scope) (:initial prior)))
@@ -362,17 +384,18 @@
          anchor (peek rows)
          through (xtdb/basis (:xt/id anchor) (ledger-time anchor))
          next-state (assoc (select-keys scope [:token :initial :admission])
-                           :profile :selected-mapped-history-checkpoint-v10
+                           :profile :selected-mapped-history-checkpoint-v11
                            :anchor anchor :counts counts :first-unclassified first-unclassified)
          next-checkpoint (HistoryCheckpoint.)]
      (require-current-scope! scope)
      (locking checkpoints (.put checkpoints next-checkpoint next-state))
-     {:profile :selected-mapped-ledger-chunk-v10 :authority :none
+     {:profile :selected-mapped-ledger-chunk-v11 :authority :none
       :status (cond first-unclassified :unclassified-steps
                     caught-up? :observed-interval-checked
                     :else :partial-interval)
       :initialization (:initial scope) :through-basis through :target-basis basis
       :caught-up? caught-up? :steps steps :counts counts
+      :publication-expectation-profile (publication-profile admission)
       :first-unclassified first-unclassified :checkpoint next-checkpoint
       :open-obligations open-obligations})))
 
@@ -407,13 +430,13 @@
   "Export an issued checkpoint as authenticated, plain EDN data. The trusted
    owner must persist it and a separate 32-byte secret key, unique to this
    database and trusted audit/decoder implementation. Change deployment-id
-   (or rotate the key) when that implementation changes. Versions 1 through 9
-   cannot be restored: they lack canonical derived publication checks.
+   (or rotate the key) when that implementation changes. Versions 1 through 10
+   cannot be restored: they lack declared publication expectation checks.
    No writer authority."
   [connectable admission checkpoint key deployment-id]
   (let [scope (audit-scope! connectable admission 1)
         prior (or (checkpoint-state! scope checkpoint) (reject! :invalid-history-checkpoint))
-        payload {:profile :selected-mapped-history-checkpoint-v10
+        payload {:profile :selected-mapped-history-checkpoint-v11
                  :scope (durable-scope scope deployment-id)
                  :anchor (update (:anchor prior) :system-time str)
                  :counts (:counts prior)
@@ -432,7 +455,7 @@
   (let [scope (audit-scope! connectable admission 1)
         {:keys [payload mac]} sealed]
     (when-not (and (map? sealed) (= #{:payload :mac} (set (keys sealed)))
-                   (map? payload) (= :selected-mapped-history-checkpoint-v10 (:profile payload))
+                   (map? payload) (= :selected-mapped-history-checkpoint-v11 (:profile payload))
                    (string? mac) (re-matches #"[0-9a-f]{64}" mac)
                    (MessageDigest/isEqual (.parseHex (HexFormat/of) ^String mac)
                                           (checkpoint-mac key payload)))
@@ -444,7 +467,7 @@
                                      (update :system-time #(Instant/parse %)))
           checkpoint (HistoryCheckpoint.)
           state (assoc (select-keys scope [:token :initial :admission])
-                       :profile :selected-mapped-history-checkpoint-v10
+                       :profile :selected-mapped-history-checkpoint-v11
                        :anchor anchor :counts (:counts payload) :first-unclassified first-unclassified)]
       ;; Verify the anchor at a pinned frontier; no classification or extension.
       (observe-range! scope anchor 1 true)

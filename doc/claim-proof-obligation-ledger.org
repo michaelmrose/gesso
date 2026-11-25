@@ -1218,3 +1218,30 @@ wiring and command order must still be checked. History classification
 remains v10 and does not yet compare these expectations with observed rows.
 Full Claim, project, Chromium and separate proof gates were not rerun.
 No CLM-R2 premise is retired.
+
+* v2587 — enforce declared historical publication expectations
+
+Compare the complete independently reconstructed pending intent multiset
+with the pinned appended outbox rows after the existing mapped semantic,
+document-frame and canonical publication checks. A declared alternative
+must derive an expectation; missing, excessive or different contributions
+are unclassified, including any publication under an explicitly empty
+alternative. Undeclared legacy admissions retain their earlier conditional
+classification, but report :not-declared rather than a matched expectation.
+The operational prefix argument marks this premise open unless a clean
+current-profile prefix belongs to a declared admission.
+
+Advance history and checkpoint profiles to v11; v10 and earlier must be
+rescanned. The admitted declaration is already bound to checkpoint scope.
+The new comparison is relative to that declaration, not proof of its
+correspondence with installed publication wiring. Keep this latter
+obligation explicit. The production Claim registration is unchanged.
+
+Focused JVM validation: 9 tests / 815 assertions, zero failures or errors.
+The actual embedded-XTDB mapped history matrix adds matching publication,
+omitted publication, wrong subject, explicit nonpublication and unexpected
+publication under explicit nonpublication. It also checks the legacy versus
+declared report distinction, and the authenticated v10 checkpoint refusal
+is covered by the selected checkpoint test. Full Claim, Chromium, separate
+proof and full project regression gates were not rerun. No CLM-R2 premise
+is retired.
