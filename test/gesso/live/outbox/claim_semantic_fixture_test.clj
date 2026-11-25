@@ -263,12 +263,28 @@
     (is (= :none (:authority info) (:transaction-authority info)))
     (is (= info (current admission source)))
     (is (false? (admission :pending? alternative "c1")))
-    (is (= :missing-preparation (reason #(admission :admit! alternative "c1" []))))
+    (is (= :exact-envelope-with-trusted-footprint-checker (:transaction-admission info)))
+    (is (= :unsupported-mapped-submission
+           (reason #(admission :admit! {:api :submit-tx :tx-ops [] :tx-options {}}))))
+    (is (= :unsupported-mapped-submission
+           (reason #(admission :admit! {:api :execute-tx :tx-ops [] :tx-options {:database :other}}))))
+    (is (= :unsupported-mapped-transaction
+           (reason #(admission :admit! {:api :execute-tx :tx-ops [[:put-docs :requests {}]] :tx-options {}}))))
+    (is (= :unsupported-mapped-transaction
+           (reason #(admission :admit! {:api :execute-tx :tx-ops [["ASSERT TRUE; DELETE FROM requests"] [:put-docs :requests {}]] :tx-options {}}))))
     (is (= :unknown-mapped-admission-action (reason #(admission :submit!))))
     (is (= :unregistered-mapped-admission (reason #(current info source))))
     (is (= :unregistered-mapped-admission (reason #(current (fn [& _] info) source))))
     (is (= :changed-mapped-admission-registration
            (reason #(current admission (assoc source :decode-outcome! (constantly :accepted))))))
+    (is (= :changed-mapped-admission-registration
+           (reason #(current admission (assoc source :transaction-footprint! (constantly {}))))))
+    (is (= :changed-mapped-admission-registration
+           (reason #(current admission (assoc source :auxiliary-tables #{})))))
+    (is (= :invalid-auxiliary-tables
+           (reason #(issue (assoc source :auxiliary-tables #{:requests})))))
+    (is (= :invalid-auxiliary-tables
+           (reason #(issue (assoc source :auxiliary-tables #{:gesso_commands})))))
     (is (= :changed-mapped-admission-registration
            (reason #(current admission (assoc-in source [:target-map :membership/two]
                                                 [:document :memberships "helper-3" :active])))))

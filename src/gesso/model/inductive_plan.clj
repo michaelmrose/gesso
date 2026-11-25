@@ -296,35 +296,79 @@
 (def ^:private original-mapped-builder preparation/build-admission!)
 (def ^:private ^WeakHashMap issued-mapped (WeakHashMap.))
 
+(def ^:private mapped-source-keys
+  #{:inductive-source :target-map :decode-outcome! :transaction-footprint! :auxiliary-tables})
+
 (defn- checked-mapped-source! [source]
-  (exact-map! source #{:inductive-source :target-map :decode-outcome!} [])
-  (when-not (and (fn? (:decode-outcome! source))
+  (exact-map! source mapped-source-keys [])
+  (when-not (and (fn? (:decode-outcome! source)) (fn? (:transaction-footprint! source))
                  (identical? original-mapped-check check-inductive-target-mapping!)
                  (identical? original-mapped-builder preparation/build-admission!))
     (reject! :invalid-mapped-admission-checker-or-decoder [] {}))
-  (original-mapped-check (select-keys source [:inductive-source :target-map])))
+  (let [checked (original-mapped-check (select-keys source [:inductive-source :target-map]))
+        mapped-tables (into #{:gesso_commands}
+                            (keep (fn [[kind table]] (when (#{:document :nullable-document} kind) table)))
+                            (vals (:target-map checked)))
+        auxiliary (:auxiliary-tables source)]
+    (when-not (and (set? auxiliary)
+                   (every? #(and (keyword? %) (nil? (namespace %))
+                                 (re-matches #"[a-z][a-z0-9_]*" (name %))) auxiliary)
+                   (empty? (set/intersection auxiliary mapped-tables)))
+      (reject! :invalid-auxiliary-tables [:auxiliary-tables] {}))
+    (assoc checked :auxiliary-tables auxiliary)))
+
+(defn- admit-transaction!
+  [registry footprint! auxiliary {:keys [api tx-ops tx-options] :as submission}]
+  (exact-map! submission #{:api :tx-ops :tx-options} [:submission])
+  (when-not (and (= :execute-tx api) (or (nil? tx-options) (= {} tx-options))
+                 (vector? tx-ops) (every? vector? tx-ops))
+    (reject! :unsupported-mapped-submission [:submission] {}))
+  (let [[guards puts] (split-with #(string? (first %)) tx-ops)]
+    (when-not (and (seq guards) (seq puts)
+                   (every? #(and (re-find #"(?is)^\s*ASSERT\s+" (first %))
+                                 (not (re-find #";" (first %)))) guards)
+                   (every? (fn [[op table & docs]]
+                             (and (= :put-docs op) (keyword? table)
+                                  (seq docs) (every? map? docs))) puts))
+      (reject! :unsupported-mapped-transaction [:submission :tx-ops] {}))
+    ;; The trusted footprint checker receives the entire original vector.
+    ;; It identifies the command/alternative; it cannot choose which puts
+    ;; reach the mapped checker. Only declared disjoint auxiliary tables
+    ;; are excluded by the issuer itself.
+    (let [{:keys [alternative command-id] :as identity} (footprint! tx-ops)]
+      (exact-map! identity #{:alternative :command-id} [:footprint])
+      (when-not (and (qualified-keyword? alternative) (string? command-id) (seq command-id))
+        (reject! :invalid-transaction-identity [:footprint] {}))
+      {:identity identity
+       :candidate ((:admit! registry) alternative command-id
+                   (filterv #(not (contains? auxiliary (second %))) puts))})))
 
 (defn- mapped-description [checked]
   (assoc checked :type ::issued-mapped-admission
                  :admission :issued-local-preparation-registry
                  :checking :live-induction-handles-and-original-mappings-rechecked-at-issuance
+                 :transaction-admission :exact-envelope-with-trusted-footprint-checker
                  :runtime-induction-gating :not-established
                  :transaction-authority :none))
 
 (defn build-inductive-mapped-admission!
   "Issue a local callable preparation registry from the original catalog and
-   both live induction handles. Dispatch only its four preparation operations.
-   The decoder and acquisition are trusted; no full transaction or installed
-   executor correspondence is established. Runtime calls do not recheck the
+   both live induction handles. Admit only a complete synchronous transaction
+   envelope via the captured trusted footprint checker and mapped registry.
+   The decoder, acquisition and footprint checker are trusted; no SQL
+   refinement or installed executor correspondence is established. Calls do not recheck the
    induction proof; use require-current-mapped-admission! at assembly review."
   [source]
   (let [checked (checked-mapped-source! source)
         registry (original-mapped-builder (get-in source [:inductive-source :catalog])
                                           (:target-map source) (:decode-outcome! source))
         admission (fn [action & args]
-                    (if-let [f (get registry action)]
-                      (apply f args)
-                      (reject! :unknown-mapped-admission-action [action] {})))]
+                    (if (= :admit! action)
+                      (apply admit-transaction! registry (:transaction-footprint! source)
+                             (:auxiliary-tables source) args)
+                      (if-let [f (get registry action)]
+                        (apply f args)
+                        (reject! :unknown-mapped-admission-action [action] {}))))]
     (locking issued-mapped
       (.put issued-mapped admission {:source source :description (mapped-description checked)}))
     admission))
@@ -338,19 +382,21 @@
 
 (defn require-current-mapped-admission!
   "Recheck the original live handles and mapping of this exact issued callable
-   against a trusted current assembly source, including decoder identity.
+   against a trusted current assembly source, including decoder and footprint identity.
    A copied description or newly issued registry is not a substitute for it."
   [admission current-source]
   (let [{original :source prior :description} (registered-mapped! admission)
         old (:inductive-source original) now (:inductive-source current-source)]
-    (exact-map! current-source #{:inductive-source :target-map :decode-outcome!} [])
+    (exact-map! current-source mapped-source-keys [])
     (exact-map! now inductive-keys [:inductive-source])
     (when-not (and (= (:catalog old) (:catalog now))
                    (= (:current-graph old) (:current-graph now))
                    (identical? (:certificate-handle old) (:certificate-handle now))
                    (identical? (:dependency-handle old) (:dependency-handle now))
                    (= (:target-map original) (:target-map current-source))
-                   (identical? (:decode-outcome! original) (:decode-outcome! current-source)))
+                   (identical? (:decode-outcome! original) (:decode-outcome! current-source))
+                   (= (:auxiliary-tables original) (:auxiliary-tables current-source))
+                   (identical? (:transaction-footprint! original) (:transaction-footprint! current-source)))
       (reject! :changed-mapped-admission-registration [:current-source] {}))
     (let [fresh (mapped-description (checked-mapped-source! current-source))]
       (when-not (= prior fresh)

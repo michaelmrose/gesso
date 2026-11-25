@@ -191,11 +191,12 @@
                 (fn [{:keys [api tx-ops tx-options]}]
                   (when (and (= :execute-tx api) (empty? tx-options))
                     (let [kind (try
-                                 (let [kind (semantics/writer-kind! seed "v2480-claim" "v2480" tx-ops)]
-                                   (when (= :claim (:kind kind))
-                                     (let [checked (semantics/admit-prepared-candidate! preparations kind tx-ops)]
-                                       (swap! checked-candidates assoc (select-keys kind [:command-id :alternative]) checked)))
-                                   kind)
+                                 (if (some #(and (= :put-docs (first %)) (= :gesso_commands (second %))) tx-ops)
+                                   (let [{:keys [identity candidate]} ((:admit! preparations)
+                                                                      {:api api :tx-ops tx-ops :tx-options tx-options})]
+                                     (swap! checked-candidates assoc identity candidate)
+                                     (assoc identity :kind :claim))
+                                   (semantics/writer-kind! seed "v2480-claim" "v2480" tx-ops))
                                  (catch clojure.lang.ExceptionInfo _ nil))]
                       (when (and kind (or (not= :initializer (:kind kind))
                                           (compare-and-set! seed-admitted? false true)))
@@ -570,6 +571,11 @@
                        (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
                        ;; A genuine current snapshot is not an acceptable open-state preparation.
                        ((:prepare! preparations) alternative binding before {})
+                       ;; Malformed complete envelopes fail before consuming the preparation.
+                       (is (= :submission-policy-refused (denied #(execute-adapter node (into puts guards) nil))))
+                       (is ((:pending? preparations) alternative id))
+                       (is (= :submission-policy-refused (denied #(execute-adapter node (pop accepted) nil))))
+                       (is ((:pending? preparations) alternative id))
                        (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
                        (is (not ((:pending? preparations) alternative id)))
                        (is (= original-admissions @policy-admissions))

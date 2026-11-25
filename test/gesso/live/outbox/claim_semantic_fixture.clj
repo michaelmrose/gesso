@@ -351,7 +351,8 @@
     checked))
 
 (defn mapped-admission-source [bound]
-  {:inductive-source bound :target-map target-map :decode-outcome! decode-claim-outcome!})
+  {:inductive-source bound :target-map target-map :decode-outcome! decode-claim-outcome!
+   :transaction-footprint! submitted-alternative! :auxiliary-tables #{:gesso_live_outbox}})
 
 (defn build-prepared-admission! [bound]
   (let [source (mapped-admission-source bound)
@@ -359,12 +360,6 @@
     {:issued issued
      :prepare! (partial issued :prepare!) :admit! (partial issued :admit!)
      :discard! (partial issued :discard!) :pending? (partial issued :pending?)}))
-
-(defn admit-prepared-candidate!
-  "The caller has already checked the full SQL and publication footprint."
-  [admission {:keys [command-id alternative]} ops]
-  ((:admit! admission) alternative command-id
-   (filterv #(and (= :put-docs (first %)) (not= :gesso_live_outbox (second %))) ops)))
 
 (defn correlate-history!
   "Reconcile the selected fixture's pinned state/ledger windows and actual
