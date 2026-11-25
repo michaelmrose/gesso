@@ -2537,3 +2537,33 @@ and uses independently predicted physical histories as inputs. No
 production assurance status changes and no CLM-R2 premise is retired.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2634 — compose selected uncertain-outcome recovery
+
+Compose independent reconciliation and fresh source-scoped discovery with
+selected pending acquisition, expired reclamation and acknowledgment.
+Derive candidate identities and actions from the fresh page rather than
+interrupted credentials; attempt acknowledgment only after successful
+physical acquisition. A contended attempt adds its aborted transaction but
+no acknowledgment. Require one complete bounded page and explicit ordered
+slots; unsupported plans return no partial trace. Recovery profile v1;
+other reference profiles and history v19 unchanged.
+
+Combined reference JVM: 58 tests / 6905 assertions, zero failures or
+errors. Four recovery histories start from supplied physical hypotheses
+for unsubmitted, committed and aborted acknowledgment. Compare production
+inspection, fresh discovery, thirteen subsequent worker calls, exact
+operations and complete history rectangles against embedded XTDB. A
+contended recovery leaves the original intent eligible in a later fresh
+scan, while the other intent progresses. Pure regressions reject malformed
+plans, reused observed lease tokens and unsupported deadlines; an empty
+page makes no submissions. Corrected a test-only extra delimiter before
+the passing run.
+
+This establishes finite composed recovery correspondence, not the actual
+production cycle scheduler, live frontier acquisition, concurrent writer
+closure, authenticated restart or external delivery. The harness supplies
+physical prefix hypotheses, pinned observations, clocks, fresh identities
+and trusted receipt data. No production assurance status changes and no
+CLM-R2 premise is retired. Full project, physical Claim, Chromium and
+independent proof gates were not rerun.

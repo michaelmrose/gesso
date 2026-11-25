@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-lifecycle-test
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-lifecycle :as lifecycle]
+            [gesso.assurance.reference-recovery :as recovery]
             [gesso.assurance.reference-discovery :as reference-discovery]
             [gesso.live.outbox.discovery :as discovery]
             [gesso.assurance.reference-temporal :as temporal]
@@ -364,3 +365,91 @@
       (let [mixed (temporal/replay (conj (:transactions history) {:system-time (time-at 3)
                                                                 :ops [[:put-docs :gesso_live_outbox {:xt/id "legacy"}]]}))]
         (is (= :unsupported (:status (reference-discovery/predict-page mixed (time-at 3) opts))))))))
+
+(defn- recovery-slot [n lease receipt deadline]
+  {:worker-id "recovery" :lease-id (id lease) :receipt-id (id receipt) :adapter :test/adapter
+   :now (time-at 11) :acquire-time (time-at n) :ack-time (time-at (inc n))
+   :lease-until (time-at deadline)})
+
+(deftest independently-composed-fresh-recovery
+  (doseq [[mode n slots expected]
+          [[:not-submitted 3 [(recovery-slot 12 31 41 40) (recovery-slot 14 32 42 40)]
+            [:reclaimed :acknowledged :acquired :acknowledged]]
+           [:committed 3 [(recovery-slot 12 31 41 40)] [:acquired :acknowledged]]
+           [:aborted 10 [(recovery-slot 12 31 41 40) (recovery-slot 14 32 42 40)]
+            [:reclaimed :acknowledged :acquired :acknowledged]]
+           [:aborted 10 [(recovery-slot 12 31 41 12) (recovery-slot 14 32 42 40)]
+            [:contended :acquired :acknowledged]]]]
+    (let [history (lifecycle/predict-lifecycle (cond-> (subvec steps 0 3)
+                                                (not= :not-submitted mode) (conj (ack n 2 1 11 "a" 21))))
+          prefix (:transactions history)
+          s (:system-time (peek prefix)) clock (time-at 11)
+          failure (interruption 1 11 "a" 21)
+          p (recovery/predict-recovery prefix "lifecycle" failure clock slots)]
+      (is (= :predicted (:status p)))
+      (is (= :none (:authority p)))
+      (is (= :not-issued (:certificate p)))
+      (is (= expected (mapv :outcome (:calls p))))
+      (is (= (if (= :committed mode) :matching-acknowledgment-recorded :same-lease-active)
+             (get-in p [:inspection :status])))
+      (with-open [node (xtn/start-node {})]
+        (submit-history! node prefix)
+        (is (= (:inspection p)
+               (with-redefs [frontier/q-from! (pinned-read node s clock)]
+                 (reconciliation/inspect! node "lifecycle" failure))))
+        (let [page (discover-at! node clock {:source-id "lifecycle" :limit 128})
+              execute! live.xtdb/execute-tx!
+              actual (atom []) last-system (atom s)
+              invoke! (fn [kind time input]
+                        (let [observed @last-system captured (atom [])
+                              outcome (with-redefs [frontier/q-from! (pinned-read node observed time)
+                                                    live.xtdb/execute-tx! (fn [connectable ops]
+                                                                            (swap! captured conj ops)
+                                                                            (reset! last-system time)
+                                                                            (execute! connectable ops {:system-time time}))]
+                                        (case kind
+                                          :acquire-pending (acquisition/acquire-pending! node input)
+                                          :reclaim-expired (acquisition/reclaim-expired! node input)
+                                          :acknowledge (acknowledgment/acknowledge-dispatch! node input)))]
+                          (is (<= (count @captured) 1))
+                          (swap! actual conj (cond-> {:kind kind :system-time time :input input
+                                                     :observed-system observed :observed-valid time
+                                                     :outcome (:status outcome) :ops (or (first @captured) [])}
+                                              (:reason outcome) (assoc :reason (:reason outcome))))
+                          outcome))]
+          (is (= (:page p) page))
+          (doseq [[{:keys [intent-id action]} slot] (map vector (:candidates page) slots)]
+            (let [claim (assoc (select-keys slot [:worker-id :lease-id :now :lease-until])
+                               :intent-id intent-id :source-id "lifecycle")
+                  result (invoke! action (:acquire-time slot) claim)]
+              (when (#{:acquired :reclaimed} (:status result))
+                (invoke! :acknowledge (:ack-time slot)
+                         {:intent-id intent-id :worker-id (:worker-id slot) :lease-id (:lease-id slot)
+                          :receipt {:receipt-id (:receipt-id slot) :adapter (:adapter slot) :result :accepted}}))))
+          (is (= (:calls p) @actual))
+          (is (= (frequencies (coalesce-valid (get-in p [:replay :rectangles])))
+                 (frequencies (coalesce-valid (mapcat #(provider-rectangles node %) [:gesso_live_outbox :lifecycleprobe])))))
+          (let [final-page (discover-at! node (time-at 16) {:source-id "lifecycle" :limit 128})]
+            (is (= (if (= :contended (first expected)) [{:intent-id (id 1) :action :reclaim-expired}] [])
+                   (:candidates final-page)))
+            (is (= final-page (:page (reference-discovery/predict-page (:replay p) (time-at 16)
+                                                                     {:source-id "lifecycle" :limit 128}))))))))))
+
+(deftest fresh-recovery-fails-closed-on-unsupported-plan
+  (let [prefix (:transactions (lifecycle/predict-lifecycle (subvec steps 0 3)))
+        failure (interruption 1 11 "a" 21)
+        slots [(recovery-slot 12 31 41 40) (recovery-slot 14 32 42 40)]]
+    (doseq [bad [(pop slots) (conj slots (first slots))
+                 (assoc-in slots [1 :lease-id] (id 31))
+                 (assoc-in slots [0 :lease-id] (id 11))
+                 (assoc-in slots [0 :ack-time] (time-at 14))
+                 (assoc-in slots [1 :adapter] :invalid)
+                 (assoc-in slots [1 :lease-until] (time-at 400))]]
+      (let [p (recovery/predict-recovery prefix "lifecycle" failure (time-at 11) bad)]
+        (is (= :unsupported (:status p)))
+        (is (not-any? #(contains? p %) [:inspection :page :calls :transactions :replay]))))
+    (let [r (lifecycle/predict-lifecycle steps)
+          p (recovery/predict-recovery (:transactions r) "lifecycle" failure (time-at 16) [])]
+      (is (= :predicted (:status p)))
+      (is (= [] (:calls p)))
+      (is (= (:transactions r) (:transactions p))))))
