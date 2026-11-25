@@ -234,6 +234,11 @@
   (envelope/check-closed-recorded-transition! (physical-connectable! connectable)
                                                tx-id witness prefix writes assertions))
 
+(defn check-recorded-stutter!
+  "Qualify retained assertion-only operations through the exact opaque adapter."
+  [connectable tx-id]
+  (envelope/check-recorded-stutter! (physical-connectable! connectable) tx-id))
+
 (defn current-submission-policy-token
   "Observe the current opaque policy generation through a live handle or
    physical node. The token grants no submission or registration authority."

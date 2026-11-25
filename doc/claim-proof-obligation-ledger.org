@@ -1529,3 +1529,33 @@ all database transactions. Selected-snapshot stutters and infrastructure
 transitions still need their own retained-operation correspondence.
 Provider execution refinement, residual assertion ordering and physical
 writer authority remain open. No CLM-R2 premise is retired.
+
+* v2598 — qualify committed stutters from retained operations
+
+Equal selected snapshots alone no longer qualify a committed stutter.
+Acquire the exact retained source message through the opaque adapter,
+check source profile and transaction identity, and refuse any decoded put,
+including a scheduled or unselected write. Require a lossless round trip
+through the restricted assertion-only language and a separately observed
+committed outcome. Missing or unsupported source operations remain
+unclassified. Preserve aborted-stutter and worker classification paths.
+Record assertion-only correspondence in the conditional operational
+argument. Advance history and checkpoint profiles to v14; v13 and older
+checkpoints require rescanning.
+
+JVM initialization/history and operational-report namespaces: 24 tests,
+557 assertions, one failure and zero errors on the first run. The failure
+was a new test reading the chunk-only first-unclassified field from the
+whole-history report; correct it to inspect the step reason. The corrected
+regression rerun passed 1 test / 11 assertions, zero failures or errors.
+Other tests in the initial run passed. Real embedded histories exercise
+assertion-only stutters, unselected writes, scheduled writes, sticky
+findings and valid-time discontinuities. The unavailable-log control is
+injected. Physical Claim and mapped-projection report expectations are
+updated but those suites, the full project, Chromium and separate proof
+gates were not rerun.
+
+The check is conditional on the retained decoder and assertion semantics,
+not a proof of provider execution or arbitrary SQL read-only behavior.
+Aborted attempts and infrastructure transitions still need independent
+retained-operation correspondence. No CLM-R2 premise is retired.

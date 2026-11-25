@@ -385,7 +385,7 @@
             (is (= :observed-interval-checked (:status initial)))
             (is (= [] (:steps initial)))
             ;; Raw writes deliberately bypass mediation to test the independent audit.
-            (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+            (xt/execute-tx node [["ASSERT TRUE"]])
             (is (= :assert-failed (assert-result #(xt/execute-tx node [["ASSERT FALSE"]]))))
             (let [report (history/audit! handle admission 16)]
               (is (= :observed-interval-checked (:status report)))
@@ -420,7 +420,7 @@
           (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :item-count 99}]])
           (xt/execute-tx node seed)
           (is (= :assert-failed (assert-result #(xt/execute-tx node [["ASSERT FALSE"]]))))
-          (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+          (xt/execute-tx node [["ASSERT TRUE"]])
           (let [handle (xtdb/adapter-connectable! node)
                 a (history/audit-chunk! handle admission 1)
                 b (history/audit-chunk! handle admission 2 (:checkpoint a))
@@ -445,7 +445,7 @@
               (is (= (:through-basis c) (:through-basis empty))))
             ;; The next chunk may extend the target; it must start at the old
             ;; anchor and retain all earlier unresolved observations.
-            (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 2}]])
+            (xt/execute-tx node [["ASSERT TRUE"]])
             (let [extended (history/audit-chunk! handle admission 1 (:checkpoint c))]
               (is (= [:observed-mapped-stutter] (mapv :classification (:steps extended))))
               (is (= {:unclassified 2 :aborted-stutter 1 :observed-mapped-stutter 2} (:counts extended)))
@@ -649,29 +649,30 @@
                 scheduled (.plusSeconds (java.time.Instant/now) 5)
                 key (byte-array 32)]
             ;; Deliberate raw writer bypass. At the first ledger sample the
-            ;; scheduled row is not yet valid, so the observation stutters.
+            ;; scheduled row is not yet valid, but its retained write is refused.
             (xt/execute-tx node [[:put-docs {:into :requests :valid-from scheduled}
                                  {:xt/id "r1" :item-count -1}]])
             (let [prefix (history/audit-chunk! handle admission 8)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "sampled-v2")
                   cursor (history/restore-checkpoint! handle admission sealed key "sampled-v2")
-                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v12)
+                  old-payload (assoc (:payload sealed) :profile :selected-mapped-history-checkpoint-v13)
                   old-mac ((deref (ns-resolve 'gesso.live.outbox.history-coverage 'checkpoint-mac)) key old-payload)
                   old-sealed {:payload old-payload :mac (.formatHex (java.util.HexFormat/of) ^bytes old-mac)}]
-              (is (= :selected-mapped-history-checkpoint-v13 (get-in sealed [:payload :profile])))
+              (is (= :selected-mapped-history-checkpoint-v14 (get-in sealed [:payload :profile])))
               (is (= :invalid-durable-history-checkpoint
                      (reason #(history/restore-checkpoint! handle admission old-sealed key "sampled-v2"))))
-              (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))
+              (is (= [:unclassified] (mapv :classification (:steps prefix))))
+              (is (= :historical-stutter-contains-write (get-in prefix [:first-unclassified :reason])))
               ;; An unrelated transaction does not change the selected rows
               ;; at its own clock, but valid-time advancement changed them.
               (let [remaining (.toMillis (java.time.Duration/between (java.time.Instant/now) scheduled))]
                 (when (>= remaining 0) (Thread/sleep (+ 100 remaining))))
-              (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+              (xt/execute-tx node [["ASSERT TRUE"]])
               (let [extended (history/audit-chunk! handle admission 8 cursor)
                     whole (history/audit! handle admission 8)]
                 (is (= :unclassified-steps (:status extended)))
-                (is (= :sampled-valid-time-discontinuity (get-in extended [:first-unclassified :reason])))
-                (is (= {:observed-mapped-stutter 1 :unclassified 1} (:counts extended)))
+                (is (= :sampled-valid-time-discontinuity (get-in extended [:steps 0 :reason])))
+                (is (= {:unclassified 2} (:counts extended)))
                 (is (= (:steps whole) (into (:steps prefix) (:steps extended))))
                 (is (contains? (:open-obligations extended) :valid-time-continuity-between-steps)))))
           (finally (release)))))))
@@ -694,15 +695,16 @@
                   key (byte-array 32)
                   sealed (history/seal-checkpoint! handle admission (:checkpoint prefix) key "interior-v3")
                   cursor (history/restore-checkpoint! handle admission sealed key "interior-v3")]
-              (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))
+              (is (= [:unclassified] (mapv :classification (:steps prefix))))
+              (is (= :historical-stutter-contains-write (get-in prefix [:first-unclassified :reason])))
               (let [remaining (.toMillis (java.time.Duration/between (java.time.Instant/now) end))]
                 (when (>= remaining 0) (Thread/sleep (+ 100 remaining))))
-              (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+              (xt/execute-tx node [["ASSERT TRUE"]])
               (let [extended (history/audit-chunk! handle admission 8 cursor)
                     whole (history/audit! handle admission 8)]
                 (is (= :unclassified-steps (:status extended)))
-                (is (= :interior-valid-time-boundary (get-in extended [:first-unclassified :reason])))
-                (is (= {:observed-mapped-stutter 1 :unclassified 1} (:counts extended)))
+                (is (= :interior-valid-time-boundary (get-in extended [:steps 0 :reason])))
+                (is (= {:unclassified 2} (:counts extended)))
                 (is (= (:steps whole) (into (:steps prefix) (:steps extended))))
                 (is (contains? (:open-obligations extended) :valid-time-continuity-between-steps)))))
           (finally (release)))))))
@@ -719,7 +721,7 @@
             release (xtdb/register-submission-policy! node writer)]
         (try
           (policy/activate-policy! writer)
-          (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+          (xt/execute-tx node [["ASSERT TRUE"]])
           (let [handle (xtdb/adapter-connectable! node)
                 prefix (history/audit-chunk! handle admission 8)
                 describe #(operational-report/describe-application
@@ -762,7 +764,7 @@
                                              :puts [[:put-docs :gesso_commands record]]})]
               (xt/execute-tx node (envelope/bind-transition-envelope! (ops "good")))
               (let [prefix (history/audit-chunk! handle admission 8)]
-                (is (= :selected-mapped-ledger-chunk-v13 (:profile prefix)))
+                (is (= :selected-mapped-ledger-chunk-v14 (:profile prefix)))
                 (is (= :observed-interval-checked (:status prefix)))
                 (is (= [:matched] (mapv :recorded-envelope (:steps prefix))))
                 (is (= [:matched] (mapv :intended-guard-prefix (:steps prefix))))
@@ -861,3 +863,34 @@
                     (do (is (= :submission-policy-refused (reason #(xtdb/execute-tx! node seed))))
                         (is (empty? @observed)))))))
             (finally (release))))))))
+
+(deftest committed-stutters-require-retained-assertion-only-operations
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (let [handle (xtdb/adapter-connectable! node)
+                good (:tx-id (xt/execute-tx node [["ASSERT ? = ?" 1 1]]))
+                prefix (history/audit-chunk! handle admission 1)]
+            (is (= :observed-interval-checked (:status prefix)))
+            (is (= [:observed-mapped-stutter] (mapv :classification (:steps prefix))))
+            (is (= :assertion-only (get-in prefix [:steps 0 :stutter-operations])))
+            (is (= :matched (:status (xtdb/check-recorded-stutter! handle good))))
+            (with-redefs [source-log/observe-source-message! (fn [& _] {:status :unavailable :reason :source-message-not-retained})]
+              (is (= :historical-stutter-envelope-unavailable
+                     (get-in (history/audit! handle admission 8) [:steps 0 :reason]))))
+            (let [hidden (:tx-id (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]]))
+                  extended (history/audit-chunk! handle admission 8 (:checkpoint prefix))]
+              (is (= :unclassified-steps (:status extended)))
+              (is (= :historical-stutter-contains-write (get-in extended [:first-unclassified :reason])))
+              (is (= :stutter-contains-write (:reason (xtdb/check-recorded-stutter! handle hidden))))
+              (is (= {:observed-mapped-stutter 1 :unclassified 1} (:counts extended)))
+              (xt/execute-tx node [["ASSERT TRUE"]])
+              (let [later (history/audit-chunk! handle admission 8 (:checkpoint extended))]
+                (is (= {:observed-mapped-stutter 2 :unclassified 1} (:counts later)))
+                (is (= (:first-unclassified extended) (:first-unclassified later))))))
+          (finally (release)))))))

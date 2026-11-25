@@ -205,6 +205,44 @@
       (reject! :unsupported-observed-envelope))
     ops))
 
+(defn check-recorded-stutter!
+  "Qualify a committed, retained assertion-only transaction. No document
+   writes, other SQL or unsupported operations are admitted. This is a
+   decoded operation check, conditional on provider semantics and retention."
+  [node tx-id]
+  (let [report (fn [status reason]
+                 (cond-> {:status status :profile profile :authority :none :certificate :not-issued}
+                   reason (assoc :reason reason)))]
+    (try
+      (let [observed (source-log/observe-source-message! node tx-id)]
+        (case (:status observed)
+          :unavailable (report :unavailable (:reason observed))
+          :unsupported (report :unsupported (:reason observed))
+          :source-message-observed
+          (cond
+            (not= log-profile (:provider-profile observed)) (report :unsupported :source-profile-mismatch)
+            (not= tx-id (:tx-id observed)) (report :mismatch :source-transaction-identity-mismatch)
+            (some #(= :put-docs (:kind %)) (:operations observed)) (report :mismatch :stutter-contains-write)
+            :else
+            (let [ops (observed-restricted-operations! (:operations observed))
+                  outcomes (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" tx-id])]
+              (cond
+                (not (every? #(string? (first %)) ops)) (report :mismatch :stutter-contains-write)
+                (empty? outcomes) (report :unavailable :transaction-outcome-unavailable)
+                (not (and (= 1 (count outcomes)) (boolean? (:committed (first outcomes)))))
+                (report :unsupported :invalid-transaction-outcome)
+                (not= [{:committed true}] outcomes) (report :mismatch :transaction-outcome-mismatch)
+                :else (assoc (report :matched nil) :tx-id tx-id :stutter-operations :assertion-only))))
+          (report :unsupported :unexpected-source-observation)))
+      (catch InterruptedException e
+        (.interrupt (Thread/currentThread))
+        (throw e))
+      (catch clojure.lang.ExceptionInfo e
+        (if (::unsupported (ex-data e))
+          (report :unsupported (:reason (ex-data e)))
+          (report :unavailable :envelope-check-failed)))
+      (catch Exception _ (report :unavailable :envelope-check-failed)))))
+
 (defn- selected-put-entries [operations tables]
   ;; Compare full decoded documents with multiplicity. Grouping disjoint
   ;; puts is immaterial here; duplicate writes are not silently collapsed.
