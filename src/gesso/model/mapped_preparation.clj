@@ -8,7 +8,8 @@
             [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.mapped-projection :as projection]
-            [gesso.model.mapped-frame :as frame]))
+            [gesso.model.mapped-frame :as frame]
+            [gesso.model.tx :as tx]))
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid mapped command preparation."
@@ -25,7 +26,10 @@
    Only pass the mapped puts after checking the full transaction footprint.
    The four-argument admit! additionally requires the formatted pre-write
    guard prefix to match the same consumed preparation. The three-argument
-   form checks supplied replacements only; it is not framed admission."
+   form checks supplied replacements only; it is not framed admission.
+   frame-guards! previews the generated prefix without consuming it;
+   admit-framed! consumes and checks that exact prefix against the same
+   captured rows used for candidate validation."
   ([catalog target-map decode-outcome!]
    (build-admission! catalog target-map decode-outcome! nil))
   ([catalog target-map decode-outcome! document-effects]
@@ -64,7 +68,17 @@
                                         (when (contains? m k) (reject! :duplicate-pending-preparation))
                                         (assoc m k {:binding binding :snapshot snapshot :inputs inputs})))
                        nil))
-          admit-candidate! (fn [id command-id puts framed? formatted-guards]
+          lower-frame! (fn [id snapshot]
+                         (when-not (some? document-effects)
+                           (reject! :invalid-framed-admission))
+                         (mapv tx/format-assertion
+                               (frame/prestate-assertions! (:mapping (operation! id))
+                                                           (:document-rows snapshot))))
+          frame-guards! (fn [id command-id]
+                          (let [entry (or (get @pending [command-id id])
+                                          (reject! :missing-preparation))]
+                            (lower-frame! id (:snapshot entry))))
+          admit-candidate! (fn [id command-id puts frame-mode formatted-guards]
                    (let [k [command-id id]
                          [prior _] (swap-vals! pending dissoc k)
                          {:keys [binding snapshot inputs]} (or (get prior k) (reject! :missing-preparation))
@@ -81,20 +95,28 @@
                          (reject! :preparation-state-mismatch))
                        (when (some? document-effects)
                          (frame/check-replacements! mapping (get document-effects id) (:document-rows snapshot) puts))
-                       (when framed?
+                       (when frame-mode
                          (when-not (and (some? document-effects) (vector? formatted-guards)
                                         (every? vector? formatted-guards))
                            (reject! :invalid-framed-admission))
-                         (frame/require-prestate-assertions! mapping (:document-rows snapshot) formatted-guards))
+                         (if (= :exact frame-mode)
+                           (when-not (= (lower-frame! id snapshot) formatted-guards)
+                             (reject! :noncanonical-frame-prefix))
+                           (frame/require-prestate-assertions! mapping (:document-rows snapshot) formatted-guards)))
                        (cond-> checked
                          (some? document-effects)
                          (assoc :document-frame :checked-supplied-complete-rows)
-                         framed?
-                         (assoc :frame-prestate :checked-supplied-prewrite-guards)))))
+                         frame-mode
+                         (assoc :frame-prestate :checked-supplied-prewrite-guards)
+                         (= :exact frame-mode)
+                         (assoc :frame-prefix :exact-generated-prefix)))))
           admit! (fn
-                   ([id command-id puts] (admit-candidate! id command-id puts false nil))
+                   ([id command-id puts] (admit-candidate! id command-id puts nil nil))
                    ([id command-id puts formatted-guards]
-                    (admit-candidate! id command-id puts true formatted-guards)))]
+                    (admit-candidate! id command-id puts :contains formatted-guards)))]
       {:prepare! prepare! :admit! admit!
+       :frame-guards! frame-guards!
+       :admit-framed! (fn [id command-id puts prefix]
+                        (admit-candidate! id command-id puts :exact prefix))
        :discard! (fn [id command-id] (swap! pending dissoc [command-id id]) nil)
        :pending? (fn [id command-id] (contains? @pending [command-id id]))}))))

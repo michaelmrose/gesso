@@ -323,8 +323,8 @@
       (doseq [[id mapping] mappings] (frame/check-effects! mapping (get effects id)))
       (assoc checked :auxiliary-tables auxiliary :document-effects effects))))
 
-(defn- admit-transaction!
-  [registry footprint! auxiliary {:keys [api tx-ops tx-options] :as submission}]
+(defn- inspect-transaction!
+  [footprint! auxiliary {:keys [api tx-ops tx-options] :as submission}]
   (exact-map! submission #{:api :tx-ops :tx-options} [:submission])
   (when-not (and (= :execute-tx api) (or (nil? tx-options) (= {} tx-options))
                  (vector? tx-ops) (every? vector? tx-ops))
@@ -346,8 +346,33 @@
       (when-not (and (qualified-keyword? alternative) (string? command-id) (seq command-id))
         (reject! :invalid-transaction-identity [:footprint] {}))
       {:identity identity
-       :candidate ((:admit! registry) alternative command-id
-                   (filterv #(not (contains? auxiliary (second %))) puts))})))
+       :puts (filterv #(not (contains? auxiliary (second %))) puts)})))
+
+(defn- admit-transaction! [registry footprint! auxiliary submission]
+  (let [{:keys [identity puts]} (inspect-transaction! footprint! auxiliary submission)]
+    {:identity identity
+     :candidate ((:admit! registry) (:alternative identity) (:command-id identity) puts)}))
+
+(defn- frame-submission! [registry footprint! auxiliary submission]
+  (let [{:keys [identity]} (inspect-transaction! footprint! auxiliary submission)
+        prefix ((:frame-guards! registry) (:alternative identity) (:command-id identity))]
+    (update submission :tx-ops #(into prefix %))))
+
+(defn- admit-framed-transaction! [registry footprint! auxiliary original actual]
+  ;; Only the unextended canonical transaction goes to the trusted footprint
+  ;; checker. The extra SQL prefix has its own exact source-derived check.
+  ;; No ordinary predicate, write, option or API may change in transit.
+  (let [{:keys [identity puts]} (inspect-transaction! footprint! auxiliary original)
+        base (:tx-ops original)
+        ops (:tx-ops actual)]
+    (exact-map! actual #{:api :tx-ops :tx-options} [:submission])
+    (when-not (and (= (dissoc original :tx-ops) (dissoc actual :tx-ops))
+                   (vector? ops) (<= (count base) (count ops))
+                   (= base (subvec ops (- (count ops) (count base)))))
+      (reject! :changed-framed-transaction [:submission] {}))
+    {:identity identity
+     :candidate ((:admit-framed! registry) (:alternative identity) (:command-id identity)
+                 puts (subvec ops 0 (- (count ops) (count base))))}))
 
 (defn- mapped-description [checked]
   (assoc checked :type ::issued-mapped-admission
@@ -361,20 +386,27 @@
   "Issue a local callable preparation registry from the original catalog and
    both live induction handles. Admit only a complete synchronous transaction
    envelope via the captured trusted footprint checker and mapped registry.
-   The decoder, acquisition and footprint checker are trusted; no SQL
+   :frame-submission! constructs a separate, generated pre-write prefix
+   over a canonical envelope without consuming its preparation.
+   :admit-framed! takes the original and actual envelopes, checks their exact
+   relationship and consumes the preparation with the exact prefix check.
+   The older :admit! is unframed; neither path submits a transaction.
+   The decoder, acquisition and footprint checker are trusted; no general SQL
    refinement or installed executor correspondence is established. Calls do not recheck the
    induction proof; use require-current-mapped-admission! at assembly review."
   [source]
   (let [checked (checked-mapped-source! source)
         registry (original-mapped-builder (get-in source [:inductive-source :catalog])
                                           (:target-map source) (:decode-outcome! source) (:document-effects source))
+        footprint! (:transaction-footprint! source)
+        auxiliary (:auxiliary-tables source)
         admission (fn [action & args]
-                    (if (= :admit! action)
-                      (apply admit-transaction! registry (:transaction-footprint! source)
-                             (:auxiliary-tables source) args)
-                      (if-let [f (get registry action)]
-                        (apply f args)
-                        (reject! :unknown-mapped-admission-action [action] {}))))]
+                    (case action
+                      :admit! (apply admit-transaction! registry footprint! auxiliary args)
+                      :frame-submission! (apply frame-submission! registry footprint! auxiliary args)
+                      :admit-framed! (apply admit-framed-transaction! registry footprint! auxiliary args)
+                      (:prepare! :discard! :pending?) (apply (get registry action) args)
+                      (reject! :unknown-mapped-admission-action [action] {})))]
     (locking issued-mapped
       (.put issued-mapped admission {:source source :description (mapped-description checked)}))
     admission))

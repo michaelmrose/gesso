@@ -6,6 +6,7 @@
             [gesso.model.mapped-preparation :as preparation]
             [gesso.model.mapped-frame :as frame]
             [gesso.model.certified-plan :as plan]
+            [gesso.model.inductive-plan :as inductive]
             [gesso.model.tx :as tx]))
 
 (def ^:private source
@@ -231,3 +232,75 @@
     (let [{:keys [prepare! admit!]} (preparation/build-admission! catalog targets decoder)]
       (prepare! id (:gesso.command/binding row) snapshot {})
       (is (= :invalid-framed-admission (reason #(admit! id "c1" puts guards)))))))
+
+(deftest framed-envelope-preserves-the-exact-original-footprint
+  (let [id :example/projection
+        original (assoc source :writes #{:example/count :example/one :example/owner}
+                        :replacements {:example/count [:literal 3] :example/one [:literal :accepted]
+                                       :example/owner [:literal "p1"]}
+                        :frame #{:example/enabled :example/two})
+        catalog {:declared-operation-ids #{id} :operations [{:id id :construction original}]}
+        effects {id {[:document :requests "r1"] {} [:document :assignments "a1"] {}}}
+        decoder #(get-in % [:gesso.command/outcome :result])
+        docs (update-in rows [:requests 0] assoc :hidden "original")
+        snapshot {:document-rows docs :records {} :state (project docs [])}
+        row (record "c1" "p1")
+        base {:api :execute-tx :tx-options {}
+              :tx-ops [["ASSERT TRUE"]
+                       [:put-docs :requests (assoc (first (:requests docs)) :item-count 3)]
+                       [:put-docs :assignments {:xt/id "a1" :owner "p1"}]
+                       [:put-docs :gesso_commands row]
+                       [:put-docs :outbox {:xt/id "intent"}]]}
+        identity {:alternative id :command-id "c1"}
+        seen (atom [])
+        footprint! (fn [ops]
+                     (swap! seen conj ops)
+                     (when-not (= (:tx-ops base) ops)
+                       (throw (ex-info "Unexpected footprint" {:reason :invalid-footprint})))
+                     identity)
+        registry (preparation/build-admission! catalog targets decoder effects)
+        prepare #((:prepare! registry) id (:gesso.command/binding row) snapshot {})
+        build #(#'inductive/frame-submission! registry footprint! #{:outbox} %)
+        admit #(#'inductive/admit-framed-transaction! registry footprint! #{:outbox} base %)
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= :missing-preparation (reason #(build base))))
+    (prepare)
+    (let [actual (build base)
+          prefix ((:frame-guards! registry) id "c1")
+          ops (:tx-ops actual)
+          n (count prefix)]
+      (is (= 3 n))
+      (is (= (into prefix (:tx-ops base)) ops))
+      (is (= (dissoc base :tx-ops) (dissoc actual :tx-ops)))
+      (is ((:pending? registry) id "c1"))
+      (is (= :invalid-footprint (reason #(build (update base :tx-ops conj [:put-docs :outbox {:xt/id "other"}])))))
+      (doseq [bad [(assoc actual :api :submit-tx)
+                   (assoc actual :tx-options {:database :other})
+                   (update actual :tx-ops pop)
+                   (assoc-in actual [:tx-ops n 0] "ASSERT FALSE")
+                   (assoc-in actual [:tx-ops (dec (count ops)) 2 :xt/id] "other")]]
+        (is (= :changed-framed-transaction (reason #(admit bad))))
+        (is ((:pending? registry) id "c1")))
+      (doseq [bad [base
+                   (assoc actual :tx-ops (into (subvec prefix 1) (:tx-ops base)))
+                   (assoc actual :tx-ops (into [["ASSERT TRUE"]] ops))
+                   (assoc actual :tx-ops (into (vec (reverse prefix)) (:tx-ops base)))]]
+        (is (= :noncanonical-frame-prefix (reason #(admit bad))))
+        (is (not ((:pending? registry) id "c1")))
+        (prepare))
+      ;; A preview is not a reservation of the preparation. Re-registration
+      ;; with changed complete rows cannot admit the old generated prefix.
+      ((:discard! registry) id "c1")
+      (let [different (assoc-in docs [:requests 0 :hidden] "new")]
+        ((:prepare! registry) id (:gesso.command/binding row)
+         {:document-rows different :records {} :state (project different [])} {}))
+      (is (= :unmapped-document-frame-mismatch (reason #(admit actual))))
+      (prepare)
+      (let [result (admit actual)]
+        (is (= identity (:identity result)))
+        (is (= :exact-generated-prefix (get-in result [:candidate :frame-prefix])))
+        (is (= :none (get-in result [:candidate :authority])))
+        (is (false? (get-in result [:candidate :transaction-submitted?]))))
+      (is (= :missing-preparation (reason #(admit actual))))
+      (is (= 1 (count (remove #(= (:tx-ops base) %) @seen))))
+      (is (not-any? #(= ops %) @seen)))))
