@@ -84,3 +84,41 @@
                                          :complete-physical-induction-correspondence]))
       (is (= r (edn/read-string (pr-str r)))))
     (is (contains? (:open-obligations mismatch) :static-history-source-join-open))))
+
+(deftest physical-prefix-argument-requires-clean-current-profile
+  (let [abstract {:identity (:source sample)
+                  :verdict :source-bound-conditional-abstract-safety
+                  :checking :original-sources-and-both-live-handles-rechecked
+                  :all-declared-invariants-conditionally-inductive? true
+                  :declared-invariant-ids #{:example/nonnegative}}
+        snapshot (update sample :report assoc
+                         :profile :selected-mapped-ledger-chunk-v3
+                         :initialization {:system-time time :catalog-fingerprint "catalog"
+                                          :case-fingerprint "case" :initialization-fingerprint "initial"
+                                          :physical-correspondence :checked-supplied-projection})
+        joined (report/describe-application abstract snapshot)
+        arg (:physical-induction joined)]
+    (is (= :conditional-observed-prefix-argument (:status arg)))
+    (is (= :v3-prefix-checked (get-in arg [:premises :visible-valid-time-continuity])))
+    (is (= #{:example/nonnegative} (:invariant-ids arg)))
+    (is (= (get-in joined [:history :coverage :through]) (:through arg)))
+    (is (= :none (:authority arg)))
+    (is (= :not-issued (:certificate arg)))
+    (is (every? (:open-obligations joined) (:open-obligations arg)))
+    (is (= joined (edn/read-string (pr-str joined))))
+    (doseq [[a s] [[(dissoc abstract :checking) snapshot]
+                   [(assoc abstract :all-declared-invariants-conditionally-inductive? false) snapshot]
+                   [abstract (assoc-in snapshot [:source :induction-fingerprint] "different")]
+                   [abstract (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v2)]
+                   [abstract (assoc-in snapshot [:report :initialization :catalog-fingerprint] "different")]
+                   [abstract (assoc-in snapshot [:report :initialization :system-time] (.plusSeconds time 1))]
+                   [abstract (assoc-in snapshot [:report :counts] {:unknown 1})]
+                   [abstract (assoc-in snapshot [:report :counts] {:unclassified 1})]
+                   [abstract (assoc-in snapshot [:report :counts] {:aborted-stutter -1})]
+                   [abstract (assoc snapshot :last-error :history-advance-failed)]
+                   [abstract (assoc snapshot :phase :closed)]
+                   [abstract nil]]]
+      (let [r (:physical-induction (report/describe-application a s))]
+        (is (= :not-established (:status r)))
+        (is (= #{} (:invariant-ids r)))
+        (is (nil? (:through r)))))))

@@ -80,6 +80,51 @@
                                    retired? (conj :history-controller-inactive)
                                    scheduler-stopped? (conj :history-scheduler-recovery)))))))
 
+(defn- physical-prefix-argument [abstract snapshot history matching?]
+  (let [r (:report snapshot)
+        initial (:initialization r)
+        counts (:counts r)
+        invariants (:declared-invariant-ids abstract)
+        abstract? (and (= :source-bound-conditional-abstract-safety (:verdict abstract))
+                       (= :original-sources-and-both-live-handles-rechecked (:checking abstract))
+                       (true? (:all-declared-invariants-conditionally-inductive? abstract))
+                       (set? invariants) (seq invariants))
+        initial? (and matching?
+                      (= (:catalog-fingerprint initial) (get-in abstract [:identity :catalog-fingerprint]))
+                      (= :checked-supplied-projection (:physical-correspondence initial))
+                      (every? #(and (string? %) (seq %))
+                              (map initial [:case-fingerprint :initialization-fingerprint]))
+                      (instance? java.time.Instant (:system-time initial))
+                      (:through-basis r)
+                      (not (pos? (compare (:system-time initial)
+                                         (xtdb/basis-system-time (:through-basis r))))))
+        clean? (and (= :selected-mapped-ledger-chunk-v3 (:profile r))
+                    (#{:observed-interval-checked :partial-interval} (:status history))
+                    (= (:status r) (:status history))
+                    (= (:caught-up? r) (= :observed-interval-checked (:status r)))
+                    (map? counts) (nil? (:first-unclassified r))
+                    (every? (fn [[k n]]
+                              (and (#{:verified-mapped-transition :verified-infrastructure-transition
+                                      :observed-mapped-stutter :aborted-stutter} k)
+                                   (integer? n) (pos? n))) counts))
+        eligible? (and matching? abstract? initial? clean?)]
+    {:status (if eligible? :conditional-observed-prefix-argument :not-established)
+     :scope :selected-mapped-history-through-persisted-basis
+     :authority :none :certificate :not-issued
+     :premises {:source-identity (if matching? :matched :open)
+                :abstract-induction (if abstract? :conditionally-checked :open)
+                :physical-initialization (if initial? :observed-projection-checked :open)
+                :historical-step-coverage (if clean? :clean-v3-prefix :open)
+                :visible-valid-time-continuity (if clean? :v3-prefix-checked :open)}
+     :invariant-ids (if eligible? invariants #{})
+     :through (when eligible? (get-in history [:coverage :through]))
+     :open-obligations #{:historical-retention-and-checkpoint-integrity
+                         :unrestricted-physical-writer-closure
+                         :transaction-internal-read-basis-refinement
+                         :valid-time-continuity-between-steps
+                         :history-coverage-beyond-sampled-frontier
+                         :complete-physical-induction-correspondence}}))
+
 (defn describe-application
   "Join source-relative abstract and operational descriptions by exact
    catalog and induction fingerprints. A matching description is not a
@@ -97,7 +142,8 @@
                        (= static-source history-source))
         assumptions (get-in abstract [:classification :open :assumptions])
         premises (get-in abstract [:classification :certificate :open-premises])
-        original (get-in abstract [:classification :original-obligations :by-operation])]
+        original (get-in abstract [:classification :original-obligations :by-operation])
+        argument (physical-prefix-argument abstract snapshot history matching?)]
     {:type :gesso.assurance/operational-application-report
      :version 1 :authority :none :certificate :not-issued :full-success? false
      :scope :conditional-abstract-and-last-persisted-history-descriptions
@@ -113,7 +159,9 @@
                         :open-assumptions assumptions :open-premises premises
                         :original-open-obligations original))
      :history history
-     :open-obligations (cond-> (into (into (into (:open-obligations history) assumptions)
+     :physical-induction argument
+     :open-obligations (cond-> (into (into (into (into (:open-obligations history)
+                                                      (:open-obligations argument)) assumptions)
                                             premises) (mapcat val original))
                          (not abstract) (conj :abstract-induction-not-selected)
                          (not matching?) (conj :static-history-source-join-open)

@@ -698,3 +698,33 @@
                 (is (= (:steps whole) (into (:steps prefix) (:steps extended))))
                 (is (contains? (:open-obligations extended) :valid-time-continuity-between-steps)))))
           (finally (release)))))))
+
+(deftest physical-prefix-argument-from-issued-admission-and-observed-history
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config {:admission admission :initializer seed :observe! identity}
+        source (select-keys (inductive/describe-mapped-admission admission)
+                            [:catalog-fingerprint :induction-fingerprint])
+        abstract (inductive/recheck-mapped-induction! admission)]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config {:source-id "s"})
+            release (xtdb/register-submission-policy! node writer)]
+        (try
+          (policy/activate-policy! writer)
+          (xt/execute-tx node [[:put-docs :unmapped {:xt/id "outside" :value 1}]])
+          (let [handle (xtdb/adapter-connectable! node)
+                prefix (history/audit-chunk! handle admission 8)
+                describe #(operational-report/describe-application
+                           abstract {:phase :open :source source :report %})
+                checked (describe prefix)]
+            (is (= :conditional-observed-prefix-argument (get-in checked [:physical-induction :status])))
+            (is (= #{:example/nonnegative} (get-in checked [:physical-induction :invariant-ids])))
+            (is (= {:observed-mapped-stutter 1} (:counts prefix)))
+            (xt/execute-tx node [[:put-docs :requests {:xt/id "r1" :item-count -1}]])
+            (let [extended (history/audit-chunk! handle admission 8 (:checkpoint prefix))
+                  refused (describe extended)]
+              (is (= :unclassified-steps (:status extended)))
+              (is (= :not-established (get-in refused [:physical-induction :status])))
+              (is (contains? (:open-obligations refused) :unclassified-historical-steps))
+              (is (= :not-issued (:certificate refused)))))
+          (finally (release)))))))
