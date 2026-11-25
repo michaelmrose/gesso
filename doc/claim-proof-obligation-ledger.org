@@ -4321,3 +4321,23 @@ Independent expectations are still caller-supplied, not reconstructed
 from retained bytes. Quiescence, authenticated provenance and universal
 refinement remain unestablished. No admission, certificate or CLM-R2
 premise retirement. Full project and independent formal gates not rerun.
+
+* v2702 — derive selected replay inputs from retained transaction bytes
+
+Add an independent envelope-to-temporal-input projection for explicit
+system times, selected UTC zone labels, absent or default xtdb user,
+ordinary public document puts without temporal bounds, and exact literal
+or positional equality assertions. Validate against the existing temporal
+interpreter; reject unsupported context, operation forms and value domains
+without returning partial inputs. No provider outcome or ledger consulted.
+The caller-supplied coordinate is not independently authenticated.
+
+Focused JVM: 67 tests / 4456 assertions, zero failures or errors across
+nine namespaces; new persistent fixture 1 test / 42 assertions. Derive
+exact submitted input shapes before and after reopening and independently
+predict commit, abort, commit. Reject implicit times, unsupported zones,
+users, metadata, bounded puts and unqualified SQL. Initial test exposed
+writer defaults Etc/UTC and xtdb user; qualify these exact defaults.
+Whole-history acquisition and correspondence integration remain open.
+No admission change, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.
