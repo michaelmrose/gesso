@@ -15,7 +15,7 @@
 (defn- no-match! [r]
   (is (not-any? #(contains? r %) [:operation-correspondence :operation-message-id
                                  :payload-correspondence :payload-fingerprint
-                                 :operations :tx-ops :message :bytes]))
+                                 :operations :tx-ops :message :bytes :processed-message-id]))
   (is (= :none (:authority r)))
   (is (= :not-issued (:certificate r))))
 
@@ -96,9 +96,64 @@
                  (no-match! r)))))
     (is (= r (observe! tx-id)))))
 
+(defn- check-processed-retained! [node [flush-id tx-id other-id]]
+  (let [observe! #(coverage/observe-local-processed-retained-operation! node %)
+        retained (coverage/observe-local-retained-operation! node tx-id)
+        r (observe! tx-id)
+        frontier {:submitted other-id :processed other-id :ingestion-failed? false}]
+    (is (= :observed (:status r)) (pr-str r))
+    (is (= coverage/local-processed-retained-operation-profile (:processed-retained-operation-profile r)))
+    (is (= coverage/local-processed-profile (:processed-profile r)))
+    (is (= other-id (:processed-message-id r) (:last-message-id r)))
+    (is (= tx-id (:operation-message-id r)))
+    (is (= retained (dissoc r :processed-retained-operation-profile :processed-profile :processed-message-id)))
+    (doseq [[before after reason]
+            [[(assoc frontier :processed tx-id) (assoc frontier :processed tx-id) :source-processing-incomplete]
+             [(assoc frontier :processed (inc tx-id)) (assoc frontier :processed (inc tx-id)) :source-processed-offset-not-framed]
+             [(assoc frontier :processed -1) (assoc frontier :processed -1) :source-processing-incomplete]
+             [(assoc frontier :processed nil) (assoc frontier :processed nil) :source-frontier-contradiction]
+             [(update frontier :processed inc) (update frontier :processed inc) :source-frontier-contradiction]
+             [(assoc frontier :processed tx-id) frontier :source-frontier-changed-during-observation]
+             [frontier (assoc frontier :ingestion-failed? true) :source-ingestion-failed]
+             [(update frontier :submitted inc) (update frontier :submitted inc) :source-frontier-coverage-mismatch]
+             [frontier (update frontier :submitted inc) :source-frontier-changed-during-observation]]]
+      (let [samples (atom [before after])]
+        (with-redefs-fn {#'coverage/read-local-frontier!
+                         (fn [_] (let [v (first @samples)] (swap! samples subvec 1) v))}
+          (fn []
+            (let [r (observe! tx-id)]
+              (is (= :unavailable (:status r)))
+              (is (= reason (:reason r)) (pr-str r))
+              (is (empty? @samples))
+              (no-match! r))))))
+    (doseq [bad [(dissoc retained :operation-correspondence)
+                 (assoc retained :operation-message-id other-id)
+                 (assoc retained :transaction-ids [other-id])
+                 (assoc retained :operation-profile :other)
+                 (assoc retained :authority :admitted)]]
+      (with-redefs [coverage/observe-local-retained-operation! (constantly bad)]
+        (let [r (observe! tx-id)]
+          (is (= :unsupported (:status r)))
+          (is (= :invalid-processed-retained-operation (:reason r)))
+          (no-match! r))))
+    (doseq [id [flush-id other-id]]
+      (let [r (observe! id)]
+        (is (= :unsupported (:status r)))
+        (no-match! r)))
+    (with-redefs [operation/compare-operation-bytes!
+                  (constantly {:status :mismatch :reason :operation-correspondence-mismatch})]
+      (let [r (observe! tx-id)]
+        (is (= :mismatch (:status r)))
+        (is (= :retained-operation-not-matched (:reason r)))
+        (no-match! r)))
+    (is (= r (observe! tx-id)))))
+
 (deftest retained-operation-requires-exact-local-transaction
   (doseq [id [nil -1 "0" 1.5 (inc (bigint Long/MAX_VALUE))]]
     (let [r (coverage/observe-local-retained-operation! nil id)]
+      (is (= :invalid-retained-transaction-id (:reason r)))
+      (no-match! r))
+    (let [r (coverage/observe-local-processed-retained-operation! nil id)]
       (is (= :invalid-retained-transaction-id (:reason r)))
       (no-match! r)))
   (is (= :embedded-primary-log-required (:reason (coverage/observe-local-retained-operation! nil 0))))
@@ -120,8 +175,10 @@
                         ids [flush-id tx-id other-id]]
                     (.awaitSourceBlocking database other-id (Duration/ofSeconds 15))
                     (check-retained! node ids)
+                    (check-processed-retained! node ids)
                     ids))]
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 15))
-          (check-retained! node ids)))
+          (check-retained! node ids)
+          (check-processed-retained! node ids)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

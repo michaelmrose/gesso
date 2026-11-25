@@ -405,3 +405,35 @@
     (assoc sample :processed-payload-profile local-processed-payload-profile
            :payload-profile local-payload-profile :decoder-profile payload/profile
            :payload-binding-profile payload-binding-profile)))
+
+(def local-processed-retained-operation-profile
+  :xtdb-2.2.0-beta1/selected-local-processed-retained-operation-v1)
+
+(defn observe-local-processed-retained-operation!
+  "Require selected retained operation correspondence bracketed by stable,
+   fully processed local source frontiers. The requested transaction must
+   belong to the observed framed history. No wait, execution outcome,
+   independent watcher semantics, atomic snapshot or certification."
+  [node tx-id]
+  (let [sample (if (and (integer? tx-id) (<= 0 tx-id Long/MAX_VALUE))
+                 (observe-local-processed*
+                  node #(observe-local-retained-operation! % tx-id))
+                 (local-result :unsupported :invalid-retained-transaction-id))
+        sample (if (and (= :observed (:status sample))
+                        (not (and (= local-profile (:profile sample))
+                                  (= local-processed-profile (:processed-profile sample))
+                                  (= retained-operation-profile (:retained-operation-profile sample))
+                                  (= :matched (:payload-correspondence sample) (:operation-correspondence sample))
+                                  (= operation/profile (:operation-profile sample))
+                                  (= tx-id (:operation-message-id sample))
+                                  (some #{tx-id} (:transaction-ids sample))
+                                  (some #{tx-id} (:record-offsets sample))
+                                  (<= tx-id (:processed-message-id sample))
+                                  (= :none (:authority sample))
+                                  (= :not-issued (:certificate sample)))))
+                 (local-result :unsupported :invalid-processed-retained-operation)
+                 sample)]
+    (assoc sample :processed-retained-operation-profile local-processed-retained-operation-profile
+           :processed-profile local-processed-profile
+           :retained-operation-profile retained-operation-profile
+           :payload-profile local-payload-profile :decoder-profile payload/profile)))

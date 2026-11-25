@@ -4234,3 +4234,21 @@ for one transaction at a stable observed local log. No processed-frontier
 binding, atomic snapshot, execution or authenticated provenance. No
 admission change, certificate or CLM-R2 premise retirement. Full project
 and independent formal gates were not rerun.
+
+* v2698 — bind retained operation correspondence to the processed frontier
+
+Bracket the selected retained operation observation with the existing
+local processed-frontier checks. Require the same submitted and processed
+coordinates before and after, full processing through the framed end,
+and an exact qualified selected transaction identity. Reject inconsistent
+operation results and discard partial matches on frontier failure. Other
+transactions receive envelope checks only; no independent watcher semantics.
+
+Focused JVM: 63 tests / 4192 assertions, zero failures or errors across
+all eight prior regression namespaces. Persistent selected operation
+fixture matches before and after reopening. Reject lag, interior offsets,
+invalid and contradictory frontiers, changed coordinates, ingestion errors,
+coverage mismatches and invalid operation reports. Earlier profiles remain
+unchanged. No wait, atomic snapshot, execution outcome, production admission,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates were not rerun.
