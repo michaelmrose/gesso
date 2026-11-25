@@ -61,6 +61,8 @@
         writers (atom [])
         seed-admitted? (atom false)
         policy-admissions (atom [])
+        preparations (atom {})
+        checked-candidates (atom {})
         execute-adapter xtdb/execute-tx!
         execute xtdb/execute-tx-from!
         observed (atom [])
@@ -125,6 +127,9 @@
                                  (let [helper (actor invocation)
                                        row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))
                                        membership (first (frontier/q-from! ctx ["SELECT * FROM memberships WHERE _id = ?" helper]))]
+                                   (let [snapshot (semantics/snapshot-at-frontier! ctx)]
+                                     (swap! preparations assoc [(identity/raw-value command-id)
+                                                                (semantics/alternative-id helper :accept)] snapshot))
                                    (swap! observed conj [(identity/raw-value command-id) helper row])
                                    (.countDown ready)
                                    (when-not (.await ready 15 TimeUnit/SECONDS)
@@ -151,9 +156,12 @@
                     :post-state-contract! (fn [_ _] {:required-post-state-values #{} :allowed-post-state-values #{}})
                     :outcome-contract! (fn [_ _] {:expected-outcome refusal})}
                    :construct-after-abort!
-                   (fn [{:keys [ctx command-id]}]
+                   (fn [{:keys [ctx command-id] :as invocation}]
                      (swap! recovery-trace conj [:construct command-id])
-                     (reset! recovery-state (semantics/snapshot-at-frontier! ctx))
+                     (let [snapshot (semantics/snapshot-at-frontier! ctx)]
+                       (reset! recovery-state snapshot)
+                       (swap! preparations assoc [(identity/raw-value command-id)
+                                                  (semantics/alternative-id (actor invocation) :refuse)] snapshot))
                      (let [row (first (frontier/q-from! ctx ["SELECT * FROM requests WHERE _id = ?" "r1"]))]
                        (when (= :claimed (:status row))
                          {:spec nil
@@ -180,8 +188,13 @@
                 :xtdb-submission-policy!
                 (fn [{:keys [api tx-ops tx-options]}]
                   (when (and (= :execute-tx api) (empty? tx-options))
-                    (let [kind (try (semantics/writer-kind! seed "v2480-claim" "v2480" tx-ops)
-                                    (catch clojure.lang.ExceptionInfo _ nil))]
+                    (let [kind (try
+                                 (let [kind (semantics/writer-kind! seed "v2480-claim" "v2480" tx-ops)]
+                                   (when (= :claim (:kind kind))
+                                     (let [checked (semantics/admit-prepared-candidate! preparations kind tx-ops)]
+                                       (swap! checked-candidates assoc (select-keys kind [:command-id :alternative]) checked)))
+                                   kind)
+                                 (catch clojure.lang.ExceptionInfo _ nil))]
                       (when (and kind (or (not= :initializer (:kind kind))
                                           (compare-and-set! seed-admitted? false true)))
                         (swap! policy-admissions conj kind)
@@ -493,6 +506,11 @@
                                                (catch clojure.lang.ExceptionInfo _ true)))]
                    (is (= (count expected) (count @submissions)))
                    (is (= expected (set (map #(dissoc % :ops :commit-basis) @submissions))))
+                   (is (= (set (map :identity expected)) (set (keys @checked-candidates))))
+                   (doseq [{:keys [identity]} expected]
+                     (is (= (:state (if (= :accept (keyword (name (:alternative identity))))
+                                     @initial-state @recovery-state))
+                            (:before (get @checked-candidates identity)))))
                    (is (refused? (conj accepted [:put-docs :memberships {:xt/id helper :active false}])))
                    (is (refused? (conj accepted ["DELETE FROM requests"])))
                    (is (refused? (filterv #(not= :request_assignments (second %)) accepted)))
@@ -541,7 +559,18 @@
                      (let [accepted (:ops (first (filter #(and (= :claim (:kind %)) (= :committed (:result %))
                                                                   (= id (:command-id %))) entries)))
                            guards (filterv #(string? (first %)) accepted)
-                           puts (filterv #(= :put-docs (first %)) accepted)]
+                           puts (filterv #(= :put-docs (first %)) accepted)
+                           k [id (semantics/alternative-id helper :accept)]
+                           original-admissions @policy-admissions
+                           original-checks @checked-candidates]
+                       ;; Even the original valid vector needs an unused preparation.
+                       (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
+                       ;; A genuine current snapshot is not an acceptable open-state preparation.
+                       (swap! preparations assoc k before)
+                       (is (= :submission-policy-refused (denied #(execute-adapter node accepted nil))))
+                       (is (not (contains? @preparations k)))
+                       (is (= original-admissions @policy-admissions))
+                       (is (= original-checks @checked-candidates))
                        ;; A well-shaped write is not enough without every source-derived predicate.
                        (doseq [guard guards]
                          (is (= :submission-policy-refused

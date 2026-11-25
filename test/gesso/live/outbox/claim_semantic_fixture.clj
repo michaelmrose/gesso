@@ -335,6 +335,35 @@
      :operations operations}))
 
 
+(defn check-prepared-candidate!
+  "Check mapped puts against the preparation captured before submission.
+   The caller must first check the full SQL and publication footprint. Do not
+   reacquire current state here: a stale, valid candidate must reach XTDB's
+   atomic guards. The supplied preparation is trusted fixture evidence."
+  [helper alternative snapshot ops]
+  (let [puts (filterv #(and (= :put-docs (first %))
+                            (not= :gesso_live_outbox (second %))) ops)
+        checked (projection/check-put-candidate! (source helper alternative) target-map
+                                                  (:document-rows snapshot) (vec (vals (:records snapshot)))
+                                                  decode-claim-outcome! {} puts)]
+    (require! (= (:state snapshot) (:before checked)))
+    checked))
+
+(defn admit-prepared-candidate!
+  "Consume one fixture-owned preparation for this command and alternative,
+   then check the actual submitted candidate. A failed check also consumes
+   the preparation; another attempt needs a new trusted preparation."
+  [preparations {:keys [command-id alternative]} ops]
+  (let [k [command-id alternative]
+        [prior _] (swap-vals! preparations dissoc k)
+        snapshot (get prior k)
+        record (first (mapcat #(drop 2 %) (filter #(and (= :put-docs (first %))
+                                                        (= :gesso_commands (second %))) ops)))
+        helper (identity/raw-value (get-in record [:gesso.command/binding :principal]))
+        step (keyword (name alternative))]
+    (require! (and snapshot (= alternative (alternative-id helper step))))
+    (check-prepared-candidate! helper step snapshot ops)))
+
 (defn correlate-history!
   "Reconcile the selected fixture's pinned state/ledger windows and actual
    adapter submission results. A committed alternative must have exactly one
@@ -377,11 +406,7 @@
                           (= (assoc (:records before) command-id record) (:records after)))))
          ;; The existing full submission classifier checks SQL and publication
          ;; writes separately. Here the actual mapped puts determine poststate.
-         (let [puts (if replay? [] (filterv #(and (= :put-docs (first %))
-                                                  (not= :gesso_live_outbox (second %))) ops))
-               candidate (projection/check-put-candidate! (source helper alternative) target-map
-                                                           (:document-rows before) (vec (vals (:records before)))
-                                                           decode-claim-outcome! {} puts)]
+         (let [candidate (check-prepared-candidate! helper alternative before (if replay? [] ops))]
            (require! (= [(:state before) (:state after)] [(:before candidate) (:after candidate)])))
          {:command-id command-id :operation-id (alternative-id helper alternative)
           :commit-basis commit-basis :before-basis before-basis :after-basis after-basis
