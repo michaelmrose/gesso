@@ -4364,3 +4364,28 @@ The sample is sensitive internal data, not a published receipt. Direct
 retained-byte execution comparison and broader replay semantics remain
 open. No production admission, certificate or CLM-R2 premise retirement.
 Full project and independent formal gates were not rerun.
+
+* v2704 — compare execution directly from retained replay inputs
+
+Compose qualified whole-history replay acquisition with the existing
+source-bound independent temporal execution comparison. Supply only the
+node and selected tables; derive transaction identities, system times and
+operations from retained bytes. Require identical qualified replay samples
+before and after the provider comparison, including exact inputs and
+content fingerprints. Validate the complete ledger, envelope and selected
+history comparison report. Construct diagnostic-only output without raw
+inputs, fingerprints or partial correspondence on failure. Preserve the
+existing nonempty execution domain and caller-supplied comparison APIs.
+
+Focused JVM: 69 tests / 4705 assertions, zero failures or errors across
+nine namespaces. Initial provider run: 12 tests / 618 assertions. Real
+persistent commit, abort and commit history matches before and after
+reopening, including positional equality assertions. Reject malformed
+projection identity, missing inputs, repeated time, changed fingerprint
+or replay contents, wrong ledger outcomes, missing rectangles, omitted
+required table, unqualified comparison, empty history and late unsupported
+SQL. No caller-supplied transaction expectations in the new API. Selected
+explicit-time replay domain only; quiescence, atomic acquisition,
+authenticated provenance and universal refinement remain unestablished.
+No production admission, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.

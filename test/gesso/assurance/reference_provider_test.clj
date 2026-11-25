@@ -556,13 +556,80 @@
       (is (= :invalid-retained-execution-comparison (:reason (compare! node bound table-set)))))
     (is (= report (compare! node bound table-set)))))
 
+(defn- check-direct-retained-replay! [node bound]
+  (let [compare! reference/compare-local-processed-retained-replay-execution!
+        observe! coverage/observe-local-processed-retained-replay-inputs!
+        read! reference/compare-source-bound-execution!
+        tables #{:providerprobe}
+        sample (observe! node)
+        report (compare! node tables)
+        no-match! (fn [r]
+                    (is (not-any? #(contains? r %) [:source-coverage :operation-correspondence
+                                                   :outcome-correspondence :processed-frontier
+                                                   :payload-correspondence :replay-inputs :payload-fingerprint
+                                                   :checks :operations :transaction-count]))
+                    (is (= :none (:authority r)))
+                    (is (= :not-issued (:certificate r))))]
+    (is (= bound (:replay-inputs sample)))
+    (is (= :matched (:status report)) (pr-str report))
+    (is (= reference/retained-replay-execution-profile (:retained-replay-execution-profile report)))
+    (is (= :matched (:source-coverage report) (:operation-correspondence report)
+           (:outcome-correspondence report) (:processed-frontier report) (:payload-correspondence report)))
+    (is (= {:ledger true :retained-envelopes true :selected-history true} (:checks report)))
+    (is (= 3 (:transaction-count report)))
+    (is (= :not-established (:provider-refinement report)))
+    (is (= :none (:authority report)))
+    (is (= :not-issued (:certificate report)))
+    (is (not-any? #(contains? report %) [:replay-inputs :payload-fingerprint :operations :transaction-ids]))
+    (with-redefs [reference/compare-source-bound-execution!
+                  (fn [node inputs tables] (is (= bound inputs)) (read! node inputs tables))]
+      (is (= report (compare! node tables))))
+    (doseq [bad [(dissoc sample :replay-input-profile)
+                 (assoc sample :replay-inputs [])
+                 (update-in sample [:replay-inputs 0 :tx-id] inc)
+                 (assoc-in sample [:replay-inputs 1 :system-time] (:system-time (first bound)))]]
+      (with-redefs [coverage/observe-local-processed-retained-replay-inputs! (constantly bad)
+                    reference/compare-source-bound-execution! (fn [& _] (throw (AssertionError. "must not compare unqualified sample")))]
+        (let [r (compare! node tables)]
+          (is (= :unavailable (:status r)))
+          (is (= :invalid-processed-retained-replay-binding (:reason r)))
+          (no-match! r))))
+    (doseq [[after reason] [[(update sample :payload-fingerprint #(str (if (= \0 (first %)) "1" "0") (subs % 1))) :source-log-changed-during-comparison]
+                            [(assoc-in sample [:replay-inputs 0 :ops 0 2 :value] 99) :source-log-changed-during-comparison]
+                            [{:status :unsupported :reason :retained-replay-input-not-qualified} :retained-replay-input-not-qualified]]]
+      (let [samples (atom [sample after])]
+        (with-redefs [coverage/observe-local-processed-retained-replay-inputs!
+                      (fn [_] (let [s (first @samples)] (swap! samples subvec 1) s))]
+          (let [r (compare! node tables)]
+            (is (= reason (:reason r)))
+            (is (empty? @samples))
+            (no-match! r)))))
+    (with-redefs [reference/compare-source-bound-execution! (constantly {:status :matched :replay-inputs bound})]
+      (let [r (compare! node tables)]
+        (is (= :invalid-retained-replay-execution-comparison (:reason r)))
+        (no-match! r)))
+    (let [ledger! @#'reference/read-ledger!]
+      (with-redefs-fn {#'reference/read-ledger! (fn [node] (update-in (ledger! node) [1 :committed?] not))}
+        (fn [] (let [r (compare! node tables)]
+                 (is (= :mismatch (:status r)))
+                 (is (= :ledger-sequence-mismatch (:reason r)))
+                 (no-match! r)))))
+    (with-redefs-fn {#'reference/read-rectangles! (constantly [])}
+      (fn [] (let [r (compare! node tables)]
+               (is (= :mismatch (:status r)))
+               (no-match! r))))
+    (let [r (compare! node #{:other})]
+      (is (= :unsupported (:status r)))
+      (no-match! r))
+    (is (= report (compare! node tables)))))
+
 (deftest retained-operation-history-bound-to-independent-outcomes
   (let [root (Files/createTempDirectory "gesso-retained-execution-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}]
                 :storage [:local {:path (str root "/storage")}]}
         txs [{:system-time (time-at 0) :ops [[:put-docs :providerprobe {:xt/id "a" :value 1}]]}
              {:system-time (time-at 1) :ops [[:put-docs :providerprobe {:xt/id "a" :value 2}] ["ASSERT FALSE"]]}
-             {:system-time (time-at 2) :ops [["ASSERT TRUE"]]}]]
+             {:system-time (time-at 2) :ops [["ASSERT ? = ?" 3 3] ["ASSERT TRUE"]]}]]
     (try
       (let [bound (with-open [node (xtn/start-node config)]
                     (let [database (db/primary-db node)
@@ -572,8 +639,35 @@
                                           (assoc tx :tx-id id))) txs)]
                       (.awaitSourceBlocking database (:tx-id (peek bound)) (Duration/ofSeconds 10))
                       (check-retained-execution! node bound)
+                      (check-direct-retained-replay! node bound)
                       bound))]
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek bound)) (Duration/ofSeconds 10))
-          (check-retained-execution! node bound)))
+          (check-retained-execution! node bound)
+          (check-direct-retained-replay! node bound)
+          (let [bad-id (:tx-id (xt/submit-tx node [["ASSERT ? IS NOT NULL" 1]]
+                                            {:system-time (time-at 3)}))]
+            (.awaitSourceBlocking (db/primary-db node) bad-id (Duration/ofSeconds 10))
+            (let [r (reference/compare-local-processed-retained-replay-execution! node #{:providerprobe})]
+              (is (= :unsupported (:status r)))
+              (is (= :retained-replay-input-not-qualified (:reason r)))
+              (is (not-any? #(contains? r %) [:outcome-correspondence :replay-inputs :payload-fingerprint]))))))
+      (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
+
+(deftest direct-replay-requires-nonempty-qualified-local-history
+  (let [compare! reference/compare-local-processed-retained-replay-execution!
+        root (Files/createTempDirectory "gesso-empty-replay-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}]
+    (try
+      (is (= :embedded-primary-log-required (:reason (compare! nil #{:probe}))))
+      (with-open [node (xtn/start-node config)]
+        (let [database (db/primary-db node)
+              log (.getSourceLog database)
+              id (.getMsgId (.appendMessageBlocking log (SourceMessage$FlushBlock. Long/MAX_VALUE)))]
+          (.awaitSourceBlocking database id (Duration/ofSeconds 15))
+          (let [r (compare! node #{:probe})]
+            (is (= :unsupported (:status r)))
+            (is (= :empty-retained-replay-history (:reason r)))
+            (is (not (contains? r :outcome-correspondence))))))
       (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))

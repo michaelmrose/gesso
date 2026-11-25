@@ -4,6 +4,7 @@
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-operation-correspondence :as operation]
+            [gesso.assurance.reference-replay-input :as replay-input]
             [gesso.assurance.xtdb-envelope :as envelope]
             [xtdb.api :as xt])
   (:import (java.time Instant ZonedDateTime)))
@@ -315,26 +316,28 @@
 
 (def retained-execution-profile :selected-processed-retained-execution-v1)
 
-(defn- observe-bound-history! [node]
-  (let [sample (coverage/observe-local-processed-retained-history-bound! node)
-        ids (:transaction-ids sample)
+(defn- valid-bound-history? [sample]
+  (let [ids (:transaction-ids sample)
         end (:processed-message-id sample)]
-    (if (and (= :observed (:status sample))
-             (not (and (valid-payload-binding? sample)
-                       (= coverage/local-processed-profile (:processed-profile sample))
-                       (= coverage/retained-history-profile (:retained-history-profile sample))
-                       (= coverage/local-processed-retained-history-profile (:processed-retained-history-profile sample))
-                       (= coverage/processed-retained-history-binding-profile (:processed-retained-history-binding-profile sample))
-                       (= operation/profile (:operation-profile sample))
-                       (= :none (:authority sample)) (= :not-issued (:certificate sample))
-                       (vector? ids) (= ids (:operation-message-ids sample))
-                       (= (if (seq ids) :matched :not-applicable) (:operation-correspondence sample))
-                       (integer? end) (<= -1 end)
-                       (vector? (:record-offsets sample))
-                       (= end (:last-message-id sample) (or (peek (:record-offsets sample)) -1))
-                       (= (count ids) (count (distinct ids)))
-                       (= ids (filterv (set ids) (:record-offsets sample)))
-                       (every? #(and (integer? %) (<= 0 % end)) ids))))
+    (and (valid-payload-binding? sample)
+         (= coverage/local-processed-profile (:processed-profile sample))
+         (= coverage/retained-history-profile (:retained-history-profile sample))
+         (= coverage/local-processed-retained-history-profile (:processed-retained-history-profile sample))
+         (= coverage/processed-retained-history-binding-profile (:processed-retained-history-binding-profile sample))
+         (= operation/profile (:operation-profile sample))
+         (= :none (:authority sample)) (= :not-issued (:certificate sample))
+         (vector? ids) (= ids (:operation-message-ids sample))
+         (= (if (seq ids) :matched :not-applicable) (:operation-correspondence sample))
+         (integer? end) (<= -1 end)
+         (vector? (:record-offsets sample))
+         (= end (:last-message-id sample) (or (peek (:record-offsets sample)) -1))
+         (= (count ids) (count (distinct ids)))
+         (= ids (filterv (set ids) (:record-offsets sample)))
+         (every? #(and (integer? %) (<= 0 % end)) ids))))
+
+(defn- observe-bound-history! [node]
+  (let [sample (coverage/observe-local-processed-retained-history-bound! node)]
+    (if (and (= :observed (:status sample)) (not (valid-bound-history? sample)))
       {:status :unavailable :reason :invalid-processed-retained-history-binding}
       sample)))
 
@@ -362,3 +365,67 @@
         (assoc (acquisition-result :unsupported :invalid-retained-execution-comparison)
                :retained-execution-profile retained-execution-profile)
         (dissoc r :source-coverage)))))
+
+(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v1)
+
+(defn- valid-replay-history? [sample]
+  (let [inputs (:replay-inputs sample)]
+    (and (valid-bound-history? sample)
+         (= coverage/processed-retained-replay-inputs-profile (:processed-retained-replay-inputs-profile sample))
+         (= replay-input/profile (:replay-input-profile sample))
+         (source-expectations? inputs)
+         (= (:transaction-ids sample) (mapv :tx-id inputs))
+         (every? #(and (instance? Instant (:system-time %)) (vector? (:ops %))
+                       (<= 1 (count (:ops %)) 256)) inputs)
+         (every? (fn [[a b]] (.isBefore ^Instant (:system-time a) ^Instant (:system-time b)))
+                 (partition 2 1 inputs)))))
+
+(defn- observe-replay-history! [node]
+  (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)]
+    (cond
+      (not= :observed (:status sample)) sample
+      (and (valid-bound-history? sample) (= [] (:transaction-ids sample) (:replay-inputs sample))
+           (= coverage/processed-retained-replay-inputs-profile (:processed-retained-replay-inputs-profile sample))
+           (= replay-input/profile (:replay-input-profile sample)))
+      {:status :unsupported :reason :empty-retained-replay-history}
+      (not (valid-replay-history? sample))
+      {:status :unavailable :reason :invalid-processed-retained-replay-binding}
+      :else sample)))
+
+(defn compare-local-processed-retained-replay-execution!
+  "Derive all selected replay transactions from qualified retained bytes,
+   predict independently, and compare provider ledger, envelopes and selected
+   all-time rectangles. Require identical qualified samples before and after.
+   The caller selects tables, not transactions; empty replay is unsupported.
+   No raw samples, atomic acquisition, authentication or refinement claim."
+  [node tables]
+  (let [tag #(assoc % :retained-replay-execution-profile retained-replay-execution-profile)
+        fail (fn [status reason]
+               (tag (acquisition-result (if (#{:unsupported :unavailable :mismatch} status) status :unavailable)
+                                        (if (keyword? reason) reason :retained-replay-comparison-failed))))
+        before (observe-replay-history! node)]
+    (if-not (= :observed (:status before))
+      (fail (:status before) (:reason before))
+      (let [inputs (:replay-inputs before)
+            comparison (compare-source-bound-execution! node inputs tables)
+            after (observe-replay-history! node)]
+        (cond
+          (not= :observed (:status after)) (fail (:status after) (:reason after))
+          (not= before after) (fail :unavailable :source-log-changed-during-comparison)
+          (not= :matched (:status comparison)) (fail (:status comparison) (:reason comparison))
+          (not (and (= profile (:profile comparison)) (= acquisition-profile (:acquisition-profile comparison))
+                    (= source-binding-profile (:source-binding-profile comparison))
+                    (= {:ledger true :retained-envelopes true :selected-history true} (:checks comparison))
+                    (= (count inputs) (:transaction-count comparison))
+                    (= :none (:authority comparison)) (= :not-issued (:certificate comparison))
+                    (= :not-established (:provider-refinement comparison))))
+          (fail :unsupported :invalid-retained-replay-execution-comparison)
+          :else
+          (tag (assoc base :status :matched :acquisition-profile acquisition-profile
+                      :source-binding-profile source-binding-profile
+                      :checks (:checks comparison) :transaction-count (count inputs)
+                      :source-coverage :matched :operation-correspondence :matched
+                      :payload-correspondence :matched :processed-frontier :matched
+                      :outcome-correspondence :matched :replay-input-profile replay-input/profile
+                      :operation-profile operation/profile
+                      :processed-retained-replay-inputs-profile coverage/processed-retained-replay-inputs-profile)))))))
