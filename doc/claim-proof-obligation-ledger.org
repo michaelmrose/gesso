@@ -2567,3 +2567,30 @@ physical prefix hypotheses, pinned observations, clocks, fresh identities
 and trusted receipt data. No production assurance status changes and no
 CLM-R2 premise is retired. Full project, physical Claim, Chromium and
 independent proof gates were not rerun.
+
+* v2635 — model selected production worker cycle orchestration
+
+Add an independent bounded cycle predictor over explicit adapter-report
+hypotheses. Predict single-candidate sweep requests, canonical cursor
+advancement, immediate dispatch of positive acquisitions, counters and
+budget/end summaries. Predict selected acquisition and post-dispatch
+interruptions with exact completed prefixes, last completed cursor and
+unverified receipt evidence. Stop before consuming subsequent steps on
+failure or budget exhaustion. Unsupported reached hypotheses return no
+partial report. Cycle profile v1; other profiles and history v19 unchanged.
+
+Expanded focused JVM gate: 90 tests / 7539 assertions, zero failures or
+errors across five reference test namespaces and the existing production
+cycle suite. Seven new selected orchestration histories compare complete
+production summaries or exception data and ordered adapter calls using
+scripted sweep and delivery reports. Six unsupported hypotheses exercise
+fail-closed behavior. The existing production cycle suite separately
+exercises physical and fault-injection cases; the new differential cases
+stub acquisition and delivery rather than claiming physical execution.
+
+This is finite selected control-flow correspondence, not malformed
+adapter-result coverage, composition of the independent physical model
+with the actual production cycle, live frontier acquisition, external
+delivery or universal provider refinement. No production assurance status
+changes and no CLM-R2 premise is retired. Full project, physical Claim,
+Chromium and independent proof gates were not rerun.
