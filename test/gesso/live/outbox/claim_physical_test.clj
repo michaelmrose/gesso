@@ -64,11 +64,9 @@
                                                 :before before :after after :replay-counts replay-counts}))
         submissions (atom [])
         writers (atom [])
-        seed-admitted? (atom false)
         policy-admissions (atom [])
         preparations (semantics/build-prepared-admission! bound)
         checked-candidates (atom {})
-        installed-node (atom nil)
         ;; Independent diagnostic: acceptance writes have the same mapped
         ;; document targets for either helper. Refusal writes only a journal
         ;; row and therefore has no document-frame prefix. Keep the exact
@@ -213,23 +211,15 @@
         resolve-id (fn [ctx _] (or (get-in ctx [:headers "fragment-id"])
                                   (when (= "scope=l1" (:query-string ctx)) "l1")))
         config {:xtdb-config {} :source-id "v2480-claim" :rules-context {}
-                :xtdb-submission-policy!
-                (fn [{:keys [api tx-ops tx-options]}]
-                  (when (and (= :execute-tx api) (empty? tx-options))
-                    (let [kind (try
-                                 (if (some #(and (= :put-docs (first %)) (= :gesso_commands (second %))) tx-ops)
-                                   (when-let [{:keys [identity candidate]}
-                                              (publication/claim-framed-submission!
-                                               (:issued preparations) @installed-node
-                                               {:api api :tx-ops tx-ops :tx-options tx-options})]
-                                     (swap! checked-candidates assoc identity candidate)
-                                     (assoc identity :kind :claim))
-                                   (semantics/writer-kind! seed "v2480-claim" "v2480" tx-ops))
-                                 (catch clojure.lang.ExceptionInfo _ nil))]
-                      (when (and kind (or (not= :initializer (:kind kind))
-                                          (compare-and-set! seed-admitted? false true)))
-                        (swap! policy-admissions conj kind)
-                        true))))
+                :mapped-writer-policy
+                {:admission (:issued preparations)
+                 :initializer seed
+                 :maintenance! #(semantics/writer-kind! seed "v2480-claim" "v2480" %)
+                 :observe! (fn [{:keys [candidate] :as kind}]
+                             (when candidate
+                               (swap! checked-candidates assoc (dissoc kind :kind :candidate) candidate))
+                             (swap! policy-admissions conj (cond-> (dissoc kind :candidate)
+                                                           candidate (assoc :kind :claim))))}
                 :worker-options {:worker-id "v2480" :poll-ms 20} :live-options {}
                 :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                               :require-derived-model? true
@@ -312,7 +302,6 @@
                          (fn [_] (g/html-response [:div "fallback"])))
               started (host/start! assembly delegate config)
              node (:xtdb/connectable started)
-             _ (reset! installed-node node)
              fragment! (fn [path headers]
                          (let [builder (HttpRequest/newBuilder
                                         (URI/create (str (get-in started [host/listener-key :base-url]) path)))]

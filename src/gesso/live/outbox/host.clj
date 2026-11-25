@@ -32,6 +32,7 @@
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.publication-manifest :as manifest]
+            [gesso.live.outbox.writer-policy :as writer-policy]
             [xtdb.node :as xtn]))
 
 (def xtdb-module-id :gesso.live.outbox.host/xtdb)
@@ -54,7 +55,7 @@
                          :reason reason))))
 
 (def ^:private allowed-config
-  #{:xtdb-config :xtdb-submission-policy! :live-options :source-id :worker-options :rules-context
+  #{:xtdb-config :xtdb-submission-policy! :mapped-writer-policy :live-options :source-id :worker-options :rules-context
     :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
@@ -82,6 +83,10 @@
   (when (and (contains? config :xtdb-submission-policy!)
              (not (fn? (:xtdb-submission-policy! config))))
     (reject! :invalid-xtdb-submission-policy {}))
+  (when (contains? config :mapped-writer-policy)
+    (when (contains? config :xtdb-submission-policy!)
+      (reject! :conflicting-xtdb-submission-policies {}))
+    (writer-policy/validate-config! (:mapped-writer-policy config)))
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -154,8 +159,12 @@
               :gesso.live.outbox.host/node
               #(xtn/start-node (get-in system [config-key :xtdb-config]))
               close!)]
-    (when-let [policy (get-in system [config-key :xtdb-submission-policy!])]
-      (reset! release (xtdb/register-submission-policy! node policy)))
+    (let [config (get system config-key)
+          policy (if-let [mapped (:mapped-writer-policy config)]
+                   (writer-policy/build-policy! node mapped)
+                   (:xtdb-submission-policy! config))]
+      (when policy
+        (reset! release (xtdb/register-submission-policy! node policy))))
     (manifest/require-compatible! node (get-in system [config-key :source-id])
                                   (::publication-manifest system))
     (assoc system :xtdb/connectable node ::close-node! close!)))
@@ -298,7 +307,10 @@
    :xtdb-config is explicitly required; {} requests volatile XTDB storage.
    Optional :xtdb-submission-policy! is a trusted admission predicate installed
    on the owned node before manifest establishment and retained until close.
-   It covers adapter submit/execute calls, not direct or external XTDB writes.
+   Alternatively :mapped-writer-policy binds the selected framed executor
+   to the exact owned node, with one-use initialization and restricted
+   trusted maintenance classification. The two selections are exclusive.
+   Both cover adapter submit/execute calls, not direct or external XTDB writes.
    :live-options allows only owned :rules, :source-options, :dispatch-options.
    :source-id, :worker-options and :rules-context are mandatory. The worker
    is installed AFTER providers, and cannot be omitted or re-ordered.

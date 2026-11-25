@@ -78,6 +78,9 @@
   (doseq [[change reason]
           [[{:xtdb-config nil} :invalid-xtdb-config]
            [{:xtdb-submission-policy! nil} :invalid-xtdb-submission-policy]
+           [{:mapped-writer-policy nil} :invalid-mapped-writer-policy]
+           [{:mapped-writer-policy {} :xtdb-submission-policy! identity}
+            :conflicting-xtdb-submission-policies]
            [{:live-options {:rules {}}} :invalid-live-rules]
            [{:live-options {:rules [] :source (atom nil)}} :unowned-live-component]
            [{:live-options {:rules [] :dispatcher (atom nil)}} :unowned-live-component]
