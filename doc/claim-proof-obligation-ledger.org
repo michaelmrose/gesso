@@ -465,3 +465,30 @@ SQL/codec refinement, transaction-internal read basis, writer mediation,
 historical retention, and production HumanHelp correspondence remain
 unestablished. Neither historical verification nor a matching prefix
 alone discharges these premises.
+
+* v2561 — decoded guard correspondence and abstract projection
+
+The v2551–v2560 opt-in work separates independent closed decoded-row
+predicates, source-relative exact SQL prefix checks, structural rules,
+concrete entry encodings and kernel-checked encoded cardinality and
+congruence lemmas. The decoded audit rechecks the source-relative
+structure, entry round trips and exact proof goals. It does not establish
+universal encoding or SQL semantics.
+
+The v2561 pilot additionally projects both the prepared rows and the
+reconstructed observed rows through the actual typed mapped projection
+using the same supplied outcome decoder. It requires equality of the two
+observed abstract states. The regression includes occupied nullable
+coordinates and both journal slots, a decoder sensitive to nested command
+arguments, and a stateful decoder whose differing outputs must be rejected.
+
+This is finite decoded-instance correspondence. The proof kernel checks
+encoded list equalities, while Clojure checks decoded entry correspondence
+and projection equality. No CLM-R2 premise is retired: general decoded
+encoding, recursive composition and projection refinement, decoder
+congruence, faithful acquisition, shared SQL formatting and identifier
+normalization, SQL value and struct semantics and the transaction-internal
+read basis remain open. Physical writer mediation and historical retention
+remain separate obligations. No certification or production authority is
+conferred by the pilot. Further provider work must address the implication
+in v2550, not merely add equalities over already equal decoded values.

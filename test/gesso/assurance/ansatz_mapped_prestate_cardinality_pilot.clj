@@ -15,6 +15,7 @@
             [gesso.assurance.proof.mapped-prestate-partition :as partition]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-frame :as frame]
+            [gesso.model.mapped-projection :as projection]
             [gesso.model.mapped-projection-test]))
 
 (defn- proof-pilot! [f & args]
@@ -560,6 +561,7 @@
         (bridge-reject! :independent-predicate-mismatch {}))
       {:type ::decoded-correspondence :status :decoded-instance-correspondence-checked
        :checked-sites checked :predicate-observation observed
+       :decoded-observation {:document-rows actual-docs :journal-rows actual-journal}
        :scope :supplied-closed-decoded-rows :authority :none :certificate :not-issued
        :sql-refinement :not-established
        :open-obligations #{:general-decoded-map-encoding-refinement
@@ -604,6 +606,68 @@
     (is (= :leaf-evidence-mismatch (reason #(audit (assoc-in bags [request 0 :item-count] 999) report))))
     (is (= :row-count-mismatch (reason #(audit (assoc bags slot []) report))))
     (is (= :incomplete-structure (reason #(audit (dissoc bags slot) report))))))
+
+(defn check-projection-correspondence!
+  "Recheck concrete structural evidence and independently project both closed
+   decoded row sets using the actual typed mapped projection. This establishes
+   equality of the two observed projections, not determinism of an arbitrary
+   application decoder or correspondence to a transaction's internal basis."
+  [original targets docs journal prefix actual report decode-outcome!]
+  (let [audit (check-decoded-correspondence! original targets docs journal prefix actual report)
+        {:keys [document-rows journal-rows]} (:decoded-observation audit)
+        prepared (projection/project-state! original targets docs journal decode-outcome!)
+        observed (projection/project-state! original targets document-rows journal-rows decode-outcome!)]
+    (when-not (= prepared observed)
+      (bridge-reject! :abstract-projection-mismatch {}))
+    {:type ::projected-correspondence
+     :status :decoded-instance-projection-checked
+     :mapping-fingerprint (get-in audit [:predicate-observation :mapping-fingerprint])
+     :prepared-state prepared :observed-state observed
+     :checked-sites (:checked-sites audit)
+     :predicate-observation (:predicate-observation audit)
+     :scope :supplied-closed-decoded-rows-and-observed-projections
+     :open-obligations (into (:open-obligations audit)
+                             #{:shared-formatter-and-identifier-refinement
+                               :general-projection-refinement})
+     :authority :none :certificate :not-issued :sql-refinement :not-established}))
+
+(deftest audited-structure-preserves-observed-abstract-projection
+  (let [[original targets docs journal _] (fixture!)
+        record (deref (ns-resolve 'gesso.model.mapped-projection-test 'record))
+        docs (assoc docs :assignments [{:xt/id "a1" :owner "p1"}])
+        journal (conj journal (record "other" "p1"))
+        prefix (frame/formatted-prestate-assertions! (plan/check-target-mapping! original targets) docs journal)
+        args [original targets docs journal prefix]
+        request [:document :requests "r1"]
+        slot [:journal-slot "p2" :example/command]
+        bags {request (:requests docs) [:document :assignments "a1"] (:assignments docs)
+              [:journal-slot "p1" :example/command] [(second journal)] slot [(first journal)]}
+        report (apply check-structure! (conj args bags))
+        decoder (fn [row] (if (= "original" (get-in row [:gesso.command/binding :arguments :nested :value]))
+                            :nested-accepted (get-in row [:gesso.command/outcome :result])))
+        run #(apply check-projection-correspondence! (conj args %1 %2 %3))
+        checked (run bags report decoder)
+        expected {:example/count 2 :example/enabled false :example/owner "p1"
+                  :example/one :accepted :example/two :nested-accepted}
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= :decoded-instance-projection-checked (:status checked)))
+    (is (= expected (:prepared-state checked) (:observed-state checked)))
+    (is (= (:fingerprint (plan/check-target-mapping! original targets)) (:mapping-fingerprint checked)))
+    (is (:matches? (:predicate-observation checked)))
+    (is (= :none (:authority checked)))
+    (is (= :not-issued (:certificate checked)))
+    (is (= :not-established (:sql-refinement checked)))
+    (doseq [obligation [:decoder-congruence :transaction-internal-read-basis
+                        :shared-formatter-and-identifier-refinement :general-projection-refinement]]
+      (is (contains? (:open-obligations checked) obligation)))
+    ;; Equal rows do not ensure equal projections for a stateful decoder.
+    (let [calls (atom 0)
+          unstable (fn [_] (if (<= (swap! calls inc) 2) :accepted :rejected))]
+      (is (= :abstract-projection-mismatch (reason #(run bags report unstable))))
+      (is (= 4 @calls)))
+    (is (= :invalid-occupied-slot-outcome (reason #(run bags report (constantly nil)))))
+    (is (= :leaf-evidence-mismatch (reason #(run (assoc-in bags [request 0 :item-count] 999) report decoder))))
+    (is (= :row-count-mismatch (reason #(run (assoc bags slot []) report decoder))))))
 
 (defn -main [& _]
   (binding [ansatz/*verbose* false] (ansatz/load-init!))
