@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-arrow-operations :as arrow]
+            [gesso.assurance.reference-arrow-schema :as schema]
             [gesso.assurance.reference-arrow-operations-test :as fixture]
             [gesso.assurance.xtdb-source-log :as provider]
             [xtdb.api :as xt]
@@ -99,7 +100,7 @@
         (is (not (contains? r :rows)))))))
 
 (deftest selected-document-key-spellings
-  (let [key! #'arrow/struct-key! allowed #{:document-keys}]
+  (let [key! #'schema/struct-key! allowed #{:document-keys}]
     (doseq [[raw expected] [["_id" "xt/id"] ["claim$status" "claim/status"]
                             ["gesso$live$outbox$lease_until" "gesso.live.outbox/lease-until"]
                             ["request_id" "request-id"] ["a$b" "a/b"] ["a_b" "a-b"]]]

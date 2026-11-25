@@ -3573,3 +3573,22 @@ semantics, null-only fields and nullable containers remain open. Do not
 infer original key presence from null bits or admit nulls to the reference
 transaction domain. No production wiring, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates were not rerun.
+
+* v2672 — separate Arrow framing and schema qualification
+
+Extract bounded IPC framing, field and buffer qualification primitives
+into reference-arrow-framing and argument field schema qualification
+into reference-arrow-schema. Keep the operation decoder entry points,
+profile identifiers, schema restrictions, value interpretation and
+rejection reasons unchanged. Relocate the direct private key grammar
+test to its owning namespace. The operation namespace drops from 1005
+to 807 lines; the new namespaces contain 66 and 144 lines respectively.
+
+Focused JVM: 25 tests / 1449 assertions, zero failures or errors across
+reference Arrow operations, struct and source payload suites. XTDB
+logged shutdown cancellation; the test process exited zero. This is
+an extraction, not new interpretation or assurance evidence. Nullable
+containers, document puts, IID correspondence and aggregate document
+budgets remain open. No production wiring, certificate or CLM-R2
+premise retirement. Full project and independent formal gates were
+not rerun.

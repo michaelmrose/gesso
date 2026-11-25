@@ -3,45 +3,17 @@
    Use Apache Arrow FlatBuffer metadata accessors, not XTDB's relation or
    operation reader. Interpret selected data buffers directly. Returned
    SQL and nested argument bytes are sensitive internal observations."
+  (:require [gesso.assurance.reference-arrow-framing :refer [max-bytes max-rows require! message! field! buffers! offsets! value-bytes! present?]]
+            [gesso.assurance.reference-arrow-schema :refer [scalar-kind!]])
   (:import (java.nio ByteBuffer ByteOrder)
            (java.nio.charset StandardCharsets CharacterCodingException)
            (java.util UUID)
            (java.time Instant ZoneId)
-           (org.apache.arrow.flatbuf Message MessageHeader MetadataVersion
-                                    Schema RecordBatch Field Type Union UnionMode Endianness Int FixedSizeBinary Timestamp TimeUnit)))
+           (org.apache.arrow.flatbuf Message MessageHeader
+                                    Schema RecordBatch Field Type Union UnionMode Endianness)))
 
 (def profile :xtdb-2.2.0-beta1/selected-sql-arrow-operations-v1)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
-(def ^:private max-bytes (* 16 1024 1024))
-(def ^:private max-rows 16384)
-
-(defn- require! [condition reason]
-  (when-not condition (throw (ex-info "Unsupported selected Arrow stream" {:reason reason}))))
-
-(defn- slice! ^ByteBuffer [^ByteBuffer b n]
-  (require! (<= 0 n (.remaining b)) :invalid-arrow-length)
-  (let [part (doto (.slice b) (.limit (int n)) (.order ByteOrder/LITTLE_ENDIAN))]
-    (.position b (+ (.position b) (int n)))
-    part))
-
-(defn- message! [^ByteBuffer stream kind]
-  (require! (and (<= 8 (.remaining stream)) (= -1 (.getInt stream))) :invalid-arrow-framing)
-  (let [n (.getInt stream)]
-    (require! (and (pos? n) (zero? (mod n 8))) :invalid-arrow-metadata-length)
-    (let [m (Message/getRootAsMessage (slice! stream n))
-          size (.bodyLength m)]
-      (require! (and (= MetadataVersion/V5 (.version m)) (= kind (.headerType m))
-                     (zero? (.customMetadataLength m))) :unsupported-arrow-message)
-      (require! (and (<= 0 size max-bytes) (zero? (mod size 8))) :invalid-arrow-body-length)
-      [m (slice! stream size)])))
-
-(defn- field! [^Field field name type nullable? children]
-  (require! (and field (= name (.name field)) (= type (.typeType field))
-                 (= nullable? (.nullable field)) (= children (.childrenLength field))
-                 (nil? (.dictionary field)) (zero? (.customMetadataLength field)))
-            :unsupported-arrow-field)
-  field)
-
 (defn- schema! [^Message m ^ByteBuffer body]
   (let [^Schema schema (.header m (Schema.))]
     (require! (and (zero? (.remaining body)) schema (= Endianness/Little (.endianness schema))
@@ -57,37 +29,6 @@
       (let [^Field args (.children sql 1) nullable? (.nullable args)]
         (field! args "args" Type/Binary nullable? 0)
         nullable?))))
-
-(defn- buffers! [^RecordBatch batch ^ByteBuffer body expected-count]
-  (require! (= expected-count (.buffersLength batch)) :unsupported-arrow-buffer-count)
-  (loop [i 0 end 0 out []]
-    (if (= i expected-count)
-      (do (require! (= (.limit body) (+ end (mod (- end) 8))) :invalid-arrow-body-extent) out)
-      (let [b (.buffers batch i) offset (.offset b) length (.length b)]
-        (require! (and (= offset (+ end (mod (- end) 8)))
-                       (<= 0 offset (.limit body)) (<= 0 length (- (.limit body) offset)))
-                  :invalid-arrow-buffer-extent)
-        (let [copy (.duplicate body)]
-          (.position copy (int offset))
-          (recur (inc i) (+ offset length) (conj out (slice! copy length))))))))
-
-(defn- offsets! [^ByteBuffer offsets ^ByteBuffer values n]
-  (require! (= (* 4 (inc n)) (.remaining offsets)) :invalid-arrow-offset-count)
-  (let [xs (mapv #(.getInt offsets (* 4 %)) (range (inc n)))]
-    (require! (and (zero? (first xs)) (= (.limit values) (peek xs)) (apply <= xs))
-              :invalid-arrow-value-offsets)
-    xs))
-
-(defn- value-bytes! [^ByteBuffer values offsets i]
-  (let [start (nth offsets i) end (nth offsets (inc i))
-        b (.duplicate values) result (byte-array (- end start))]
-    (.position b (int start))
-    (.get b result)
-    result))
-
-(defn- present? [^ByteBuffer bitmap i]
-  (or (zero? (.limit bitmap))
-      (not (zero? (bit-and (.get bitmap (quot i 8)) (bit-shift-left 1 (mod i 8)))))))
 
 (defn- batch! [^Message m ^ByteBuffer body nullable?]
   (let [^RecordBatch batch (.header m (RecordBatch.)) n (.length batch)]
@@ -210,145 +151,6 @@
 (def integer-profile :xtdb-2.2.0-beta1/selected-int64-arrow-operations-v1)
 (def ^:private integer-base (assoc base :profile integer-profile))
 (def ^:private max-argument-columns 64)
-
-(declare scalar-kind!)
-
-(def ^:private union-leg-kinds
-  {"i64" :integer "utf8" :string "bool" :boolean "keyword" :keyword "uuid" :uuid})
-
-(defn- union-kind! [^Field f temporal?]
-  (let [leg-kinds (cond-> union-leg-kinds
-                    temporal? (assoc "timestamp-tz-micro-utc" :timestamp-utc))
-        n (.childrenLength f)
-        ^Union u (.type f (Union.))]
-    (field! f "$data$" Type/Union false n)
-    (require! (and (<= 2 n (count leg-kinds)) u
-                   (= UnionMode/Dense (.mode u)) (zero? (.typeIdsLength u)))
-              :unsupported-arrow-list-union)
-    (let [kinds (mapv (fn [i]
-                        (let [^Field leg (.children f i)
-                              name (.name leg)
-                              kind (get leg-kinds name)]
-                          (require! kind :unsupported-arrow-list-union-leg)
-                          (let [actual (scalar-kind! leg name (if (= :timestamp-utc kind)
-                                                               #{:timestamp :timestamp-utc} #{kind}))]
-                            (require! (= kind actual) :unsupported-arrow-list-union-leg)
-                            actual)))
-                      (range n))]
-      (require! (= n (count (distinct kinds))) :unsupported-arrow-list-union-leg)
-      [:union kinds])))
-
-(defn- struct-key! [name allowed depth]
-  (require! (and name (<= 1 (count name) 4095)) :unsupported-arrow-struct-key)
-  (if (contains? allowed :document-keys)
-    (if (= "_id" name)
-      (do (require! (zero? depth) :unsupported-arrow-struct-key) "xt/id")
-      (let [split (.lastIndexOf ^String name "$")
-            ns-part (when (not= -1 split) (subs name 0 split))
-            local (subs name (inc split))]
-        (require! (and (re-matches #"[a-z][a-z0-9]*(?:_[a-z0-9]+)*" local)
-                       (or (nil? ns-part)
-                           (and (not= "xt" ns-part)
-                                (re-matches #"[a-z][a-z0-9]*(?:\$[a-z][a-z0-9]*)*" ns-part))))
-                  :unsupported-arrow-struct-key)
-        (str (when ns-part (str (.replace ^String ns-part \$ \.) "/"))
-             (.replace ^String local \_ \-))))
-    (do (require! (re-matches #"[a-z][a-z0-9]*" name) :unsupported-arrow-struct-key)
-        name)))
-
-(defn- scalar-kind-at! [^Field f field-name allowed depth]
-  (let [nullable? (and (contains? allowed :nullable-field) (.nullable f))
-        allowed (disj allowed :nullable-field)
-        type (.typeType f)
-        extension? (pos? (.customMetadataLength f))
-        kind (if extension?
-               (let [_ (require! (= 2 (.customMetadataLength f)) :unsupported-arrow-field)
-                     metadata (into {} (map (fn [j]
-                                             (let [kv (.customMetadata f j)]
-                                               [(.key kv) (.value kv)]))
-                                           (range (.customMetadataLength f))))
-                     name (get metadata "ARROW:extension:name")]
-                 (require! (and (= 2 (.customMetadataLength f))
-                                (= {"ARROW:extension:name" name
-                                    "ARROW:extension:metadata" ""} metadata))
-                           :unsupported-arrow-field)
-                 (cond
-                   (and (= Type/Utf8 type) (= "xt/clj-keyword" name)) :keyword
-                   (and (= Type/FixedSizeBinary type) (= "uuid" name)) :uuid
-                   :else (require! false :unsupported-arrow-field)))
-               (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
-                     Type/Timestamp :timestamp Type/Struct_ :struct-map Type/List (cond
-                                                           (contains? allowed :empty-list) :empty-list
-                                                           (contains? allowed :temporal-union-list) :temporal-union-list
-                                                           (contains? allowed :union-list) :union-list
-                                                           (contains? allowed :temporal-list) :temporal-list
-                                                           (contains? allowed :scalar-list) :scalar-list
-                                                           :else :int64-list)} type))]
-    (require! (contains? allowed kind) :unsupported-arrow-field)
-    (require! (or (not nullable?) (#{:integer :boolean :string :keyword :uuid :timestamp} kind))
-              :unsupported-arrow-nullable-field)
-    (if (#{:keyword :uuid} kind)
-      (require! (and (= field-name (.name f)) (= (boolean nullable?) (.nullable f))
-                     (zero? (.childrenLength f)) (nil? (.dictionary f)))
-                :unsupported-arrow-field)
-      (field! f field-name type (boolean nullable?) (cond
-                                      (= :struct-map kind) (.childrenLength f)
-                                      (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind) 1
-                                      :else 0)))
-    (when (= :integer kind)
-      (let [^Int t (.type f (Int.))]
-        (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
-    (when (= :uuid kind)
-      (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
-        (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
-    (cond
-      (= :struct-map kind)
-      (let [n (.childrenLength f)]
-        (require! (< depth 8) :arrow-struct-depth-limit)
-        (require! (<= (if (contains? allowed :empty-struct) 0 1) n 256)
-                  :unsupported-arrow-struct-field-count)
-        (let [fields (mapv (fn [i]
-                             (let [^Field child (.children f i)
-                                   name (.name child)]
-                               (let [key (struct-key! name allowed depth)
-                                     nullable-field? (and (contains? allowed :nullable-struct-fields)
-                                                          (not= "xt/id" key) (.nullable child))
-                                     child-kind (scalar-kind-at! child name
-                                                                 (cond-> allowed nullable-field?
-                                                                   (conj :nullable-field))
-                                                                 (inc depth))]
-                                 [key (if nullable-field? [:nullable child-kind] child-kind)])))
-                           (range n))]
-          (require! (= n (count (distinct (map first fields)))) :duplicate-arrow-struct-key)
-          [:struct fields]))
-      (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind)
-      (let [^Field child (.children f 0)]
-        (require! (< depth 8) :arrow-list-depth-limit)
-        [:list (cond
-                 (and (contains? allowed :recursive-list) (= Type/List (.typeType child)))
-                 (scalar-kind-at! child "$data$" allowed (inc depth))
-                 (and (= :empty-list kind) (= Type/Null (.typeType child)))
-                 (do (field! child "$data$" Type/Null false 0) :empty-child)
-                 (and (#{:union-list :temporal-union-list :empty-list} kind) (= Type/Union (.typeType child)))
-                 (union-kind! child (not= :union-list kind))
-                 :else (scalar-kind! child "$data$"
-                               (case kind
-                                 :int64-list #{:integer}
-                                 :scalar-list #{:integer :boolean :string :keyword :uuid}
-                                 (:temporal-list :union-list :temporal-union-list :empty-list)
-                                 #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc})))])
-      (= :timestamp kind)
-      (let [^Timestamp t (.type f (Timestamp.))
-            zone (when t (.timezone t))]
-        (require! (and t (= TimeUnit/MICROSECOND (.unit t))
-                       (or (= "Z" zone)
-                           (and (= "UTC" zone) (contains? allowed :timestamp-utc))))
-                  :unsupported-arrow-timestamp-type)
-        (if (= "UTC" zone) :timestamp-utc :timestamp))
-      :else kind)))
-
-(defn- scalar-kind! [f field-name allowed]
-  (scalar-kind-at! f field-name allowed 0))
 
 (def ^:private timestamp-min (Instant/parse "0001-01-01T00:00:00Z"))
 (def ^:private timestamp-end (Instant/parse "9999-01-01T00:00:00Z"))
