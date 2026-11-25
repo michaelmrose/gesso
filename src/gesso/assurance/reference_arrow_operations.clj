@@ -258,6 +258,7 @@
                    :else (require! false :unsupported-arrow-field)))
                (get {Type/Int :integer Type/Bool :boolean Type/Utf8 :string
                      Type/Timestamp :timestamp Type/List (cond
+                                                           (contains? allowed :empty-list) :empty-list
                                                            (contains? allowed :temporal-union-list) :temporal-union-list
                                                            (contains? allowed :union-list) :union-list
                                                            (contains? allowed :temporal-list) :temporal-list
@@ -268,7 +269,7 @@
       (require! (and (= field-name (.name f)) (not (.nullable f))
                      (zero? (.childrenLength f)) (nil? (.dictionary f)))
                 :unsupported-arrow-field)
-      (field! f field-name type false (if (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list} kind) 1 0)))
+      (field! f field-name type false (if (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind) 1 0)))
     (when (= :integer kind)
       (let [^Int t (.type f (Int.))]
         (require! (and t (= 64 (.bitWidth t)) (.isSigned t)) :unsupported-integer-type)))
@@ -276,15 +277,18 @@
       (let [^FixedSizeBinary t (.type f (FixedSizeBinary.))]
         (require! (and t (= 16 (.byteWidth t))) :unsupported-uuid-width)))
     (cond
-      (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list} kind)
+      (#{:int64-list :scalar-list :temporal-list :union-list :temporal-union-list :empty-list} kind)
       (let [^Field child (.children f 0)]
-        [:list (if (and (#{:union-list :temporal-union-list} kind) (= Type/Union (.typeType child)))
-                 (union-kind! child (= :temporal-union-list kind))
-                 (scalar-kind! child "$data$"
+        [:list (cond
+                 (and (= :empty-list kind) (= Type/Null (.typeType child)))
+                 (do (field! child "$data$" Type/Null false 0) :empty-child)
+                 (and (#{:union-list :temporal-union-list :empty-list} kind) (= Type/Union (.typeType child)))
+                 (union-kind! child (not= :union-list kind))
+                 :else (scalar-kind! child "$data$"
                                (case kind
                                  :int64-list #{:integer}
                                  :scalar-list #{:integer :boolean :string :keyword :uuid}
-                                 (:temporal-list :union-list :temporal-union-list)
+                                 (:temporal-list :union-list :temporal-union-list :empty-list)
                                  #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc})))])
       (= :timestamp kind)
       (let [^Timestamp t (.type f (Timestamp.))
@@ -323,7 +327,8 @@
         :else 1))
 
 (defn- buffer-count [kind]
-  (cond (list-kind? kind) (+ 2 (buffer-count (second kind)))
+  (cond (= :empty-child kind) 0
+        (list-kind? kind) (+ 2 (buffer-count (second kind)))
         (union-kind? kind) (+ 2 (reduce + (map buffer-count (second kind))))
         :else (if (#{:string :keyword} kind) 3 2)))
 
@@ -391,11 +396,13 @@
   (let [child (.nodes batch (inc node-index))
         child-count (.length child)
         ^ByteBuffer offsets (nth buffers (inc start))
-        union? (union-kind? kind)]
+        union? (union-kind? kind)
+        empty? (= :empty-child kind)]
     (require! (and (<= 0 child-count (min (quot max-bytes 8) (* 256 n)))
-                   (if union? (= -1 (.nullCount child))
-                       (and (zero? (.nullCount child))
-                            (zero? (.limit ^ByteBuffer (nth buffers (+ start 2))))))
+                   (cond union? (= -1 (.nullCount child))
+                         empty? (and (zero? child-count) (zero? (.nullCount child)))
+                         :else (and (zero? (.nullCount child))
+                                    (zero? (.limit ^ByteBuffer (nth buffers (+ start 2))))))
                    (= (* 4 (inc n)) (.limit offsets)))
               :unsupported-arrow-list-buffer-layout)
     ;; Preserve the original integer-list buffer rejection reason.
@@ -407,9 +414,9 @@
                 :invalid-arrow-list-offsets)
       (require! (every? #(<= (- (second %) (first %)) 256) (partition 2 1 xs))
                 :arrow-list-element-limit)
-      (let [read-child (if union?
-                         (union-reader! (second kind) batch (inc node-index) buffers (+ start 2) child-count)
-                         (scalar-reader! kind buffers (+ start 2) child-count))]
+      (let [read-child (cond empty? (fn [_] (require! false :unsupported-arrow-list-buffer-layout))
+                             union? (union-reader! (second kind) batch (inc node-index) buffers (+ start 2) child-count)
+                             :else (scalar-reader! kind buffers (+ start 2) child-count))]
         (fn [row]
           (mapv read-child (range (nth xs row) (nth xs (inc row)))))))))
 
@@ -754,3 +761,26 @@
   "Expand selected SQL groups including heterogeneous scalar and UTC timestamp lists."
   [bytes]
   (expand-fixed-operations bytes temporal-union-list-base temporal-union-list-rows!))
+
+(def empty-list-profile :xtdb-2.2.0-beta1/selected-empty-and-scalar-list-arrow-operations-v1)
+(def ^:private empty-list-base (assoc base :profile empty-list-profile))
+
+(defn- empty-list-rows! [bytes]
+  (scalar-rows! bytes #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc :empty-list}))
+
+(defn decode-empty-list-arguments
+  "Decode selected scalar lists, including all-empty vectors with a zero-length
+   Null child. Null-valued elements and top-level null arguments are excluded."
+  [bytes]
+  (try
+    (assoc empty-list-base :status :decoded :rows (empty-list-rows! bytes))
+    (catch clojure.lang.ExceptionInfo e
+      (assoc empty-list-base :status :unsupported :reason (:reason (ex-data e))))
+    (catch CharacterCodingException _
+      (assoc empty-list-base :status :unsupported :reason :invalid-arrow-utf8))
+    (catch Exception _ (assoc empty-list-base :status :unsupported :reason :invalid-arrow-stream))))
+
+(defn decode-empty-list-operations
+  "Expand selected SQL groups including all-empty and typed scalar vectors."
+  [bytes]
+  (expand-fixed-operations bytes empty-list-base empty-list-rows!))

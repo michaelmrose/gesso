@@ -3431,3 +3431,24 @@ recursive composites, document puts and aggregate reference document
 budgets remain open. No production wiring, certificate or CLM-R2
 premise retirement. Full project and independent formal gates were
 not rerun.
+
+* v2666 — decode selected untyped empty Arrow lists
+
+Qualify the observed nonnullable List with a nonnullable Null $data$
+child having zero nodes' entries, zero null count and no child buffers.
+Require every list offset to be zero; reconstruct empty vectors without
+admitting null elements or null top-level arguments. Preserve all earlier
+typed and heterogeneous list profiles, column ordering and expansion bounds.
+
+Focused JVM: 19 tests / 1142 assertions, zero failures or errors across
+reference Arrow operations and source payload suites. Physical retained
+all-empty columns alongside integer and heterogeneous list columns match
+expected operations, spans and provider observations before and after
+reopening. Mutate scalar bytes and empty-list offsets; reject nonempty
+null children, top-level null and truncated framing. XTDB logged shutdown
+cancellation; the test process exited zero.
+
+Selected empty and scalar-list profile v1. Recursive composites, nullable
+values, document puts and aggregate reference document budgets remain open.
+No production wiring, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates were not rerun.

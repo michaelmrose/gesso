@@ -881,3 +881,56 @@
           (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 10))
           (doseq [id ids] (check-temporal-union-retained! node id rows))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-empty-list-retained! [node id other-ids rows]
+  (let [data (retained-operation-bytes node id)
+        observed (provider/observe-source-message! node id)
+        decoded (arrow/decode-empty-list-operations data)
+        query "ASSERT ($1 IS NOT NULL AND ($2 = 0) AND $3 IS NOT NULL)"
+        expected (mapv #(hash-map :kind :sql :query query :args %) rows)
+        args (:argument-bytes (first (:groups (arrow/decode-operations data))))
+        [_ offsets _ values] (buffer-starts args)]
+    (is (= :decoded (:status decoded)) (pr-str (dissoc decoded :operations)))
+    (is (= arrow/empty-list-profile (:profile decoded)))
+    (is (= :none (:authority decoded)))
+    (is (= :not-issued (:certificate decoded)))
+    (is (= expected (:operations decoded) (:operations observed)))
+    (is (= [(count rows)] (:logged-operation-spans decoded) (:logged-operation-spans observed)))
+    (is (= rows (:rows (arrow/decode-empty-list-arguments args))))
+    (is (= :unsupported-arrow-field (:reason (arrow/decode-temporal-union-list-operations data))))
+    (is (= (assoc-in rows [0 1] 99)
+           (:rows (arrow/decode-empty-list-arguments (edit-long args values 99)))))
+    (doseq [[bad reason] [[(edit-int args offsets 1) :invalid-arrow-list-offsets]
+                          [(edit-int args (+ offsets 4) 1) :invalid-arrow-list-offsets]
+                          [(edit-int args (+ offsets (* 4 (count rows))) 1) :invalid-arrow-list-offsets]
+                          [(Arrays/copyOf args (dec (alength args))) :unsupported-arrow-terminator]]]
+      (let [r (arrow/decode-empty-list-arguments bad)]
+        (is (= :unsupported (:status r)))
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not (contains? r :rows)))))
+    (doseq [other-id other-ids]
+      (let [r (arrow/decode-empty-list-operations (retained-operation-bytes node other-id))]
+        (is (= :unsupported (:status r)) (pr-str (dissoc r :operations)))
+        (is (not (contains? r :operations)))))))
+
+(deftest selected-empty-lists-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-empty-list-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        rows [[[] 0 [1 "x"]] [[] 1 []] [[] -1 [true 2]]]]
+    (is (= [[]] (:rows (arrow/decode-empty-list-arguments nil))))
+    (try
+      (let [[id other-ids]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitTxBlocking database id (Duration/ofSeconds 10)) id))
+                    id (submit! (mapv #(into ["ASSERT (? IS NOT NULL AND (? = 0) AND ? IS NOT NULL)"] %) rows))
+                    other-ids [(submit! [["ASSERT ? IS NOT NULL" [nil]]])
+                               (submit! [["ASSERT ? IS NULL" nil]])]]
+                (check-empty-list-retained! node id other-ids rows)
+                [id other-ids]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek other-ids) (Duration/ofSeconds 10))
+          (check-empty-list-retained! node id other-ids rows)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
