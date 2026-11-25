@@ -8,6 +8,7 @@
             [xtdb.util :as xt-util]
             [gesso.model.tx :as model-tx]
             [gesso.model.certified-plan :as plan]
+            [gesso.model.mapped-projection :as projection]
             [gesso.assurance.transition :as construction]
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.induction :as induction]
@@ -83,42 +84,28 @@
 (defn- require! [condition]
   (when-not condition (throw (ex-info "Outside closed Claim observation" {}))))
 
+(defn- decode-claim-outcome! [record]
+  (let [binding (:gesso.command/binding record)
+        helper (identity/raw-value (:principal binding))
+        outcome (:gesso.command/outcome record)]
+    (require! (= {:request-id "r1"} (:arguments binding)))
+    (cond (= {:outcome :request/claimed :helper helper} outcome) :accepted
+          (= {:outcome :request/not-claimable :reason :already-claimed} outcome) :rejected
+          :else (throw (ex-info "Unknown Claim outcome" {})))))
+
 (defn snapshot!
-  "Project actual rows supplied by a query function. Use snapshot-at-frontier!
-   for physical observations; this decoder does not itself pin any reads."
+  "Acquire the closed fixture rows using the supplied query function; delegate
+   typed projection and identity coverage to the mapped decoder. The extra
+   assignment relationship and outcome meanings remain fixture-specific."
   [q]
   (let [requests (q ["SELECT _id, status, revision FROM requests"])
         assignments (q ["SELECT _id, request_id, helper FROM request_assignments"])
         memberships (q ["SELECT _id, active FROM memberships"])
-        records (q ["SELECT * FROM gesso_commands"])
-        request (first requests)
-        assignment (first assignments)]
-    (require! (and (= 1 (count requests)) (= "r1" (:xt/id request))
-                   (<= (count assignments) 1)
-                   (or (empty? assignments)
-                       (and (= "primary-r1" (:xt/id assignment))
-                            (= "r1" (:request-id assignment)) (helpers (:helper assignment))))
-                   (= 2 (count memberships)) (= (set (keys helpers)) (set (map :xt/id memberships)))))
-    (let [state (reduce (fn [s {:keys [xt/id active]}]
-                          (assoc s (second (helpers id)) active))
-                        {:request/status (:status request) :request/revision (:revision request)
-                         :assignment/helper (:helper assignment) :journal/one nil :journal/two nil}
-                        memberships)]
-      (reduce (fn [s record]
-                (let [binding (:gesso.command/binding record)
-                      helper (identity/raw-value (:principal binding))
-                      slot (first (helpers helper))
-                      outcome (:gesso.command/outcome record)]
-                  (require! (and slot (nil? (get s slot))
-                                 (= :request/claim (:operation binding))
-                                 (= {:request-id "r1"} (:arguments binding))
-                                 (= (:xt/id record) (identity/raw-value (:command-id binding)))
-                                 (= :incorporated (:gesso.command/status record))))
-                  (assoc s slot
-                         (cond (= {:outcome :request/claimed :helper helper} outcome) :accepted
-                               (= {:outcome :request/not-claimable :reason :already-claimed} outcome) :rejected
-                               :else (throw (ex-info "Unknown Claim outcome" {}))))))
-              state records))))
+        records (q ["SELECT * FROM gesso_commands"])]
+    (require! (every? #(and (= "r1" (:request-id %)) (helpers (:helper %))) assignments))
+    (projection/project-state! (source "helper-1" :accept) target-map
+                               {:requests requests :request_assignments assignments :memberships memberships}
+                               records decode-claim-outcome!)))
 
 (defn snapshot-at-frontier!
   "Capture one completed basis on the selected node and use that exact
