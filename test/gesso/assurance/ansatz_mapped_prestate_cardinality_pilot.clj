@@ -7,9 +7,11 @@
    gesso.assurance.ansatz-mapped-prestate-cardinality-pilot."
   (:require [ansatz.core :as ansatz]
             [ansatz.kernel.env :as kernel]
+            [ansatz.kernel.expr :as expr]
             [clojure.test :refer [deftest is run-tests]]
             [gesso.assurance.ansatz-reservation-pilot]
             [gesso.assurance.proof.mapped-prestate-rules :as rules]
+            [gesso.assurance.proof.mapped-prestate-partition :as partition]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-frame :as frame]
             [gesso.model.mapped-projection-test]))
@@ -110,6 +112,91 @@
           changed-sites (:sites (derive-obligations! original targets changed journal changed-prefix))]
       (is (not= sites changed-sites))
       (is (some #{ {:target [:document :requests "r1"] :path [] :cardinality 4}} changed-sites)))))
+
+(defn- list-form [codes]
+  (reduce (fn [tail code] (list 'List.cons 'Int code tail))
+          '(List.nil Int) (reverse codes)))
+
+(defn- check-instance! [lemma {:keys [target path cardinality partition]}]
+  (let [{:keys [known actual residual]} partition
+        known-form (list-form known)
+        actual-form (list-form actual)
+        residual-form (list-form residual)
+        premise! (fn [form]
+                   (proof-pilot! 'check-obligation!
+                                 {:parameters [] :goal-form form :proof-script '[(rfl)]}))
+        hk (premise! (list '= 'Nat (list 'List.length known-form) cardinality))
+        ha (premise! (list '= 'Nat (list 'List.length actual-form) cardinality))
+        hp (premise! (list '= '(List Int) actual-form
+                           (list 'List.append known-form residual-form)))
+        goal (proof-pilot! 'elaborate-source-proposition!
+                          {:parameters [] :goal-form (list '= '(List Int) actual-form known-form)})
+        [_ actual-term known-term] (expr/get-app-args goal)
+        residual-term (last (expr/get-app-args (last (expr/get-app-args (:goal hp)))))
+        proof (expr/app* (:proof lemma) known-term actual-term residual-term
+                         (:proof hk) (:proof ha) (:proof hp))
+        env (ansatz/env)]
+    (when-not (kernel/verifies? env goal proof)
+      (throw (ex-info "Kernel rejected concrete cardinality application."
+                      {:target target :path path})))
+    {:target target :path path :cardinality cardinality
+     :goal goal :proof proof :premises [hk ha hp]
+     :dependencies (proof-pilot! 'qualify-proof-dependencies!
+                                (proof-pilot! 'inspect-proof-dependencies env goal proof))}))
+
+(defn check-partitions!
+  "Re-derive concrete partitions and apply the original checked lemma only
+   at sites with established cardinality premises. The kernel checks the
+   instantiated equality of encoded lists; the decoded-map bridge remains
+   instance evidence and does not imply a general refinement theorem."
+  [original targets docs journal prefix actual]
+  (let [observation (partition/observe! original targets docs journal prefix actual)
+        abstract (check! original targets docs journal prefix)
+        lemmas (into {} (map (juxt #(get-in % [:description :expected-cardinality]) identity))
+                     (:checked abstract))
+        sites (mapv (fn [{:keys [cardinality partition] :as site}]
+                      (if (:cardinality-premises-satisfied? partition)
+                        (assoc site :application (check-instance! (get lemmas cardinality) site)
+                               :status :kernel-checked-encoded-equality)
+                        (assoc site :status :premises-open)))
+                    (:sites observation))]
+    {:type ::partition-cardinality-pilot :sites sites
+     :status (cond (empty? sites) :no-map-sites
+                   (every? #(= :kernel-checked-encoded-equality (:status %)) sites)
+                   :all-map-encoded-equalities-checked
+                   :else :map-encoded-equalities-open)
+     :open-obligations (:open-obligations observation)
+     :scope :source-derived-concrete-encoded-list-equalities
+     :sql-refinement :not-established :authority :none :certificate :not-issued}))
+
+(deftest concrete-partitions-instantiate-the-checked-cardinality-lemma
+  (let [[_ _ docs journal _ :as args] (fixture!)
+        request [:document :requests "r1"]
+        bags {request (:requests docs) [:document :assignments "a1"] []
+              [:journal-slot "p1" :example/command] []
+              [:journal-slot "p2" :example/command] journal}
+        report (apply check-partitions! (conj args bags))
+        changed (apply check-partitions! (conj args (assoc-in bags [request 0 :extra] true)))
+        changed-site (first (filter #(= request (:target %)) (:sites changed)))]
+    (is (= :all-map-encoded-equalities-checked (:status report)))
+    (is (seq (:sites report)))
+    (is (= :map-encoded-equalities-open (:status changed)))
+    (is (= :premises-open (:status changed-site)))
+    (is (nil? (:application changed-site)))
+    (is (= 1 (count (get-in changed-site [:partition :residual]))))
+    (is (= :none (:authority report)))
+    (is (= :not-issued (:certificate report)))
+    (is (= :not-established (:sql-refinement report)))
+    (is (contains? (:open-obligations report) :general-structural-soundness))
+    (doseq [{:keys [target path partition application status]} (:sites report)]
+      (let [{:keys [goal proof premises dependencies]} application]
+        (is (= :kernel-checked-encoded-equality status))
+        (is (= [target path] ((juxt :target :path) application)))
+        (is (= 3 (count premises)))
+        (is (= (:known partition) (:actual partition)))
+        (is (kernel/verifies? (ansatz/env) goal proof))
+        (is (empty? (:unresolved dependencies)))
+        (is (empty? (:non-safe dependencies)))))))
 
 (defn -main [& _]
   (binding [ansatz/*verbose* false] (ansatz/load-init!))
