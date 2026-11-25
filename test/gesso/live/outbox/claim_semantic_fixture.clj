@@ -9,7 +9,7 @@
             [gesso.model.tx :as model-tx]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-projection :as projection]
-            [gesso.model.mapped-preparation :as preparation]
+            [gesso.model.inductive-plan :as inductive-plan]
             [gesso.assurance.transition :as construction]
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.induction :as induction]
@@ -350,8 +350,15 @@
     (require! (= (:state snapshot) (:before checked)))
     checked))
 
-(defn build-prepared-admission! []
-  (preparation/build-admission! (catalog) target-map decode-claim-outcome!))
+(defn mapped-admission-source [bound]
+  {:inductive-source bound :target-map target-map :decode-outcome! decode-claim-outcome!})
+
+(defn build-prepared-admission! [bound]
+  (let [source (mapped-admission-source bound)
+        issued (inductive-plan/build-inductive-mapped-admission! source)]
+    {:issued issued
+     :prepare! (partial issued :prepare!) :admit! (partial issued :admit!)
+     :discard! (partial issued :discard!) :pending? (partial issued :pending?)}))
 
 (defn admit-prepared-candidate!
   "The caller has already checked the full SQL and publication footprint."

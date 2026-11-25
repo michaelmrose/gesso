@@ -18,6 +18,7 @@
             [gesso.live.outbox.claim-browser-fixture :as browser]
             [gesso.live.outbox.claim-semantic-fixture :as semantics]
             [gesso.assurance.observed-correspondence :as correspondence]
+            [gesso.model.inductive-plan :as inductive-plan]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.read-frontier :as frontier]
@@ -45,7 +46,8 @@
 (def ^:dynamic *claim-browser-observer?* false)
 
 (deftest distinct-claim-commands-contend-for-one-primary-assignment
-  (doseq [recovery-mode [:valid :wrong-outcome :missing-guard :domain-write]]
+  (doseq [bound [(semantics/bound-inductive-source!)]
+          recovery-mode [:valid :wrong-outcome :missing-guard :domain-write]]
    (session/with-session-authority!
     #{:fixture/helper-1 :fixture/helper-2 :fixture/reader}
     (fn [{:keys [source issue! revoke!]}]
@@ -61,7 +63,7 @@
         writers (atom [])
         seed-admitted? (atom false)
         policy-admissions (atom [])
-        preparations (semantics/build-prepared-admission!)
+        preparations (semantics/build-prepared-admission! bound)
         checked-candidates (atom {})
         execute-adapter xtdb/execute-tx!
         execute xtdb/execute-tx-from!
@@ -583,9 +585,11 @@
                                                                             (assoc-in op [2 :status] :open) op)) accepted) nil)))))
                      (is (= before (semantics/snapshot-at-frontier! node)))))
                  (when valid?
-                   (let [correlated (semantics/correlate-history! @comparisons @submissions)
+                   (let [issued (inductive-plan/require-current-mapped-admission!
+                                 (:issued preparations) (semantics/mapped-admission-source bound))
+                         correlated (semantics/correlate-history! @comparisons @submissions)
                          report (correspondence/check-bound-declared-observations!
-                                 {:inductive-source (semantics/bound-inductive-source!)
+                                 {:inductive-source bound
                                   :observations (mapv :observation correlated)})
                          rejected? (fn [steps attempts]
                                      (try (semantics/correlate-history! steps attempts) false
@@ -594,6 +598,10 @@
                                              (filter #(= :committed (:result %)) @submissions)))
                          replay-ids #{(semantics/alternative-id helper :replay-accepted)
                                       (semantics/alternative-id loser-helper :replay-rejected)}]
+                     (is (= :issued-local-preparation-registry (:admission issued)))
+                     (is (= (:catalog-fingerprint issued) (get-in report [:induction-ledger :catalog-fingerprint])))
+                     (is (= (:induction-fingerprint issued) (get-in report [:induction-ledger :induction-fingerprint])))
+                     (is (= :none (:transaction-authority issued)))
                      (is (= [id loser-id id loser-id] (mapv :command-id correlated)))
                      (is (= [:committed-in-window :committed-in-window :no-new-submission :no-new-submission]
                             (mapv :submission correlated)))

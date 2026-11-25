@@ -248,3 +248,36 @@
                               (assoc claim/target-map :membership/two [:document :memberships "helper-3" :active])))))
     (is (thrown? clojure.lang.ExceptionInfo
                  (mapped/check-inductive-target-mapping! (assoc-in source [:inductive-source :certificate-handle] {}))))))
+
+(deftest issued-mapped-admission-requires-original-live-source
+  (let [bound (claim/bound-inductive-source!)
+        source (claim/mapped-admission-source bound)
+        issue mapped/build-inductive-mapped-admission!
+        current mapped/require-current-mapped-admission!
+        admission (issue source)
+        info (mapped/describe-mapped-admission admission)
+        alternative (claim/alternative-id "helper-1" :accept)
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= :issued-local-preparation-registry (:admission info)))
+    (is (= :not-issued (:executor info) (:certificate info)))
+    (is (= :none (:authority info) (:transaction-authority info)))
+    (is (= info (current admission source)))
+    (is (false? (admission :pending? alternative "c1")))
+    (is (= :missing-preparation (reason #(admission :admit! alternative "c1" []))))
+    (is (= :unknown-mapped-admission-action (reason #(admission :submit!))))
+    (is (= :unregistered-mapped-admission (reason #(current info source))))
+    (is (= :unregistered-mapped-admission (reason #(current (fn [& _] info) source))))
+    (is (= :changed-mapped-admission-registration
+           (reason #(current admission (assoc source :decode-outcome! (constantly :accepted))))))
+    (is (= :changed-mapped-admission-registration
+           (reason #(current admission (assoc-in source [:target-map :membership/two]
+                                                [:document :memberships "helper-3" :active])))))
+    (is (= :changed-mapped-admission-registration
+           (reason #(current admission (assoc-in source [:inductive-source :certificate-handle] {})))))
+    (is (= :changed-mapped-admission-registration
+           (reason #(current admission (assoc-in source [:inductive-source :dependency-handle] {})))))
+    (is (thrown? clojure.lang.ExceptionInfo (issue (assoc-in source [:inductive-source :certificate-handle] {}))))
+    (is (thrown? clojure.lang.ExceptionInfo (issue (assoc-in source [:inductive-source :catalog :id] :fixture/other))))
+    (is (= :invalid-mapped-admission-checker-or-decoder
+           (with-redefs [mapped/check-inductive-target-mapping! (constantly info)]
+             (reason #(issue source)))))))

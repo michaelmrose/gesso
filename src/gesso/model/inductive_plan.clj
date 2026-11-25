@@ -24,7 +24,8 @@
             [gesso.assurance.inductive-report :as inductive]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.transition :as transition]
-            [gesso.model.certified-plan :as plan])
+            [gesso.model.certified-plan :as plan]
+            [gesso.model.mapped-preparation :as preparation])
   (:import (java.util WeakHashMap)))
 
 (def adapter-version 1)
@@ -290,3 +291,68 @@
      :scope :declared-abstract-field-projection-only
      :executor :not-issued :physical-correspondence :not-established
      :certificate :not-issued :authority :none}))
+
+(def ^:private original-mapped-check check-inductive-target-mapping!)
+(def ^:private original-mapped-builder preparation/build-admission!)
+(def ^:private ^WeakHashMap issued-mapped (WeakHashMap.))
+
+(defn- checked-mapped-source! [source]
+  (exact-map! source #{:inductive-source :target-map :decode-outcome!} [])
+  (when-not (and (fn? (:decode-outcome! source))
+                 (identical? original-mapped-check check-inductive-target-mapping!)
+                 (identical? original-mapped-builder preparation/build-admission!))
+    (reject! :invalid-mapped-admission-checker-or-decoder [] {}))
+  (original-mapped-check (select-keys source [:inductive-source :target-map])))
+
+(defn- mapped-description [checked]
+  (assoc checked :type ::issued-mapped-admission
+                 :admission :issued-local-preparation-registry
+                 :checking :live-induction-handles-and-original-mappings-rechecked-at-issuance
+                 :runtime-induction-gating :not-established
+                 :transaction-authority :none))
+
+(defn build-inductive-mapped-admission!
+  "Issue a local callable preparation registry from the original catalog and
+   both live induction handles. Dispatch only its four preparation operations.
+   The decoder and acquisition are trusted; no full transaction or installed
+   executor correspondence is established. Runtime calls do not recheck the
+   induction proof; use require-current-mapped-admission! at assembly review."
+  [source]
+  (let [checked (checked-mapped-source! source)
+        registry (original-mapped-builder (get-in source [:inductive-source :catalog])
+                                          (:target-map source) (:decode-outcome! source))
+        admission (fn [action & args]
+                    (if-let [f (get registry action)]
+                      (apply f args)
+                      (reject! :unknown-mapped-admission-action [action] {})))]
+    (locking issued-mapped
+      (.put issued-mapped admission {:source source :description (mapped-description checked)}))
+    admission))
+
+(defn- registered-mapped! [admission]
+  (or (when (fn? admission) (locking issued-mapped (.get issued-mapped admission)))
+      (reject! :unregistered-mapped-admission [:admission] {})))
+
+(defn describe-mapped-admission [admission]
+  (:description (registered-mapped! admission)))
+
+(defn require-current-mapped-admission!
+  "Recheck the original live handles and mapping of this exact issued callable
+   against a trusted current assembly source, including decoder identity.
+   A copied description or newly issued registry is not a substitute for it."
+  [admission current-source]
+  (let [{original :source prior :description} (registered-mapped! admission)
+        old (:inductive-source original) now (:inductive-source current-source)]
+    (exact-map! current-source #{:inductive-source :target-map :decode-outcome!} [])
+    (exact-map! now inductive-keys [:inductive-source])
+    (when-not (and (= (:catalog old) (:catalog now))
+                   (= (:current-graph old) (:current-graph now))
+                   (identical? (:certificate-handle old) (:certificate-handle now))
+                   (identical? (:dependency-handle old) (:dependency-handle now))
+                   (= (:target-map original) (:target-map current-source))
+                   (identical? (:decode-outcome! original) (:decode-outcome! current-source)))
+      (reject! :changed-mapped-admission-registration [:current-source] {}))
+    (let [fresh (mapped-description (checked-mapped-source! current-source))]
+      (when-not (= prior fresh)
+        (reject! :stale-mapped-admission [:current-source] {}))
+      fresh)))
