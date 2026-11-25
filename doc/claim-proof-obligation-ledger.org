@@ -695,3 +695,26 @@ This regression passed 1 test / 69 assertions, no failures or errors.
 Production is unchanged. This is adversarial fixture-level qualification,
 not authentication of unrestricted writers or a provider refinement proof.
 The full Claim, Ansatz, Chromium and project suites were not rerun.
+
+* v2570 — historical writer provenance is not guard reconstruction
+
+A correct version-4 witness can accompany raw domain and journal puts
+without executing any SQL assertions. Extend the adversarial history
+fixture with this unguarded case: the installed adapter refuses the
+unmediated envelope before submission, but direct XTDB execution commits
+and does not invoke the policy observer. The selected historical rows
+still satisfy the expected pre/post correspondence, and reconstruction
+of the expected guard digest succeeds. Both guarded and unguarded raw
+controls therefore qualify as verified mapped transitions in the
+observational classifier. This is not evidence of actual guard execution.
+
+Expose :historical-writer-provenance :not-established in the conditional
+physical-prefix premises and retain :historical-mapped-writer-authentication
+as an explicit open obligation, independently of unrestricted writer
+closure. Neither a clean history nor a correct witness can close it.
+Do not alter the history checkpoint profile: the observational classifier
+and its persisted state are unchanged. No certificate or production
+admission authority is added. Closing provenance would require a trusted
+execution receipt bound to the actual committed transaction or an
+independently enforced exclusive writer boundary; a digest of a proposed
+prefix alone cannot supply either.

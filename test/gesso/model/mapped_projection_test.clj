@@ -1216,11 +1216,13 @@
                            (frame/prefix-evidence! (frame/formatted-prestate-assertions!
                                                     mapping (assoc-in docs [:requests 0 :hidden] "other") [])))]
     (doseq [[mode reason] [[:valid nil]
+                           [:unguarded nil]
                            [:other-prestate :historical-guard-prefix-mismatch]
                            [:legacy :invalid-historical-mapped-evidence]
                            [:wrong-profile :invalid-historical-mapped-evidence]]]
       (with-open [node (xtn/start-node {})]
-        (let [writer (policy/build-policy! node {:admission admission :initializer seed :observe! identity}
+        (let [observations (atom [])
+              writer (policy/build-policy! node {:admission admission :initializer seed :observe! #(swap! observations conj %)}
                                            {:source-id "guard-history"})
               release (live-xtdb/register-submission-policy! node writer)]
           (try
@@ -1232,6 +1234,7 @@
                   witness (inductive/mapped-transition-evidence! admission checked)
                   corrupted (case mode
                               :valid witness
+                              :unguarded witness
                               :other-prestate (assoc witness :guard-prefix-fingerprint other-fingerprint)
                               :legacy (-> witness (assoc :profile-version 3)
                                           (dissoc :guard-profile :guard-prefix-fingerprint))
@@ -1239,9 +1242,24 @@
                   initial (history/audit-chunk! node admission 8)]
               (is (= :conditional-observed-prefix-argument (get-in (describe initial) [:physical-induction :status])))
               (is (not= other-fingerprint (:guard-prefix-fingerprint witness)))
-              ;; Deliberate raw writer bypass: identical valid domain and command
-              ;; writes, same-transaction evidence, only the witness differs.
-              (xt/execute-tx node (conj (:tx-ops framed) [:put-docs :gesso_transition_evidence corrupted]))
+              ;; Deliberate raw writer bypass. In the unguarded control,
+              ;; no assertion or admitted adapter invocation reaches XTDB.
+              ;; Historical row reconstruction cannot distinguish that
+              ;; execution from the guarded raw control.
+              (let [ops (conj (if (= :unguarded mode)
+                                (into [] (filter #(= :put-docs (first %))) (:tx-ops base))
+                                (:tx-ops framed))
+                              [:put-docs :gesso_transition_evidence corrupted])
+                    prior-observations @observations]
+                (when (= :unguarded mode)
+                  (is (every? #(= :put-docs (first %)) ops))
+                  (is (= :submission-policy-refused
+                         (try (live-xtdb/execute-tx! node ops) nil
+                              (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))
+                  (is (empty? (xt/q node "SELECT * FROM gesso_commands")))
+                  (is (empty? (xt/q node "SELECT * FROM gesso_transition_evidence"))))
+                (xt/execute-tx node ops)
+                (is (= prior-observations @observations)))
               (is (= [corrupted] (xt/q node "SELECT * FROM gesso_transition_evidence")))
               (is (= (:requests after) (xt/q node "SELECT * FROM requests")))
               (is (= [command] (xt/q node "SELECT * FROM gesso_commands")))
@@ -1257,6 +1275,8 @@
                 (is (= (if reason :not-established :conditional-observed-prefix-argument)
                        (get-in report [:physical-induction :status])))
                 (is (= :not-issued (:certificate report)))
+                (is (= :not-established (get-in report [:physical-induction :premises :historical-writer-provenance])))
+                (is (contains? (:open-obligations report) :historical-mapped-writer-authentication))
                 (when reason
                   (is (= step (:first-unclassified chunk)))
                   (is (contains? (:open-obligations report) :unclassified-historical-steps))

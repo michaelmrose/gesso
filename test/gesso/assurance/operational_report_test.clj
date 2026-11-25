@@ -100,6 +100,8 @@
         arg (:physical-induction joined)]
     (is (= :conditional-observed-prefix-argument (:status arg)))
     (is (= :v4-prefix-checked (get-in arg [:premises :visible-valid-time-continuity])))
+    (is (= :not-established (get-in arg [:premises :historical-writer-provenance])))
+    (is (contains? (:open-obligations joined) :historical-mapped-writer-authentication))
     (is (= #{:example/nonnegative} (:invariant-ids arg)))
     (is (= (get-in joined [:history :coverage :through]) (:through arg)))
     (is (= :none (:authority arg)))

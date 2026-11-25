@@ -115,11 +115,14 @@
                 :abstract-induction (if abstract? :conditionally-checked :open)
                 :physical-initialization (if initial? :observed-projection-checked :open)
                 :historical-step-coverage (if clean? :clean-v4-prefix :open)
-                :visible-valid-time-continuity (if clean? :v4-prefix-checked :open)}
+                :visible-valid-time-continuity (if clean? :v4-prefix-checked :open)
+                ;; Reconstructed guard identity is not evidence of execution.
+                :historical-writer-provenance :not-established}
      :invariant-ids (if eligible? invariants #{})
      :through (when eligible? (get-in history [:coverage :through]))
      :open-obligations #{:historical-retention-and-checkpoint-integrity
                          :unrestricted-physical-writer-closure
+                         :historical-mapped-writer-authentication
                          :transaction-internal-read-basis-refinement
                          :valid-time-continuity-between-steps
                          :history-coverage-beyond-sampled-frontier
