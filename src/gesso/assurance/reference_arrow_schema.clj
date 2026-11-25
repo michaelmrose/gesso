@@ -39,8 +39,14 @@
 (defn- struct-key! [name allowed depth]
   (require! (and name (<= 1 (count name) 4095)) :unsupported-arrow-struct-key)
   (if (contains? allowed :document-keys)
-    (if (= "_id" name)
+    (cond
+      (= "_id" name)
       (do (require! (zero? depth) :unsupported-arrow-struct-key) "xt/id")
+      (and (contains? allowed :document-valid-time)
+           (#{"_valid_from" "_valid_to"} name))
+      (do (require! (zero? depth) :unsupported-arrow-struct-key)
+          (if (= "_valid_from" name) "xt/valid-from" "xt/valid-to"))
+      :else
       (let [split (.lastIndexOf ^String name "$")
             ns-part (when (not= -1 split) (subs name 0 split))
             local (subs name (inc split))]
@@ -111,12 +117,17 @@
                              (let [^Field child (.children f i)
                                    name (.name child)]
                                (let [key (struct-key! name allowed depth)
+                                     valid-time? (#{"xt/valid-from" "xt/valid-to"} key)
                                      nullable-field? (and (contains? allowed :nullable-struct-fields)
                                                           (not= "xt/id" key) (.nullable child))
                                      null-only? (and nullable-field?
                                                      (contains? allowed :null-only-fields)
                                                      (= Type/Null (.typeType child)))
                                      child-kind (cond
+                                                  valid-time?
+                                                  (let [k (scalar-kind-at! child name #{:timestamp :timestamp-utc} (inc depth))]
+                                                    (require! (= :timestamp-utc k) :unsupported-arrow-put-bound-type)
+                                                    k)
                                                   (and (= "xt/id" key)
                                                        (contains? allowed :mixed-document-ids)
                                                        (= Type/Union (.typeType child)))

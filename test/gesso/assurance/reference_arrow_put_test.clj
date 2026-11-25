@@ -571,3 +571,76 @@
           (.awaitSourceBlocking (db/primary-db node) unsupported-id (Duration/ofSeconds 10))
           (check-nullable-documents! node id plain-id unsupported-id)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-temporal-documents! [node ids expected]
+  (let [decode arrow/decode-temporal-document-put]
+    (doseq [[id group] (map vector ids expected)]
+      (let [data (#'fixture/retained-operation-bytes node id)
+            r (decode data)]
+        (is (= :decoded (:status r)) (pr-str (dissoc r :groups)))
+        (is (= arrow/temporal-document-put-profile (:profile r)))
+        (is (= :none (:authority r)))
+        (is (= :not-issued (:certificate r)))
+        (is (= :matched (:iid-correspondence r)))
+        (is (= [group] (:groups r) (:operations (provider/observe-source-message! node id))))
+        (if (some #(or (contains? % :xt/valid-from) (contains? % :xt/valid-to)) (:documents group))
+          (is (= :unsupported-arrow-struct-key (:reason (arrow/decode-nullable-document-put data))))
+          (is (= (:groups r) (:groups (arrow/decode-nullable-document-put data)))))))
+    (let [data (#'fixture/retained-operation-bytes node (first ids))
+          group (first expected)
+          [_ _ _ _ _ _ iids _ _ _ _ _ _ from _ to _ _ _ _ _ outer-valid]
+          (#'fixture/buffer-starts data)
+          utc (java.time.ZoneId/of "UTC")
+          epoch (.atZone Instant/EPOCH utc)
+          latest (.atZone (Instant/parse "9998-12-31T23:59:59.999999Z") utc)
+          field (#'fixture/find-byte-sequence data "_valid_from")
+          row-field (.lastIndexOf (String. ^bytes data java.nio.charset.StandardCharsets/ISO_8859_1) "_valid_from")]
+      (is (< field row-field))
+      (is (= [(assoc-in group [:documents 0 :xt/valid-from] epoch)]
+             (:groups (decode (#'fixture/edit-long data from 0)))))
+      (is (= [(assoc-in group [:documents 0 :xt/valid-to] latest)]
+             (:groups (decode (#'fixture/edit-long data to 253370764799999999)))))
+      ;; Reversed intervals are retained facts, not admitted operations.
+      (is (= [(assoc-in group [:documents 0 :xt/valid-to] epoch)]
+             (:groups (decode (#'fixture/edit-long data to 0)))))
+      (doseq [[bad reason] [[(#'fixture/edit-long data from Long/MIN_VALUE) :unsupported-arrow-timestamp-range]
+                            [(#'fixture/edit-long data to Long/MAX_VALUE) :unsupported-arrow-timestamp-range]
+                            [(#'fixture/edit-byte data (+ field 10) 120) :unsupported-arrow-field]
+                            [(#'fixture/edit-byte data (+ row-field 10) 120) :unsupported-arrow-struct-key]
+                            [(#'fixture/edit-byte data outer-valid 1) :unsupported-arrow-put-bounds]
+                            [(#'fixture/edit-byte data iids 0) :document-iid-mismatch]
+                            [(Arrays/copyOf data (dec (alength data))) :unsupported-arrow-terminator]]]
+        (let [r (decode bad)]
+          (is (= :unsupported (:status r)))
+          (is (= reason (:reason r)) (pr-str r))
+          (is (not (contains? r :groups)))
+          (is (not (contains? r :iid-correspondence))))))))
+
+(deftest selected-temporal-documents-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-temporal-put-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        from (Instant/parse "2025-01-01T00:00:00Z")
+        to (Instant/parse "2026-01-01T00:00:00Z")
+        negative (Instant/parse "1969-12-31T23:59:59.999999Z")
+        future (Instant/parse "2030-01-01T00:00:00Z")
+        utc (java.time.ZoneId/of "UTC")
+        docs [{:xt/id 1 :name "a"} {:xt/id 2 :name "b"}]
+        options [{:valid-from from :valid-to to} {:valid-from negative} {:valid-to future} {}]
+        expected (mapv (fn [opts]
+                         {:kind :put-docs :table :public/foo :bounds {}
+                          :iids ["4cd9b7672d7fbee8fb51fb1e049f6903" "420fce314175df402adbeae3cfbbb856"]
+                          :documents (mapv #(merge % (into {} (map (fn [[k v]] [(keyword "xt" (name k)) (.atZone ^Instant v utc)]) opts))) docs)})
+                       options)]
+    (try
+      (let [ids (with-open [node (xtn/start-node config)]
+                  (let [database (db/primary-db node)
+                        ids (mapv (fn [opts]
+                                    (let [id (:tx-id (xt/submit-tx node [(into [:put-docs (assoc opts :into :foo)] docs)]))]
+                                      (.awaitSourceBlocking database id (Duration/ofSeconds 10)) id)) options)]
+                    (check-temporal-documents! node ids expected)
+                    ids))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (peek ids) (Duration/ofSeconds 10))
+          (check-temporal-documents! node ids expected)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

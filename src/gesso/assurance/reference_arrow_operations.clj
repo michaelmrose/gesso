@@ -884,3 +884,15 @@
     (decode-put-envelope* bytes #{:mixed-document-ids :nullable-struct-fields :null-only-fields
                                   :nullable-list-fields :nullable-map-fields})
     nullable-document-put-profile iid/document-iid))
+
+(def temporal-document-put-profile :xtdb-2.2.0-beta1/selected-temporal-document-verified-put-arrow-v1)
+
+(defn decode-temporal-document-put
+  "Verify selected retained document puts with explicit UTC microsecond
+   valid-time row fields. Preserve bounds in documents, not outer metadata.
+   No inference of default bounds, interval validity or execution."
+  [bytes]
+  (verify-put-iids
+    (decode-put-envelope* bytes #{:mixed-document-ids :nullable-struct-fields :null-only-fields
+                                  :nullable-list-fields :nullable-map-fields :document-valid-time})
+    temporal-document-put-profile iid/document-iid))

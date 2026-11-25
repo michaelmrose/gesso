@@ -3892,3 +3892,33 @@ Selected nullable-document verified put profile v1. Explicit valid-time
 bounds, multiple put groups/tables, mixed operation sequences and aggregate
 document budgets remain open. No production wiring, certificate or CLM-R2
 premise retirement. Full project and independent formal gates were not rerun.
+
+* v2685 — verify explicit retained document valid-time row fields
+
+Physical XTDB probes establish that the current put API writes explicit
+valid-time options as nonnullable UTC microsecond fields _valid_from
+and _valid_to inside document rows, not as populated outer envelope
+bounds. Qualify those reserved field names only at the document root
+in a new temporal-document verified put profile. Preserve exact retained
+ZonedDateTime values, absent bounds and all previous field/IID checks.
+Do not infer default bounds or interval validity; even reversed retained
+bounds are diagnostic facts, not evidence of transaction admission.
+
+Focused JVM: 41 tests / 2616 assertions, zero failures or errors across
+reference Arrow operations, struct, put and source payload suites. Real
+persistent puts with both bounds, either bound alone, and no bounds
+match expected groups and provider observations before and after
+reopening. Check pre-epoch microseconds, upper date boundary, mutated
+row values, out-of-range timestamps, corrupted row and outer field
+names, unsupported populated outer bounds, inconsistent IIDs and
+truncated framing. Initial probe stalled awaiting transaction completion;
+source-frontier observation succeeded. Initial regression failed two
+assertions because the mutation targeted the outer field name rather
+than the row name; correct and test both locations. XTDB logged shutdown
+cancellation; the final test process exited zero.
+
+Selected temporal-document verified put profile v1. Populated outer
+bounds and nullable row-bound columns remain unsupported. Multiple put
+groups/tables, mixed operation sequences and aggregate document budgets
+remain open. No production wiring, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates were not rerun.
