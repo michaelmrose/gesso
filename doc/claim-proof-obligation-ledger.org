@@ -2594,3 +2594,30 @@ with the actual production cycle, live frontier acquisition, external
 delivery or universal provider refinement. No production assurance status
 changes and no CLM-R2 premise is retired. Full project, physical Claim,
 Chromium and independent proof gates were not rerun.
+
+* v2636 — model selected malformed cycle adapter reports
+
+Extend the independent cycle predictor with selected raw returned worker
+pages and delivery reports. Validate single-candidate page shape, count,
+canonical cursor, owner and lease identity before dispatch; preserve only
+single credible reported leases as unverified recovery leads. Distinguish
+unexpected acquisition statuses from invalid pages. Independently check
+positive delivery reports for correlated intent, lease, receipt, progression,
+acknowledgment and source emission evidence. Preserve correlated reported
+receipts only at the supported interruption boundaries. Cycle profile v2;
+other reference profiles and history v19 unchanged.
+
+New differential coverage comprises eleven malformed page cases, one
+unexpected acquisition status, thirteen rejected delivery reports and one
+valid raw delivery trace. Compare exact adapter call order, exception data,
+completed prefix and last cursor with the production cycle. The focused
+cycle gate passed 4 tests / 289 assertions, zero failures or errors.
+Expanded focused JVM gate: 92 tests / 7761 assertions, zero failures or errors.
+
+This is finite returned-report correspondence using scripted adapters,
+not authentication or physical ownership proof, malformed exception
+payload coverage, composition with independent physical execution, live
+frontier acquisition, external delivery or universal provider refinement.
+No production assurance status changes and no CLM-R2 premise is retired.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.

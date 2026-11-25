@@ -28,6 +28,7 @@
                                 (case (:kind step)
                                   :end {:results [] :attempted 0 :halt-reason :observed-end :next-after nil}
                                   :acquisition-error (throw (ex-info "unknown acquisition" {:error/type :test/acquisition-unknown}))
+                                  :raw-page (:page step)
                                   :candidate {:results [a] :attempted 1
                                               :halt-reason (if (:more? step) :page-budget :observed-end)
                                               :next-after (when (:more? step) (:intent-id a))}
@@ -37,14 +38,16 @@
                               (swap! calls conj [:dispatch a])
                               (let [{:keys [kind receipt-id]} (:delivery @current)
                                     ids (assoc (select-keys a [:intent-id :lease-id]) :receipt-id receipt-id)]
-                                (case kind
+                                (if (= :raw-page (:kind @current))
+                                  (:delivery-report @current)
+                                  (case kind
                                   :accepted (assoc ids :status :dispatch-accepted :progression (:progression a)
                                                    :source-result {:status :emitted-many :count 1 :results [{:status :emitted}]}
                                                    :acknowledgment (assoc ids :status :acknowledged))
                                   :contended (assoc ids :status :dispatched-unacknowledged :acknowledgment {:status :contended})
                                   :unknown (throw (ex-info "lost response" (assoc ids :error/type :gesso.live.outbox/post-dispatch-ack-unknown
                                                                                 :dispatch/status :accepted :acknowledgment/status :unknown)))
-                                  (throw (AssertionError. "unexpected dispatch")))))]
+                                  (throw (AssertionError. "unexpected dispatch"))))))]
                 (cycle/process-cycle! :node {:source :stub} {} source options)))
         outcome (try {:result (run)} (catch clojure.lang.ExceptionInfo e {:failure (ex-data e)}))]
     (assoc outcome :calls @calls)))
@@ -86,3 +89,80 @@
     (let [p (reference/predict-cycle source options steps)]
       (is (= :unsupported (:status p)))
       (is (not-any? #(contains? p %) [:result :failure :calls])))))
+
+(defn- raw-page [a]
+  {:kind :raw-page :page {:results [a] :attempted 1 :halt-reason :page-budget :next-after (:intent-id a)}})
+
+(defn- raw-positive [a]
+  (let [ids (assoc (select-keys a [:intent-id :lease-id]) :receipt-id (id 302))]
+    (assoc ids :status :dispatch-accepted :progression (:progression a)
+           :acknowledgment (assoc ids :status :acknowledged)
+           :source-result {:status :emitted-many :count 2 :results [{:status :emitted} {:status :queued}]})))
+
+(deftest selected-raw-worker-page-rejection
+  (let [first-step (candidate 1 :contended true)
+        a (:acquisition (candidate 2 :acquired true)) page (raw-page a)
+        later (candidate 3 :unavailable false)
+        cases [[(assoc-in page [:page :attempted] 0) true]
+               [(assoc-in page [:page :next-after] (id 3)) true]
+               [(assoc-in page [:page :halt-reason] :observed-end) true]
+               [(assoc-in page [:page :halt-reason] :unknown) true]
+               [(assoc-in page [:page :results 0 :worker-id] "foreign") true]
+               [(assoc-in page [:page :results 0 :intent-id] (id 1)) true]
+               [(assoc-in page [:page :results 0 :lease-id] "invalid") false]
+               [(assoc-in page [:page :results 0 :intent-id] nil) false]
+               [(assoc-in page [:page :results] [a a]) false]
+               [(assoc-in page [:page :results] (list a)) false]
+               [{:kind :raw-page :page nil} false]]]
+    (doseq [[step evidence?] cases]
+      (let [trace [first-step step later] p (reference/predict-cycle source opts trace)
+            f (:failure p)]
+        (is (= :predicted (:status p)))
+        (is (= (run-production opts trace) (select-keys p [:failure :calls])))
+        (is (= :acquisition-exception (:reason f)))
+        (is (= :gesso.live.outbox/invalid-cycle (:original-error/type f)))
+        (is (= 1 (:completed-count f)))
+        (is (= (id 1) (:last-completed-cursor f)))
+        (is (= 2 (count (:calls p))))
+        (is (= evidence? (= :unverified-worker-page (get-in f [:in-flight :evidence]))))
+        (is (true? (:rescan-required? f)))))
+    (let [trace [first-step (raw-page (assoc a :status :unexpected)) later]
+          p (reference/predict-cycle source opts trace)]
+      (is (= (run-production opts trace) (select-keys p [:failure :calls])))
+      (is (= :unexpected-acquisition-status (get-in p [:failure :reason])))
+      (is (= 2 (count (:calls p)))))))
+
+(deftest selected-raw-delivery-rejection
+  (let [first-step (candidate 1 :contended true)
+        a (:acquisition (candidate 2 :reclaimed true)) page (raw-page a)
+        d (raw-positive a) later (candidate 3 :unavailable false)
+        cases [[(assoc d :intent-id (id 9)) false :invalid-delivery-result]
+               [(assoc d :lease-id (id 9)) false :invalid-delivery-result]
+               [(assoc d :receipt-id "invalid") false :invalid-delivery-result]
+               [(assoc d :progression [:foreign]) true :invalid-delivery-result]
+               [(assoc-in d [:acknowledgment :receipt-id] (id 9)) true :invalid-delivery-result]
+               [(assoc-in d [:acknowledgment :status] :contended) true :invalid-delivery-result]
+               [(assoc-in d [:source-result :count] 1) true :invalid-delivery-result]
+               [(assoc-in d [:source-result :results 1 :status] :rejected) true :invalid-delivery-result]
+               [(assoc d :source-result {:status :emitted-many :count 0 :results []}) true :invalid-delivery-result]
+               [(assoc d :status :dispatched-unacknowledged :acknowledgment {:status :unavailable}) true :not-dispatch-accepted]
+               [(assoc d :status :dispatched-unacknowledged :acknowledgment {:status :unknown}) false :not-dispatch-accepted]
+               [(assoc d :status :failed) false :not-dispatch-accepted]
+               [nil false :not-dispatch-accepted]]]
+    (doseq [[report evidence? reason] cases]
+      (let [trace [first-step (assoc page :delivery-report report) later]
+            p (reference/predict-cycle source opts trace) f (:failure p)]
+        (is (= :predicted (:status p)))
+        (is (= (run-production opts trace) (select-keys p [:failure :calls])))
+        (is (= reason (:reason f)))
+        (is (= 1 (:completed-count f)))
+        (is (= (id 1) (:last-completed-cursor f)))
+        (is (= 3 (count (:calls p))))
+        (is (= evidence? (= :unverified-post-dispatch-receipt (get-in f [:in-flight :receipt-evidence]))))
+        (is (= (when evidence? (:receipt-id d)) (get-in f [:in-flight :receipt-id])))
+        (is (= :none (:authority p)))))
+    (let [trace [first-step (assoc page :delivery-report d) later]
+          p (reference/predict-cycle source opts trace)]
+      (is (= (run-production opts trace) (select-keys p [:result :calls])))
+      (is (= 3 (get-in p [:result :processed])))
+      (is (= 1 (get-in p [:result :dispatch-accepted]))))))
