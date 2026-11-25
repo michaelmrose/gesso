@@ -1,7 +1,11 @@
 (ns gesso.assurance.reference-source-coverage
-  "Bounded identity coverage of the installed embedded in-memory source log."
+  "Bounded identity coverage of the installed embedded source logs."
   (:require [xtdb.db-catalog :as db])
-  (:import (xtdb.api.log InMemoryLog Log$Record SourceMessage$Tx
+  (:import (java.io RandomAccessFile)
+           (java.lang ReflectiveOperationException)
+           (java.nio.file Path)
+           (xtdb.time InstantUtil)
+           (xtdb.api.log LocalLog InMemoryLog Log$Record SourceMessage$Tx
                          SourceMessage$FlushBlock SourceMessage$TriesAdded SourceMessage$BlockUploaded)
            (xtdb.database Database)))
 
@@ -107,3 +111,102 @@
         (throw e))
       (catch Exception _
         (assoc (result :unavailable :source-frontier-read-failed) :processed-profile processed-profile)))))
+
+(def local-profile :xtdb-2.2.0-beta1/selected-local-source-coverage-v1)
+(def ^:private max-local-bytes (* 64 1024 1024))
+(def ^:private max-local-message-bytes (* 16 1024 1024))
+(defn- local-result [status reason]
+  (assoc (result status reason) :profile local-profile))
+
+(defn- local-log-path [^LocalLog log]
+  ;; Version-specific read-only access to the actual log object's path, not
+  ;; a caller-supplied path that could identify another database.
+  (let [field (.getDeclaredField LocalLog "logFilePath")]
+    (.setAccessible field true)
+    (.get field log)))
+
+(defn- local-frames [^RandomAccessFile file]
+  ;; Installed LocalLog: separator byte 30, BE int payload length, BE long
+  ;; timestamp in micros, payload, BE long record-start offset. Do not
+  ;; decode or allocate the payload here. Check every frame through EOF.
+  (let [size (.length file)]
+    (if (> size max-local-bytes)
+      (local-result :unsupported :source-byte-limit)
+      (loop [offset 0 frames []]
+        (cond
+          (= offset size) {:status :framed :size size :frames frames}
+          (>= (count frames) max-records) (local-result :unsupported :source-record-limit)
+          (< (- size offset) 21) (local-result :unavailable :invalid-source-frame)
+          :else
+          (do (.seek file offset)
+              (let [separator (.readUnsignedByte file)
+                    length (.readInt file)
+                    micros (.readLong file)
+                    next-offset (+ offset 21 length)]
+                (cond
+                  (or (not= 30 separator) (neg? length) (> next-offset size))
+                  (local-result :unavailable :invalid-source-frame)
+                  (> length max-local-message-bytes) (local-result :unsupported :source-message-byte-limit)
+                  :else
+                  (do (.seek file (- next-offset 8))
+                      (if (not= offset (.readLong file))
+                        (local-result :unavailable :invalid-source-frame)
+                        (recur next-offset (conj frames [offset micros length]))))))))))))
+
+(defn- classify-local-records [framing records end]
+  (let [frames (:frames framing)
+        coordinates (mapv (fn [^Log$Record r]
+                            [(.getMsgId r) (InstantUtil/getAsMicros (.getLogTimestamp r))]) records)
+        expected (mapv #(subvec % 0 2) frames)]
+    (cond
+      (not= end (or (ffirst (rseq frames)) -1))
+      (local-result :unavailable :source-frame-end-mismatch)
+      (not= coordinates expected)
+      (local-result :unavailable :source-record-coverage-gap)
+      :else
+      (let [kinds (mapv #(record-kind (.getMessage ^Log$Record %)) records)]
+        (if (some #{:unsupported} kinds)
+          (local-result :unsupported :unsupported-source-message-kind)
+          (assoc base :profile local-profile :status :observed :last-message-id end
+                 :record-offsets (mapv first frames) :file-bytes (:size framing)
+                 :transaction-ids (into [] (keep (fn [[frame kind]]
+                                                  (when (= :transaction kind) (first frame))))
+                                        (map vector frames kinds))
+                 :maintenance-count (count (remove #{:transaction} kinds))))))))
+
+(defn observe-local-coverage!
+  "Selected epoch-zero LocalLog coverage. Independently walk byte frames
+   from zero to EOF and compare decoded record identities and timestamps.
+   Recheck framing and submitted end. Requires the installed private path
+   field and stable quiescent file; not independent payload decoding,
+   retention, an atomic snapshot, processed frontier or tamper detection."
+  [node]
+  (if-not (db/<-node node)
+    (local-result :unsupported :embedded-primary-log-required)
+    (try
+      (let [^Database database (db/primary-db node)
+            log (.getSourceLog database)]
+        (if-not (and (instance? LocalLog log) (zero? (.getEpoch ^LocalLog log)))
+          (local-result :unsupported :unsupported-source-log)
+          (let [^LocalLog log log
+                end (.getLatestSubmittedOffset log)
+                path (local-log-path log)]
+            (with-open [file (RandomAccessFile. (.toFile ^Path path) "r")]
+              (let [framing (local-frames file)]
+                (if-not (= :framed (:status framing))
+                  framing
+                  (if (not= end (or (ffirst (rseq (:frames framing))) -1))
+                    (local-result :unavailable :source-frame-end-mismatch)
+                    (let [records (if (neg? end) []
+                                    (into [] (take (inc max-records))
+                                          (iterator-seq (.iterator (.readRecords log 0 (inc end))))))
+                          report (classify-local-records framing records end)]
+                      (if (or (not= framing (local-frames file))
+                              (not= end (.getLatestSubmittedOffset log)))
+                        (local-result :unavailable :source-log-changed-during-observation)
+                        report)))))))))
+      (catch InterruptedException e
+        (.interrupt (Thread/currentThread))
+        (throw e))
+      (catch ReflectiveOperationException _ (local-result :unsupported :unsupported-local-log-layout))
+      (catch Exception _ (local-result :unavailable :source-log-read-failed)))))

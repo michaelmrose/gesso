@@ -2911,3 +2911,37 @@ proof of the provider observation semantics remain open. No production
 assurance status changes, no certificate or CLM-R2 premise retirement.
 Full project, physical Claim, Chromium and independent proof gates were
 not rerun.
+
+* v2646 — compare bounded persistent source-log framing
+
+Add selected epoch-zero local persistent source coverage for the installed
+XTDB 2.2.0-beta1 format. Independently traverse byte offsets from zero to
+EOF using the separator, big-endian payload length, timestamp and trailing
+record-start offset; validate frame bounds and compare every decoded
+record identity and timestamp. Require the final framed offset to match
+the submitted end and recheck framing and that end after decoding. Bound
+file size, record count and payload length. Compose coverage before and
+after source-bound execution comparison. Preserve the in-memory and
+processed-frontier interfaces; local-source coverage profile v1.
+
+Focused provider suite: 8 tests / 169 assertions. Expanded focused JVM
+gate: 112 tests / 8720 assertions, zero failures or errors across seven
+reference namespaces, production cycle and operational report suites.
+The latter ran separately after correcting an omitted namespace flag.
+Five actual transactions and six maintenance records match before and
+after closing and reopening a persistent node in the same JVM. An actual
+maintenance append invalidates the comparison. Synthetic framing tests
+reject truncated data, bad trailers, separators and lengths, oversized
+files, missing or duplicate decoded records, timestamp disagreement,
+incorrect end and unknown message kinds. Corrected a missing Java
+exception-class import before the passing tests.
+
+This is selected frame and decoded-identity correspondence, not independent
+payload decoding or a retention theorem. The observer reads the installed
+LocalLog private path field; layout and quiescent stable-file semantics
+remain provider premises. No cross-process retention, tamper detection,
+atomic snapshot or persistent processed-frontier correspondence is
+established. File and frame bounds do not sandbox provider decoding.
+No assurance status changes, no certificate or CLM-R2 premise retirement.
+Full project, physical Claim, Chromium and independent proof gates were
+not rerun.

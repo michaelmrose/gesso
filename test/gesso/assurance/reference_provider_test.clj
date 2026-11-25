@@ -1,5 +1,6 @@
 (ns gesso.assurance.reference-provider-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.java.io :as io]
+            [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-provider :as reference]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
@@ -9,7 +10,10 @@
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
-  (:import (java.time Duration ZonedDateTime)
+  (:import (java.io RandomAccessFile)
+           (java.nio.file Files)
+           (java.nio.file.attribute FileAttribute)
+           (java.time Duration ZonedDateTime)
            (xtdb.api.log Log Log$Record SourceMessage$FlushBlock)))
 
 (defn- id [n] (java.util.UUID. 0 n))
@@ -265,3 +269,90 @@
               (is (= :unavailable (:status r)))
               (is (= :source-log-changed-during-comparison (:reason r)))
               (is (not (contains? r :processed-frontier))))))))))
+
+(deftest local-source-coverage-across-node-reopen
+  (let [root (Files/createTempDirectory "gesso-reference-local-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        txs (transactions)]
+    (try
+      (let [[bound initial]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    ^Log log (.getSourceLog database)
+                    flush! (fn []
+                             (let [id (.getMsgId (.appendMessageBlocking log (SourceMessage$FlushBlock. Long/MAX_VALUE)))]
+                               (.awaitSourceBlocking database id (Duration/ofSeconds 10)) id))
+                    _ (flush!)
+                    bound (mapv (fn [{:keys [system-time ops] :as tx}]
+                                  (let [id (:tx-id (xt/submit-tx node ops {:system-time system-time}))]
+                                    (.awaitTxBlocking database id (Duration/ofSeconds 10))
+                                    (flush!)
+                                    (assoc tx :tx-id id))) txs)
+                    observed (coverage/observe-local-coverage! node)
+                    r (reference/compare-local-source-covered-execution! node bound tables)]
+                (is (= :observed (:status observed)) (pr-str observed))
+                (is (= (mapv :tx-id bound) (:transaction-ids observed)))
+                (is (= 6 (:maintenance-count observed)))
+                (is (= 11 (count (:record-offsets observed))))
+                (is (= 0 (first (:record-offsets observed))))
+                (is (> (second (:record-offsets observed)) 1))
+                (is (> (:file-bytes observed) (:last-message-id observed)))
+                (is (= :matched (:status r)) (pr-str r))
+                (is (= :matched (:source-coverage r)))
+                (is (= coverage/local-profile (:source-coverage-profile r)))
+                (is (= :none (:authority r)))
+                (is (= :not-issued (:certificate r)))
+                (is (= :not-established (:provider-refinement r)))
+                (is (= :unsupported (:status (coverage/observe-coverage! node))))
+                (is (= :source-transaction-coverage-mismatch
+                       (:reason (reference/compare-local-source-covered-execution! node (pop bound) tables))))
+                [bound observed]))]
+        (with-open [node (xtn/start-node config)]
+          (let [database (db/primary-db node)]
+            (.awaitSourceBlocking database (:last-message-id initial) (Duration/ofSeconds 10))
+            (is (= initial (coverage/observe-local-coverage! node)))
+            (is (= :matched (:status (reference/compare-local-source-covered-execution! node bound tables))))
+            (let [compare! reference/compare-source-bound-execution!]
+              (with-redefs [reference/compare-source-bound-execution!
+                            (fn [& args]
+                              (let [r (apply compare! args)
+                                    ^Log log (.getSourceLog database)
+                                    id (.getMsgId (.appendMessageBlocking log (SourceMessage$FlushBlock. Long/MAX_VALUE)))]
+                                (.awaitSourceBlocking database id (Duration/ofSeconds 10)) r))]
+                (is (= :source-log-changed-during-comparison
+                       (:reason (reference/compare-local-source-covered-execution! node bound tables)))))))))
+      (finally (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
+
+(deftest local-source-framing-rejects-incomplete-and-contradictory-records
+  (let [path (Files/createTempFile "gesso-reference-frame-" ".log" (make-array FileAttribute 0))
+        scan #'coverage/local-frames
+        classify #'coverage/classify-local-records
+        timestamp (java.time.Instant/EPOCH)
+        record #(Log$Record. 0 % timestamp (SourceMessage$FlushBlock. Long/MAX_VALUE))]
+    (try
+      (with-open [file (RandomAccessFile. (.toFile path) "rw")]
+        (let [write! (fn [offset n]
+                       (.seek file offset) (.writeByte file 30) (.writeInt file n)
+                       (.writeLong file 0) (.write file (byte-array n)) (.writeLong file offset))]
+          (is (= {:status :framed :size 0 :frames []} (scan file)))
+          (write! 0 3) (write! 24 5)
+          (let [framing (scan file)]
+            (is (= {:status :framed :size 50 :frames [[0 0 3] [24 0 5]]} framing))
+            (is (= :observed (:status (classify framing [(record 0) (record 24)] 24))))
+            (is (= :source-record-coverage-gap (:reason (classify framing [(record 24)] 24))))
+            (is (= :source-record-coverage-gap (:reason (classify framing [(record 0) (record 0)] 24))))
+            (is (= :source-record-coverage-gap (:reason (classify framing [(record 0) (Log$Record. 0 24 (.plusSeconds timestamp 1) (SourceMessage$FlushBlock. 1))] 24))))
+            (is (= :source-frame-end-mismatch (:reason (classify framing [(record 0) (record 24)] 0))))
+            (is (= :unsupported-source-message-kind (:reason (classify framing [(record 0) (Log$Record. 0 24 timestamp nil)] 24)))))
+          (.seek file 42) (.writeLong file 0)
+          (is (= :invalid-source-frame (:reason (scan file))))
+          (write! 24 5) (.setLength file 49)
+          (is (= :invalid-source-frame (:reason (scan file))))
+          (write! 24 5) (.seek file 24) (.writeByte file 0)
+          (is (= :invalid-source-frame (:reason (scan file))))
+          (write! 24 5) (.seek file 25) (.writeInt file -1)
+          (is (= :invalid-source-frame (:reason (scan file))))
+          (.setLength file (inc (* 64 1024 1024)))
+          (is (= :source-byte-limit (:reason (scan file))))))
+      (finally (Files/deleteIfExists path)))))

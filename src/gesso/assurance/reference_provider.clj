@@ -237,3 +237,11 @@
                                     #(assoc % :source-coverage-profile coverage/profile
                                               :processed-profile coverage/processed-profile))]
     (cond-> r (= :matched (:source-coverage r)) (assoc :processed-frontier :matched))))
+
+(defn compare-local-source-covered-execution!
+  "Require independently framed retained coverage for the installed local
+   persistent source log, before and after source-bound comparison. No
+   processed frontier or cross-process retention guarantee is implied."
+  [node expectations tables]
+  (compare-source-coverage* node expectations tables coverage/observe-local-coverage!
+                            #(assoc % :source-coverage-profile coverage/local-profile)))
