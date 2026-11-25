@@ -170,3 +170,66 @@
         (is (= :not-established (:status r)))
         (is (= #{} (:invariant-ids r)))
         (is (nil? (:through r)))))))
+
+(deftest provider-refinement-distinguishes-observation-from-open-semantics
+  (let [abstract {:identity (:source sample)
+                  :verdict :source-bound-conditional-abstract-safety
+                  :checking :original-sources-and-both-live-handles-rechecked
+                  :all-declared-invariants-conditionally-inductive? true
+                  :declared-invariant-ids #{:example/nonnegative}}
+        snapshot (update sample :report assoc
+                         :profile :selected-mapped-ledger-chunk-v19
+                         :publication-expectation-profile :declared
+                         :residual-assertion-profile :declared
+                         :initialization {:system-time time :catalog-fingerprint "catalog"
+                                          :case-fingerprint "case" :initialization-fingerprint "initial"
+                                          :physical-correspondence :checked-supplied-projection
+                                          :initialization-tx-id 5 :initialization-envelope :matched
+                                          :manifest-envelope :matched :manifest-tx-id 4})
+        joined (report/describe-application abstract snapshot)
+        refinement (:provider-execution-refinement joined)
+        cases (:cases refinement)
+        derive #(-> (report/describe-application abstract %) :provider-execution-refinement)]
+    (is (= :not-established (:status refinement)))
+    (is (= :none (:authority refinement)))
+    (is (= :not-issued (:certificate refinement)))
+    (is (= :xtdb-2.2.0-beta1/restricted-envelope-v1 (:envelope-profile refinement)))
+    (is (true? (:observed-prefix? refinement)))
+    (is (= (get-in joined [:physical-induction :through]) (:through refinement)))
+    (is (= #{:initialization :manifest :mapped-transition :worker-transition :committed-stutter :aborted-stutter}
+           (set (keys cases))))
+    (doseq [id [:initialization :manifest :mapped-transition]]
+      (is (= :conditional-observation (get-in cases [id :status]))))
+    (is (= 2 (get-in cases [:mapped-transition :observed-count])))
+    (doseq [id [:worker-transition :committed-stutter :aborted-stutter]]
+      (is (= :not-observed (get-in cases [id :status])))
+      (is (= 0 (get-in cases [id :observed-count]))))
+    (is (contains? (get-in cases [:worker-transition :open-assumptions]) :provider-transaction-clock-refinement))
+    (is (contains? (get-in cases [:aborted-stutter :open-assumptions]) :provider-abort-atomicity-refinement))
+    (is (contains? (get-in cases [:committed-stutter :open-assumptions]) :provider-assertion-read-only-refinement))
+    (is (= {:historical-step-coverage :clean-v19-prefix :visible-valid-time-continuity :v19-prefix-checked}
+           (:prefix-correspondence refinement)))
+    (is (contains? (:open-obligations joined) :provider-execution-refinement))
+    (is (every? (:open-obligations joined) (:open-assumptions refinement)))
+    (is (= refinement (edn/read-string (pr-str refinement))))
+    (doseq [field [:publication-expectation-profile :residual-assertion-profile]]
+      (is (= :incomplete-expectation (get-in (derive (assoc-in snapshot [:report field] :not-declared))
+                                             [:cases :mapped-transition :status]))))
+    (let [all (derive (update-in snapshot [:report :counts] merge
+                                {:verified-infrastructure-transition 1 :observed-mapped-stutter 2 :aborted-stutter 3}))]
+      (is (every? #(= :conditional-observation (:status %)) (vals (:cases all))))
+      (is (= [1 2 3] (mapv #(get-in all [:cases % :observed-count])
+                           [:worker-transition :committed-stutter :aborted-stutter])))
+      (is (= (:open-assumptions refinement) (:open-assumptions all))))
+    (is (= :not-observed (get-in (derive (update-in snapshot [:report :initialization]
+                                                   #(assoc (dissoc % :manifest-tx-id) :manifest-envelope :not-selected)))
+                                  [:cases :manifest :status])))
+    (doseq [bad [nil (assoc snapshot :last-error :history-advance-failed)
+                 (assoc-in snapshot [:report :profile] :selected-mapped-ledger-chunk-v18)
+                 (assoc-in snapshot [:source :induction-fingerprint] "wrong")
+                 (assoc-in snapshot [:report :counts :unclassified] 1)]]
+      (let [r (derive bad)]
+        (is (false? (:observed-prefix? r)))
+        (is (nil? (:through r)))
+        (is (every? #(and (= :not-established (:status %)) (nil? (:observed-count %))) (vals (:cases r))))
+        (is (= (:open-assumptions refinement) (:open-assumptions r)))))))

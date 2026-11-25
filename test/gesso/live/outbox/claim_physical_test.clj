@@ -734,6 +734,15 @@
                      (is (= :v19-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
+                     (let [joined (host/combined-assurance-status started)
+                           refinement (:provider-execution-refinement joined)]
+                       (is (= :not-established (:status refinement)))
+                       (is (true? (:observed-prefix? refinement)))
+                       (is (= :conditional-observation (get-in refinement [:cases :mapped-transition :status])))
+                       (is (= 4 (get-in refinement [:cases :worker-transition :observed-count])))
+                       (is (= 1 (get-in refinement [:cases :aborted-stutter :observed-count])))
+                       (is (= :not-observed (get-in refinement [:cases :committed-stutter :status])))
+                       (is (every? (:open-obligations joined) (:open-assumptions refinement))))
                      (let [operational (host/assurance-status started)]
                        (is (= :observed-interval-checked (:status operational)))
                        (is (= (:counts report) (get-in operational [:coverage :classification-counts])))

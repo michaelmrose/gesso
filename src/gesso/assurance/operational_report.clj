@@ -2,7 +2,8 @@
   "Portable, nonauthoritative operational assurance observations. Format the
    host-owned history controller's last persisted report, not a live database
    query or a replacement for source-bound abstract assurance reports."
-  (:require [gesso.live.consistency.xtdb :as xtdb])
+  (:require [gesso.live.consistency.xtdb :as xtdb]
+            [gesso.assurance.provider-refinement :as provider])
   (:import [java.time Duration]))
 
 (def ^:private permanent-obligations
@@ -178,7 +179,8 @@
         assumptions (get-in abstract [:classification :open :assumptions])
         premises (get-in abstract [:classification :certificate :open-premises])
         original (get-in abstract [:classification :original-obligations :by-operation])
-        argument (physical-prefix-argument abstract snapshot history matching?)]
+        argument (physical-prefix-argument abstract snapshot history matching?)
+        refinement (provider/describe argument (get-in snapshot [:report :counts]))]
     {:type :gesso.assurance/operational-application-report
      :version 1 :authority :none :certificate :not-issued :full-success? false
      :scope :conditional-abstract-and-last-persisted-history-descriptions
@@ -195,9 +197,12 @@
                         :original-open-obligations original))
      :history history
      :physical-induction argument
+     :provider-execution-refinement refinement
      :open-obligations (cond-> (into (into (into (into (:open-obligations history)
                                                       (:open-obligations argument)) assumptions)
                                             premises) (mapcat val original))
                          (not abstract) (conj :abstract-induction-not-selected)
                          (not matching?) (conj :static-history-source-join-open)
+                         true (into (:open-assumptions refinement))
+                         true (conj :provider-execution-refinement)
                          true (conj :complete-physical-induction-correspondence))}))

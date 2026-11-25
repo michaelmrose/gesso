@@ -1712,3 +1712,41 @@ Full mapped-projection, project, Chromium and separate proof gates not rerun.
 Qualification establishes a restricted retained attempted operation shape
 and recorded abort, not semantic legitimacy, abort cause, rollback semantics,
 provider execution refinement or writer authority. No CLM-R2 premise is retired.
+
+* v2604 — decompose the provider execution refinement argument
+
+Add a nonauthoritative, portable provider dependency report alongside the
+existing conditional physical prefix argument. For its six cases (initial
+projection, selected manifest, mapped transition, worker transition,
+committed stutter and aborted stutter), report the corresponding checks,
+observed counts and open semantic assumptions. Do not infer an observed
+case from a vacuously clean prefix. Missing declared residual or publication
+expectations mark the mapped case incomplete. An ineligible prefix does
+not supply counts or a through basis. Preserve the existing v19 history
+and checkpoint formats: this adds no new historical verification.
+
+The common provider premises are exact source decoding and retention,
+ledger identity/order/outcome correspondence, pinned system and valid-time
+snapshot correspondence, and valid-time continuity. The write cases also
+require ordered atomic execution of the complete put sequence, physical
+identity and default valid-time semantics, correct ASSERT evaluation, and
+the correspondence of transaction-internal reads with the reconstructed
+prestate. The worker case additionally requires the transaction clock to
+agree with the lease guard and observed transition time. The committed
+stutter case requires that supported ASSERTs have no state-changing effects;
+the abort case requires that a recorded abort rolls back all attempted
+effects, not merely the sampled rows. These are unproved provider premises,
+not conclusions drawn from the retained operation comparison. They remain
+open even when a case is unobserved, and enter the combined report's open
+obligations. Writer authority, application refinement and source-declaration
+correspondence remain distinct open obligations.
+
+Final JVM operational-report namespace: 5 tests / 229 assertions, zero
+failures or errors. Exercise all six cases, nonempty and empty case counts,
+undeclared expectations, source mismatch, stale profile, failed controller,
+unclassified history and portable output. Physical Claim integration:
+3 tests / 1164 assertions with source-log observation enabled, zero failures
+or errors. The installed host report exercises the observed mapped and
+worker cases, the aborted case and the unobserved committed-stutter case.
+Full project, mapped-projection, Chromium and independent proof gates
+were not rerun. No CLM-R2 premise is retired.
