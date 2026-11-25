@@ -492,3 +492,25 @@ read basis remain open. Physical writer mediation and historical retention
 remain separate obligations. No certification or production authority is
 conferred by the pilot. Further provider work must address the implication
 in v2550, not merely add equalities over already equal decoded values.
+
+* v2562 — valid-time distinction at the physical assertion boundary
+
+The mapped projection regression uses one pinned system snapshot and two
+fixed valid-time clocks. A required document changes, a nullable document
+appears, an occupied journal slot changes outcome, and a previously empty
+slot becomes occupied. The independent decoded predicate distinguishes
+all four differences. Generated prefixes with one stale coordinate at a
+time, or the complete stale observation, must refuse without writing a
+marker. The current observation must permit the marker to commit. This is
+finite physical evidence, not direct inspection of an internal read basis
+or a general theorem of XTDB temporal semantics.
+
+The initial positive control exposed a separate conservative refusal:
+an occupied journal slot with empty arguments can fail struct equality
+when another record has nonempty nested arguments. Individual physical
+assertions isolated the failure to the occupied-slot equality guard.
+The temporal regression uses uniform nonempty argument shapes to isolate
+its intended property. Empty-map equality and progress under mixed struct
+schemas remain open; do not replace equality with LENGTH alone, which
+would fail to distinguish empty maps from other empty value shapes. No
+production guard semantics or certification claims change in this revision.

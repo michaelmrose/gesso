@@ -931,3 +931,72 @@
     (is (= :not-established (:sql-refinement report)))
     (is (contains? (:open-obligations report) :recursive-child-equality-correspondence))
     (is (contains? (:open-obligations report) :kernel-checked-partition-instance-composition))))
+
+(deftest mapped-prefix-refuses-stale-valid-time-observations
+  ;; Fixed historical intervals avoid sleeps and clock-boundary races.
+  ;; The external query clock is not the internal transaction clock.
+  (let [start (java.time.Instant/parse "2020-01-01T00:00:00Z")
+        boundary (java.time.Instant/parse "2021-01-01T00:00:00Z")
+        later (java.time.Instant/parse "2022-01-01T00:00:00Z")
+        request (first (:requests rows))
+        changed-request (assoc request :item-count 3)
+        assignment {:xt/id "a1" :owner "p1"}
+        occupied (record "old" "p2" {:nested {:value "original"}})
+        changed-occupied (assoc-in occupied [:gesso.command/outcome :result] :rejected)
+        ;; Keep the arguments struct shape uniform in this valid-time test.
+        ;; Mixed empty/nonempty structs currently fail closed under XTDB
+        ;; equality even for unchanged decoded rows; separate codec issue.
+        intruder (record "intruder" "p1" {:nested {:value "intruder"}})
+        marker {:xt/id "probe" :written true}
+        mapping (plan/check-target-mapping! source targets)]
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node [[:put-docs {:into :requests :valid-from start} request]
+                           [:put-docs {:into :gesso_commands :valid-from start} occupied]])
+      (xt/execute-tx node [[:put-docs {:into :requests :valid-from boundary} changed-request]
+                           [:put-docs {:into :assignments :valid-from boundary} assignment]
+                           [:put-docs {:into :gesso_commands :valid-from boundary} changed-occupied intruder]
+                           [:put-docs :guard_probe {:xt/id "sentinel"}]])
+      (let [token (:snapshot-token (first (xt/q node "SHOW SNAPSHOT_TOKEN")))
+            observe (fn [opts]
+                      [{:requests (xt/q node ["SELECT * FROM requests WHERE _id = ?" "r1"] opts)
+                        :assignments (xt/q node ["SELECT * FROM assignments WHERE _id = ?" "a1"] opts)}
+                       (xt/q node ["SELECT * FROM gesso_commands ORDER BY _id"] opts)])
+            old-basis {:snapshot-token token :current-time start}
+            later-basis {:snapshot-token token :current-time later}
+            [old-docs old-journal :as old] (observe old-basis)
+            [current-docs current-journal :as current] (observe later-basis)
+            attempt (fn [docs journal]
+                      (let [prefix (frame/formatted-prestate-assertions! mapping docs journal)]
+                        (is (= :checked-exact-prefix
+                               (:status (lowering/check-prefix! source targets docs journal prefix))))
+                        (try (xt/execute-tx node (conj prefix [:put-docs :guard_probe marker]))
+                             :committed
+                             (catch Exception e
+                               (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                                 :assert-failed (throw e))))))
+            written #(xt/q node ["SELECT * FROM guard_probe WHERE _id = ?" "probe"])]
+        (is (and (string? token) (seq token)))
+        (is (= [rows [occupied]] old))
+        (is (= [{:requests [changed-request] :assignments [assignment]}
+                [intruder changed-occupied]] current))
+        (is (= current (observe {})))
+        (is (not= (project old-docs old-journal) (project current-docs current-journal)))
+        ;; Isolate each stale coordinate. No writer races or elapsed-time
+        ;; waits are needed: each prepared value was visible at the earlier
+        ;; valid clock on the very same system snapshot.
+        (doseq [[label docs journal]
+                [[:request (assoc current-docs :requests (:requests old-docs)) current-journal]
+                 [:nullable (assoc current-docs :assignments (:assignments old-docs)) current-journal]
+                 [:occupied current-docs [intruder occupied]]
+                 [:empty-slot current-docs [changed-occupied]]
+                 [:all old-docs old-journal]]]
+          (let [description (prestate/describe! source targets docs journal)
+                reference (prestate/observe! source targets docs journal description current-docs current-journal)]
+            (is (false? (:matches? reference)) (name label))
+            (is (= :assert-failed (attempt docs journal)) (name label))
+            (is (empty? (written)) (name label))))
+        (is (= old (observe old-basis)))
+        (is (= current (observe later-basis)))
+        (is (= :committed (attempt current-docs current-journal)))
+        (is (= [marker] (written)))
+        (is (= current (observe {})))))))
