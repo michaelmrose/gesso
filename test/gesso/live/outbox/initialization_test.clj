@@ -14,10 +14,11 @@
   ([table auxiliary]
   (let [id :example/initialize
         source {:subject {:kind :operation :id id :interface {:operation id}}
-                :state-types {:example/count {:type :integer}}
+                :state-types {:example/count {:type :integer}
+                              :example/assignee {:type :string :nullable? true}}
                 :input-types {} :guard {:readers #{} :expression [:literal true]}
                 :reads #{} :writes #{:example/count}
-                :replacements {:example/count [:literal 3]} :frame #{}}
+                :replacements {:example/count [:literal 3]} :frame #{:example/assignee}}
         invariant {:readers #{:example/count}
                    :expression [:>= [:read :example/count] [:literal 0]]}
         catalog {:id :example/initialization :initial-condition invariant
@@ -25,7 +26,8 @@
                  :declared-operation-ids #{id} :operations [{:id id :construction source}]}]
     (inductive/build-inductive-mapped-admission!
      {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
-      :target-map {:example/count [:document table "r1" :item_count]}
+      :target-map {:example/count [:document table "r1" :item_count]
+                   :example/assignee [:nullable-document :assignments "a1" :helper]}
       :decode-outcome! identity
       :transaction-footprint! (fn [_] (throw (ex-info "Unexpected mapped operation" {})))
       :auxiliary-tables auxiliary :document-effects {id {[:document table "r1"] {}}}}))))
@@ -64,10 +66,10 @@
             (is (false? (init/initialized? node source)))
             (is (= :submission-policy-refused (reason #(xtdb/execute-tx! node seed))))
             (is (= :submission-policy-refused
-                   (reason #(xtdb/execute-tx! node (pop (init/transaction source seed))))))
+                   (reason #(xtdb/execute-tx! node (pop (init/transaction source seed #{:assignments}))))))
             (is (= :submission-policy-refused
-                   (reason #(xtdb/submit-tx! node (init/transaction source seed)))))
-            (is (nil? (init/initialize! node source seed)))
+                   (reason #(xtdb/submit-tx! node (init/transaction source seed #{:assignments})))))
+            (is (nil? (init/initialize! node source seed #{:assignments})))
             (is (= [marker] (read-marker node)))
             (is (= [{:xt/id "r1" :item-count 0}] (read-requests node)))
             (is (= [{:kind :initializer}] @observed))
@@ -79,11 +81,11 @@
         (let [release (install! node changed)]
           (try
             (is (true? (init/initialized? node source)))
-            (is (nil? (init/initialize! node source changed)))
+            (is (nil? (init/initialize! node source changed #{:assignments})))
             (is (= :submission-policy-refused
-                   (reason #(xtdb/execute-tx! node (init/transaction source changed)))))
+                   (reason #(xtdb/execute-tx! node (init/transaction source changed #{:assignments})))))
             (is (= :submission-policy-refused
-                   (reason #(xtdb/execute-tx! node (init/transaction source seed)))))
+                   (reason #(xtdb/execute-tx! node (init/transaction source seed #{:assignments})))))
             (is (= [marker] (read-marker node)))
             (is (empty? (read-requests node)))
             (is (= [{:kind :initializer}] @observed))
@@ -96,13 +98,13 @@
       (xt/execute-tx node [[:put-docs :requests {:xt/id "other" :item-count 42}]])
       (let [release (install! node seed)]
         (try
-          (is (= :assert-failed (assert-result #(init/initialize! node source seed))))
+          (is (= :assert-failed (assert-result #(init/initialize! node source seed #{:assignments}))))
           (is (= [{:xt/id "other" :item-count 42}] (read-requests node)))
           (is (empty? (xt/q node ["SELECT * FROM memberships"])))
           (is (empty? (read-marker node)))
           (finally (release))))
       (xt/execute-tx node [[:put-docs :gesso_initializations (assoc marker :profile-version 2)]])
-      (is (= :invalid-initialization-marker (reason #(init/initialize! node source seed))))
+      (is (= :invalid-initialization-marker (reason #(init/initialize! node source seed #{:assignments}))))
       (is (= :invalid-mapped-writer-policy
              (reason #(policy/validate-config! {:admission admission :initializer [[:put-docs init/table marker]]
                                                 :observe! identity})))))))
@@ -126,3 +128,32 @@
                      :public/gesso_commands :Requests :public/requests]]
         (is (not (canonical? (assoc-in base [1 1] table))) (str table)))
       (is (not (canonical? (conj base [:delete-docs :requests "r1"])))))))
+
+(deftest selected-initializer-establishes-the-declared-initial-case
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        config (fn [seed] {:admission admission :initializer seed :observe! identity})
+        check #(reason (fn [] (policy/validate-config! (config %))))
+        scope {:source-id "source" :worker-id "worker" :descriptor nil}
+        checked (inductive/check-mapped-initialization! admission seed)]
+    (is (= {:example/count 0 :example/assignee nil} (:state checked)))
+    (is (= #{:requests :assignments} (:tables checked)))
+    (is (= :none (:authority checked)))
+    (is (= :constructor-outside-initial-condition (check (assoc-in seed [0 2 :item-count] -1))))
+    (is (= :missing-mapped-field (check (update-in seed [0 2] dissoc :item-count))))
+    (is (= :aliased-initial-document-key (check (assoc-in seed [0 2 :item_count] 5))))
+    (is (= :duplicate-initial-document (check (into seed seed))))
+    (is (= :unexpected-row (check (conj seed [:put-docs :requests {:xt/id "other" :item-count 0}]))))
+    (is (= :unsupported-null-initial-field
+           (check (conj seed [:put-docs :assignments {:xt/id "a1" :helper nil}]))))
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node [[:put-docs :assignments {:xt/id "a1" :helper "old"}]])
+      (let [release (xtdb/register-submission-policy! node (policy/build-policy! node (config seed) scope))]
+        (try
+          (is (= :submission-policy-refused
+                 (reason #(xtdb/execute-tx! node (init/transaction "source" seed)))))
+          (is (= :assert-failed (assert-result #(policy/initialize! node "source" (config seed)))))
+          (is (empty? (xt/q node ["SELECT * FROM requests"])))
+          (is (empty? (xt/q node ["SELECT * FROM gesso_initializations"])))
+          (is (= [{:xt/id "a1" :helper "old"}] (xt/q node ["SELECT * FROM assignments"])))
+          (finally (release)))))))

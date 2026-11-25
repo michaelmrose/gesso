@@ -51,7 +51,20 @@
       (reject! :reserved-mapped-document-table))
     (when-not (every? #{:gesso_live_outbox} auxiliary-tables)
       (reject! :unsupported-mapped-auxiliary-table)))
+  (when initializer (inductive/check-mapped-initialization! admission initializer))
   config)
+
+(defn- mapped-tables [admission]
+  (into #{} (keep (fn [[kind table]]
+                    (when (#{:document :nullable-document} kind) table)))
+        (vals (:target-map (inductive/describe-mapped-admission admission)))))
+
+(defn initialize!
+  "Initialize only the selected seed, with emptiness guards for every mapped
+   table, including those whose nullable documents are absent from the seed."
+  [node source-id {:keys [admission initializer]}]
+  (when initializer
+    (initialization/initialize! node source-id initializer (mapped-tables admission))))
 
 (defn- mapped-operations? [ops]
   ;; The issuer checks assertion/put order and the exact original envelope.
@@ -73,7 +86,7 @@
   (let [{:keys [admission initializer observe!]} (validate-config! config)
         initialized? (atom false)
         source-id (:source-id infrastructure)
-        seed-ops (initialization/transaction source-id initializer)]
+        seed-ops (initialization/transaction source-id initializer (mapped-tables admission))]
     (when-not connectable (reject! :missing-mapped-writer-connectable))
     (fn [{:keys [api tx-ops tx-options] :as envelope}]
       (boolean

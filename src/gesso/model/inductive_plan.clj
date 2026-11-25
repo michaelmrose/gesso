@@ -23,10 +23,13 @@
   (:require [clojure.set :as set]
             [gesso.assurance.inductive-report :as inductive]
             [gesso.assurance.proof.operation-set :as operation-set]
+            [gesso.assurance.proof.initial-constructor :as constructor]
             [gesso.assurance.transition :as transition]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-preparation :as preparation]
-            [gesso.model.mapped-frame :as frame])
+            [gesso.model.mapped-frame :as frame]
+            [gesso.model.mapped-projection :as projection]
+            [xtdb.util :as xt-util])
   (:import (java.util WeakHashMap)))
 
 (def adapter-version 1)
@@ -417,6 +420,70 @@
 
 (defn describe-mapped-admission [admission]
   (:description (registered-mapped! admission)))
+
+(def ^:private original-initial-constructor constructor/check-initial-constructor!)
+(def ^:private original-initial-projection projection/project-state!)
+
+(defn check-mapped-initialization!
+  "Check the supplied seed against the original issued catalog's shared Init
+   and every invariant. Project all mapped tables (including absent nullable
+   targets) and empty journal slots. The host must atomically guard emptiness
+   of every returned table. This is a concrete constructor check, not a
+   physical refinement proof or permission to submit a transaction."
+  [admission seed]
+  (let [{:keys [source]} (registered-mapped! admission)
+        {:keys [target-map decode-outcome!]} source
+        catalog (get-in source [:inductive-source :catalog])
+        construction (:construction (first (:operations catalog)))
+        tables (into #{} (keep (fn [[kind table]]
+                                 (when (#{:document :nullable-document} kind) table)))
+                     (vals target-map))]
+    (when-not (and (identical? original-initial-constructor constructor/check-initial-constructor!)
+                   (identical? original-initial-projection projection/project-state!))
+      (reject! :substituted-initialization-checker [] {}))
+    (when-not (and (vector? seed) (seq seed)
+                   (every? (fn [[op table & rows :as entry]]
+                             (and (vector? entry) (= :put-docs op)
+                                  (simple-keyword? table)
+                                  (re-matches #"[a-z][a-z0-9_]*" (name table))
+                                  (not= :gesso_commands table)
+                                  (seq rows) (every? map? rows))) seed))
+      (reject! :invalid-mapped-initializer [] {}))
+    (doseq [[_ table & rows] seed row rows]
+      (when-not (and (string? (:xt/id row)) (seq (:xt/id row))
+                     (every? keyword? (keys row)))
+        (reject! :invalid-initial-document [table] {}))
+      (let [columns (map xt-util/kw->normal-form-kw (keys row))]
+        (when-not (= (count columns) (count (set columns)))
+          (reject! :aliased-initial-document-key [table] {}))
+        (when (some #(and (not= % (xt-util/kw->normal-form-kw :xt/id))
+                          (or (.startsWith (name %) "xt$") (.startsWith (name %) "_"))) columns)
+          (reject! :reserved-initial-document-key [table] {}))))
+    (let [entries (mapcat (fn [[_ table & rows]] (map #(vector table %) rows)) seed)
+          addresses (map (fn [[table row]] [table (:xt/id row)]) entries)
+          _ (when-not (= (count addresses) (count (distinct addresses)))
+              (reject! :duplicate-initial-document [] {}))
+          docs (reduce (fn [m [table row]]
+                         (if (contains? tables table) (update m table conj row) m))
+                       (zipmap tables (repeat [])) entries)
+          state (original-initial-projection construction target-map docs [] decode-outcome!)
+          ;; Present nil fields have no established XTDB readback correspondence.
+          _ (doseq [[_ [kind table id field]] target-map
+                    :when (#{:document :nullable-document} kind)
+                    row (get docs table) :when (= id (:xt/id row))]
+              (when (nil? (get row (keyword (.replace (name field) "_" "-"))))
+                (reject! :unsupported-null-initial-field [table id field] {})))
+          checked (original-initial-constructor
+                   (assoc (select-keys catalog [:initial-condition :invariants])
+                          :construction construction)
+                   {:id ::mapped-initializer
+                    :fields (into {} (map (fn [[k v]] [k [:literal v]])) state)})]
+      (when-not (and (= state (:constructed-state checked))
+                     (true? (:initial-condition-holds? checked))
+                     (true? (:all-declared-invariants-hold? checked)))
+        (reject! :initial-invariant-violation [] {}))
+      {:tables tables :state state :case-fingerprint (:fingerprint checked)
+       :authority :none :physical-correspondence :not-established})))
 
 (defn require-current-mapped-admission!
   "Recheck the original live handles and mapping of this exact issued callable

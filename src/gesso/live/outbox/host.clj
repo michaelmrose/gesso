@@ -33,7 +33,6 @@
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.writer-policy :as writer-policy]
-            [gesso.live.outbox.initialization :as initialization]
             [xtdb.node :as xtn]))
 
 (def xtdb-module-id :gesso.live.outbox.host/xtdb)
@@ -171,8 +170,8 @@
         (reset! release (xtdb/register-submission-policy! node policy))))
     (manifest/require-compatible! node (get-in system [config-key :source-id])
                                   (::publication-manifest system))
-    (initialization/initialize! node (get-in system [config-key :source-id])
-                                (get-in system [config-key :mapped-writer-policy :initializer]))
+    (when-let [mapped (get-in system [config-key :mapped-writer-policy])]
+      (writer-policy/initialize! node (get-in system [config-key :source-id]) mapped))
     (assoc system :xtdb/connectable node ::close-node! close!)))
 
 (defn- stop-xtdb! [system]

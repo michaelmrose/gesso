@@ -237,6 +237,7 @@
                 ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM memberships)"]
+                ["ASSERT 0 = (SELECT COUNT(*) FROM request_assignments)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM requests)"]]
                (conj seed [:put-docs :gesso_initializations {:xt/id source-id :profile-version 1}]))
          ops) {:kind :initializer}

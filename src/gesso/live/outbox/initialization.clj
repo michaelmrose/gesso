@@ -28,18 +28,20 @@
    has already passed writer-policy validation of canonical put tables.
    This checks current emptiness, not historical absence or adoption of
    an existing application. The selected host owns the database."
-  [source-id seed]
+  ([source-id seed] (transaction source-id seed #{}))
+  ([source-id seed mapped-tables]
   (when seed
-    (let [tables (sort (into #{:gesso_commands :gesso_live_outbox} (map second) seed))]
+    (let [tables (sort (into (into #{:gesso_commands :gesso_live_outbox} mapped-tables) (map second) seed))]
       (into (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_initializations WHERE _id = ?)" source-id]]
                   (map (fn [t] [(str "ASSERT 0 = (SELECT COUNT(*) FROM " (name t) ")")]) tables))
-            (conj seed [:put-docs table (marker source-id)])))))
+            (conj seed [:put-docs table (marker source-id)]))))))
 
 (defn initialize!
   "Called after manifest compatibility, before Live/worker/HTTP startup.
    Skip on a durable marker; otherwise execute the guarded seed and marker
    atomically. Any submission or assertion failure aborts host startup."
-  [node source-id seed]
-  (when (and seed (not (initialized? node source-id)))
-    (xtdb/execute-tx! node (transaction source-id seed)))
-  nil)
+  ([node source-id seed] (initialize! node source-id seed #{}))
+  ([node source-id seed mapped-tables]
+   (when (and seed (not (initialized? node source-id)))
+     (xtdb/execute-tx! node (transaction source-id seed mapped-tables)))
+   nil))
