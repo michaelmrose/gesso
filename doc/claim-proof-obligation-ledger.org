@@ -2750,3 +2750,41 @@ transaction resolution, live frontier acquisition, external delivery,
 arbitrary writer closure or universal refinement. No production assurance
 status changes and no CLM-R2 premise is retired. Full project, physical
 Claim, Chromium and independent proof gates were not rerun.
+
+* v2641 — compare selected provider execution observations
+
+Add a bounded diagnostic joining independent bitemporal replay to
+supplied ordered ledger observations, correlated retained-envelope
+comparison reports and selected complete historical rectangle inventories.
+Compare commit outcomes and system times, require envelope identity and
+outcome correspondence, and canonicalize adjacent valid-axis partitions
+without erasing system-time provenance or overlapping multiplicity.
+Require selection of every attempted put table, including aborted writes.
+Distinguish mismatches, unsupported observations and unavailable retained
+evidence. The diagnostic always retains provider refinement as not
+established, no authority and no certificate. Existing operational
+provider reports, history v19 and other reference profiles are unchanged.
+
+Add a separate expected-worker-attempt envelope comparison admitting
+aborted outcomes. An initial acquisition comparison exposed the retained
+UTC-zoned encoding of a caller Instant lease deadline. Encode that one
+expected document field accordingly, without normalizing observed document
+values or changing the existing committed-worker comparison. Regressions
+reject changed deadlines, different zones and incorrect commit outcomes.
+
+Expanded focused JVM gate: 105 tests / 8574 assertions, zero failures or
+errors across seven reference namespaces, the production cycle suite and
+operational report suite. New focused comparison: 1 test / 23 assertions.
+Five real transactions exercise publication, acquisition, aborted
+acknowledgment, committed assertion-only stutter and aborted ordinary
+write. Retained envelopes, ledger and selected full history agree with
+independent predictions; altered observations exercise mismatch,
+unavailability and unsupported classifications.
+
+This is finite selected execution correspondence, not a live provider
+refinement checker. Correct envelope-check invocation, observation
+acquisition, completeness, quiescent history and supplied initial
+conditions remain premises. The diagnostic does not authenticate supplied
+reports, establish retention or universal provider semantics, or retire
+any CLM-R2 premise. Full project, physical Claim, Chromium and independent
+proof gates were not rerun.

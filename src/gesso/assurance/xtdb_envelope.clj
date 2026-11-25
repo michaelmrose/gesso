@@ -231,6 +231,23 @@
   [node tx-id ops]
   (check-envelope* node tx-id ops true expected-worker-operations! normalize-worker-operations))
 
+(defn- expected-worker-attempt-operations! [ops]
+  (let [expected (expected-worker-operations! ops)
+        path [(dec (count expected)) :documents 0 :gesso.live.outbox/lease-until]
+        deadline (get-in expected path)]
+    ;; The selected caller Instant is retained as a UTC-zoned document
+    ;; value. Do not normalize observed document fields or other timestamps.
+    (if (instance? Instant deadline)
+      (assoc-in expected path (.atZone ^Instant deadline (java.time.ZoneId/of "UTC")))
+      expected)))
+
+(defn check-worker-attempt-envelope!
+  "Compare selected expected worker attempts, including aborts. Encode a
+   caller Instant lease deadline as the retained UTC-zoned document value.
+   The existing committed-worker comparison is unchanged."
+  [node tx-id ops committed?]
+  (check-envelope* node tx-id ops committed? expected-worker-attempt-operations! normalize-worker-operations))
+
 (defn- observed-caller-operations! [operations]
   ;; Recover caller shape without dropping operation order. The caller must
   ;; subsequently check the complete decoded round trip.
