@@ -670,6 +670,8 @@
                    (is (= :observed-interval-checked (:status audit)))
                    (is (= :none (:authority audit)))
                    (is (= :declared (:publication-expectation-profile audit)))
+                   (is (= :declared (:residual-assertion-profile audit)))
+                   (is (every? #(= :matched (:residual-assertion-expectation %)) (:verified-mapped-transition groups)))
                    (is (every? #(= :matched (:publication-expectation %)) (:verified-mapped-transition groups)))
                    (is (= (cond-> #{id} valid? (conj loser-id))
                           (set (map :command-id (:verified-mapped-transition groups)))))
@@ -718,6 +720,10 @@
                      (is (= (frequencies (map :classification steps)) (:counts report)))
                      (is (= report (:report (host/history-status started))))
                      (is (= :declared (:publication-expectation-profile report)))
+                     (is (= :declared (:residual-assertion-profile report)))
+                     (is (= :v12-declared-expectations-checked
+                            (get-in (host/combined-assurance-status started)
+                                    [:physical-induction :premises :residual-assertion-correspondence])))
                      (is (= :v12-declared-expectations-checked
                             (get-in (host/combined-assurance-status started)
                                     [:physical-induction :premises :publication-expectation-correspondence])))
@@ -825,7 +831,7 @@
                      (is (= before (semantics/snapshot-at-frontier! node)))))
                  (when valid?
                    (let [issued (inductive-plan/require-current-mapped-admission!
-                                 (:issued preparations) (semantics/publication-mapped-admission-source bound))
+                                 (:issued preparations) (semantics/physical-mapped-admission-source bound))
                          correlated (semantics/correlate-history! @comparisons @submissions)
                          report (correspondence/check-bound-declared-observations!
                                  {:inductive-source bound

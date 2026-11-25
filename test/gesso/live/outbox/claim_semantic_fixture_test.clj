@@ -422,20 +422,7 @@
   (let [source (claim/publication-mapped-admission-source (claim/bound-inductive-source!))
         accept (claim/alternative-id "helper-1" :accept)
         refuse (claim/alternative-id "helper-1" :refuse)
-        declarations (into {} (for [[helper [_ membership]] claim/helpers
-                                    alternative claim/alternatives]
-                                [(claim/alternative-id helper alternative)
-                                 (when (#{:accept :refuse} alternative)
-                                   {:document-layout
-                                    (cond-> {[:requests "r1"] [[:state :request/revision]
-                                                                 [:prestate :updated-at]
-                                                                 [:state :request/status]]}
-                                      (= :accept alternative)
-                                      (assoc [:memberships helper] [[:prestate :revision]
-                                                                    [:prestate :updated-at]
-                                                                    [:state membership]]))
-                                    :subject-checks (if (= :accept alternative)
-                                                      [[:requests "r1" :request/location-id]] [])})]))
+        declarations (claim/residual-assertion-derivations)
         source* (assoc source :residual-assertion-derivations declarations)
         issue mapped/build-inductive-mapped-admission!
         admission (issue source*)

@@ -352,8 +352,27 @@
                                         {:target [:document :request_assignments "primary-r1"]
                                          :topic :request-assignment :field :request/location-id}]})]))))
 
+(defn residual-assertion-derivations []
+  (into {} (for [[helper [_ membership]] helpers alternative alternatives]
+             [(alternative-id helper alternative)
+              (when (#{:accept :refuse} alternative)
+                {:document-layout
+                 (cond-> {[:requests "r1"] [[:state :request/revision]
+                                              [:prestate :updated-at]
+                                              [:state :request/status]]}
+                   (= :accept alternative)
+                   (assoc [:memberships helper] [[:prestate :revision]
+                                                [:prestate :updated-at]
+                                                [:state membership]]))
+                 :subject-checks (if (= :accept alternative)
+                                   [[:requests "r1" :request/location-id]] [])})])))
+
+(defn physical-mapped-admission-source [bound]
+  (assoc (publication-mapped-admission-source bound)
+         :residual-assertion-derivations (residual-assertion-derivations)))
+
 (defn build-prepared-admission! [bound]
-  (let [source (publication-mapped-admission-source bound)
+  (let [source (physical-mapped-admission-source bound)
         issued (inductive-plan/build-inductive-mapped-admission! source)]
     {:issued issued
      :prepare! (partial issued :prepare!) :admit! (partial issued :admit!)

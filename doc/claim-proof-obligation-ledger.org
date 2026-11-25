@@ -1419,3 +1419,30 @@ admission, proof of SQL equivalence or installed constructor refinement.
 Residual assertion order within the prewrite group, unselected writes,
 provider execution and writer authority remain open. No CLM-R2 premise
 is retired.
+
+* v2594 — qualify declared residual assertions in physical Claim
+
+Extract the residual assertion declaration catalog from the focused Claim
+semantic test into the shared fixture and install it alongside publication
+expectations in the physical mapped admission. Use that exact source for
+the subsequent current-admission recheck. Require declared residual status
+and matched expectations for every committed mapped transition, including
+acceptance and guarded refusal. Require the v12 residual correspondence
+premise in the host's combined operational assurance report. The actual
+transaction constructor and historical verifier are unchanged.
+
+JVM validation on the changed files: full physical Claim with source-log
+observation enabled, 3 tests / 1112 assertions; focused semantic publication
+and residual derivation regressions, 2 tests / 31 assertions. Zero failures
+or errors in both runs. This exercises the installed physical Claim path
+through its competing-command and recovery cases, including actual nonempty
+residual assertion expectations for committed mapped transitions. Aborted
+attempts remain stutters in the history classification, not matched
+historical mapped transitions. Full project, Chromium and separate proof
+gates were not rerun.
+
+This qualifies the selected Claim fixture under the existing v12 history
+profile; it does not establish arbitrary constructor refinement, SQL
+semantic equivalence or preventive residual admission. Complete write-table
+closure, provider execution refinement and writer authority remain open.
+No CLM-R2 premise is retired.
