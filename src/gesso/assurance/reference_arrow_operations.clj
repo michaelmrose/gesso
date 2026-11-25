@@ -5,7 +5,7 @@
    SQL and nested argument bytes are sensitive internal observations."
   (:require [gesso.assurance.reference-arrow-framing :refer [max-bytes max-rows require! message! field! buffers! offsets! value-bytes! present?]]
             [gesso.assurance.reference-arrow-schema :refer [scalar-kind!]]
-            [gesso.assurance.reference-arrow-values :refer [node-count buffer-count value-reader! sql-argument-reader!]]
+            [gesso.assurance.reference-arrow-values :refer [node-count buffer-count value-reader! sql-argument-reader! with-value-budget]]
             [gesso.assurance.reference-document-iid :as iid]
             [gesso.assurance.reference-arrow-put :as put])
   (:import (java.nio ByteBuffer ByteOrder)
@@ -1029,3 +1029,13 @@
    Retain nullable and recursive restrictions. Diagnostic only."
   [bytes]
   (decode-mixed-sql-put* bytes mixed-positional-sql-put-profile positional-sql-rows!))
+
+(def mixed-bounded-sql-put-profile :xtdb-2.2.0-beta1/selected-mixed-bounded-sql-put-arrow-v1)
+
+(defn decode-mixed-bounded-sql-put
+  "Interpret the positional mixed profile with one shared value-slot
+   budget across all document tables and SQL argument relations. Retain
+   individual byte, row, depth and element limits. Diagnostic only."
+  [bytes]
+  (with-value-budget
+    #(decode-mixed-sql-put* bytes mixed-bounded-sql-put-profile positional-sql-rows!)))

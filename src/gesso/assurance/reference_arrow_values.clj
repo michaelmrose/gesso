@@ -32,6 +32,23 @@
 (defn- nullable-kind? [kind] (and (vector? kind) (= :nullable (first kind))))
 (def ^:private absent-field (Object.))
 
+(def max-value-slots 65536)
+(def ^:dynamic ^:private *remaining-value-slots* nil)
+
+(defn with-value-budget
+  "Run one synchronous interpretation with a fresh aggregate value-slot
+   budget. Count logical field slots (including nulls), containers and
+   list descendants; union selections count once, not once per leg.
+   This is a diagnostic resource bound, not an admission judgment."
+  [decode!]
+  (binding [*remaining-value-slots* (volatile! max-value-slots)]
+    (decode!)))
+
+(defn- charge-value-slots! [n]
+  (when-let [remaining *remaining-value-slots*]
+    (require! (<= 0 n @remaining) :arrow-aggregate-value-limit)
+    (vswap! remaining - n)))
+
 (defn node-count [kind]
   (cond (nullable-kind? kind) (node-count (second kind))
         (list-kind? kind) (inc (node-count (second kind)))
@@ -120,6 +137,7 @@
                                     (zero? (.limit ^ByteBuffer (nth buffers (+ start 2))))))
                    (= (* 4 (inc n)) (.limit offsets)))
               :unsupported-arrow-list-buffer-layout)
+    (charge-value-slots! child-count)
     ;; Preserve the original integer-list buffer rejection reason.
     (when (= :integer kind)
       (require! (= (* 8 child-count) (.limit ^ByteBuffer (nth buffers (+ start 3))))
@@ -194,6 +212,7 @@
       (fn [row] (if (present? validity row) (reader row) absent-field)))))
 
 (defn value-reader! [kind ^RecordBatch batch node-index buffers start n]
+  (charge-value-slots! n)
   (cond
     (= :null-only-field kind)
     (let [node (.nodes batch node-index)]

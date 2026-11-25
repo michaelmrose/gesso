@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-arrow-operations :as arrow]
+            [gesso.assurance.reference-arrow-values :as values]
             [gesso.assurance.reference-arrow-operations-test :as fixture]
             [gesso.assurance.reference-arrow-struct-test :as struct-fixture]
             [gesso.assurance.xtdb-source-log :as provider]
@@ -409,4 +410,55 @@
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) old-id (Duration/ofSeconds 15))
           (check-mixed-reordered! node id old-id rows retained-query)))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- check-mixed-budget! [node small-id large-id]
+  (let [decode arrow/decode-mixed-bounded-sql-put
+        small (#'fixture/retained-operation-bytes node small-id)
+        large (#'fixture/retained-operation-bytes node large-id)
+        old (arrow/decode-mixed-positional-sql-put small)
+        ;; Two document structs with two scalar fields each (6 slots),
+        ;; one recursive list with two list children and two leaves (5),
+        ;; and one all-null SQL column (1).
+        accepted (with-redefs [values/max-value-slots 12] (decode small))
+        rejected (with-redefs [values/max-value-slots 11] (decode small))]
+    (is (= :decoded (:status old)))
+    (is (= arrow/mixed-bounded-sql-put-profile (:profile accepted)))
+    (is (= (dissoc old :profile) (dissoc accepted :profile)))
+    (is (= :unsupported (:status rejected)))
+    (is (= :arrow-aggregate-value-limit (:reason rejected)))
+    (is (not-any? #(contains? rejected %) [:groups :operations :logged-operation-spans :iid-correspondence]))
+    ;; Each recursive value is independently within the per-list and
+    ;; byte ceilings. Their aggregate across SQL and put exceeds 65536.
+    (is (= :decoded (:status (arrow/decode-mixed-positional-sql-put large))))
+    (let [r (decode large)]
+      (is (= :unsupported (:status r)))
+      (is (= :arrow-aggregate-value-limit (:reason r)))
+      (is (= :none (:authority r)))
+      (is (= :not-issued (:certificate r)))
+      (is (not-any? #(contains? r %) [:groups :operations :logged-operation-spans :iid-correspondence])))
+    (is (= accepted (decode small)))))
+
+(deftest aggregate-mixed-value-budget-from-persistent-source-bytes
+  (let [root (Files/createTempDirectory "gesso-arrow-mixed-budget-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        p1 [:put-docs :foo {:xt/id 1 :name "a"}]
+        p2 [:put-docs :bar {:xt/id "x" :ok true}]
+        v (vec (repeat 128 (vec (range 256))))]
+    (try
+      (let [[small-id large-id]
+            (with-open [node (xtn/start-node config)]
+              (let [database (db/primary-db node)
+                    submit! (fn [ops] (let [id (:tx-id (xt/submit-tx node ops))]
+                                        (.awaitSourceBlocking database id (Duration/ofSeconds 15)) id))
+                    small-id (submit! [p1 ["ASSERT ? IS NOT NULL" [[1 2] []]]
+                                       ["ASSERT ? IS NULL" nil] p2])
+                    large-id (submit! [[:put-docs :foo {:xt/id 2 :items v}]
+                                       ["ASSERT ? IS NOT NULL" v]])]
+                (check-mixed-budget! node small-id large-id)
+                [small-id large-id]))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) large-id (Duration/ofSeconds 15))
+          (check-mixed-budget! node small-id large-id)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

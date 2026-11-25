@@ -4154,3 +4154,30 @@ Selected mixed positional SQL/put profile v1. Aggregate recursive value
 budgets and independent transaction correspondence integration remain open.
 No production wiring, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2695 — bound aggregate recursive values in mixed streams
+
+Qualify a separate mixed bounded SQL/put profile with 65536 value slots
+per synchronous interpretation. Charge each document struct, field or
+SQL argument slot (including absent/null slots) and each nested list
+child before value materialization. Count dense union selections once;
+retain earlier byte, row, schema, depth and per-list limits. Share the
+budget across all tables and argument relations, reset on each call and
+return no partial result on exhaustion. This bounds interpreted value
+slots, not total memory, schema metadata or all decoder allocations.
+
+Focused JVM: 50 tests / 3308 assertions, zero failures or errors across
+reference Arrow operations, struct, put, mixed and source payload suites.
+Persistent small mixed fixture accepts at twelve slots and rejects at
+eleven with a test-local ceiling, including nested and all-null columns.
+A real mixed transaction whose recursive document and SQL values each
+satisfy local limits exceeds the production diagnostic ceiling and is
+rejected without partial evidence. Earlier positional profile accepts
+both fixtures. Repeat after reopening and verify a fresh budget after
+failure. XTDB shutdown cancellation logged; process exited zero.
+
+Selected mixed bounded SQL/put profile v1. Independent operation and
+retained transaction correspondence integration remain open. No provider
+or reference-domain admission change, production wiring, certificate or
+CLM-R2 premise retirement. Full project and independent formal gates
+were not rerun.
