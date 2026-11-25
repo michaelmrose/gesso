@@ -53,7 +53,12 @@
                 (cons [(str "LENGTH(" p ") = ?") (count v)]
                       (mapcat (fn [[_ col child]] (walk (conj path col) child))
                               (columns! v #"[a-z_][a-z0-9_$]*")))
-                (or (= {} v) (journal-leaf? v)
+                (= {} v)
+                ;; XTDB 2.2.0-beta1: zero visible length plus struct print
+                ;; shape; length alone accepts other empty value types.
+                [[(str "LENGTH(" p ") = ?") 0]
+                 [(str "STR(" p ") LIKE ?") "{%"]]
+                (or (journal-leaf? v)
                     (and (vector? v) (every? journal-leaf? v)))
                 [[(str p " = ?") v]]
                 :else (reject! :unsupported-value))))]
@@ -91,7 +96,7 @@
         expected (into [] (mapcat :assertions) groups)]
     (when-not (and (vector? prefix) (every? vector? prefix) (= expected prefix))
       (reject! :noncanonical-lowering-prefix))
-    {:type ::mapped-prestate-lowering :version 1
+    {:type ::mapped-prestate-lowering :version 2
      :mapping-fingerprint (:mapping-fingerprint description)
      :scope :source-relative-syntactic-prefix :status :checked-exact-prefix
      :groups groups :assertion-count (count expected)

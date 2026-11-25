@@ -941,11 +941,10 @@
         request (first (:requests rows))
         changed-request (assoc request :item-count 3)
         assignment {:xt/id "a1" :owner "p1"}
-        occupied (record "old" "p2" {:nested {:value "original"}})
+        occupied (record "old" "p2")
         changed-occupied (assoc-in occupied [:gesso.command/outcome :result] :rejected)
-        ;; Keep the arguments struct shape uniform in this valid-time test.
-        ;; Mixed empty/nonempty structs currently fail closed under XTDB
-        ;; equality even for unchanged decoded rows; separate codec issue.
+        ;; Restore the mixed empty/nonempty argument shapes that exposed
+        ;; the original v2562 positive-control failure.
         intruder (record "intruder" "p1" {:nested {:value "intruder"}})
         marker {:xt/id "probe" :written true}
         mapping (plan/check-target-mapping! source targets)]
@@ -1000,3 +999,51 @@
         (is (= :committed (attempt current-docs current-journal)))
         (is (= [marker] (written)))
         (is (= current (observe {})))))))
+
+(deftest mapped-prefix-distinguishes-empty-structs-after-schema-evolution
+  (let [mapping (plan/check-target-mapping! source targets)
+        empty-args (record "one" "p1")
+        nested-empty (record "two" "p2" {:nested {:empty {}}})
+        journal [empty-args nested-empty]
+        args-path [:gesso.command/binding :arguments]
+        nested-path (into args-path [:nested :empty])
+        prefix (frame/formatted-prestate-assertions! mapping rows journal)
+        marker {:xt/id "probe" :written true}
+        attempt! (fn [node ops]
+                   (try (xt/execute-tx node ops) :committed
+                        (catch Exception e
+                          (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
+                            :assert-failed (throw e)))))]
+    (is (= :checked-exact-prefix
+           (:status (lowering/check-prefix! source targets rows journal prefix))))
+    (is (= 2 (:version (lowering/check-prefix! source targets rows journal prefix))))
+    (with-open [node (xtn/start-node {})]
+      (xt/execute-tx node [[:put-docs :requests (first (:requests rows))]
+                           [:put-docs :gesso_commands empty-args nested-empty]])
+      (let [actual #(xt/q node "SELECT * FROM gesso_commands ORDER BY _id")
+            written #(xt/q node ["SELECT * FROM guard_probe WHERE _id = ?" "probe"])
+            ops (conj prefix [:put-docs :guard_probe marker])]
+        (is (= journal (actual)))
+        (is (= :committed (attempt! node prefix)))
+        (doseq [[row path] [[empty-args args-path] [nested-empty nested-path]]
+                [label value] [[:nonempty-map {:extra "bad"}]
+                               [:empty-string ""] [:map-looking-string "{}"]
+                               [:empty-vector []] [:empty-set #{}]
+                               [:empty-binary (byte-array 0)] [:null nil]]]
+          (xt/execute-tx node [[:put-docs :gesso_commands (assoc-in row path value)]])
+          (is (= :assert-failed (attempt! node ops)) (str path " " label))
+          (is (empty? (written)))
+          (xt/execute-tx node [[:put-docs :gesso_commands row]])
+          (is (= journal (actual)))
+          (is (= :committed (attempt! node prefix)) (str "restored " path " " label)))
+        (doseq [[row path] [[empty-args args-path] [nested-empty nested-path]]]
+          (xt/execute-tx node [[:put-docs :gesso_commands (update-in row (pop path) dissoc (peek path))]])
+          (is (= :assert-failed (attempt! node ops)))
+          (is (empty? (written)))
+          (xt/execute-tx node [[:put-docs :gesso_commands row]]))
+        ;; Null-only physical fields are omitted by the decoded XTDB row.
+        ;; The supported predicate is equality of visible decoded entries.
+        (xt/execute-tx node [[:put-docs :gesso_commands (assoc-in empty-args args-path {:extra nil})]])
+        (is (= journal (actual)))
+        (is (= :committed (attempt! node ops)))
+        (is (= [marker] (written)))))))

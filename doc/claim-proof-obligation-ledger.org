@@ -514,3 +514,29 @@ its intended property. Empty-map equality and progress under mixed struct
 schemas remain open; do not replace equality with LENGTH alone, which
 would fail to distinguish empty maps from other empty value shapes. No
 production guard semantics or certification claims change in this revision.
+
+* v2563 — empty decoded-map guard under the installed XTDB codec
+
+XTDB 2.2.0-beta1 exposes no SQL TYPEOF or IS OF predicate in the tested
+fragment. Its LENGTH implementation counts non-null struct members but
+also accepts strings, binary values, lists and sets. Its STR implementation
+prints decoded structs with a leading brace, including schema fields with
+null values. For the other LENGTH-supported types, a zero-length value
+cannot have that prefix: strings are empty, binary prints as hexadecimal,
+and list/set values print as vectors. The restricted empty-map lowering
+therefore combines parameterized LENGTH = 0 and STR LIKE '{%' conditions.
+The independent prefix checker reconstructs both conditions (version 2).
+
+The physical regression restores mixed empty/nonempty argument shapes in
+the v2562 temporal fixture and exercises both empty arguments and a nested
+empty map. Nonempty maps, empty strings, map-looking strings, empty lists,
+sets, binary values, null and absent fields must refuse without a marker
+write. Restored decoded rows must commit despite intervening schema changes.
+A null-only struct decodes to an empty map in the installed provider; the
+obligation concerns decoded visible entries, not preservation of explicit
+physical null field identities.
+
+This is a version-specific codec qualification, not a portable SQL type
+predicate or a general refinement proof. A provider upgrade must requalify
+both LENGTH and STR semantics, including the exhaustive supported-type
+boundary. No CLM-R2 premise or certification authority is retired here.

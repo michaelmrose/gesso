@@ -145,8 +145,10 @@
 (defn- journal-field-tests! [path value]
   ;; XTDB struct equality compares the union schema of field names. Use
   ;; visible field counts and scalar leaves for nonempty maps instead.
-  ;; Empty maps retain the conservative equality check (LENGTH alone would
-  ;; not distinguish them from empty lists or strings).
+  ;; For empty maps in XTDB 2.2.0-beta1, LENGTH counts visible members and
+  ;; STR prints structs with a leading brace, even with null schema fields.
+  ;; Other LENGTH-supported types of length zero print without that prefix.
+  ;; This is a provider-specific fragment, not a portable type predicate.
   (cond
     (map? value)
     (do (safe-keys! (keys value))
@@ -154,7 +156,8 @@
           (into [[(str "LENGTH(" path ") = ?") (count value)]]
                 (mapcat (fn [[k v]] (journal-field-tests! (journal-field-sql! path k) v)))
                 (sort-by (comp str key) value))
-          [[(str path " = ?") value]]))
+          [[(str "LENGTH(" path ") = ?") 0]
+           [(str "STR(" path ") LIKE ?") "{%"]]))
     (or (comparable-field? value) (uuid? value)
         (and (vector? value) (every? #(or (comparable-field? %) (uuid? %)) value)))
     [[(str path " = ?") value]]
@@ -175,8 +178,9 @@
    slot requires exactly one match and equality of the complete record,
    including the binding and outcome used by the decoder. Supplied rows
    must already have passed the mapped projection check. Restrict nested
-   values to a supported non-null fragment. Nonempty structs use visible
-   field counts and leaf equality, not whole-struct schema equality. This
+   values to a supported non-null fragment. Structs use visible field counts,
+   leaf equality and, for empty structs, a provider-specific shape check.
+   This avoids whole-struct schema equality. This
    does not establish independent codec or provider refinement."
   [mapping document-rows journal-rows]
   (let [slots (sort-by pr-str (filter #(= :journal-slot (first %))
