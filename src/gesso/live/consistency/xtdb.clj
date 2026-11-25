@@ -213,6 +213,13 @@
         node))
     value))
 
+(defn current-submission-policy-token
+  "Observe the current opaque policy generation through a live handle or
+   physical node. The token grants no submission or registration authority."
+  [connectable]
+  (locking submission-policies
+    (:token (.get submission-policies (physical-connectable! connectable)))))
+
 (defn same-connectable?
   "Compare live adapter/node identities without exposing the physical node."
   [a b]

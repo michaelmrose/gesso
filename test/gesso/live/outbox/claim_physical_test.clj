@@ -97,6 +97,7 @@
         execute xtdb/execute-tx-from!
         observed (atom [])
         projected (atom [])
+        correspondence-reports (atom [])
         streams (atom [])
         observer (atom nil)
         page-basis (atom nil)
@@ -217,6 +218,9 @@
                                (let [{:keys [basis rows]} (frontier/q-with-basis!
                                                            ctx ["SELECT r.status, a.helper FROM requests r JOIN request_assignments a ON r._id = a.request_id WHERE r._id = ? AND a._id = ?" "r1" "primary-r1"])]
                                  (swap! projected conj [(identity/raw-value command-id) (:status result)])
+                                 (swap! correspondence-reports conj
+                                        [(:status result) (or (get-in result [:transaction :mapped-readback :correspondence])
+                                                              (get-in result [:mapped-readback :correspondence]))])
                                  {:resolution (if (= refusal (:outcome result)) :rejected
                                                   (if (= :incorporated (:status result)) :confirmed :already-incorporated))
                                   :outcome (get-in result [:outcome :outcome])
@@ -527,6 +531,19 @@
                      (is (= [loser-id :replay] (last @projected)))
                      (is (= 2 (count @recovery-trace)))
                      (is (= 2 (count @observed)))))
+                 (let [reports (group-by #(get-in (second %) [:transition :command-id]) @correspondence-reports)]
+                   (is (= (cond-> #{id} valid? (conj loser-id)) (set (keys reports))))
+                   (doseq [[_ observations] reports
+                           :let [report (second (first observations))]]
+                     (is (= #{:incorporated :replay} (set (map first observations))))
+                     (is (apply = (map second observations)))
+                     (is (= :initialized-transition-checked (:status report)))
+                     (is (= :none (:authority report)))
+                     (is (= (dissoc expected-marker :xt/id :profile-version)
+                            (select-keys (:initialization report) [:catalog-fingerprint :case-fingerprint :initialization-fingerprint])))
+                     (is (= :checked-command-and-prestate-selectors (get-in report [:transition :inputs])))
+                     (is (contains? (:open-obligations report) :complete-intervening-history-coverage))
+                     (is (not (contains? (:open-obligations report) :initialization-correspondence-for-step)))))
                  (is (= 2 (count (xt/q node ["SELECT _id FROM gesso_live_outbox"]))))
                  ;; Both replays have returned without any new physical submission.
                  (let [expected (cond-> #{{:identity {:alternative (semantics/alternative-id helper :accept) :command-id id}

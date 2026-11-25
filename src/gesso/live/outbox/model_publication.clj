@@ -8,6 +8,7 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.read-frontier :as frontier]
+            [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.optimistic.server :as server]
             [gesso.live.optimistic.resolved-operation :as adapter]
@@ -365,12 +366,13 @@
       (inductive/check-mapped-poststate! admission checked docs journal)
       ;; Derive inputs again from the actual durable command and saved prestate;
       ;; the preceding projection check below independently checks that prestate.
-      (inductive/check-historical-mapped-poststate!
-       admission (some #(when (= (:xt/id evidence) (:xt/id %)) %) journal) evidence docs journal)
-      (let [prestate (check-preceding-mapped-state! node admission evidence opts
-                                                     (xtdb/basis-system-time basis) (xtdb/basis-tx-id basis))]
+      (let [semantic (inductive/check-historical-mapped-poststate!
+                      admission (some #(when (= (:xt/id evidence) (:xt/id %)) %) journal) evidence docs journal)
+            time (xtdb/basis-system-time basis)
+            prestate (check-preceding-mapped-state! node admission evidence opts time (xtdb/basis-tx-id basis))]
         (assoc receipt :mapped-readback {:basis basis :authority :none
                                          :prestate prestate
+                                         :correspondence (correspondence/transition-report node admission evidence time prestate semantic)
                                          :physical-correspondence :checked-commit-basis-projection})))
     (catch Exception cause
       (when (instance? InterruptedException cause)
@@ -478,14 +480,14 @@
               _ (when-not (and (= [row] (xtdb/q-from node query opts))
                                (= current (xtdb/q-from node evidence-query opts)))
                   (reject! :historical-mapped-record-mismatch {}))
-              {:keys [docs journal]} (mapped-rows! node admission opts)]
-          (inductive/check-historical-mapped-poststate!
-           admission record (dissoc evidence-row :xt/system-from) docs journal)
-          (let [prestate (check-preceding-mapped-state! node admission (dissoc evidence-row :xt/system-from)
-                                                         opts instant nil)]
-            (assoc prior :mapped-readback {:system-time instant :authority :none
-                                            :prestate prestate
-                                            :physical-correspondence :checked-historical-projection})))
+              {:keys [docs journal]} (mapped-rows! node admission opts)
+              evidence (dissoc evidence-row :xt/system-from)
+              semantic (inductive/check-historical-mapped-poststate! admission record evidence docs journal)
+              prestate (check-preceding-mapped-state! node admission evidence opts instant nil)]
+          (assoc prior :mapped-readback {:system-time instant :authority :none
+                                          :prestate prestate
+                                          :correspondence (correspondence/transition-report node admission evidence instant prestate semantic)
+                                          :physical-correspondence :checked-historical-projection}))
         prior))))
 
 (defn- reconcile-selected! [ctx may-disclose? admission]

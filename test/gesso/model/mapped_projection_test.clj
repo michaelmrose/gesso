@@ -513,10 +513,19 @@
             (is (= 4 (:item-count (request-row))))
             (is (= :checked-preceding-projection
                    (get-in result [:transaction :mapped-readback :prestate :physical-correspondence])))
-            (let [replay (exec (call "valid"))]
+            (let [replay (exec (call "valid"))
+                  report (get-in result [:transaction :mapped-readback :correspondence])]
               (is (= :checked-historical-projection (get-in replay [:mapped-readback :physical-correspondence])))
               (is (= (get-in result [:transaction :mapped-readback :prestate])
-                     (get-in replay [:mapped-readback :prestate]))))
+                     (get-in replay [:mapped-readback :prestate])))
+              (is (= report (get-in replay [:mapped-readback :correspondence])))
+              (is (= :none (:authority report)))
+              (is (= :transition-checked-only (:status report)))
+              (is (= :not-established-for-step (:initialization report)))
+              (is (contains? (:open-obligations report) :initialization-correspondence-for-step))
+              (is (contains? (:open-obligations report) :complete-intervening-history-coverage))
+              (is (= :checked-command-and-prestate-selectors (get-in report [:transition :inputs])))
+              (is (= :checked-supplied-witness (get-in report [:transition :relation]))))
             (is (= 4 (:item-count (request-row))))
             (xt/execute-tx node [[:put-docs :requests after]]))
           (is (= after (request-row)))

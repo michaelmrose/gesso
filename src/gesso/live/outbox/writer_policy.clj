@@ -8,6 +8,7 @@
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.maintenance-policy :as maintenance]
             [gesso.live.outbox.initialization :as initialization]
+            [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.model.inductive-plan :as inductive]))
 
 (def ^:private maintenance-kinds
@@ -62,17 +63,25 @@
                     (when (#{:document :nullable-document} kind) table)))
         (vals (:target-map (inductive/describe-mapped-admission admission)))))
 
-(defn initialize!
+(defn- initialize-observation!
   "Initialize and check the original abstract state from a pinned physical
    readback. Repeat that check at the marker's historical time on restart;
    a compatible marker alone cannot bypass a failed readback."
   [node source-id {:keys [admission initializer]}]
   (when (nil? initializer) (reject! :missing-mapped-initializer))
-  (let [readback (initialization/initialize-and-readback!
-                  node source-id initializer (mapped-tables admission)
-                  (inductive/check-mapped-initialization! admission initializer))]
-    (inductive/check-mapped-initialization-readback!
-     admission initializer (:document-rows readback) (:journal-rows readback)))
+  (let [checked (inductive/check-mapped-initialization! admission initializer)
+        readback (initialization/initialize-and-readback!
+                  node source-id initializer (mapped-tables admission) checked)
+        observed (inductive/check-mapped-initialization-readback!
+                  admission initializer (:document-rows readback) (:journal-rows readback))]
+    (merge (select-keys checked [:catalog-fingerprint :case-fingerprint])
+           (select-keys observed [:initialization-fingerprint :physical-correspondence :authority])
+           {:source-id source-id :system-time (:system-time readback)})))
+
+(defn initialize!
+  "Check the selected initializer without opening a writer policy."
+  [node source-id config]
+  (initialize-observation! node source-id config)
   nil)
 
 (defn- mapped-operations? [ops]
@@ -103,10 +112,11 @@
     (when-not (compare-and-set! phase :pending :checking)
       (reject! :invalid-mapped-writer-activation))
     (try
-      (initialize! connectable source-id config)
-      (when-not (xtdb/submission-policy-current? connectable token)
-        (reject! :uninstalled-mapped-writer-policy))
-      (reset! phase {:registration token})
+      (let [observation (initialize-observation! connectable source-id config)]
+        (when-not (xtdb/submission-policy-current? connectable token)
+          (reject! :uninstalled-mapped-writer-policy))
+        (correspondence/record-activation! connectable policy token (:admission config) observation)
+        (reset! phase {:registration token}))
       nil
       (catch Throwable e
         (reset! phase :failed)

@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
+            [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.writer-policy :as policy]
             [gesso.model.inductive-plan :as inductive]
@@ -312,14 +313,25 @@
               (is (nil? (policy/initialize! node "s" config)))
               (is (false? (writer envelope)))
               (is (= 0 @handoffs))
+              (is (nil? (correspondence/initialization-observation node admission)))
               (is (nil? (policy/activate-policy! writer)))
+              (let [observation (correspondence/initialization-observation node admission)
+                    handle (xtdb/adapter-connectable! node)]
+                (is (= (:initialization-fingerprint checked) (:initialization-fingerprint observation)))
+                (is (= (:catalog-fingerprint checked) (:catalog-fingerprint observation)))
+                (is (= :none (:authority observation)))
+                (is (not (contains? observation :state)))
+                (is (= observation (correspondence/initialization-observation handle admission)))
+                (is (nil? (correspondence/initialization-observation node (admission!)))))
               (is (true? (writer envelope)))
               (is (= 1 @handoffs))
               (is (= :invalid-mapped-writer-activation (reason #(policy/activate-policy! writer)))))
             (finally (release))))
+        (is (nil? (correspondence/initialization-observation node admission)))
         ;; Installing the same callable again is a different generation.
         (let [release (xtdb/register-submission-policy! node writer)]
           (try
+            (is (nil? (correspondence/initialization-observation node admission)))
             (with-redefs [publication/claim-framed-submission! claim]
               (is (false? (writer envelope)))
               (is (= 1 @handoffs)))
@@ -339,6 +351,7 @@
         (try
           (is (= :initialization-readback-state-mismatch
                  (reason #(policy/activate-policy! writer))))
+          (is (nil? (correspondence/initialization-observation node admission)))
           (with-redefs [publication/claim-framed-submission! claim]
             (is (false? (writer envelope)))
             (is (= 2 @handoffs)))
