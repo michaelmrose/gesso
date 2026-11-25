@@ -4341,3 +4341,26 @@ writer defaults Etc/UTC and xtdb user; qualify these exact defaults.
 Whole-history acquisition and correspondence integration remain open.
 No admission change, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates were not rerun.
+
+* v2703 — acquire independent replay inputs across the retained history
+
+Add a separate internal processed-history sample projecting every framed
+transaction from the same bounded payload acquisition used for operation
+correspondence. Require exact ordered input identities, qualified projection
+reports, increasing explicit system times and at most 256 transactions.
+Maintenance contributes no replay input. Bind the inputs to the existing
+content fingerprint and stable processed frontiers. Any failed projection,
+operation, envelope, final byte or frontier check discards the inputs and
+fingerprint. Preserve earlier observation APIs and profiles.
+
+Focused JVM: 68 tests / 4568 assertions, zero failures or errors across
+nine namespaces; replay input suite 2 tests / 154 assertions. Real persistent
+maintenance-only and three-transaction histories match before and after
+reopening. Independently predict commit, abort, commit from acquired inputs.
+Reject altered projection identity or profile, absent projection, repeated
+system time, transaction limit, truncated reread, lagging frontier and late
+unsupported SQL. Earlier operation history still matches the latter.
+The sample is sensitive internal data, not a published receipt. Direct
+retained-byte execution comparison and broader replay semantics remain
+open. No production admission, certificate or CLM-R2 premise retirement.
+Full project and independent formal gates were not rerun.

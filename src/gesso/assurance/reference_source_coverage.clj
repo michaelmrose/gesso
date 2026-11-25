@@ -2,12 +2,14 @@
   "Bounded identity coverage of the installed embedded source logs."
   (:require [gesso.assurance.reference-operation-correspondence :as operation]
             [gesso.assurance.reference-source-payload :as payload]
+            [gesso.assurance.reference-replay-input :as replay-input]
             [xtdb.db-catalog :as db])
   (:import (java.io RandomAccessFile)
            (java.lang ReflectiveOperationException)
            (java.nio ByteBuffer)
            (java.nio.file Path)
            (java.security MessageDigest)
+           (java.time Instant)
            (java.util Arrays HexFormat)
            (xtdb.time InstantUtil)
            (xtdb.api.log LocalLog InMemoryLog Log$Record SourceMessage$Tx
@@ -238,42 +240,76 @@
         (:field r) (assoc :field (:field r))
         (:decode-reason r) (assoc :decode-reason (:decode-reason r))))))
 
+(def ^:private max-replay-transactions 256)
+
+(defn- qualified-replay-input? [offset tx]
+  (and (map? tx) (= #{:tx-id :system-time :ops} (set (keys tx)))
+       (= offset (:tx-id tx)) (instance? Instant (:system-time tx))
+       (vector? (:ops tx)) (<= 1 (count (:ops tx)) 256)))
+
+(defn- project-replay-input [offset body]
+  (let [r (replay-input/decode-replay-input offset body)]
+    (if (and (= :decoded (:status r)) (= replay-input/profile (:profile r))
+             (= :none (:authority r)) (= :not-issued (:certificate r))
+             (qualified-replay-input? offset (:transaction r)))
+      {:input (:transaction r)}
+      {:failure (assoc (local-result :unsupported :retained-replay-input-not-qualified)
+                       :message-id offset :decode-reason (:reason r))})))
+
+(defn- increasing-replay-times? [inputs]
+  (every? (fn [[a b]] (.isBefore ^Instant (:system-time a) ^Instant (:system-time b)))
+          (partition 2 1 inputs)))
+
 (defn- compare-local-payloads [report frames bytes records node target]
   ;; Compare only after coordinates, order and cardinality have matched.
-  ;; Operation comparisons use the envelope at the same coordinate.
-  (cond
-    (not= :observed (:status report)) report
-    (not= (count frames) (count bytes) (count records))
-    (local-result :unavailable :source-payload-coverage-gap)
-    (and (some? target) (not= :all target) (not (some #{target} (:transaction-ids report))))
-    (assoc (local-result :unsupported :retained-transaction-not-framed) :message-id target)
-    :else
-    (loop [samples (seq (map vector frames bytes records)) matched []]
-      (if-let [[[offset _ _] body ^Log$Record record] (first samples)]
-        (let [decoded (payload/decode-payload body)
-              message (:message decoded)]
-          (if-not (= :decoded (:status decoded))
-            (assoc (local-result :unsupported :unsupported-source-payload)
-                   :message-id offset :decode-reason (:reason decoded))
-            (if-let [field (payload-mismatch message (.getMessage record))]
-              (assoc (local-result :mismatch :source-payload-mismatch)
-                     :message-id offset :field field)
-              (if (or (= target offset) (and (= :all target) (= :transaction (:kind message))))
-                (if-let [failure (compare-selected-operation node offset message)]
-                  failure
-                  (recur (next samples) (conj matched offset)))
-                (recur (next samples) matched)))))
-        (let [report (assoc report :payload-correspondence :matched)]
-          (cond
-            (= :all target)
-            (if (= matched (:transaction-ids report))
-              (assoc report :operation-correspondence (if (seq matched) :matched :not-applicable)
-                     :operation-message-ids matched :operation-profile operation/profile)
-              (local-result :unavailable :retained-operation-coverage-gap))
-            (some? target)
-            (assoc report :operation-correspondence :matched
-                   :operation-message-id target :operation-profile operation/profile)
-            :else report))))))
+  ;; Operation comparisons and replay projection use the same framed bytes.
+  (let [replay? (= :replay target)
+        all? (or replay? (= :all target))]
+    (cond
+      (not= :observed (:status report)) report
+      (not= (count frames) (count bytes) (count records))
+      (local-result :unavailable :source-payload-coverage-gap)
+      (and replay? (> (count (:transaction-ids report)) max-replay-transactions))
+      (local-result :unsupported :retained-replay-transaction-limit)
+      (and (some? target) (not all?) (not (some #{target} (:transaction-ids report))))
+      (assoc (local-result :unsupported :retained-transaction-not-framed) :message-id target)
+      :else
+      (loop [samples (seq (map vector frames bytes records)) matched [] inputs []]
+        (if-let [[[offset _ _] body ^Log$Record record] (first samples)]
+          (let [decoded (payload/decode-payload body)
+                message (:message decoded)]
+            (if-not (= :decoded (:status decoded))
+              (assoc (local-result :unsupported :unsupported-source-payload)
+                     :message-id offset :decode-reason (:reason decoded))
+              (if-let [field (payload-mismatch message (.getMessage record))]
+                (assoc (local-result :mismatch :source-payload-mismatch)
+                       :message-id offset :field field)
+                (if (or (= target offset) (and all? (= :transaction (:kind message))))
+                  (if-let [failure (compare-selected-operation node offset message)]
+                    failure
+                    (let [{:keys [input failure]} (when replay? (project-replay-input offset body))]
+                      (if failure failure
+                          (recur (next samples) (conj matched offset)
+                                 (cond-> inputs replay? (conj input))))))
+                  (recur (next samples) matched inputs)))))
+          (let [report (assoc report :payload-correspondence :matched)]
+            (cond
+              all?
+              (cond
+                (not= matched (:transaction-ids report))
+                (local-result :unavailable :retained-operation-coverage-gap)
+                (and replay? (not= matched (mapv :tx-id inputs)))
+                (local-result :unavailable :retained-replay-input-coverage-gap)
+                (and replay? (not (increasing-replay-times? inputs)))
+                (local-result :unsupported :retained-replay-system-time-order)
+                :else
+                (cond-> (assoc report :operation-correspondence (if (seq matched) :matched :not-applicable)
+                               :operation-message-ids matched :operation-profile operation/profile)
+                  replay? (assoc :replay-inputs inputs :replay-input-profile replay-input/profile)))
+              (some? target)
+              (assoc report :operation-correspondence :matched
+                     :operation-message-id target :operation-profile operation/profile)
+              :else report)))))))
 
 (def payload-binding-profile :xtdb-2.2.0-beta1/selected-local-payload-binding-v1)
 
@@ -512,3 +548,34 @@
                              :decoder-profile payload/profile))]
     (assoc sample :payload-binding-profile payload-binding-profile
            :processed-retained-history-binding-profile processed-retained-history-binding-profile)))
+
+(def processed-retained-replay-inputs-profile
+  :xtdb-2.2.0-beta1/selected-processed-retained-replay-inputs-v1)
+
+(defn observe-local-processed-retained-replay-inputs!
+  "Internal sensitive sample of independently projected replay inputs from
+   the same framed payloads as complete operation correspondence. Require
+   stable bytes and processed frontiers, exact ordered identities and
+   increasing explicit system times. Empty history yields no inputs.
+   Do not publish inputs or fingerprints. No execution comparison or proof."
+  [node]
+  (let [sample (observe-processed-retained-history*
+                node #(assoc (observe-local* % true true :replay)
+                             :retained-history-profile retained-history-profile
+                             :payload-profile local-payload-profile
+                             :decoder-profile payload/profile))
+        inputs (:replay-inputs sample)
+        sample (if (and (= :observed (:status sample))
+                        (not (and (= replay-input/profile (:replay-input-profile sample))
+                                  (vector? inputs) (<= (count inputs) max-replay-transactions)
+                                  (= (:transaction-ids sample) (mapv :tx-id inputs))
+                                  (every? #(qualified-replay-input? (:tx-id %) %) inputs)
+                                  (increasing-replay-times? inputs)
+                                  (string? (:payload-fingerprint sample))
+                                  (re-matches #"[0-9a-f]{64}" (:payload-fingerprint sample)))))
+                 (local-result :unsupported :invalid-processed-retained-replay-inputs)
+                 sample)]
+    (cond-> (assoc sample :processed-retained-replay-inputs-profile processed-retained-replay-inputs-profile
+                   :processed-retained-history-binding-profile processed-retained-history-binding-profile
+                   :payload-binding-profile payload-binding-profile)
+      (not= :observed (:status sample)) (dissoc :replay-inputs :payload-fingerprint))))

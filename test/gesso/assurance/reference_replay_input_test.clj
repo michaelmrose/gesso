@@ -68,3 +68,102 @@
           (.awaitSourceBlocking (db/primary-db node) (peek rejected) (Duration/ofSeconds 15))
           (check-inputs! node expected rejected)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(defn- no-replay-sample! [r]
+  (is (not-any? #(contains? r %) [:replay-inputs :payload-fingerprint :operation-correspondence
+                                 :operation-message-ids :payload-correspondence]))
+  (is (= :none (:authority r)))
+  (is (= :not-issued (:certificate r))))
+
+(defn- check-replay-history! [node expected]
+  (let [observe! #(coverage/observe-local-processed-retained-replay-inputs! node)
+        decode! input/decode-replay-input
+        r (observe!)]
+    (is (= :observed (:status r)) (pr-str (dissoc r :replay-inputs :payload-fingerprint)))
+    (is (= coverage/processed-retained-replay-inputs-profile (:processed-retained-replay-inputs-profile r)))
+    (is (= input/profile (:replay-input-profile r)))
+    (is (= expected (:replay-inputs r)))
+    (is (= (mapv :tx-id expected) (:transaction-ids r) (:operation-message-ids r)))
+    (is (= (if (seq expected) :matched :not-applicable) (:operation-correspondence r)))
+    (is (= :matched (:payload-correspondence r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= (coverage/observe-local-processed-retained-history-bound! node)
+           (dissoc r :processed-retained-replay-inputs-profile :replay-input-profile :replay-inputs)))
+    (when (seq expected)
+      (let [last-id (:tx-id (peek expected))
+            first-time (:system-time (first expected))]
+        (doseq [change [(fn [r] (assoc r :profile :wrong))
+                        (fn [r] (update-in r [:transaction :tx-id] inc))
+                        (fn [r] (dissoc r :transaction))]]
+          (with-redefs [input/decode-replay-input
+                        (fn [id bytes] (cond-> (decode! id bytes) (= id last-id) change))]
+            (let [r (observe!)]
+              (is (= :unsupported (:status r)))
+              (is (= :retained-replay-input-not-qualified (:reason r)))
+              (is (= last-id (:message-id r)))
+              (no-replay-sample! r))))
+        (with-redefs [input/decode-replay-input
+                      (fn [id bytes] (cond-> (decode! id bytes)
+                                       (= id last-id) (assoc-in [:transaction :system-time] first-time)))]
+          (let [r (observe!)]
+            (is (= :unsupported (:status r)))
+            (is (= :retained-replay-system-time-order (:reason r)))
+            (no-replay-sample! r)))
+        (with-redefs-fn {#'coverage/max-replay-transactions 2}
+          (fn [] (let [r (observe!)]
+                   (is (= :retained-replay-transaction-limit (:reason r)))
+                   (no-replay-sample! r))))
+        (let [read! @#'coverage/read-local-payloads!
+              seen (atom 0)]
+          (with-redefs-fn {#'coverage/read-local-payloads!
+                          (fn [file frames]
+                            (let [sample (read! file frames)]
+                              (if (= 2 (swap! seen inc)) (pop sample) sample)))}
+            (fn [] (let [r (observe!)]
+                     (is (= :source-payload-changed-during-observation (:reason r)))
+                     (no-replay-sample! r)))))
+        (let [frontier {:submitted (:last-message-id r) :processed -1 :ingestion-failed? false}]
+          (with-redefs-fn {#'coverage/read-local-frontier! (constantly frontier)}
+            (fn [] (let [r (observe!)]
+                     (is (= :source-processing-incomplete (:reason r)))
+                     (no-replay-sample! r)))))
+        (is (= [true false true]
+               (mapv :committed? (:history (temporal/replay (mapv #(dissoc % :tx-id) (:replay-inputs r)))))))))
+    (is (= r (observe!)))))
+
+(deftest complete-retained-replay-input-history
+  (let [root (Files/createTempDirectory "gesso-replay-history-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        txs [[[:put-docs :probe {:xt/id "a" :value 1}]]
+             [[:put-docs :probe {:xt/id "a" :value 2}] ["ASSERT FALSE"]]
+             [["ASSERT ? = ?" 3 3] ["ASSERT TRUE"]]]]
+    (try
+      (let [expected (with-open [node (xtn/start-node config)]
+                       (let [database (db/primary-db node)
+                             log (.getSourceLog database)
+                             flush-id (.getMsgId (.appendMessageBlocking log (xtdb.api.log.SourceMessage$FlushBlock. Long/MAX_VALUE)))
+                             _ (.awaitSourceBlocking database flush-id (Duration/ofSeconds 15))
+                             _ (check-replay-history! node [])
+                             expected (mapv (fn [i ops]
+                                              (let [time (.plusSeconds t i)]
+                                                {:tx-id (:tx-id (xt/submit-tx node ops {:system-time time}))
+                                                 :system-time time :ops ops}))
+                                            (range) txs)]
+                         (.awaitSourceBlocking database (:tx-id (peek expected)) (Duration/ofSeconds 15))
+                         (check-replay-history! node expected)
+                         expected))]
+        (with-open [node (xtn/start-node config)]
+          (let [database (db/primary-db node)]
+            (.awaitSourceBlocking database (:tx-id (peek expected)) (Duration/ofSeconds 15))
+            (check-replay-history! node expected)
+            (let [bad-id (:tx-id (xt/submit-tx node [["ASSERT ? IS NOT NULL" 1]] {:system-time (.plusSeconds t 3)}))]
+              (.awaitSourceBlocking database bad-id (Duration/ofSeconds 15))
+              (let [r (coverage/observe-local-processed-retained-replay-inputs! node)]
+                (is (= :unsupported (:status r)))
+                (is (= bad-id (:message-id r)))
+                (is (= :retained-replay-input-not-qualified (:reason r)))
+                (no-replay-sample! r))
+              (is (= :observed (:status (coverage/observe-local-processed-retained-history! node))))))))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
