@@ -2390,3 +2390,34 @@ structural maintenance revision, not additional refinement evidence or
 premise retirement. No production assurance status changes; CLM-R2 and
 history v19 remain unchanged. Full project, physical Claim, Chromium and
 independent proof gates were not rerun.
+
+* v2629 — compose selected worker acknowledgment
+
+Independently validate the selected closed receipt submission, derive
+active ownership eligibility from a pinned observation, and construct the
+terminal replacement with its original intent and lease metadata intact.
+Add only dispatch-accepted status, receipt UUID and adapter classification.
+Compose the active fence and replacement in one temporal transaction;
+distinguish unavailable, stale ownership rejection, contention and
+acknowledgment. Unsupported inputs yield no operations or replay.
+Worker profile v4; observation v1, temporal v10, current-state v13 and
+history v19 unchanged.
+
+Combined reference JVM: 49 tests / 5365 assertions, zero failures or
+errors. Ten production acknowledgment calls compare predicted outcomes,
+exact operation sequences, successful receipt identity and complete
+selected outbox history rectangles against embedded XTDB. Five submit
+real transactions through the production adapter; five submit none.
+Cover missing/non-leased intents, mismatched owner/token, stale versions,
+repeat acknowledgment and exact/late expiration. Pure regressions check
+one microsecond before expiration and reject unsupported receipt shapes.
+Pinned reads and explicit transaction clocks remain harness inputs;
+next reference prefixes use predicted operations, not provider results.
+
+This establishes finite composed acknowledgment correspondence, not
+adapter authenticity, delivery, exactly-once effects, unknown-outcome
+recovery, live frontier acquisition or universal provider refinement.
+The differential seed contains selected physical fixtures, not a proof
+of admitted writer closure. No production assurance status changes and
+no CLM-R2 premise is retired. Full project, physical Claim, Chromium and
+independent proof gates were not rerun.

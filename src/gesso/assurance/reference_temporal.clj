@@ -281,7 +281,7 @@
           (assoc result :status :mismatch :reason :lease-deadline)
           :else (assoc result :status :matched))))))
 
-(def worker-profile :selected-worker-acquisition-v3)
+(def worker-profile :selected-worker-acquisition-v4)
 
 (defn- supported-claim? [claim]
   (and (map? claim) (nil? (meta claim))
@@ -422,3 +422,43 @@
                        :outcome (if (:committed? (peek (:history after))) :committed :contended))
                 (select-keys (assoc result :status :unsupported)
                              [:profile :authority :certificate :status]))))))
+
+(defn predict-acknowledgment
+  "Predict selected trusted receipt bookkeeping, not adapter authenticity
+   or external delivery. Invalid submissions remain outside the fragment."
+  [prefix observed-system observed-valid transaction-time submission]
+  (let [result {:profile worker-profile :authority :none :certificate :not-issued
+                :status :unsupported}
+        receipt (:receipt submission)
+        prior (replay prefix)]
+    (if-not (and (map? submission) (nil? (meta submission))
+                 (= #{:intent-id :lease-id :worker-id :receipt} (set (keys submission)))
+                 (map? receipt) (nil? (meta receipt))
+                 (= #{:receipt-id :adapter :result} (set (keys receipt)))
+                 (uuid? (:receipt-id receipt)) (qualified-keyword? (:adapter receipt))
+                 (= :accepted (:result receipt))
+                 (= :predicted (:status prior)) (clock-instant? transaction-time)
+                 (before? (:system-time (peek (:history prior))) transaction-time))
+      result
+      (let [fence (dissoc submission :receipt)
+            guard (predict-active-fence prior observed-system observed-valid fence)
+            row (:row (observe-outbox-at prior observed-system observed-valid (:intent-id fence)))]
+        (cond
+          (not= :predicted (:status guard)) result
+          (and row (str/blank? (:gesso.live.outbox/source-id row))) result
+          (= :rejected (:outcome guard))
+          (let [reason (:reason guard)]
+            (assoc guard :replay prior
+                   :outcome (if (= :stale-lease reason) :rejected :unavailable)
+                   :reason (if (= :missing-lease reason) :missing reason)))
+          :else
+          (let [updated (assoc (dissoc row :xt/system-from)
+                               :gesso.live.outbox/status :dispatch-accepted
+                               :gesso.live.outbox/dispatch-receipt-id (:receipt-id receipt)
+                               :gesso.live.outbox/dispatch-adapter (:adapter receipt))
+                ops (conj (:ops guard) [:put-docs :gesso_live_outbox updated])
+                after (replay (conj prefix {:system-time transaction-time :ops ops}))]
+            (if (= :predicted (:status after))
+              (assoc result :status :predicted :ops ops :replay after
+                     :outcome (if (:committed? (peek (:history after))) :acknowledged :contended))
+              result)))))))

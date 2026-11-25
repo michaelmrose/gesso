@@ -6,6 +6,7 @@
             [gesso.assurance.reference-transaction :as current]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
+            [gesso.live.outbox.acknowledgment :as acknowledgment]
             [gesso.live.outbox.read-frontier :as frontier]
             [gesso.live.consistency.xtdb :as live.xtdb]
             [gesso.live.outbox.publication-manifest :as manifest]
@@ -693,4 +694,84 @@
                       (if (seq (:ops predicted))
                         (conj prefix {:system-time time :ops (:ops predicted)}) prefix)))
                   reclamation-seed fence-cases)]
+      (is (= 8 (count prefix))))))
+
+(def ^:private expiry-intent-id #uuid "00000000-0000-0000-0000-000000000004")
+(def ^:private ack-submission
+  (assoc owner-fence :receipt {:receipt-id third-intent-id :adapter :test/adapter :result :accepted}))
+(def ^:private acknowledgment-seed
+  (conj reclamation-seed {:system-time (worker-time 2)
+                         :ops [[:put-docs outbox/intent-table first-lease
+                                (assoc first-lease :xt/id expiry-intent-id)]]}))
+(def ^:private acknowledgment-cases
+  [[2 (worker-time 3) (assoc ack-submission :intent-id third-intent-id) :unavailable :missing]
+   [2 (worker-time 3) (assoc ack-submission :intent-id other-intent-id) :unavailable :not-leased]
+   [2 (worker-time 3) (assoc ack-submission :lease-id intent-id) :rejected :stale-lease]
+   [2 (worker-time 3) (assoc ack-submission :worker-id "worker-b") :rejected :stale-lease]
+   [1 (worker-time 3) ack-submission :contended nil]
+   [3 (worker-time 4) ack-submission :acknowledged nil]
+   [4 (worker-time 5) ack-submission :unavailable :not-leased]
+   [2 (worker-time 5) ack-submission :contended nil]
+   [5 first-deadline (assoc ack-submission :intent-id expiry-intent-id) :contended nil]
+   [5 (worker-time 181) (assoc ack-submission :intent-id expiry-intent-id) :contended nil]])
+
+(deftest independently-composed-acknowledgment
+  (let [predict #(temporal/predict-acknowledgment acknowledgment-seed
+                   (worker-time 2) (worker-time 2) %1 %2)
+        r (predict (.minusNanos first-deadline 1000) ack-submission)
+        updated (nth (last (:ops r)) 2)]
+    (is (= :acknowledged (:outcome r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (is (= (assoc first-lease :gesso.live.outbox/status :dispatch-accepted
+                  :gesso.live.outbox/dispatch-receipt-id third-intent-id
+                  :gesso.live.outbox/dispatch-adapter :test/adapter) updated))
+    (is (= :contended (:outcome (predict first-deadline ack-submission))))
+    (doseq [submission [(dissoc ack-submission :receipt)
+                        (assoc ack-submission :extra true)
+                        (assoc ack-submission :worker-id "")
+                        (assoc-in ack-submission [:receipt :receipt-id] "receipt")
+                        (assoc-in ack-submission [:receipt :adapter] :adapter)
+                        (assoc-in ack-submission [:receipt :result] :failed)
+                        (assoc-in ack-submission [:receipt :extra] true)]]
+      (let [invalid (predict (worker-time 3) submission)]
+        (is (= :unsupported (:status invalid)))
+        (is (not (contains? invalid :ops)))
+        (is (not (contains? invalid :replay)))))))
+
+(deftest composed-acknowledgment-matches-worker-and-xtdb
+  (with-open [node (xtn/start-node {})]
+    (doseq [tx acknowledgment-seed]
+      (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+        (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+        (is (= [{:committed true}] (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+    (let [execute! live.xtdb/execute-tx!
+          prefix
+          (reduce (fn [prefix [observed time submission outcome reason]]
+                    (let [s (worker-time observed)
+                          predicted (temporal/predict-acknowledgment prefix s s time submission)
+                          captured (atom [])
+                          actual (with-redefs [frontier/q-from! (fn [_ [_ id]]
+                                                                (xt/q node ["SELECT *, _system_from FROM gesso_live_outbox FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? WHERE _id = ?" s s id]))
+                                               live.xtdb/execute-tx! (fn [connectable ops]
+                                                                       (swap! captured conj ops)
+                                                                       (execute! connectable ops {:system-time time}))]
+                                   (try (acknowledgment/acknowledge-dispatch! node submission)
+                                        (catch clojure.lang.ExceptionInfo e
+                                          (if (= :gesso.live.outbox/invalid-acknowledgment (:error/type (ex-data e)))
+                                            {:status :rejected :reason (:reason (ex-data e))}
+                                            (throw e)))))]
+                      (is (= :predicted (:status predicted)))
+                      (is (= outcome (:outcome predicted) (:status actual)))
+                      (is (= reason (:reason predicted) (:reason actual)))
+                      (is (= (if (seq (:ops predicted)) [(:ops predicted)] []) @captured))
+                      (when (= :acknowledged outcome)
+                        (is (= (select-keys submission [:intent-id :lease-id])
+                               (select-keys actual [:intent-id :lease-id])))
+                        (is (= (get-in submission [:receipt :receipt-id]) (:receipt-id actual))))
+                      (is (= (frequencies (coalesce-valid (:rectangles (:replay predicted))))
+                             (frequencies (coalesce-valid (provider-rectangles node outbox/intent-table)))))
+                      (if (seq (:ops predicted))
+                        (conj prefix {:system-time time :ops (:ops predicted)}) prefix)))
+                  acknowledgment-seed acknowledgment-cases)]
       (is (= 8 (count prefix))))))
