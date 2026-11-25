@@ -77,7 +77,7 @@
                           (let [entry (or (get @pending [command-id id])
                                           (reject! :missing-preparation))]
                             (lower-frame! id (:snapshot entry))))
-          admit-candidate! (fn [id command-id puts frame-mode formatted-guards]
+          admit-candidate! (fn [id command-id puts frame-mode formatted-guards check-publication!]
                    (let [k [command-id id]
                          [prior _] (swap-vals! pending dissoc k)
                          {:keys [binding snapshot inputs]} (or (get prior k) (reject! :missing-preparation))
@@ -104,6 +104,9 @@
                            (frame/require-formatted-prestate-assertions! mapping (:document-rows snapshot)
                                                                           (vec (vals (:records snapshot))) formatted-guards)))
                        (cond-> checked
+                         check-publication!
+                         (assoc :publication-expectation
+                                (check-publication! (:document-rows snapshot) puts (first records)))
                          (some? document-effects)
                          (assoc :document-frame :checked-supplied-complete-rows)
                          frame-mode
@@ -113,12 +116,15 @@
                          (= :exact frame-mode)
                          (merge (frame/prefix-evidence! formatted-guards))))))
           admit! (fn
-                   ([id command-id puts] (admit-candidate! id command-id puts nil nil))
+                   ([id command-id puts] (admit-candidate! id command-id puts nil nil nil))
                    ([id command-id puts formatted-guards]
-                    (admit-candidate! id command-id puts :contains formatted-guards)))]
+                    (admit-candidate! id command-id puts :contains formatted-guards nil)))]
       {:prepare! prepare! :admit! admit!
        :frame-guards! frame-guards!
-       :admit-framed! (fn [id command-id puts prefix]
-                        (admit-candidate! id command-id puts :exact prefix))
+       :admit-framed! (fn
+                        ([id command-id puts prefix]
+                         (admit-candidate! id command-id puts :exact prefix nil))
+                        ([id command-id puts prefix check-publication!]
+                         (admit-candidate! id command-id puts :exact prefix check-publication!)))
        :discard! (fn [id command-id] (swap! pending dissoc [command-id id]) nil)
        :pending? (fn [id command-id] (contains? @pending [command-id id]))}))))

@@ -444,7 +444,7 @@
         prefix ((:frame-guards! registry) (:alternative identity) (:command-id identity))]
     (update submission :tx-ops #(into prefix %))))
 
-(defn- admit-framed-transaction! [registry footprint! auxiliary original actual]
+(defn- admit-framed-transaction! [registry footprint! auxiliary original actual & [check-publication!]]
   ;; Only the unextended canonical transaction goes to the trusted footprint
   ;; checker. The extra SQL prefix has its own exact source-derived check.
   ;; No ordinary predicate, write, option or API may change in transit.
@@ -458,7 +458,8 @@
       (reject! :changed-framed-transaction [:submission] {}))
     {:identity identity
      :candidate ((:admit-framed! registry) (:alternative identity) (:command-id identity)
-                 puts (subvec ops 0 (- (count ops) (count base))))}))
+                 puts (subvec ops 0 (- (count ops) (count base)))
+                 (when check-publication! (partial check-publication! identity base)))}))
 
 (defn- mapped-description [checked]
   (assoc checked :type ::issued-mapped-admission
@@ -468,6 +469,33 @@
                  :runtime-induction-gating :not-established
                  :transaction-authority :none))
 
+(declare reconstruct-mapped-publication!)
+
+(defn- check-candidate-publication! [admission source-id alternative ops before puts record]
+  (when-not (and (string? source-id) (not (str/blank? source-id)))
+    (reject! :invalid-publication-source [] {}))
+  ;; All replacements have already passed target, relation and frame checks.
+  ;; Use the exact consumed preparation, never a fresh observation or the
+  ;; constructor's claimed before rows or change list.
+  (let [after (reduce (fn [docs [_ table & rows]]
+                        (if (= :gesso_commands table)
+                          docs
+                          (reduce (fn [d row]
+                                    (update d table #(conj (filterv (fn [prior] (not= (:xt/id prior) (:xt/id row))) %) row)))
+                                  docs rows))) before puts)
+        {:keys [status intents]} (reconstruct-mapped-publication! admission alternative source-id record before after)
+        actual (mapcat #(drop 2 %) (filter #(and (= :put-docs (first %)) (= outbox/intent-table (second %))) ops))
+        guard-sql "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)"
+        guards (frequencies (map #(vector guard-sql (:xt/id %)) intents))
+        observed-guards #(frequencies (filter (fn [op] (= guard-sql (first op))) %))]
+    (when-not (= :derived status)
+      (reject! :invalid-candidate-publication-expectation [] {}))
+    (when-not (= (frequencies intents) (frequencies actual))
+      (reject! :candidate-publication-expectation-mismatch [] {}))
+    (when-not (= guards (observed-guards (take-while #(string? (first %)) ops)) (observed-guards ops))
+      (reject! :candidate-publication-guard-mismatch [] {}))
+    :matched))
+
 (defn build-inductive-mapped-admission!
   "Issue a local callable preparation registry from the original catalog and
    both live induction handles. Admit only a complete synchronous transaction
@@ -476,7 +504,9 @@
    over a canonical envelope without consuming its preparation.
    :admit-framed! takes the original and actual envelopes, checks their exact
    relationship and consumes the preparation with the exact prefix check.
-   The older :admit! is unframed; neither path submits a transaction.
+   :admit-framed-publication! additionally checks declared publication
+   against the consumed preparation and the actual complete candidate.
+   The older :admit! is unframed; no path submits a transaction.
    Input-bearing alternatives require closed :input-derivations selectors
    for every declared input. Input-free catalogs may omit that key. The
    supplied preparation inputs must equal the derived typed valuation.
@@ -497,11 +527,23 @@
                      ;; The registry independently projects the supplied rows and
                      ;; checks the binding before storing this exact preparation.
                      ((:prepare! registry) id binding snapshot inputs)))
-        admission (fn [action & args]
+        admission (fn admission [action & args]
                     (case action
                       :admit! (apply admit-transaction! registry footprint! auxiliary args)
                       :frame-submission! (apply frame-submission! registry footprint! auxiliary args)
-                      :admit-framed! (apply admit-framed-transaction! registry footprint! auxiliary args)
+                      :admit-framed!
+                      (do (when-not (= 2 (count args))
+                            (reject! :invalid-framed-admission-arguments [] {}))
+                          (apply admit-framed-transaction! registry footprint! auxiliary args))
+                      :admit-framed-publication!
+                      (let [[original actual source-id] args]
+                        (when-not (= 3 (count args))
+                          (reject! :invalid-publication-admission-arguments [] {}))
+                        (admit-framed-transaction! registry footprint! auxiliary original actual
+                          (when (contains? checked :publication-derivations)
+                            (fn [identity ops before puts record]
+                              (check-candidate-publication! admission source-id (:alternative identity)
+                                                            ops before puts record)))))
                       :prepare! (apply prepare! args)
                       (:discard! :pending?) (apply (get registry action) args)
                       (reject! :unknown-mapped-admission-action [action] {})))]

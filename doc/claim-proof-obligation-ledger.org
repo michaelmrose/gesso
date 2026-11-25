@@ -1278,3 +1278,35 @@ fixture transitions by history, not yet enforced against the compiled
 candidate before submission. This is not general installed-executor or
 writer authority refinement; the corresponding open obligation remains.
 No CLM-R2 premise is retired.
+
+* v2589 — check declared publication before physical submission
+
+Extend the framed preparation consumer with a private check invoked after
+candidate relation, complete document frame and exact prefix validation.
+Derive expected pending intents from the consumed preparation's rows and
+the actual checked mapped puts, with the installed command source identity.
+Require exact multiset equality of complete outbox puts and canonical
+absence guards, including an empty contribution for explicitly nonpublishing
+alternatives. A failed check consumes the preparation and propagates before
+the physical execution/recovery try. The production framing function uses
+this action for initial and guarded-abort candidates; undeclared admissions
+retain their previous behavior. Return only a matched status in the checked
+candidate, not raw prestate rows. Keep the internal callback inaccessible
+through the legacy diagnostic action by requiring its original arity.
+
+Focused JVM validation on the final files: 3 tests / 76 assertions, zero
+failures or errors. The production framing boundary rejects missing,
+duplicate, wrong-purpose, wrong-subject and wrong-identity publications,
+incorrect absence guards, missing source identity and undeclared callback
+arguments. Tests isolate the new check with a deliberately permissive
+footprint, and verify preparation consumption and explicit nonpublication.
+Physical Claim with source-log observation: 3 tests / 1092 assertions,
+zero failures or errors, on the same production check before the final
+legacy-action arity-only hardening. The writer observer sees :matched on
+every checked candidate. Full project, Chromium and separate proof gates
+were not rerun. History/checkpoint profiles remain v11.
+
+The expectation is relative to the admitted selectors, trusted preparation,
+source binder and the shared derivation. This does not establish physical
+execution, full assertion equivalence, arbitrary writer closure or general
+installed-executor refinement. No CLM-R2 premise is retired.

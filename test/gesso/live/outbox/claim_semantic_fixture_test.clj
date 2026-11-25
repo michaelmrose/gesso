@@ -9,6 +9,7 @@
             [gesso.model.command-resolution :as resolution]
             [gesso.choreo.identity :as identity]
             [gesso.live.outbox :as outbox]
+            [gesso.live.outbox.model-publication :as publication]
             [gesso.assurance.observed-correspondence :as correspondence]
             [gesso.assurance.proof.guarded-substitution :as guarded]
             [gesso.assurance.proof.unified-preservation :as unified]
@@ -352,3 +353,65 @@
                  (update-in declarations [accept :contributions] conj (first (:contributions declaration)))
                  (assoc-in declarations [accept :purpose] :unqualified)]]
       (is (thrown? clojure.lang.ExceptionInfo (issue (assoc source* :publication-derivations bad)))))))
+
+(deftest declared-publication-is-checked-at-production-frame-boundary
+  (let [accept (claim/alternative-id "helper-1" :accept)
+        source (assoc (claim/publication-mapped-admission-source (claim/bound-inductive-source!))
+                      ;; Isolate this check from the fixture footprint's own
+                      ;; restrictions, which already reject some bad intents.
+                      :transaction-footprint! (constantly {:alternative accept :command-id "c1"}))
+        admission (mapped/build-inductive-mapped-admission! source)
+        no-publication (mapped/build-inductive-mapped-admission!
+                        (assoc-in source [:publication-derivations accept] nil))
+        binding {:principal (identity/principal "helper-1") :command-id (identity/command-id "c1")
+                 :operation :request/claim :arguments {:request-id "r1"}}
+        record (resolution/command-record binding {:outcome :request/claimed :helper "helper-1"} "t1")
+        before {:xt/id "r1" :status :open :revision 0 :created-at "t0" :updated-at "t0" :request/location-id "l1"}
+        member {:active true :revision 0 :created-at "t0" :updated-at "t0"}
+        docs {:requests [before] :request_assignments []
+              :memberships [(assoc member :xt/id "helper-1") (assoc member :xt/id "helper-2")]}
+        snapshot {:document-rows docs :records {}
+                  :state (claim/snapshot! (fn [[sql]] (get (assoc docs :gesso_commands []) (keyword (last (clojure.string/split sql #" "))))))}
+        writes [[:put-docs :requests (assoc before :status :claimed :revision 1 :updated-at "t1")]
+                [:put-docs :request_assignments {:xt/id "primary-r1" :request-id "r1" :helper "helper-1"
+                                                 :revision 0 :created-at "t1" :updated-at "t1" :request/location-id "l1"}]
+                [:put-docs :gesso_commands record]]
+        pub (outbox/prepare! {:intent-ids (mapv #(outbox/derived-intent-id "source" :request/claim "helper-1" "c1" %) [0 1])
+                              :source-id "source" :operation :request/claim :purpose :gesso.live/refresh :command-id "c1"}
+                             [{:topic :request :id "l1"} {:topic :request-assignment :id "l1"}])
+        ops (into (into (:guard-ops pub) writes) [(:tx-op pub)])
+        ctx {publication/preparation-key (with-meta (constantly nil) {::publication/source-id "source"})}
+        frame! (fn [a ctx ops]
+                 (a :prepare! accept binding snapshot {})
+                 ;; Same function used before either executor's physical try.
+                 (#'publication/frame-resolved-plan! ctx {:ops ops :record record} a))
+        reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+        marker #(get-in % [:frame-handoff :checked :candidate :publication-expectation])]
+    ;; The registry callback is private to the issuer; the legacy admission
+    ;; action cannot be used to extract the captured complete document rows.
+    (admission :prepare! accept binding snapshot {})
+    (let [base {:api :execute-tx :tx-options {} :tx-ops ops}
+          framed (admission :frame-submission! base)
+          called (atom false)]
+      (is (= :invalid-framed-admission-arguments
+             (reason #(admission :admit-framed! base framed (fn [& _] (reset! called true))))))
+      (is (false? @called))
+      (is (admission :pending? accept "c1")))
+    (admission :discard! accept "c1")
+    (is (= :matched (marker (frame! admission ctx ops))))
+    (is (not (admission :pending? accept "c1")))
+    (doseq [bad [(pop ops)
+                 (update-in ops [(dec (count ops)) 2] assoc :gesso.live.outbox/purpose :example/wrong)
+                 (update-in ops [(dec (count ops)) 2] assoc :gesso.live.outbox/subject-id "other")
+                 (update ops (dec (count ops)) conj (first (:intents pub)))
+                 (assoc-in ops [(dec (count ops)) 2 :xt/id] (:xt/id (second (:intents pub))))]]
+      (is (= :candidate-publication-expectation-mismatch (reason #(frame! admission ctx bad))))
+      (is (not (admission :pending? accept "c1"))))
+    (doseq [bad [(subvec ops 1) (into [(first ops)] ops) (assoc-in ops [0 1] (random-uuid))]]
+      (is (= :candidate-publication-guard-mismatch (reason #(frame! admission ctx bad))))
+      (is (not (admission :pending? accept "c1"))))
+    (is (= :invalid-publication-source (reason #(frame! admission {} ops))))
+    (is (not (admission :pending? accept "c1")))
+    (is (= :candidate-publication-expectation-mismatch (reason #(frame! no-publication ctx ops))))
+    (is (= :matched (marker (frame! no-publication ctx (into [["ASSERT TRUE"]] writes)))))
+    (is (not (no-publication :pending? accept "c1")))))

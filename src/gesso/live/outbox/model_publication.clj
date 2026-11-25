@@ -508,14 +508,15 @@
       (after-abort! failure)
       :else (throw failure))))
 
-(defn- frame-resolved-plan! [plan admission]
+(defn- frame-resolved-plan! [ctx plan admission]
   (if admission
     (let [original {:api :execute-tx :tx-ops (:ops plan) :tx-options (xtdb/tx-opts nil)}
           actual (admission :frame-submission! original)]
       ;; Consume the exact preparation before physical submission. This is
       ;; intentionally outside transaction recovery: a failed local admission
       ;; is not an XTDB abort or evidence of an uncertain commit.
-      (let [checked (admission :admit-framed! original actual)
+      (let [checked (admission :admit-framed-publication! original actual
+                               (::source-id (meta (get ctx preparation-key))))
             evidence (inductive/mapped-transition-evidence! admission checked)
             ;; The closed footprint excludes this framework-owned record.
             ;; Add it only after admission; bind the final vector to the handoff.
@@ -545,7 +546,7 @@
     ;; and publication. A second abort may reconcile a winning record but
     ;; cannot invoke another constructor.
     (let [plan (frame-resolved-plan!
-                (model-resolved-plan! ctx nil model-plan outcome now contract) admission)]
+                ctx (model-resolved-plan! ctx nil model-plan outcome now contract) admission)]
       (try {:status :incorporated :outcome outcome
             :transaction (execute-resolved-plan! ctx plan)}
            (catch Exception second-failure
@@ -730,7 +731,7 @@
                        #{:spec :model-plan :outcome :now}
                        (model-resolved-plan! ctx spec model-plan outcome now contract)
                        (reject! :invalid-resolved-construction {}))
-                plan (frame-resolved-plan! plan mapped-admission)]
+                plan (frame-resolved-plan! ctx plan mapped-admission)]
             (try {:status :incorporated :outcome outcome
                   :transaction (execute-resolved-plan! ctx plan)}
                  (catch Exception failure
@@ -1028,6 +1029,7 @@
              (fn [_ _] (reject! :canonical-model-plan-required {}))
              prepare-model)
            {::topics topics
+            ::source-id source-id
             ::require-derived-model? strict?
             ::prepare-model prepare-model
             ::derive-model-fragment (when entity-topics

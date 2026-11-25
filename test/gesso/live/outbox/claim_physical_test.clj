@@ -590,6 +590,7 @@
                    (is (= (set (map :identity expected)) (set (keys @checked-candidates))))
                    (is (every? #(= :checked-supplied-complete-rows (:document-frame %)) (vals @checked-candidates)))
                    (is (every? #(= :exact-generated-prefix (:frame-prefix %)) (vals @checked-candidates)))
+                   (is (every? #(= :matched (:publication-expectation %)) (vals @checked-candidates)))
                    (doseq [{:keys [identity ops framed-ops]} @submissions]
                      (is (= ops (base-ops! framed-ops)))
                      (let [alternative (keyword (name (:alternative identity)))
