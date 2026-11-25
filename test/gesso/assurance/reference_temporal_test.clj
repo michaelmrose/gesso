@@ -157,3 +157,66 @@
       (doseq [s (range 0 10) v (concat (range -1 12) [100])]
         (is (= (temporal/visible-at r (sys s) (sys v))
                (provider-at node (sys s) (sys v))) (str "system " s " valid " v))))))
+
+(defn- rectangle [table doc vf vt sf st]
+  {:table table :document doc :valid-from vf :valid-to vt
+   :system-from sf :system-to st})
+
+(def ^:private provenance-transactions
+  (mapv (fn [n ops] {:system-time (sys n) :ops ops}) (range 1 6)
+        [[[:put-docs {:into :temporalprobe :valid-from (day 1)} a]]
+         [(put :temporalprobe 3 5 a)]
+         [(put :temporalprobe 2 4 b) (put :temporalprobe 3 6 c)]
+         [(put :temporalprobe 0 10 d) ["ASSERT FALSE"]]
+         [["ASSERT TRUE"]]]))
+
+(deftest independent-history-rectangle-provenance
+  (let [r (temporal/replay provenance-transactions)
+        rect #(rectangle :temporalprobe %1 (day %2) (when %3 (day %3))
+                         (sys %4) (when %5 (sys %5)))]
+    (is (= :predicted (:status r)))
+    ;; Same-value replacement creates a new version. The two puts in S3
+    ;; overlap, but the intermediate value never obtains a system interval.
+    (is (= (frequencies [(rect a 3 5 1 2)
+                         (rect a 2 3 1 3) (rect a 5 6 1 3)
+                         (rect a 3 4 2 3) (rect a 4 5 2 3)
+                         (rect a 1 2 1 nil) (rect b 2 3 3 nil)
+                         (rect c 3 6 3 nil) (rect a 6 nil 1 nil)])
+           (frequencies (:rectangles r))))
+    (is (= [true true true false true] (mapv :committed? (:history r))))
+    (is (not (contains? (temporal/replay []) :rectangles)))))
+
+(defn- provider-rectangles [node table]
+  (mapv (fn [row]
+          (let [instant #(when-let [v (get row %)] (.toInstant ^java.time.ZonedDateTime v))]
+            (rectangle table (dissoc row :xt/valid-from :xt/valid-to
+                                     :xt/system-from :xt/system-to)
+                       (instant :xt/valid-from) (instant :xt/valid-to)
+                       (instant :xt/system-from) (instant :xt/system-to))))
+        (xt/q node [(str "SELECT *, _valid_from, _valid_to, _system_from, _system_to FROM "
+                         (name table) " FOR VALID_TIME ALL FOR SYSTEM_TIME ALL")])))
+
+(defn- coalesce-valid [rectangles]
+  ;; Compare equivalent valid-axis partitions, preserving system origins,
+  ;; ends, row contents and multiplicity of overlapping rectangles.
+  (mapcat (fn [[_ rs]]
+            (reduce (fn [acc r]
+                      (if (and (seq acc) (= (:valid-to (peek acc)) (:valid-from r)))
+                        (conj (pop acc) (assoc (peek acc) :valid-to (:valid-to r)))
+                        (conj acc r)))
+                    [] (sort-by :valid-from rs)))
+          (group-by #(dissoc % :valid-from :valid-to) rectangles)))
+
+(deftest independently-predicted-history-rectangles-match-xtdb
+  (doseq [txs [transactions open-transactions provenance-transactions]]
+    (let [r (temporal/replay txs)]
+      (is (= :predicted (:status r)))
+      (with-open [node (xtn/start-node {})]
+        (doseq [[tx expected] (map vector txs (:history r))]
+          (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+            (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 10))
+            (is (= [{:committed (:committed? expected)}]
+                   (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" id])))))
+        (let [actual (mapcat #(provider-rectangles node %) [:temporalprobe :temporalother])]
+          (is (= (frequencies (coalesce-valid (:rectangles r)))
+                 (frequencies (coalesce-valid actual)))))))))

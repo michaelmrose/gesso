@@ -2043,3 +2043,31 @@ transaction-internal temporal guards or universal provider refinement.
 No production assurance status changes and no CLM-R2 premise is retired.
 Current-state, full project, physical Claim, Chromium and independent
 proof gates were not rerun.
+
+* v2616 — model bitemporal history rectangles
+
+Extend the independent temporal replay to retain each active segment's
+issuing system time. Close the overwritten intersection at the replacing
+transaction's system time, retain the origin on unaffected segments, and
+suppress zero-duration intermediate versions within a transaction. Abort
+retains active and closed rectangles; identical-value writes still have
+new provenance. Report the complete selected rectangle inventory with
+explicit unbounded ends. Temporal profile v3; current-state v9 and history
+v19 unchanged.
+
+Temporal JVM: 8 tests / 869 assertions, zero failures or errors. Three
+embedded XTDB histories (21 transactions) compare complete all-valid-time,
+all-system-time document inventories and temporal bounds, allowing only
+coalescing of adjacent valid intervals with identical document and system
+bounds. A new five-transaction history tests identical-value replacement,
+overlapping writes within one transaction, rollback and assertion stutters.
+Pure regressions check the exact predicted rectangle inventory, and the
+previous 244 bitemporal point comparisons remain green. No provider
+observation feeds reference replay.
+
+This is finite empirical correspondence for selected put-only histories
+and literal assertions, not universal provider refinement, arbitrary
+history SQL, deletion, erasure, current-time overrides or temporal guard
+execution. No production assurance status changes and no CLM-R2 premise
+is retired. Current-state, full project, physical Claim, Chromium and
+independent proof gates were not rerun.

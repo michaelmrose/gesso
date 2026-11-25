@@ -4,7 +4,7 @@
   (:require [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant)))
 
-(def profile :selected-bitemporal-transaction-v2)
+(def profile :selected-bitemporal-transaction-v3)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -39,31 +39,54 @@
           (reject! :unsupported-temporal-put))
         (into [:put-docs {:into table :valid-from from :valid-to to}] docs)))))
 
-(defn- overlay [segments from to doc]
-  ;; Each segment is [inclusive-from exclusive-to complete-document].
-  ;; A nil end is positive infinity; every start is finite.
-  (->> segments
-       (mapcat (fn [[a b old :as segment]]
-                 (if (or (not (before-end? a to)) (not (before-end? from b)))
-                   [segment]
-                   (cond-> []
-                     (before? a from) (conj [a from old])
-                     (and to (before-end? to b)) (conj [to b old])))))
-       (cons [from to doc])
-       (sort-by first) vec))
+(defn- rectangle [table [from to doc origin] end]
+  {:table table :document doc :valid-from from :valid-to to
+   :system-from origin :system-to end})
 
-(defn- apply-put [state [_ opts & docs]]
+(defn- earlier-end [a b]
+  (cond (nil? a) b (nil? b) a (before? a b) a :else b))
+
+(defn- overlay [segments table from to doc system-time]
+  ;; Preserve issuing system time on unaffected pieces. Close only the
+  ;; intersection that is overwritten, and never emit a zero-system-time
+  ;; rectangle for an earlier put in the same transaction.
+  (let [{:keys [active closed]}
+        (reduce (fn [acc [a b old origin :as segment]]
+                  (if (or (not (before-end? a to)) (not (before-end? from b)))
+                    (update acc :active conj segment)
+                    (cond-> acc
+                      (before? a from) (update :active conj [a from old origin])
+                      (and to (before-end? to b)) (update :active conj [to b old origin])
+                      (before? origin system-time)
+                      (update :closed conj
+                              (rectangle table [(if (before? a from) from a)
+                                                (earlier-end b to) old origin]
+                                         system-time)))))
+                {:active [] :closed []} segments)]
+    {:active (vec (sort-by first (conj active [from to doc system-time])))
+     :closed closed}))
+
+(defn- apply-put [state system-time [_ opts & docs]]
   (reduce (fn [s doc]
-            (update-in s [(:into opts) (:xt/id doc)] overlay
-                       (:valid-from opts) (:valid-to opts) doc))
+            (let [table (:into opts)
+                  path [:segments table (:xt/id doc)]
+                  {:keys [active closed]} (overlay (get-in s path) table
+                                                   (:valid-from opts) (:valid-to opts)
+                                                   doc system-time)]
+              (-> s (assoc-in path active) (update :closed into closed))))
           state docs))
+
+(defn- active-rectangles [segments]
+  (vec (for [[table rows] segments [_ intervals] rows segment intervals]
+         (rectangle table segment nil))))
 
 (defn replay
   "Replay from empty state. Each transaction is {:system-time Instant :ops
    vector}. All system times strictly increase. Valid intervals are
    half-open and microsecond-aligned, with omitted starts at the supplied
    system time and omitted ends unbounded. Abort retains the prior snapshot.
-   No provider observations, implicit clock or authority are admitted."
+   Rectangles retain the issuing system time and exclusive supersession
+   time. No provider observations, implicit clock or authority are admitted."
   [transactions]
   (let [report {:profile profile :authority :none :certificate :not-issued}]
     (try
@@ -80,17 +103,21 @@
       (let [normalized (mapv (fn [{:keys [system-time ops] :as tx}]
                                (assoc tx :ops (mapv #(normalize-op! system-time %) ops)))
                              transactions)]
-        (assoc report :status :predicted
-             :history (reduce (fn [history {:keys [system-time ops]}]
-                                (let [prior (or (:segments (peek history)) {})
-                                      aborted? (some #{["ASSERT FALSE"]} ops)
-                                      next-state (if aborted? prior
-                                                     (reduce (fn [s op]
-                                                               (if (= :put-docs (first op)) (apply-put s op) s))
-                                                             prior ops))]
-                                  (conj history {:system-time system-time
-                                                 :committed? (not aborted?) :segments next-state})))
-                              [] normalized)))
+        (let [{:keys [history segments closed]}
+              (reduce (fn [{:keys [history] :as prior} {:keys [system-time ops]}]
+                        (let [aborted? (some #{["ASSERT FALSE"]} ops)
+                              next-state (if aborted? prior
+                                             (reduce (fn [s op]
+                                                       (if (= :put-docs (first op))
+                                                         (apply-put s system-time op) s))
+                                                     prior ops))]
+                          (assoc next-state :history
+                                 (conj history {:system-time system-time
+                                                :committed? (not aborted?)
+                                                :segments (:segments next-state)}))))
+                      {:history [] :segments {} :closed []} normalized)]
+          (assoc report :status :predicted :history history
+                 :rectangles (into closed (active-rectangles segments)))))
       (catch clojure.lang.ExceptionInfo e
         (if (::unsupported (ex-data e))
           (assoc report :status :unsupported :reason (:reason (ex-data e)))
