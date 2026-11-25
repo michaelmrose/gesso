@@ -226,7 +226,7 @@
   "Classify synchronous adapter writes in this closed fixture. Background
    writes must be confined to one manifest or outbox document; the seed must
    match exactly. This is footprint accounting, not SQL or writer closure."
-  [seed source-id worker-id ops]
+  [seed source-id worker-id expected-marker ops]
   (require! (and (vector? ops) (seq ops)))
   (let [puts (filterv #(= :put-docs (first %)) ops)
         tables (set (map second puts))
@@ -239,7 +239,7 @@
                 ["ASSERT 0 = (SELECT COUNT(*) FROM memberships)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM request_assignments)"]
                 ["ASSERT 0 = (SELECT COUNT(*) FROM requests)"]]
-               (conj seed [:put-docs :gesso_initializations {:xt/id source-id :profile-version 1}]))
+               (conj seed [:put-docs :gesso_initializations expected-marker]))
          ops) {:kind :initializer}
       (contains? tables :gesso_commands)
       (assoc (submitted-alternative! ops) :kind :claim)

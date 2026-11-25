@@ -11,7 +11,8 @@
 
 (defn- admission!
   ([] (admission! :requests #{}))
-  ([table auxiliary]
+  ([table auxiliary] (admission! table auxiliary :example/initialization :assignments))
+  ([table auxiliary catalog-id nullable-table]
   (let [id :example/initialize
         source {:subject {:kind :operation :id id :interface {:operation id}}
                 :state-types {:example/count {:type :integer}
@@ -21,13 +22,13 @@
                 :replacements {:example/count [:literal 3]} :frame #{:example/assignee}}
         invariant {:readers #{:example/count}
                    :expression [:>= [:read :example/count] [:literal 0]]}
-        catalog {:id :example/initialization :initial-condition invariant
+        catalog {:id catalog-id :initial-condition invariant
                  :invariants {:example/nonnegative invariant}
                  :declared-operation-ids #{id} :operations [{:id id :construction source}]}]
     (inductive/build-inductive-mapped-admission!
      {:inductive-source ((deref (ns-resolve 'gesso.model.inductive-plan-test 'proof-package)) catalog)
       :target-map {:example/count [:document table "r1" :item_count]
-                   :example/assignee [:nullable-document :assignments "a1" :helper]}
+                   :example/assignee [:nullable-document nullable-table "a1" :helper]}
       :decode-outcome! identity
       :transaction-footprint! (fn [_] (throw (ex-info "Unexpected mapped operation" {})))
       :auxiliary-tables auxiliary :document-effects {id {[:document table "r1"] {}}}}))))
@@ -49,10 +50,12 @@
         seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]
               [:put-docs :memberships {:xt/id "m1" :active true}]]
         changed (assoc-in seed [0 2 :item-count] 99)
-        marker {:xt/id source :profile-version 1}
         observed (atom [])
         scope {:source-id source :worker-id "worker" :descriptor nil}
         admission (admission!)
+        checked (inductive/check-mapped-initialization! admission seed)
+        marker (init/marker source checked)
+        changed-checked (inductive/check-mapped-initialization! admission changed)
         install! (fn [node seed]
                    (xtdb/register-submission-policy!
                     node (policy/build-policy! node {:admission admission :initializer seed
@@ -63,13 +66,13 @@
       (with-open [node (xtn/start-node config)]
         (let [release (install! node seed)]
           (try
-            (is (false? (init/initialized? node source)))
+            (is (false? (init/initialized? node source checked)))
             (is (= :submission-policy-refused (reason #(xtdb/execute-tx! node seed))))
             (is (= :submission-policy-refused
-                   (reason #(xtdb/execute-tx! node (pop (init/transaction source seed #{:assignments}))))))
+                   (reason #(xtdb/execute-tx! node (pop (init/transaction source seed #{:assignments} checked))))))
             (is (= :submission-policy-refused
-                   (reason #(xtdb/submit-tx! node (init/transaction source seed #{:assignments})))))
-            (is (nil? (init/initialize! node source seed #{:assignments})))
+                   (reason #(xtdb/submit-tx! node (init/transaction source seed #{:assignments} checked)))))
+            (is (nil? (init/initialize! node source seed #{:assignments} checked)))
             (is (= [marker] (read-marker node)))
             (is (= [{:xt/id "r1" :item-count 0}] (read-requests node)))
             (is (= [{:kind :initializer}] @observed))
@@ -80,12 +83,16 @@
       (with-open [node (xtn/start-node config)]
         (let [release (install! node changed)]
           (try
-            (is (true? (init/initialized? node source)))
-            (is (nil? (init/initialize! node source changed #{:assignments})))
+            (is (true? (init/initialized? node source checked)))
+            (is (= :initialization-evidence-mismatch
+                   (reason #(policy/initialize! node source {:admission admission :initializer changed}))))
+            (is (= :initialization-evidence-mismatch
+                   (reason #(policy/initialize! node source {:admission admission :initializer nil}))))
+            (is (nil? (policy/initialize! node source {:admission (admission!) :initializer seed})))
+            (is (= :initialization-evidence-mismatch
+                   (reason #(xtdb/execute-tx! node (init/transaction source changed #{:assignments} changed-checked)))))
             (is (= :submission-policy-refused
-                   (reason #(xtdb/execute-tx! node (init/transaction source changed #{:assignments})))))
-            (is (= :submission-policy-refused
-                   (reason #(xtdb/execute-tx! node (init/transaction source seed #{:assignments})))))
+                   (reason #(xtdb/execute-tx! node (init/transaction source seed #{:assignments} checked)))))
             (is (= [marker] (read-marker node)))
             (is (empty? (read-requests node)))
             (is (= [{:kind :initializer}] @observed))
@@ -98,13 +105,13 @@
       (xt/execute-tx node [[:put-docs :requests {:xt/id "other" :item-count 42}]])
       (let [release (install! node seed)]
         (try
-          (is (= :assert-failed (assert-result #(init/initialize! node source seed #{:assignments}))))
+          (is (= :assert-failed (assert-result #(init/initialize! node source seed #{:assignments} checked))))
           (is (= [{:xt/id "other" :item-count 42}] (read-requests node)))
           (is (empty? (xt/q node ["SELECT * FROM memberships"])))
           (is (empty? (read-marker node)))
           (finally (release))))
-      (xt/execute-tx node [[:put-docs :gesso_initializations (assoc marker :profile-version 2)]])
-      (is (= :invalid-initialization-marker (reason #(init/initialize! node source seed #{:assignments}))))
+      (xt/execute-tx node [[:put-docs :gesso_initializations (assoc marker :profile-version 1)]])
+      (is (= :initialization-evidence-mismatch (reason #(init/initialize! node source seed #{:assignments} checked))))
       (is (= :invalid-mapped-writer-policy
              (reason #(policy/validate-config! {:admission admission :initializer [[:put-docs init/table marker]]
                                                 :observe! identity})))))))
@@ -151,9 +158,37 @@
       (let [release (xtdb/register-submission-policy! node (policy/build-policy! node (config seed) scope))]
         (try
           (is (= :submission-policy-refused
-                 (reason #(xtdb/execute-tx! node (init/transaction "source" seed)))))
+                 (reason #(xtdb/execute-tx! node (init/transaction "source" seed #{} checked)))))
           (is (= :assert-failed (assert-result #(policy/initialize! node "source" (config seed)))))
           (is (empty? (xt/q node ["SELECT * FROM requests"])))
           (is (empty? (xt/q node ["SELECT * FROM gesso_initializations"])))
           (is (= [{:xt/id "a1" :helper "old"}] (xt/q node ["SELECT * FROM assignments"])))
+          (finally (release)))))))
+
+(deftest initialization-evidence-binds-catalog-mapping-and-complete-seed
+  (let [seed [[:put-docs :requests {:xt/id "r1" :item-count 0 :hidden "original"}]]
+        admission (admission!)
+        check #(inductive/check-mapped-initialization! %1 %2)
+        baseline (check admission seed)
+        different-catalog (admission! :requests #{} :example/other :assignments)
+        different-map (admission! :requests #{} :example/initialization :other_assignments)
+        altered (assoc-in seed [0 2 :hidden] "different")]
+    (is (= baseline (check (admission!) seed)))
+    (is (= baseline (check admission (update-in seed [0 2] #(into (sorted-map) %)))))
+    (doseq [other [(check different-catalog seed) (check different-map seed) (check admission altered)]]
+      (is (= (:state baseline) (:state other)))
+      (is (not= (:initialization-fingerprint baseline) (:initialization-fingerprint other))))
+    (with-open [node (xtn/start-node {})]
+      (let [cfg {:admission admission :initializer seed :observe! identity}
+            release (xtdb/register-submission-policy!
+                     node (policy/build-policy! node cfg {:source-id "s"}))]
+        (try
+          (is (nil? (policy/initialize! node "s" cfg)))
+          (doseq [other [(assoc cfg :admission different-catalog)
+                         (assoc cfg :admission different-map)
+                         (assoc cfg :initializer altered)]]
+            (is (= :initialization-evidence-mismatch
+                   (reason #(policy/initialize! node "s" other)))))
+          (is (= [(init/marker "s" baseline)] (xt/q node ["SELECT * FROM gesso_initializations"])))
+          (is (= [(get-in seed [0 2])] (xt/q node ["SELECT * FROM requests"])))
           (finally (release)))))))

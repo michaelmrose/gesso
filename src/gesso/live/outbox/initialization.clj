@@ -1,47 +1,53 @@
 (ns gesso.live.outbox.initialization
   "Durable one-time initialization for the selected single-node host.
-   A source marker and exact seed writes commit atomically. Unmarked
-   nonempty seed tables or current command/outbox rows refuse enrollment.
-   This is not migration or protection against unmediated writers."
+   Commit the seed and its exact source-relative evidence marker atomically.
+   This is not migration, physical refinement or protection against raw writers."
   (:require [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.read-frontier :as frontier]))
 
 (def table :gesso_initializations)
+(def ^:private evidence-keys
+  #{:catalog-fingerprint :case-fingerprint :initialization-fingerprint})
 
-(defn- marker [source-id]
-  {:xt/id source-id :profile-version 1})
+(defn marker
+  "Build a data-only v2 marker from a checked initialization report. The
+   installed policy, not this copyable record, supplies submission authority."
+  [source-id checked]
+  (let [evidence (select-keys checked evidence-keys)]
+    (when-not (and (= evidence-keys (set (keys evidence)))
+                   (every? #(and (string? %) (re-matches #"sha256:[0-9a-f]{64}" %))
+                           (vals evidence)))
+      (throw (ex-info "Incomplete initialization evidence."
+                      {:reason :invalid-initialization-evidence})))
+    (assoc evidence :xt/id source-id :profile-version 2)))
 
 (defn initialized?
-  "Await the node-owned submitted frontier and require an exact marker.
-   An existing marker is permanent for this source; changed seed config
-   is not a migration request and must never cause reinitialization."
-  [node source-id]
+  "An exact current marker is required on restart. A changed catalog,
+   mapping, seed, legacy marker or omitted initializer is not migration.
+   A missing marker is not evidence of historical absence."
+  [node source-id checked]
   (let [rows (frontier/q-from! node ["SELECT * FROM gesso_initializations WHERE _id = ?" source-id])]
     (cond
       (= [] rows) false
-      (= [(marker source-id)] rows) true
-      :else (throw (ex-info "Invalid durable initialization marker."
-                            {:reason :invalid-initialization-marker :source-id source-id})))))
+      (and checked (= [(marker source-id checked)] rows)) true
+      :else (throw (ex-info "Incompatible durable initialization marker."
+                            {:reason :initialization-evidence-mismatch :source-id source-id})))))
 
 (defn transaction
-  "Build the exact guarded initialization transaction. The selected seed
-   has already passed writer-policy validation of canonical put tables.
-   This checks current emptiness, not historical absence or adoption of
-   an existing application. The selected host owns the database."
-  ([source-id seed] (transaction source-id seed #{}))
-  ([source-id seed mapped-tables]
+  "Build the exact guarded initialization transaction from the selected
+   seed and checked report. The installed policy independently derives both."
+  [source-id seed mapped-tables checked]
   (when seed
     (let [tables (sort (into (into #{:gesso_commands :gesso_live_outbox} mapped-tables) (map second) seed))]
       (into (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_initializations WHERE _id = ?)" source-id]]
                   (map (fn [t] [(str "ASSERT 0 = (SELECT COUNT(*) FROM " (name t) ")")]) tables))
-            (conj seed [:put-docs table (marker source-id)]))))))
+            (conj seed [:put-docs table (marker source-id checked)])))))
 
 (defn initialize!
-  "Called after manifest compatibility, before Live/worker/HTTP startup.
-   Skip on a durable marker; otherwise execute the guarded seed and marker
-   atomically. Any submission or assertion failure aborts host startup."
-  ([node source-id seed] (initialize! node source-id seed #{}))
-  ([node source-id seed mapped-tables]
-   (when (and seed (not (initialized? node source-id)))
-     (xtdb/execute-tx! node (transaction source-id seed mapped-tables)))
-   nil))
+  "Check the durable evidence before starting services, even when the
+   initializer was omitted. A seedless unmarked host is not certified."
+  [node source-id seed mapped-tables checked]
+  (let [initialized (initialized? node source-id checked)]
+    (when (and seed (not initialized))
+      (xtdb/execute-tx! node (transaction source-id seed mapped-tables checked))))
+  nil)

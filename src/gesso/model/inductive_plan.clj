@@ -25,6 +25,7 @@
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.initial-constructor :as constructor]
             [gesso.assurance.transition :as transition]
+            [gesso.assurance.subject :as subject]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-preparation :as preparation]
             [gesso.model.mapped-frame :as frame]
@@ -423,6 +424,7 @@
 
 (def ^:private original-initial-constructor constructor/check-initial-constructor!)
 (def ^:private original-initial-projection projection/project-state!)
+(def ^:private original-initial-identity subject/describe-subject)
 
 (defn check-mapped-initialization!
   "Check the supplied seed against the original issued catalog's shared Init
@@ -431,7 +433,7 @@
    of every returned table. This is a concrete constructor check, not a
    physical refinement proof or permission to submit a transaction."
   [admission seed]
-  (let [{:keys [source]} (registered-mapped! admission)
+  (let [{:keys [source description]} (registered-mapped! admission)
         {:keys [target-map decode-outcome!]} source
         catalog (get-in source [:inductive-source :catalog])
         construction (:construction (first (:operations catalog)))
@@ -439,7 +441,8 @@
                                  (when (#{:document :nullable-document} kind) table)))
                      (vals target-map))]
     (when-not (and (identical? original-initial-constructor constructor/check-initial-constructor!)
-                   (identical? original-initial-projection projection/project-state!))
+                   (identical? original-initial-projection projection/project-state!)
+                   (identical? original-initial-identity subject/describe-subject))
       (reject! :substituted-initialization-checker [] {}))
     (when-not (and (vector? seed) (seq seed)
                    (every? (fn [[op table & rows :as entry]]
@@ -482,8 +485,14 @@
                      (true? (:initial-condition-holds? checked))
                      (true? (:all-declared-invariants-hold? checked)))
         (reject! :initial-invariant-violation [] {}))
-      {:tables tables :state state :case-fingerprint (:fingerprint checked)
-       :authority :none :physical-correspondence :not-established})))
+      (let [binding {:catalog-fingerprint (:catalog-fingerprint description)
+                     :case-fingerprint (:fingerprint checked)}
+            fingerprint (:fingerprint
+                         (original-initial-identity
+                          {:kind :rule :id ::mapped-initializer-binding
+                           :interface (assoc binding :target-map target-map :seed seed)}))]
+        (merge binding {:tables tables :state state :initialization-fingerprint fingerprint
+                        :authority :none :physical-correspondence :not-established})))))
 
 (defn require-current-mapped-admission!
   "Recheck the original live handles and mapping of this exact issued callable

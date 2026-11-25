@@ -19,6 +19,7 @@
             [gesso.live.outbox.claim-semantic-fixture :as semantics]
             [gesso.assurance.observed-correspondence :as correspondence]
             [gesso.model.inductive-plan :as inductive-plan]
+            [gesso.live.outbox.initialization :as initialization]
             [gesso.model.certified-plan :as plan]
             [gesso.model.mapped-frame :as frame]
             [gesso.model.tx :as tx]
@@ -84,10 +85,6 @@
                               (throw (ex-info "Incorrect observed Claim frame prefix" {})))
                             (subvec ops (count prefix)))
                         ops)))
-        classify! (fn [seed ops]
-                    (semantics/writer-kind! seed "v2480-claim" "v2480"
-                     (if (some #(and (= :put-docs (first %)) (= :gesso_commands (second %))) ops)
-                       (base-ops! ops) ops)))
         execute-adapter xtdb/execute-tx!
         execute xtdb/execute-tx-from!
         observed (atom [])
@@ -112,6 +109,12 @@
         member {:xt/id "m1" :active true :revision 0 :created-at "t0" :updated-at "t0"}
         seed [[:put-docs :requests before]
               [:put-docs :memberships (assoc member :xt/id "helper-1") (assoc member :xt/id "helper-2")]]
+        expected-marker (initialization/marker "v2480-claim"
+                                               (inductive-plan/check-mapped-initialization! (:issued preparations) seed))
+        classify! (fn [seed ops]
+                    (semantics/writer-kind! seed "v2480-claim" "v2480" expected-marker
+                     (if (some #(and (= :put-docs (first %)) (= :gesso_commands (second %))) ops)
+                       (base-ops! ops) ops)))
         assignment {:xt/id "primary-r1" :request-id "r1" :helper "helper-1"
                     :revision 0 :created-at "t1" :updated-at "t1" :request/location-id "l1"}
         ;; Independent closed fixture policy, not extracted from the constructed plan.
@@ -557,7 +560,7 @@
                        claims (filter #(= :claim (:kind %)) entries)
                        workers (filter #(= :worker (:kind %)) entries)
                        intent-ids (set (map :xt/id (xt/q node ["SELECT _id FROM gesso_live_outbox"])))
-                       classify #(semantics/writer-kind! seed "v2480-claim" "v2480" %)
+                       classify #(semantics/writer-kind! seed "v2480-claim" "v2480" expected-marker %)
                        refused? (fn [ops] (try (classify ops) false (catch clojure.lang.ExceptionInfo _ true)))
                        worker-ops (:ops (first workers))]
                    (is (= #{:initializer :manifest :claim :worker} (set (map :kind entries))))
