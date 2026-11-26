@@ -6473,3 +6473,49 @@ Next: specify and test a restricted worker-interleaved selection relation
 that independently qualifies all intervening maintenance steps and
 preserves mapped-state and journal linkage without dropping transactions
 from the full retained replay.
+
+* v2782 — bounded worker-interleaved recovery relation
+
+Add a separate pure recovery-linkage profile for three ordered selected
+transactions with intervening outbox worker operations. Replay every
+supplied transaction, including the suffix, without removing or
+renumbering any steps. Require every intervening transaction to commit
+and reconstruct its complete historical worker envelope from independent
+replayed before/after outbox rows at the transaction valid time. Require
+the supplied publication source and an existing linked journal record,
+unchanged non-outbox temporal segments (including system origins), and
+no non-outbox valid-time boundary between the prior and current step.
+Normalize only the supported worker timestamp representations for the
+envelope comparison. Check the stale abort against its actual immediate
+predecessor, then require the same winning and recovering journal
+identities and outcome linkage as the adjacent profile.
+
+Preserve the existing adjacent comparator and its prefix replay scope,
+sharing the command linkage and journal checks. The new result includes
+selected transaction identities, individually checked maintenance
+identities and the complete replay count. A failed gap or replay does
+not return positive linkage evidence. Prefix and suffix operations are
+replayed but not classified as intervening workers.
+
+Focused JVM regression: 7 tests / 131 assertions, zero failures or
+errors, covering the recovery-trajectory and mapped-recovery namespaces.
+Synthetic interleaving includes acquisition before the selected abort
+and acknowledgment afterward. Reject extra assertions, payload changes,
+stale version operands, unclassified assertions, extra domain writes,
+aborted maintenance, wrong source, reordered selection, invalid suffix
+operations, and protected valid-time boundaries including a transient
+interval invisible at both endpoints. The initial run caught an
+unmatched delimiter; the corrected exact source and test blobs passed.
+
+This is a pure, supplied-input relation, not yet integrated into the
+actual retained provider bracket or assembled host. The existing
+historical worker relation is reused; the test does not independently
+establish all reclamation or contention cases. No authentication,
+complete writer closure, external delivery, universal provider
+refinement, certificate or CLM-R2 retirement. Full project gates and
+persistent integration were not rerun.
+
+Next: compose this interleaved relation with actual retained acquisition,
+provider worker-envelope verification and selected mapped executor
+correspondence under one stable history bracket, preserving the strict
+adjacent API.
