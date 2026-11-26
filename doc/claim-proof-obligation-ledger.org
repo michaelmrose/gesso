@@ -5309,3 +5309,28 @@ residual assertions, supplied input/selector/catalog premises, authenticated
 provenance and selected commitment remain unqualified. No production
 admission expansion, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates not rerun.
+
+* v2743 — derive source-relative mapped publication fragments
+
+Independently derive ordered topic/subject contributions from original
+mapped write targets, complete prepared rows and forward-derived replacement
+rows. Require a declaration for the selected operation (explicit nil is
+empty, missing is unsupported), complete target coverage and unambiguous
+per-topic fields. Include old and new subjects with stable deduplication.
+Reimplement the frozen typed UTF-16 identity framing and UUIDv8 digest
+without the outbox writer, then construct exact pending intent rows and
+prewrite identity absence guards. Compare the canonical guard/put fragment
+with structural validation; no observed outbox or candidate data enters
+expected derivation. String command/principal/source identities and at
+most 128 contributions and distinct changes are selected profile bounds.
+
+JVM: 4 tests / 211 assertions, zero failures or errors across mapped
+publication, persistent publication replay and mapped evidence. The new
+fixture contributes 51 assertions, including production writer parity,
+supplementary Unicode identity encoding, changed and unchanged subjects,
+nullable creation, cross-target deduplication, declaration order, explicit
+empty versus missing, and malformed or altered fragments. This is not a
+whole retained envelope check; guard placement, historical outbox identity
+absence, installed declaration/source provenance and selected commitment
+remain open. No production admission expansion, certificate or CLM-R2
+premise retirement. Full project and independent formal gates not rerun.
