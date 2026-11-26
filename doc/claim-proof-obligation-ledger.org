@@ -5961,3 +5961,33 @@ Full gates not rerun.
 Next: use complete concrete outcome declarations for all Claim journal
 writers and compose the outcome check with the input-qualified retained
 executor trajectory, keeping source and decoder authentication explicit.
+
+* v2769 — source-relative outcome-qualified retained recovery
+
+Compose the v2768 finite outcome derivation with the v2767 input-qualified
+retained executor recovery comparison. Require each candidate to match
+the original selected alternative and the complete derived outcome case
+table before passing the same steps to the existing input and recovery
+diagnostics. Expose positive outcome derivation results only after the
+entire composed comparison succeeds. Preserve previous entry points.
+
+The persistent Claim fixture now supplies concrete declarations covering
+all four journal-writing alternatives, including the unselected refusal
+for the winning helper, and independently checks the resulting complete
+case table. The actual selected acceptance, stale competing candidate,
+and guarded refusal match before and after reopening XTDB. Reject a
+missing unselected declaration and a substituted incomplete case table
+on the aborted step, without returning positive trajectory fields.
+
+Focused persistent JVM integration: 1 test / 308 assertions, zero
+failures or errors, using the supplied offline classpath and JVM flags.
+The concrete declarations, original source and installed decoder issuance
+remain premises; this comparison does not establish that the opaque
+runtime decoder implements exactly the finite declared cases, nor does it
+authenticate source, principal or clock provenance. No production admission
+expansion, certificate, universal provider refinement or CLM-R2 premise
+retirement. Full project gates were not rerun.
+
+Next: qualify the relationship between the finite outcome declaration
+and the installed mapped admission decoder, with explicit treatment of
+the supported finite domain and unsupported outcomes.

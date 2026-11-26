@@ -5,6 +5,7 @@
             [gesso.assurance.proof.typed-value-semantics :as values]
             [gesso.assurance.reference-mapped-writes :as writes]
             [gesso.assurance.reference-mapped-input :as input]
+            [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.assurance.reference-mapped-publication :as publication]
             [gesso.assurance.reference-mapped-residual :as residual]
             [gesso.assurance.reference-provider :as provider]
@@ -487,3 +488,35 @@
                 (not= executor-recovery-profile (:executor-recovery-profile result))
                 (fail :unsupported :invalid-executor-recovery-comparison)
                 :else (assoc result :input-derivations (mapv :input-derivation reports))))))))))
+
+(def executor-outcome-recovery-profile :selected-mapped-retained-executor-outcome-recovery-v1)
+
+(defn compare-local-processed-retained-mapped-executor-outcome-recovery!
+  "Require source-relative outcome cases and selected alternative linkage for
+   all three candidates, then qualify the same input and recovery trajectory.
+   Concrete outcome declarations and installed decoder issuance remain premises."
+  [node tables source outcome-declarations steps]
+  (let [tag #(assoc % :executor-outcome-recovery-profile executor-outcome-recovery-profile
+                      :source-provenance :not-established :outcome-provenance :not-established)
+        fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
+                    :provider-refinement :not-established})
+        required #{:original :targets :docs :journal :expectation :prefix-count
+                   :spec :context :source-id :declarations :residual-declarations}]
+    (if-not (and (map? source) (nil? (meta source))
+                 (vector? steps) (nil? (meta steps)) (= 3 (count steps))
+                 (every? #(and (map? %) (nil? (meta %)) (= required (set (keys %)))) steps))
+      (fail :unsupported :invalid-executor-outcome-recovery-source)
+      (let [reports (mapv (fn [{:keys [original targets expectation spec]}]
+                            (outcome/compare-selected! source outcome-declarations original targets expectation spec)) steps)]
+        (if-let [failure (first (remove #(= :matched (:status %)) reports))]
+          (fail (:status failure) (:reason failure))
+          (if-not (every? #(and (= outcome/profile (:profile %))
+                                (= :matched-declared-journal-assignment (:outcome-derivation %))
+                                (= :matched (:candidate-command-record %))) reports)
+            (fail :unsupported :invalid-executor-outcome-comparison)
+            (let [result (tag (compare-local-processed-retained-mapped-executor-input-recovery! node tables source steps))]
+              (cond
+                (not= :matched (:status result)) result
+                (not= executor-input-recovery-profile (:executor-input-recovery-profile result))
+                (fail :unsupported :invalid-executor-input-recovery-comparison)
+                :else (assoc result :outcome-derivations (mapv :outcome-derivation reports))))))))))

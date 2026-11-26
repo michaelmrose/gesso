@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.assurance.reference-mapped-evidence :as evidence]
+            [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
@@ -99,9 +100,14 @@
                                                                                   (mapv (fn [{:keys [topic] :as change}] {:topic topic :id (get change (subjects topic))}) changes)))})
                         cmd (assoc b :execution-id (identity/execution-id (str "e-" id)))]
                     (executor (assoc cmd :command cmd :ctx {:xtdb/connectable node publication/preparation-key prepare}))))
+        outcome-declarations (into {} (for [helper (keys claim/helpers) branch [:accept :refuse]]
+                                         [(claim/alternative-id helper branch)
+                                          {:arguments {:request-id "r1"}
+                                           :outcome (if (= :accept branch) (accepted helper) refused)}]))
         cases {["helper-1" :request/claim {:request-id "r1"} (accepted "helper-1")] :accepted
                ["helper-2" :request/claim {:request-id "r1"} (accepted "helper-2")] :accepted
-               ["helper-2" :request/claim {:request-id "r1"} refused] :rejected}
+               ["helper-2" :request/claim {:request-id "r1"} refused] :rejected
+               ["helper-1" :request/claim {:request-id "r1"} refused] :rejected}
         recovery-steps (fn [history]
                          (mapv (fn [[idx b branch outcome now]]
                                  (let [id (claim/alternative-id (actor b) branch)
@@ -127,7 +133,7 @@
                        actual (:replay-inputs sample)
                        prediction (temporal/replay (mapv #(dissoc % :tx-id) actual))
                        steps (recovery-steps history)
-                       trajectory! #(evidence/compare-local-processed-retained-mapped-executor-input-recovery! node %1 mapped-source %2)
+                       trajectory! #(evidence/compare-local-processed-retained-mapped-executor-outcome-recovery! node %1 mapped-source outcome-declarations %2)
                        trajectory (trajectory! tables steps)]
                    (is (= :observed (:status sample)))
                    (is (= history actual))
@@ -138,6 +144,9 @@
                    (is (= evidence/executor-recovery-profile (:executor-recovery-profile trajectory)))
                    (is (= evidence/executor-input-recovery-profile (:executor-input-recovery-profile trajectory)))
                    (is (= (vec (repeat 3 :matched-source-relative-selectors)) (:input-derivations trajectory)))
+                   (is (= evidence/executor-outcome-recovery-profile (:executor-outcome-recovery-profile trajectory)))
+                   (is (= (vec (repeat 3 :matched-declared-journal-assignment)) (:outcome-derivations trajectory)))
+                   (is (= cases (:cases (outcome/derive-cases! mapped-source outcome-declarations))))
                    (is (= :not-established (:source-provenance trajectory)))
                    (is (= :not-established (:outcome-provenance trajectory)))
                    (is (= provider/mapped-recovery-profile (:mapped-recovery-profile trajectory)))
@@ -153,11 +162,15 @@
                    (is (= :not-established (:provider-refinement trajectory)))
                    (doseq [[bad reason] [[(trajectory! (disj tables :memberships) steps) :incomplete-mapped-recovery-scope]
                                          [(trajectory! tables [(nth steps 0) (nth steps 2) (nth steps 1)]) :nonadjacent-recovery-selection]
-                                         [(trajectory! tables (assoc-in steps [1 :context :selectors] {:fake/input [:principal]})) :selected-input-selector-mismatch]]]
+                                         [(trajectory! tables (assoc-in steps [1 :context :selectors] {:fake/input [:principal]})) :selected-input-selector-mismatch]
+                                         [(trajectory! tables (update-in steps [1 :spec :outcome-cases] dissoc ["helper-1" :request/claim {:request-id "r1"} refused])) :selected-outcome-cases-mismatch]
+                                         [(evidence/compare-local-processed-retained-mapped-executor-outcome-recovery!
+                                           node tables mapped-source (dissoc outcome-declarations (claim/alternative-id "helper-1" :refuse)) steps)
+                                          :incomplete-outcome-declarations]]]
                      (is (#{:mismatch :unsupported} (:status bad)) (pr-str bad))
                      (is (= reason (:reason bad)) (pr-str bad))
                      (is (not-any? #(contains? bad %) [:recovery-linkage :selected-tx-ids :selected-commitments
-                                                      :abstract-transitions :executor-envelopes :input-derivations])))
+                                                      :abstract-transitions :executor-envelopes :input-derivations :outcome-derivations])))
                    (doseq [[i {:keys [original docs journal expectation prefix-count spec context]}] (map-indexed vector steps)]
                      (let [idx (inc i) source original document-rows docs tx expectation
                            report (evidence/compare-local-processed-retained-mapped-executor! node tables source claim/target-map document-rows journal tx prefix-count spec context source-id
