@@ -4955,3 +4955,21 @@ parameters, wrong operand domains, altered predicates and incomplete table
 scope. The complete manifest-establishment transaction is not qualified by
 this change. No production admission, certificate or CLM-R2 premise
 retirement; full project and independent formal gates not rerun.
+
+* v2728 — project retained worker lease and version assertions
+
+Recognize the five exact numbered SQL worker guards in strict retained
+replay. Require UUID identities and qualified UTC-zoned timestamp
+operands, canonicalize SQL timestamps to instants, and leave document
+values unchanged. Existing temporal replay validates range and precision.
+Advance strict input, processed acquisition and execution profiles without
+expanding clocked/equal-time replay.
+
+Focused JVM: 1 test / 68 assertions, zero failures or errors. The persistent
+fixture compares eleven real XTDB transactions before and after reopening,
+including stale version, premature reclaim, deadline equality, excessive
+lease duration, successful reclamation and acknowledgment. Reject altered
+SQL, malformed numbering, wrong types, precision and zone, and incomplete
+observation scope. The broader five-namespace regression run timed out
+without a completed summary; no failures were reported before timeout.
+No production admission, certificate or CLM-R2 premise retirement.

@@ -8,7 +8,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v11)
+(def profile :selected-retained-replay-input-v12)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -66,6 +66,27 @@
     (let [op (into [(str/replace query "$1" "?")] args)]
       (when (= #{:gesso_live_outbox} (current/operation-tables op)) op))))
 
+(def ^:private worker-assertion-arities
+  {"ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = $1 AND _system_from = $2)" 2
+   "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = $1 AND _system_from = $2 AND CURRENT_TIMESTAMP >= $3)" 3
+   "ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = $1 AND _system_from = $2 AND CURRENT_TIMESTAMP < $3)" 3
+   "ASSERT CURRENT_TIMESTAMP < $1" 1
+   "ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= $1" 1})
+
+(defn- project-worker-assertion [query args]
+  ;; SQL timestamps have instant semantics. Keep document values unchanged.
+  ;; The temporal interpreter checks timestamp precision and range.
+  (when-let [n (get worker-assertion-arities query)]
+    (let [timestamps (if (= n 1) args (rest args))]
+      (when (and (= n (count args))
+                 (or (= n 1) (uuid? (first args)))
+                 (every? #(and (instance? ZonedDateTime %)
+                               (#{(ZoneId/of "Z") (ZoneId/of "UTC")}
+                                (.getZone ^ZonedDateTime %))) timestamps))
+        (into [(str/replace query #"\$[123]" "?")]
+              (concat (when (not= n 1) [(first args)])
+                      (map #(.toInstant ^ZonedDateTime %) timestamps)))))))
+
 (defn- project-journal-slot-assertion [query args]
   ;; Exact slot selector; dollar signs in column names are not parameters.
   (when (and (= 2 (count args))
@@ -112,6 +133,7 @@
                                 (project-mapped-assertion query args)
                                 (project-field-count-assertion query args)
                                 (project-publication-absence query args)
+                                (project-worker-assertion query args)
                                 (project-journal-slot-assertion query args)
                                 (project-journal-value-assertion query args))))
     :put-docs (when (and (= #{:kind :table :documents :iids :bounds} (set (keys op)))
@@ -167,8 +189,9 @@
 (defn decode-replay-input
   "Project selected retained operations with explicit time precedence.
    Includes exact quoted-table row-read, row-count, mapped scalar and
-   document field-count, publication identity/source absence, journal slot
-   and selected recursive journal value assertions; the history must qualify
+   document field-count, publication identity/source absence, journal slot,
+   selected recursive journal value and worker clock/version assertions;
+   the history must qualify
    for strictly increasing temporal replay.
    The four-argument form resolves implicit times from the frame and prior
    time; the two-argument form requires explicit time. Clock rejection
