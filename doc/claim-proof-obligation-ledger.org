@@ -5360,3 +5360,27 @@ provenance, successful selected commitment and universal provider
 refinement remain unqualified. No production admission expansion,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates not rerun.
+
+* v2745 — independently derive selected residual assertion fragments
+
+Derive literal state guard conjunctions, declared prestate version checks,
+nullable-document absence, command identity and slot absence, and declared
+subject checks from original construction, closed prepared rows and binding.
+Construct the ordered SQL and operands independently of the production
+residual lowerer and SQL formatter. Require exact selected document layout
+coverage and distinguish explicit nil from a missing declaration. Restrict
+this profile to Gesso-prefixed tables, canonical scalar field spellings and
+string command identities. Check complete ordered fragments, not candidate
+values as derivation inputs. The production catalog validator and lowerer
+are test oracles, not dependencies of the independent derivation.
+
+Focused JVM: 1 test / 37 assertions, zero failures or errors. Compare all
+five generated assertions to the production lowerer, validate declaration
+issuance, changed prestate operands, missing/duplicate/reordered assertions,
+malformed selectors, unsupported guard shape and noncanonical operands.
+The broader Claim semantic fixture run timed out before its summary; no
+regression pass is claimed for that run. Ordinary SQL equality coercion,
+retained residual decoding and execution, whole-envelope composition and
+installed declaration provenance remain open. No production admission
+expansion, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates not rerun.
