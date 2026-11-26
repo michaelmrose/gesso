@@ -47,7 +47,8 @@
         refusal-guards #{[:requests "r1" :status :claimed] [:requests "r1" :revision 1] [:requests "r1" :updated-at "t1"]}
         snapshots (atom {}) attempts (atom []) admissions (atom 0) recovered (atom 0)
         actor #(identity/raw-value (:principal %))
-        admit (induction/build-inductive-mapped-admission! (claim/physical-mapped-admission-source (claim/bound-inductive-source!)))
+        mapped-source (claim/physical-mapped-admission-source (claim/bound-inductive-source!))
+        admit (induction/build-inductive-mapped-admission! mapped-source)
         catalog (induction/describe-mapped-admission admit)
         prepare! (fn [invocation branch]
                    (let [snapshot (claim/snapshot-at-frontier! (:ctx invocation))
@@ -126,7 +127,7 @@
                        actual (:replay-inputs sample)
                        prediction (temporal/replay (mapv #(dissoc % :tx-id) actual))
                        steps (recovery-steps history)
-                       trajectory! #(evidence/compare-local-processed-retained-mapped-executor-recovery! node %1 %2)
+                       trajectory! #(evidence/compare-local-processed-retained-mapped-executor-input-recovery! node %1 mapped-source %2)
                        trajectory (trajectory! tables steps)]
                    (is (= :observed (:status sample)))
                    (is (= history actual))
@@ -135,6 +136,10 @@
                    (is (= (:segments (nth (:history prediction) 1)) (:segments (nth (:history prediction) 2))))
                    (is (= :matched (:status trajectory)) (pr-str trajectory))
                    (is (= evidence/executor-recovery-profile (:executor-recovery-profile trajectory)))
+                   (is (= evidence/executor-input-recovery-profile (:executor-input-recovery-profile trajectory)))
+                   (is (= (vec (repeat 3 :matched-source-relative-selectors)) (:input-derivations trajectory)))
+                   (is (= :not-established (:source-provenance trajectory)))
+                   (is (= :not-established (:outcome-provenance trajectory)))
                    (is (= provider/mapped-recovery-profile (:mapped-recovery-profile trajectory)))
                    (is (= (mapv :tx-id (subvec history 1)) (:selected-tx-ids trajectory)))
                    (is (= [:committed :aborted :committed] (:selected-commitments trajectory)))
@@ -147,11 +152,12 @@
                    (is (= :not-issued (:certificate trajectory)))
                    (is (= :not-established (:provider-refinement trajectory)))
                    (doseq [[bad reason] [[(trajectory! (disj tables :memberships) steps) :incomplete-mapped-recovery-scope]
-                                         [(trajectory! tables [(nth steps 0) (nth steps 2) (nth steps 1)]) :nonadjacent-recovery-selection]]]
+                                         [(trajectory! tables [(nth steps 0) (nth steps 2) (nth steps 1)]) :nonadjacent-recovery-selection]
+                                         [(trajectory! tables (assoc-in steps [1 :context :selectors] {:fake/input [:principal]})) :selected-input-selector-mismatch]]]
                      (is (#{:mismatch :unsupported} (:status bad)) (pr-str bad))
                      (is (= reason (:reason bad)) (pr-str bad))
                      (is (not-any? #(contains? bad %) [:recovery-linkage :selected-tx-ids :selected-commitments
-                                                      :abstract-transitions :executor-envelopes])))
+                                                      :abstract-transitions :executor-envelopes :input-derivations])))
                    (doseq [[i {:keys [original docs journal expectation prefix-count spec context]}] (map-indexed vector steps)]
                      (let [idx (inc i) source original document-rows docs tx expectation
                            report (evidence/compare-local-processed-retained-mapped-executor! node tables source claim/target-map document-rows journal tx prefix-count spec context source-id

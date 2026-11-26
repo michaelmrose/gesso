@@ -5900,3 +5900,32 @@ Composition with the shared retained trajectory and genuine persistent
 qualification are subsequent work. No production admission expansion,
 certificate, universal provider refinement or CLM-R2 premise retirement.
 Full gates were not rerun.
+
+* v2767 — source-relative input-qualified retained recovery
+
+Compose the v2766 selected candidate input derivation with the v2765
+complete retained executor recovery diagnostic. Require all three steps
+to select their original construction, target map and declared input
+selectors from one supplied mapped catalog. Check the candidate journal
+record and typed input valuation using the prepared state for each step,
+including the aborted attempt's stale preparation rather than its actual
+transaction predecessor. Pass exactly those checked steps to the existing
+shared retained-provider comparison. Expose positive input derivation
+results only if the complete recovery comparison also succeeds. Preserve
+the older executor recovery entry point.
+
+Focused persistent JVM integration: 1 test / 290 assertions, zero failures
+or errors. The genuine Claim fixture reuses the mapped source supplied to
+the installed admission constructor; all three input-free alternatives
+match before and after reopening XTDB. Reject substituted selectors on
+the aborted attempt as well as the existing reordered-attempt and
+incomplete-table-scope cases without positive trajectory or input fields.
+Nonempty selector forms were exercised separately in v2766, not in this
+persistent Claim fixture. This remains conditional on the supplied catalog,
+prepared snapshots and outcome interpretation; no authenticated source,
+principal or outcome provenance, certificate, universal provider
+refinement, admission expansion or CLM-R2 retirement. Full gates not rerun.
+
+Next: source-relative outcome interpretation and explicit binding of the
+selected candidate outcome to the original declared alternative, without
+treating a supplied decoder or outcome table as authenticated issuance.

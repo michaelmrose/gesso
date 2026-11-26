@@ -4,6 +4,7 @@
   (:require [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.assurance.proof.typed-value-semantics :as values]
             [gesso.assurance.reference-mapped-writes :as writes]
+            [gesso.assurance.reference-mapped-input :as input]
             [gesso.assurance.reference-mapped-publication :as publication]
             [gesso.assurance.reference-mapped-residual :as residual]
             [gesso.assurance.reference-provider :as provider]
@@ -453,3 +454,36 @@
               (assoc :executor-envelopes [:matched-source-relative-record
                                           :matched-uncommitted-record
                                           :matched-source-relative-record]))))))))
+
+(def executor-input-recovery-profile :selected-mapped-retained-executor-input-recovery-v1)
+
+(defn compare-local-processed-retained-mapped-executor-input-recovery!
+  "Check the candidate input derivations against one supplied original mapped
+   catalog, then qualify the same steps in the complete recovery bracket.
+   The aborted step uses its prepared candidate state, not its actual stale
+   predecessor. Source issuance and outcome interpretation remain premises."
+  [node tables source steps]
+  (let [tag #(assoc % :executor-input-recovery-profile executor-input-recovery-profile
+                      :source-provenance :not-established :outcome-provenance :not-established)
+        fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
+                    :provider-refinement :not-established})
+        required #{:original :targets :docs :journal :expectation :prefix-count
+                   :spec :context :source-id :declarations :residual-declarations}]
+    (if-not (and (map? source) (nil? (meta source))
+                 (vector? steps) (nil? (meta steps)) (= 3 (count steps))
+                 (every? #(and (map? %) (nil? (meta %)) (= required (set (keys %)))) steps))
+      (fail :unsupported :invalid-executor-input-recovery-source)
+      (let [reports (mapv (fn [{:keys [original targets docs journal expectation spec context]}]
+                            (input/compare-selected! source original targets docs journal expectation spec context)) steps)]
+        (if-let [failure (first (remove #(= :matched (:status %)) reports))]
+          (fail (:status failure) (:reason failure))
+          (if-not (every? #(and (= input/profile (:profile %))
+                                (= :matched-source-relative-selectors (:input-derivation %))
+                                (= :matched (:candidate-command-record %))) reports)
+            (fail :unsupported :invalid-executor-input-comparison)
+            (let [result (tag (compare-local-processed-retained-mapped-executor-recovery! node tables steps))]
+              (cond
+                (not= :matched (:status result)) result
+                (not= executor-recovery-profile (:executor-recovery-profile result))
+                (fail :unsupported :invalid-executor-recovery-comparison)
+                :else (assoc result :input-derivations (mapv :input-derivation reports))))))))))
