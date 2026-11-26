@@ -30,7 +30,9 @@
        (every? offset? xs)
        (every? (fn [[a b]] (< a b)) (partition 2 1 xs))))
 
-(defn- historical-cut? [cut]
+(defn historical-cut?
+  "Validate a declared cut shape only; no acquisition or identity evidence."
+  [cut]
   (and (map? cut) (not (record? cut)) (nil? (meta cut))
        (= cut-keys (set (keys cut)))
        (= cut-profile (:payload-binding-profile cut))

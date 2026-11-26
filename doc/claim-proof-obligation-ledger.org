@@ -7134,3 +7134,26 @@ bundle; full project gates not run.
 Next: derive the declared historical cut from actual retained acquisition
 contents and qualify the required prefix against a target sample without
 confusing digest equality with authenticated lifecycle evidence.
+
+* v2798 — derive exact historical cuts from issued acquisitions
+
+Project the sensitive cut from the locally issued, qualified retained
+sample, using the shared declaration validator. Refuse raw samples,
+unissued handles and replaced acquisition readers. Compare an explicit
+required cut against an issued target and match exact content only.
+Return no cut or digest from the comparison. Reject missing coordinates
+and unequal content at the same cut; a longer coordinate-compatible
+history remains unsupported until its required prefix can be hashed
+within the same qualified acquisition. Do not confuse an equal full-log
+fingerprint with proof of provenance or a different full-log fingerprint
+with evidence of lost history. The declared required cut's original
+observation binding remains open.
+
+Focused JVM: 31 tests / 912 assertions, zero failures or errors across
+historical cut, storage identity and assumption namespaces. Real local
+XTDB history exercises empty, exact, extended and shorter cuts, forged
+inputs and a replaced reader. Older offline dependency bundle; full
+project gates not run. No durable identity, lineage or CLM-R2 discharge.
+
+Next: acquire the selected required prefix digest within the same
+qualified full retained acquisition, then compare a genuine extension.
