@@ -6259,3 +6259,47 @@ Next: exercise the actual installed host writer policy and its framed
 handoff path with the same local observation and retained recovery
 comparison. Keep durable source identity and authenticated command
 provenance as separate obligations.
+
+* v2777 — actual mapped writer policy recovery qualification
+
+Replace the recovery fixture's hand-written submission predicate and raw
+seed with the actual host mapped writer-policy constructor, registration,
+manifest establishment and activation sequence. Verify the installed
+initialization observation and exact five policy classifications:
+manifest, initializer, mapped operation, mapped operation, mapped operation.
+Collect the comparison handoffs from the actual locally issued observation.
+Use the complete retained history, including manifest and initialization
+transactions and their tables, for the existing combined observed recovery
+diagnostic. Repeat the comparison after reopening the persistent database.
+
+The retained replay projection lacked the selected initializer's unquoted
+absence guards. Add only the exact marker-ID guard and literal zero-count
+guards on the three Claim domain tables and three reserved infrastructure
+tables. Independently validate the projected operation grammar and table
+dependencies; do not admit arbitrary unquoted statements or broaden the
+clocked profile. Test the exact guard forms, wrong placeholders, arities,
+identity domains, unexpected tables, counts and comments.
+
+Focused JVM results on the exact candidate: persistent recovery 1 test /
+465 assertions and pure projection 1 test / 37 assertions, both zero
+failures or errors. The complete history predicts commit, commit, commit,
+abort, commit, and matches the independently observed physical history.
+The actual mapped writer policy, not a substitute predicate, admitted the
+three selected recovery attempts.
+
+This fixture calls the host's writer-policy and startup components
+directly with a fixture-supplied descriptor, not a fully assembled host
+with a compiled publication graph, HTTP authentication, worker, history
+controller and runtime lifecycle. It does not restart or reactivate the
+writer after reopening; the second check is historical. The narrow replay
+addition is not a general initialization translation theorem. Existing
+receipt/presentation interceptions, process-local observation lifetime,
+aborted receipt identity, durable storage identity, unrestricted writer
+closure and authenticated command provenance remain limitations. No
+certificate, universal provider refinement, production admission expansion
+or CLM-R2 premise retirement. Full gates were not rerun.
+
+Next: bind the observation to the actual activated writer-policy generation
+and its initialization root as part of the combined diagnostic, rather
+than relying on separate test assertions about which policy was installed;
+then qualify the assembled host lifecycle and command provenance.

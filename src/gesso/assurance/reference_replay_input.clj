@@ -65,6 +65,23 @@
       (let [op [(str/replace query "$1" "?") (first args)]]
         (when (= #{table} (current/operation-tables op)) op)))))
 
+(defn- project-initialization-absence [query args]
+  ;; The selected Claim host's exact initialization guards. Do not admit
+  ;; arbitrary unquoted SQL or broaden the clocked replay profile.
+  (let [op (cond
+             (and (= query "ASSERT 0 = (SELECT COUNT(*) FROM gesso_initializations WHERE _id = $1)")
+                  (= 1 (count args)))
+             ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_initializations WHERE _id = ?)" (first args)]
+             (and (empty? args)
+                  (#{"ASSERT 0 = (SELECT COUNT(*) FROM requests)"
+                     "ASSERT 0 = (SELECT COUNT(*) FROM request_assignments)"
+                     "ASSERT 0 = (SELECT COUNT(*) FROM memberships)"
+                     "ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands)"
+                     "ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence)"
+                     "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox)"} query))
+             [query])]
+    (when (and op (seq (current/operation-tables op))) op)))
+
 (defn- project-field-count-assertion [query args]
   ;; Recognize only the selected top-level struct cardinality guard.
   (when (and (string? query)
@@ -161,6 +178,7 @@
              (not clocked?) (or (project-state-assertion query args)
                                 (project-mapped-absence query args)
                                 (project-writer-absence query args)
+                                (project-initialization-absence query args)
                                 (project-document-assertion query args)
                                 (project-field-count-assertion query args)
                                 (project-publication-absence query args)

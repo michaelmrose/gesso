@@ -16,6 +16,9 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.claim-semantic-fixture :as claim]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.writer-policy :as writer-policy]
+            [gesso.live.outbox.publication-manifest :as manifest]
+            [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.model.certified-plan :as plan]
             [gesso.model.command :as command]
             [gesso.model.command-resolution :as resolution]
@@ -42,13 +45,16 @@
         winner (binding "helper-1" "claim-1") loser (binding "helper-2" "claim-2")
         accepted (fn [helper] {:outcome :request/claimed :helper helper})
         refused {:outcome :request/not-claimable :reason :already-claimed}
-        tables #{:requests :request_assignments :memberships :gesso_commands :gesso_transition_evidence :gesso_live_outbox}
+        descriptor "[[[\"\" \"request\"] [\"request\" \"location-id\"] []] [[\"\" \"request-assignment\"] [\"request\" \"location-id\"] []]]"
+        seed [[:put-docs :requests before] [:put-docs :memberships (member "helper-1") (member "helper-2")]]
+        tables #{:gesso_initializations :gesso_publication_manifests :requests :request_assignments :memberships :gesso_commands :gesso_transition_evidence :gesso_live_outbox}
         writes #{:requests :request_assignments :gesso_commands}
         targets #{[:requests "r1"] [:request_assignments "primary-r1"]}
         updates #{[:requests "r1" :status :open] [:requests "r1" :revision 0] [:requests "r1" :updated-at "t0"]}
         operations #{[:requests "r1" :claim] [:request_assignments "primary-r1" :create]}
         refusal-guards #{[:requests "r1" :status :claimed] [:requests "r1" :revision 1] [:requests "r1" :updated-at "t1"]}
         snapshots (atom {}) attempts (atom []) admissions (atom 0) recovered (atom 0)
+        policy-events (atom [])
         claims (atom []) captured (atom nil) observation-handle (atom nil)
         actor #(identity/raw-value (:principal %))
         mapped-source (claim/physical-mapped-admission-source (claim/bound-inductive-source!))
@@ -128,9 +134,9 @@
                                                     :selectors (get-in catalog [:input-derivations id]))
                                     :source-id source-id :declarations (:publication-derivations catalog)
                                     :residual-declarations (:residual-assertion-derivations catalog)}))
-                               [[1 winner :accept (accepted "helper-1") "t1"]
-                                [2 loser :accept (accepted "helper-2") "t1"]
-                                [3 loser :refuse refused "t2"]]))
+                               [[2 winner :accept (accepted "helper-1") "t1"]
+                                [3 loser :accept (accepted "helper-2") "t1"]
+                                [4 loser :refuse refused "t2"]]))
         check! (fn [node history]
                  (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
                        actual (:replay-inputs sample)
@@ -197,8 +203,8 @@
                    (is (= :observed (:status sample)))
                    (is (= history actual))
                    (is (= :predicted (:status prediction)))
-                   (is (= [true true false true] (mapv :committed? (:history prediction))))
-                   (is (= (:segments (nth (:history prediction) 1)) (:segments (nth (:history prediction) 2))))
+                   (is (= [true true true false true] (mapv :committed? (:history prediction))))
+                   (is (= (:segments (nth (:history prediction) 2)) (:segments (nth (:history prediction) 3))))
                    (is (= :matched (:status trajectory)) (pr-str trajectory))
                    (is (= evidence/issued-executor-recovery-profile (:issued-executor-recovery-profile trajectory)))
                    (is (= :matched-issued-declarations (:issued-admission-binding trajectory)))
@@ -225,7 +231,7 @@
                    (is (= :not-established (:source-provenance trajectory)))
                    (is (= :not-established (:outcome-provenance trajectory)))
                    (is (= provider/mapped-recovery-profile (:mapped-recovery-profile trajectory)))
-                   (is (= (mapv :tx-id (subvec history 1)) (:selected-tx-ids trajectory)))
+                   (is (= (mapv :tx-id (subvec history 2)) (:selected-tx-ids trajectory)))
                    (is (= [:committed :aborted :committed] (:selected-commitments trajectory)))
                    (is (= [:matched-retained-projection :not-committed :matched-retained-projection]
                           (:abstract-transitions trajectory)))
@@ -247,7 +253,7 @@
                      (is (not-any? #(contains? bad %) [:recovery-linkage :selected-tx-ids :selected-commitments
                                                       :abstract-transitions :executor-envelopes :input-derivations :outcome-derivations])))
                    (doseq [[i {:keys [original docs journal expectation prefix-count spec context]}] (map-indexed vector steps)]
-                     (let [idx (inc i) source original document-rows docs tx expectation
+                     (let [idx (+ 2 i) source original document-rows docs tx expectation
                            report (evidence/compare-local-processed-retained-mapped-executor! node tables source claim/target-map document-rows journal tx prefix-count spec context source-id
                                                                                               (:publication-derivations catalog) (:residual-assertion-derivations catalog))
                            abort! (fn [tx scope]
@@ -264,7 +270,7 @@
                                      node tables source claim/target-map document-rows journal tx prefix-count spec context source-id
                                      (:publication-derivations catalog) (:residual-assertion-derivations catalog))
                            physical (provider/compare-local-processed-retained-committed-transaction! node tables tx)]
-                       (if (= idx 2)
+                       (if (= idx 3)
                          (do (is (= :mismatch (:status report)) (pr-str report))
                              (is (= :selected-retained-prestate-mismatch (:reason report)))
                              (is (= :checked-exact-prefix (:status (lowering/check-prefix! source claim/target-map document-rows journal (subvec (:ops tx) 1 (inc prefix-count))))))
@@ -347,11 +353,13 @@
                              (is (not (contains? abort :candidate-envelope)))))))))]
     (try
       (let [history (with-open [node (xtn/start-node config)]
-                      (xt/execute-tx node [[:put-docs :requests before] [:put-docs :memberships (member "helper-1") (member "helper-2")]])
-                      (let [release (live-xtdb/register-submission-policy! node (fn [submission]
-                                                                                (when-let [checked (publication/claim-framed-submission! admit node submission)]
-                                                                                  (swap! claims conj {:submission submission :checked checked})
-                                                                                  (swap! admissions inc) true)))
+                      (let [writer (writer-policy/build-policy!
+                                    node {:admission admit :initializer seed
+                                          :observe! (fn [{:keys [kind] :as event}]
+                                                      (swap! policy-events conj kind)
+                                                      (when (= :mapped-operation kind) (swap! admissions inc)))}
+                                    {:source-id source-id :worker-id "recovery" :descriptor descriptor})
+                            release (live-xtdb/register-submission-policy! node writer)
                             execute live-xtdb/execute-tx-from!
                             winning (publication/build-executor (assoc opts :construct! construct))
                             losing (publication/build-executor
@@ -368,6 +376,11 @@
                                                                      {:spec nil :model-plan {:guards [(command/guard :requests after (assoc version :compare-keys [:revision :updated-at :status]))]}
                                                                       :outcome refused :now "t2"})))]
                         (try
+                          (manifest/require-compatible! node source-id descriptor)
+                          (writer-policy/activate-policy! writer)
+                          (let [initial (correspondence/initialization-observation node admit)]
+                            (is (= :matched (:manifest-envelope initial)))
+                            (is (= (:catalog-fingerprint catalog) (:catalog-fingerprint initial))))
                           (let [result (with-redefs [adapter/project-resolution! (fn [_ r _] r)
                                                      live-xtdb/execute-tx-from! (fn [ctx ops & [options]]
                                                                                  (try (let [receipt (execute ctx ops options)]
@@ -379,6 +392,7 @@
                                                (publication/capture-framed-submissions! admit node #(invoke! node losing loser))]
                                            (reset! captured capture)
                                            (reset! observation-handle observation)
+                                           (reset! claims (:claims (publication/read-framed-submission-observation! admit observation)))
                                            (if (= :returned (:outcome capture))
                                              (:result capture)
                                              (throw (:error capture)))))
@@ -386,6 +400,7 @@
                             (is (= :incorporated (:status result)))
                             (is (= refused (:outcome result)))
                             (is (= 3 @admissions))
+                            (is (= [:manifest :initializer :mapped-operation :mapped-operation :mapped-operation] @policy-events))
                             (is (= 1 @recovered))
                             (is (= [nil :xtdb/assert-failed nil] (mapv :error @attempts)))
                             (is (= [after] (xt/q node "SELECT * FROM requests")))
@@ -396,10 +411,10 @@
                             (is (= #{"claim-1"} (set (map :gesso.live.outbox/command-id (xt/q node "SELECT * FROM gesso_live_outbox")))))
                             (.awaitSourceBlocking (db/primary-db node) (live-xtdb/basis-tx-id basis) (Duration/ofSeconds 30))
                             (let [history (:replay-inputs (coverage/observe-local-processed-retained-replay-inputs! node))]
-                              (is (= 4 (count history)))
-                              (is (= (mapv :ops @attempts) (mapv :ops (subvec history 1))))
-                              (doseq [idx [1 3]]
-                                (let [basis (live-xtdb/tx-result-basis (:tx-result (:receipt (nth @attempts (dec idx)))))]
+                              (is (= 5 (count history)))
+                              (is (= (mapv :ops @attempts) (mapv :ops (subvec history 2))))
+                              (doseq [idx [2 4]]
+                                (let [basis (live-xtdb/tx-result-basis (:tx-result (:receipt (nth @attempts (- idx 2)))))]
                                   (is (= (select-keys (nth history idx) [:tx-id :system-time])
                                          {:tx-id (live-xtdb/basis-tx-id basis) :system-time (live-xtdb/basis-system-time basis)}))))
                               (check! node history)
