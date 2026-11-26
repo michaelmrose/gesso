@@ -5,7 +5,7 @@
   (:require [clojure.string :as str])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-current-state-transaction-v16)
+(def profile :selected-current-state-transaction-v17)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -231,7 +231,21 @@
   #"ASSERT \? = \(SELECT COUNT\(\*\) FROM (gesso_[a-z0-9_]+) WHERE (.+)\)")
 
 (def ^:private mapped-column-pattern
-  #"\(([a-z][a-z0-9]*|_id) = \?\)")
+  #"\((_id|[a-z][a-z0-9]*(?:_[a-z0-9]+)*|\"(?:[a-z][a-z0-9]*\$)+[a-z][a-z0-9]*(?:_[a-z0-9]+)*\") = \?\)")
+
+(defn- mapped-column! [column]
+  ;; Canonical SQL spellings only: unquoted local names and quoted
+  ;; namespace-qualified names. Independently invert the physical name,
+  ;; rejecting reserved identities, alternate spellings and aliases.
+  (if (= "_id" column)
+    :xt/id
+    (let [parts (str/split (str/replace column "\"" "") #"\$" -1)
+          local (str/replace (last parts) "_" "-")
+          k (if (= 1 (count parts)) (keyword local)
+                (keyword (str/join "." (butlast parts)) local))]
+      (when-not (and (value-key? k) (or (= 1 (count parts)) (not= "xt" (first parts))))
+        (reject! :unsupported-reference-mapped-column))
+      k)))
 
 (defn- mapped-assertion! [op [_ table predicate]]
   (let [clauses (str/split predicate #" AND " -1)
@@ -251,7 +265,7 @@
                                                   (equality-domain c))
                                    (= a b c))
                       (reject! :unsupported-reference-mapped-assertion))
-                    [(if (= "_id" col) :xt/id (keyword col)) a]))
+                    [(mapped-column! col) a]))
                 (partition 3 clauses) (partition 3 (subvec args 1)))
           [id-field id] (first checks)]
       (when-not (and (= :xt/id id-field) (id? id)

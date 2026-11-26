@@ -543,3 +543,38 @@
                          [(pop (mapped-guard [[:value :open]])) nil]
                          [[:unknown] nil]]]
     (is (= expected (reference/operation-tables op)) (pr-str op))))
+
+(deftest mapped-canonical-qualified-column-identities
+  (let [doc {:xt/id "a" :updated-at "t0" :request/location-id "l1"
+             :request.detail/last-kind :example/open :location-id "unqualified"}
+        state {mapped-table {"a" doc}}
+        checks (mapv #(vector % (get doc %)) [:updated-at :request/location-id :request.detail/last-kind :location-id])
+        guard (mapped-guard checks)
+        check! (fn [ops] (reference/execute state ops))]
+    (is (str/includes? (first guard) "(updated_at = ?)"))
+    (is (str/includes? (first guard) "(\"request$location_id\" = ?)"))
+    (is (str/includes? (first guard) "(\"request$detail$last_kind\" = ?)"))
+    (is (= #{mapped-table} (reference/operation-tables guard)))
+    (is (true? (:committed? (check! [guard]))))
+    (doseq [changed [(assoc doc :updated-at "t1")
+                     (assoc doc :request/location-id "unqualified")
+                     (assoc doc :location-id "l1")
+                     (assoc doc :request.detail/last-kind :example/closed)
+                     (dissoc doc :request/location-id)]]
+      (let [r (check! [[:put-docs mapped-table changed] put-other guard])]
+        (is (= :predicted (:status r)))
+        (is (false? (:committed? r)))
+        (is (= 2 (:failed-assertion-index r)))
+        (is (= state (:state r)))))
+    (doseq [bad [(update guard 0 str/replace "updated_at" "updated__at")
+                 (update guard 0 str/replace "\"request$location_id\"" "request$location_id")
+                 (update guard 0 str/replace "\"request$location_id\"" "\"request$$location_id\"")
+                 (update guard 0 str/replace "\"request$location_id\"" "\"xt$location_id\"")
+                 (update guard 0 str/replace "\"request$location_id\"" "\"xt$detail$location_id\"")
+                 (update guard 0 str/replace "\"request$location_id\"" "location_id")
+                 (update guard 0 str/replace-first "STR(\"request$location_id\")" "STR(location_id)")
+                 (update guard 0 str/replace "\"request$location_id\"" "\"request$1\"")]]
+      (is (nil? (reference/operation-tables bad)) (pr-str bad))
+      (let [r (check! [["ASSERT FALSE"] bad])]
+        (is (= :unsupported (:status r)))
+        (is (not (contains? r :committed?)))))))

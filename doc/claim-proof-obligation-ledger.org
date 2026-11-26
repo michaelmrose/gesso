@@ -5465,3 +5465,32 @@ column grammar, other admitted guard orderings, input/declaration
 provenance, selected commitment and universal refinement remain open.
 No certificate or CLM-R2 premise retirement. Full project and independent
 formal gates not rerun.
+
+* v2749 — qualify mapped canonical document column identities
+
+Independently invert the selected production mapped triple assertion's
+unquoted canonical underscore-separated local names and quoted
+dollar-separated qualified names, including dotted namespaces, to
+canonical decoded Clojure keys. Preserve the special _id identity,
+exact same-column triple syntax, duplicate decoded field rejection and
+existing scalar domain semantics. Reject malformed segments, reserved
+xt namespace prefixes and noncanonical alternative spellings. Advance
+current-state, strict bitemporal, retained input, processed acquisition
+and direct retained execution profiles; no clocked/equal-time expansion.
+
+JVM: 28 tests / 2781 assertions, zero failures or errors across mapped
+envelope, reference transaction and retained replay input tests.
+Restore updated-at, request/location-id, request.detail/last-kind and
+an unqualified location-id to the persistent production-shaped envelope
+fixture, including a qualified residual subject check. The expanded
+fixture passes 67 assertions and persistent reopening. New current-state
+controls distinguish changed or missing qualified fields from similarly
+named unqualified fields, preserve rollback and failure indices, and
+reject reserved/malformed identifiers, duplicate decoded columns and
+mismatched comparison triples. Independent decoder grammar remains
+bounded to canonical lowercase segments, not general SQL identifiers
+or every possible Clojure keyword. Fixture uses manually assembled
+transactions and production encoders; installed executor correspondence,
+input provenance, selected commitment and universal refinement remain
+open. No production admission expansion, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates not rerun.

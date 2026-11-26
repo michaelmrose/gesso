@@ -31,7 +31,7 @@
                                                [:= [:read :example/outcome] [:literal nil]]]})
                    (update :reads into fields))
         targets @#'fixture/targets
-        row {:xt/id "r1" :amount 2 :enabled true :revision 0 :extra "preserve" :status :open}
+        row {:xt/id "r1" :amount 2 :enabled true :revision 0 :extra "preserve" :status :open :updated-at "t0" :request/location-id "l1" :request.detail/last-kind :example/open :location-id "other"}
         docs {:gesso_requests [row] :gesso_assignments []}
         binding {:command-id (identity/command-id "c1") :principal (identity/principal "helper-a")
                  :operation :example/claim :arguments {:request-id "r1"}}
@@ -43,8 +43,8 @@
         declarations {:example/claim {:purpose :example/refresh
                                        :contributions [{:target [:document :gesso_requests "r1"] :topic :example/revision :field :revision}
                                                        {:target [:document :gesso_assignments "a1"] :topic :example/revision :field :revision}]}}
-        residual-declaration {:document-layout {[:gesso_requests "r1"] [[:prestate :revision] [:state :example/count] [:prestate :status]]}
-                              :subject-checks [[:gesso_requests "r1" :status]]}
+        residual-declaration {:document-layout {[:gesso_requests "r1"] [[:prestate :revision] [:state :example/count] [:prestate :status] [:prestate :updated-at]]}
+                              :subject-checks [[:gesso_requests "r1" :request/location-id]]}
         residual-declarations {:example/claim residual-declaration}
         mapping (plan/check-target-mapping! source targets)
         prefix (frame/formatted-prestate-assertions! mapping docs [])
