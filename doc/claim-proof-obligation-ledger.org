@@ -5436,3 +5436,32 @@ selected regression run passed. Complete residual envelope composition,
 installed declaration/input provenance and selected commitment remain
 unqualified. No production admission expansion, certificate or CLM-R2
 premise retirement. Full project and independent formal gates not rerun.
+
+* v2748 — compose retained residual and publication envelope
+
+Add a separate selected mapped-retained evidence v3 diagnostic requiring
+the exact source-derived residual fragment after the mapped prefix and
+before canonical publication guards. Residual command-ID absence is part
+of that fragment, not an additional duplicate assertion. Explicit nil
+declares an empty residual fragment and reports the command guard as not
+declared; the historical global identity absence check still applies.
+Check complete mapped and auxiliary puts and the bound final witness;
+bind all identity and prepared-row comparisons to the same retained
+predecessor. Preserve earlier diagnostic arities and profiles. Select
+one concrete ordering, stricter than production's guard multiset check.
+
+JVM: 5 tests / 266 assertions, zero failures or errors across the new
+persistent envelope fixture and mapped evidence/publication regressions.
+Check source-derived residual guards, changed, missing, duplicated and
+reordered residuals after rebinding, outbox collision, fresh submission,
+explicit empty declarations, missing declarations, incomplete scope and
+reopening. Initial runs failed because the full mapped triple interpreter
+does not yet cover hyphenated/qualified document fields and the residual
+allowlist does not include the fixture's extra field. Restrict the final
+fixture to the intersection of qualified column grammars; no interpreter
+admission expansion. The fixture uses production encoders with manually
+assembled operations, not the installed executor. Complete production
+column grammar, other admitted guard orderings, input/declaration
+provenance, selected commitment and universal refinement remain open.
+No certificate or CLM-R2 premise retirement. Full project and independent
+formal gates not rerun.

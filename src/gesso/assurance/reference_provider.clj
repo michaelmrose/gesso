@@ -590,22 +590,32 @@
   "Check the leading evidence guard, mapped prefix and consecutive exact
    publication identity guards, and bind their absence to the same retained
    predecessor as command/evidence identities. An explicit empty ID vector
-   still requires the outbox observation scope. No publication body check."
-  [node tables original target-map docs journal expectation prefix-count command-id publication-ids]
+   still requires the outbox observation scope. Optional residual-ops is
+   the exact preceding fragment supplied by a separate derivation checker;
+   this function checks placement, not residual source correspondence.
+   No publication body check."
+  ([node tables original target-map docs journal expectation prefix-count command-id publication-ids]
+   (compare-local-processed-retained-mapped-publication-absence!
+    node tables original target-map docs journal expectation prefix-count command-id publication-ids []))
+  ([node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops]
   (let [ops (:ops expectation)]
     (if (and (set? tables) (every? tables [:gesso_commands :gesso_transition_evidence :gesso_live_outbox])
              (string? command-id) (not (str/blank? command-id)) (<= (count command-id) 1024)
              (vector? publication-ids) (nil? (meta publication-ids)) (<= (count publication-ids) 128)
              (every? uuid? publication-ids) (= (count publication-ids) (count (set publication-ids)))
              (vector? ops) (integer? prefix-count) (<= 1 prefix-count 256)
-             (<= (+ 1 prefix-count (count publication-ids)) (count ops))
+             (vector? residual-ops) (nil? (meta residual-ops)) (<= (count residual-ops) 256)
+             (every? #(and (vector? %) (string? (first %))) residual-ops)
+             (<= (+ 1 prefix-count (count residual-ops) (count publication-ids)) (count ops))
              (= ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" command-id]
                 (first ops))
+             (= residual-ops (subvec ops (inc prefix-count) (+ 1 prefix-count (count residual-ops))))
              (= (mapv #(vector "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = ?)" %) publication-ids)
-                (subvec ops (inc prefix-count) (+ 1 prefix-count (count publication-ids)))))
+                (subvec ops (+ 1 prefix-count (count residual-ops))
+                        (+ 1 prefix-count (count residual-ops) (count publication-ids)))))
       (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true command-id true publication-ids)
       (assoc (acquisition-result :unsupported :invalid-retained-publication-id-guards)
-             :mapped-retained-publication-absence-profile :selected-mapped-retained-publication-absence-v1))))
+             :mapped-retained-publication-absence-profile :selected-mapped-retained-publication-absence-v1)))))
 
 (def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v3)
 

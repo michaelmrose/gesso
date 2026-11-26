@@ -5,6 +5,7 @@
             [gesso.assurance.proof.typed-value-semantics :as values]
             [gesso.assurance.reference-mapped-writes :as writes]
             [gesso.assurance.reference-mapped-publication :as publication]
+            [gesso.assurance.reference-mapped-residual :as residual]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.subject :as subject]
@@ -204,5 +205,78 @@
                    :transition-evidence :matched-source-relative-record
                    :transition-envelope-binding :matched
                    :publication-fragment :matched-source-relative-publication)
+          r))
+      (fail (:status checked) (:reason checked)))))
+
+(def residual-retained-profile :selected-mapped-retained-evidence-v3)
+
+(defn compare-local-processed-retained-mapped-residual!
+  "Check the selected production-shaped envelope with residual assertions
+   before publication guards. Derive the complete residual fragment, including
+   its own command-ID guard (when declared), rather than adding another guard.
+   Explicit nil declares an empty residual fragment, not missing provenance.
+   Exact selected order is stricter than production's guard multiset check.
+   All historical absence checks and replay still use the same retained sample.
+   No installed admission provenance or selected commitment is established."
+  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
+  (let [tag #(assoc % :mapped-retained-evidence-profile residual-retained-profile)
+        fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
+                    :provider-refinement :not-established})
+        checked (try
+                  (let [{:keys [intents guard-ops put-ops]}
+                        (publication/derive-publication! original targets docs journal spec source-id declarations)
+                        residual-ops (residual/derive-assertions! original targets docs journal (:binding spec) residual-declarations)
+                        ops (:ops expectation) id (resolution/record-id (:binding spec))
+                        residual-end (+ 1 (if (integer? prefix-count) prefix-count 0) (count residual-ops))
+                        guard-end (+ residual-end (count guard-ops))
+                        put-end (- (count ops) 1 (count put-ops))]
+                    (if-not (and (vector? ops) (integer? prefix-count) (<= 1 prefix-count 256)
+                                 (<= (count residual-ops) 256) (< guard-end put-end)
+                                 (= ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" id]
+                                    (first ops))
+                                 (vector? (peek ops)) (= 3 (count (peek ops)))
+                                 (= [:put-docs :gesso_transition_evidence] (subvec (peek ops) 0 2))
+                                 (map? (peek (peek ops))))
+                      {:status :unsupported :reason :invalid-mapped-residual-envelope}
+                      (let [prefix (subvec ops 1 (inc prefix-count))
+                            witness (peek (peek ops))
+                            expected (derive-record! original targets docs journal prefix spec context)
+                            mapped (writes/derive-puts! original targets docs journal spec)
+                            fragment {:guard-ops (subvec ops residual-end guard-end)
+                                      :put-ops (subvec ops put-end (dec (count ops)))}]
+                        (cond
+                          (some #(#{:gesso_live_outbox :gesso_transition_evidence} (second %)) mapped)
+                          {:status :unsupported :reason :reserved-mapped-publication-table}
+                          (not= :matched (:status (residual/check-assertions!
+                                                  original targets docs journal (:binding spec) residual-declarations
+                                                  (subvec ops (inc prefix-count) residual-end))))
+                          {:status :mismatch :reason :residual-assertion-fragment-mismatch}
+                          (not= :matched (:status (publication/check-publication!
+                                                  original targets docs journal spec source-id declarations fragment)))
+                          {:status :mismatch :reason :publication-fragment-mismatch}
+                          (not= expected (apply dissoc witness envelope/binding-keys))
+                          {:status :mismatch :reason :transition-evidence-record-mismatch}
+                          (not= (writes/put-row-frequencies! mapped)
+                                (writes/put-row-frequencies! (subvec ops guard-end put-end)))
+                          {:status :mismatch :reason :selected-retained-write-suffix-mismatch}
+                          (not (envelope/bound-transition-envelope? ops))
+                          {:status :mismatch :reason :transition-evidence-envelope-binding-mismatch}
+                          :else {:status :matched :id id :publication-ids (mapv :xt/id intents)
+                                 :residual-ops residual-ops}))))
+                  (catch clojure.lang.ExceptionInfo _
+                    {:status :unsupported :reason :invalid-mapped-residual-source-or-envelope}))]
+    (if (= :matched (:status checked))
+      (let [r (tag (provider/compare-local-processed-retained-mapped-publication-absence!
+                    node tables original targets docs journal expectation prefix-count (:id checked)
+                    (:publication-ids checked) (:residual-ops checked)))]
+        (if (= :matched (:status r))
+          (assoc r :mapped-write-suffix :matched-source-derived-puts
+                   :evidence-id-absence-guard :matched
+                   :command-id-absence-guard (if (some #{["ASSERT ? = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" 0 (:id checked)]}
+                                                       (:residual-ops checked)) :matched :not-declared)
+                   :transition-evidence :matched-source-relative-record
+                   :transition-envelope-binding :matched
+                   :publication-fragment :matched-source-relative-publication
+                   :residual-fragment :matched-source-relative-residual)
           r))
       (fail (:status checked) (:reason checked)))))
