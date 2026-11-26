@@ -6059,3 +6059,40 @@ CLM-R2 premise retirement. Full project gates were not rerun.
 Next: bind the closed finite decoder construction and its source-relative
 case declaration to the actual issued admission and retained trajectory,
 rather than relying only on callback identity and sampled observations.
+
+* v2772 — bind closed decoder construction to issued admission
+
+Add a local closed-decoder constructor that captures the original mapped
+catalog, target map, complete concrete outcome declarations and derived
+finite case table. Register the exact callable with a weak-key registry
+and an explicit weak identity reference, rather than trusting a supplied
+description or sampled behavior. The closed decoder validates the command
+record and performs an exact case lookup. An issued-construction comparison
+checks callable identity, original construction inputs and rederived cases,
+then rechecks the actual issued mapped admission with its original source
+and live induction handles. Return the matched catalog and induction
+fingerprints only within that bounded local comparison.
+
+The Claim fixture uses the new registered constructor, preserving one
+decoder callable across snapshot projection and admission assembly. The
+actual issued comparison matches its four declared cases. The regression
+also checks the existing sample observations and rejects an unregistered
+wrapper, changed catalog or target map, changed concrete declarations,
+a separately constructed decoder not captured by the admission, and an
+unregistered admission. The synthetic negative tests stub issuance
+rechecking; the actual Claim positive check uses genuine issuance.
+
+Focused JVM run: 5 tests / 378 assertions, zero failures or errors,
+including the unchanged persistent Claim recovery regression before and
+after reopening XTDB. This is a construction-to-local-issuance binding,
+conditional on trusted constructor and checker execution. It does not
+authenticate the concrete declarations, principal, clock, retained
+candidate origin or actual executor use of the decoder. It is not an
+independent translation theorem, universal decoder correspondence,
+certificate or physical refinement. No production admission expansion
+or CLM-R2 premise retirement. Full project gates were not rerun.
+
+Next: compose the exact issued closed-decoder construction binding with
+the retained recovery trajectory, matching the supplied step contexts
+against the actual issued admission's catalog and induction fingerprints
+and its declared effects and derivations.

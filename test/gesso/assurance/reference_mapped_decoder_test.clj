@@ -76,8 +76,15 @@
                 (record "foreign-request" "helper-1" :request/claim {:request-id "r2"} refused)
                 (record "foreign-outcome" "helper-1" :request/claim {:request-id "r1"} {:outcome :other})
                 (record "wrong-helper" "helper-1" :request/claim {:request-id "r1"} (accepted "helper-2"))]
-        result (decoder/compare-issued! admission source declarations probes)]
+        result (decoder/compare-issued! admission source declarations probes)
+        closed (decoder/compare-issued-closed! admission source declarations)]
     (is (= declarations (claim/outcome-declarations)))
+    (is (= :matched (:status closed)) (pr-str closed))
+    (is (= :matched-issued-closed-construction (:closed-decoder-binding closed)))
+    (is (= 4 (:declared-case-count closed)))
+    (is (= (:catalog-fingerprint result) (:catalog-fingerprint closed)))
+    (is (= (:induction-fingerprint result) (:induction-fingerprint closed)))
+    (is (= :not-established (:outcome-provenance closed)))
     (is (= :matched (:status result)) (pr-str result))
     (is (= :matched-finite-samples (:decoder-observation result)))
     (is (= 4 (:declared-case-count result)))
@@ -90,3 +97,42 @@
                                                    :xt/id "wrong-record-id"))))
     (is (= :not-established (:universal-decoder-correspondence result)))
     (is (= :not-established (:outcome-provenance result)))))
+
+(deftest closed-construction-binding-is-not-sampling
+  (let [decode! (decoder/build-closed! fixture/source fixture/declarations)
+        source (assoc fixture/source :decode-outcome! decode!)
+        admission (fn [& _] nil)
+        calls (atom 0)
+        other (decoder/build-closed! source fixture/declarations)
+        record (nth (first (:ops (fixture/candidate fixture/spec))) 2)]
+    (is (= :claimed (decode! record)))
+    (is (thrown? clojure.lang.ExceptionInfo (decode! outside)))
+    (with-redefs [induction/require-current-mapped-admission!
+                  (fn [a s]
+                    (swap! calls inc)
+                    (if (and (identical? admission a) (identical? decode! (:decode-outcome! s)))
+                      {:catalog-fingerprint "test-catalog" :induction-fingerprint "test-induction"}
+                      (throw (ex-info "Changed registration" {:reason :changed-mapped-admission-registration}))))]
+      (let [r (decoder/compare-issued-closed! admission source fixture/declarations)]
+        (is (= :matched (:status r)) (pr-str r))
+        (is (= decoder/closed-profile (:profile r)))
+        (is (= :matched-issued-closed-construction (:closed-decoder-binding r)))
+        (is (= "test-catalog" (:catalog-fingerprint r)))
+        (is (= 2 (:declared-case-count r)))
+        (is (= :not-established (:outcome-provenance r)))
+        (is (= :not-established (:universal-decoder-correspondence r)))
+        (is (= :none (:authority r)))
+        (is (= :not-issued (:certificate r))))
+      (doseq [[s d reason] [[(assoc source :decode-outcome! (fn [r] (decode! r))) fixture/declarations :unregistered-closed-decoder]
+                             [(assoc source :target-map {}) fixture/declarations :changed-closed-decoder-construction]
+                             [(assoc-in source [:inductive-source :catalog :id] :other/catalog) fixture/declarations :changed-closed-decoder-construction]
+                             [source (assoc-in fixture/declarations [:example/claim :arguments] {:request-id "r2"}) :changed-closed-decoder-construction]]]
+        (let [r (decoder/compare-issued-closed! admission s d)]
+          (is (= reason (:reason r)) (pr-str r))
+          (is (not (contains? r :closed-decoder-binding)))))
+      (is (= 1 @calls))
+      (is (= :changed-mapped-admission-registration
+             (:reason (decoder/compare-issued-closed! admission (assoc source :decode-outcome! other) fixture/declarations))))
+      (is (= :changed-mapped-admission-registration
+             (:reason (decoder/compare-issued-closed! nil source fixture/declarations))))
+      (is (= 3 @calls)))))

@@ -6,8 +6,7 @@
             [gesso.model.tx :as model-tx]
             [gesso.model.mapped-guard :as guard]
             [gesso.model.certified-plan :as plan]
-            [gesso.model.command-resolution :as resolution]
-            [gesso.assurance.reference-mapped-outcome :as outcome]
+            [gesso.assurance.reference-mapped-decoder :as decoder]
             [gesso.model.mapped-projection :as projection]
             [gesso.model.inductive-plan :as inductive-plan]
             [gesso.assurance.transition :as construction]
@@ -95,22 +94,7 @@
                           {:outcome :request/claimed :helper helper}
                           {:outcome :request/not-claimable :reason :already-claimed})}])))
 
-;; The fixture has one fixed catalog. Keep the decoder identity stable across
-;; independently constructed mapped sources and use the same closed cases for
-;; snapshot projection, preparation and installed admission.
-(def ^:private claim-outcome-cases
-  (delay (:cases (outcome/derive-cases! {:inductive-source {:catalog (catalog)}
-                                       :target-map target-map}
-                                      (outcome-declarations)))))
-
-(defn- decode-claim-outcome! [record]
-  (let [row (resolution/require-record record)
-        {:keys [principal operation arguments]} (:gesso.command/binding row)
-        k [(identity/raw-value principal) operation arguments (:gesso.command/outcome row)]
-        cases @claim-outcome-cases]
-    (if (contains? cases k)
-      (get cases k)
-      (throw (ex-info "Outside closed Claim outcome cases" {:reason :undeclared-claim-outcome})))))
+(declare ^:private decode-claim-outcome!)
 
 (defn snapshot!
   "Acquire the closed fixture rows using the supplied query function; delegate
@@ -332,6 +316,12 @@
      :invariants {:claim/ownership-and-journal ownership :claim/nonnegative-revision revision}
      :operations operations}))
 
+
+;; The fixture has one fixed catalog and one registered decoder callable.
+;; Preserve its identity across snapshot projection and admission assembly.
+(def ^:private decode-claim-outcome!
+  (decoder/build-closed! {:inductive-source {:catalog (catalog)} :target-map target-map}
+                         (outcome-declarations)))
 
 (defn check-prepared-candidate!
   "Check mapped puts against the preparation captured before submission.
