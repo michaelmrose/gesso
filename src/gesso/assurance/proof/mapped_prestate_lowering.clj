@@ -84,12 +84,20 @@
     (case kind
       :absent [(count-guard 0)]
       :exact-row
-      (let [constraints (vec (journal-constraints row))]
-        [(count-guard 1)
-         (tx/format-assertion (tx/assert-document-field-count :gesso_commands (:xt/id row) (count row)))
-         (into [(str "ASSERT 1 = (SELECT COUNT(*)" slot-selector " AND "
-                     (str/join " AND " (map first constraints)) ")") principal operation]
-               (map second constraints))])
+      (let [constraints (vec (journal-constraints row))
+            n (count constraints)
+            ;; Derive boundaries independently from the ordered constraints.
+            ranges (if (> n 96)
+                     (map (fn [start] [start (min n (+ start 12))]) (range 0 n 12))
+                     [[0 n]])]
+        (into [(count-guard 1)
+               (tx/format-assertion (tx/assert-document-field-count :gesso_commands (:xt/id row) (count row)))]
+              (map (fn [[start end]]
+                     (let [group (subvec constraints start end)]
+                       (into [(str "ASSERT 1 = (SELECT COUNT(*)" slot-selector " AND "
+                                   (str/join " AND " (map first group)) ")") principal operation]
+                             (map second group)))))
+              ranges))
       (reject! :unsupported-predicate))))
 
 (defn check-prefix!
@@ -107,7 +115,7 @@
         expected (into [] (mapcat :assertions) groups)]
     (when-not (and (vector? prefix) (every? vector? prefix) (= expected prefix))
       (reject! :noncanonical-lowering-prefix))
-    {:type ::mapped-prestate-lowering :version 4
+    {:type ::mapped-prestate-lowering :version 5
      :mapping-fingerprint (:mapping-fingerprint description)
      :scope :source-relative-syntactic-prefix :status :checked-exact-prefix
      :groups groups :assertion-count (count expected)

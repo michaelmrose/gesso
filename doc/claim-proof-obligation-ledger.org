@@ -5016,3 +5016,27 @@ replay grammar remain unchanged; the experiment does not establish a safe
 universal compilation bound or performance characteristics. No production
 admission, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates not rerun.
+
+* v2731 — lower wide journal predicates canonically
+
+Lower occupied journal conjunctions with more than 96 predicate/operand
+pairs into consecutive groups of at most twelve, after the existing
+unique-slot and document field-count guards. Preserve predicate order,
+values, slot selection and transaction scope. Retain the existing narrow
+form. Independently derive identical group boundaries from the original
+construction and exact prepared rows; reject noncanonical prefixes.
+Advance mapped-frame guard profile and independent lowering to v5. Old
+profile evidence is not interchangeable with the new profile.
+
+Focused JVM: 1 test / 56 assertions, zero failures or errors, including
+the production-generated 32-element vector, exact independent lowering,
+missing/reordered/altered chunks, narrow form and the previous provider
+negative controls. Regression JVM: 35 tests / 3151 assertions, zero
+failures or errors in mapped projection and reference transaction tests.
+The 96-predicate cutoff and twelve-predicate group size are provisional
+engineering choices, not a proven universal compilation or resource bound.
+Partitioned retained SQL is not yet independently replay-qualified;
+that extension must preserve individual assertion failure indices and
+reject unsupported forms. No broadened certification, production admission
+scope or CLM-R2 premise retirement. Full project and independent formal
+gates not rerun.

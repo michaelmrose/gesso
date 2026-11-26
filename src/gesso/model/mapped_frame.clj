@@ -187,12 +187,18 @@
 
 (defn- occupied-slot-assertions! [where principal operation row]
   (canonical-decoded-keys! (keys row))
-  (let [checks (mapcat (fn [[k v]] (journal-field-tests! (journal-field-sql! nil k) v))
-                       (sort-by (comp str key) row))]
-    [(tx/format-assertion (tx/assert-document-field-count :gesso_commands (:xt/id row) (count row)))
-     (into [(str "ASSERT 1 = (SELECT COUNT(*)" where " AND "
-                 (str/join " AND " (map first checks)) ")") principal operation]
-           (map second checks))]))
+  (let [checks (vec (mapcat (fn [[k v]] (journal-field-tests! (journal-field-sql! nil k) v))
+                            (sort-by (comp str key) row)))
+        ;; Preserve the previously qualified narrow SQL form. Wide guards
+        ;; use the experimentally exercised twelve-predicate chunks. This
+        ;; cutoff is a policy, not a universal JVM compilation bound.
+        groups (if (> (count checks) 96) (partition-all 12 checks) [checks])]
+    (into [(tx/format-assertion (tx/assert-document-field-count :gesso_commands (:xt/id row) (count row)))]
+          (map (fn [group]
+                 (into [(str "ASSERT 1 = (SELECT COUNT(*)" where " AND "
+                             (str/join " AND " (map first group)) ")") principal operation]
+                       (map second group))))
+          groups)))
 
 (defn formatted-prestate-assertions!
   "Extend the mapped document prefix with every mapped journal slot. An
@@ -203,7 +209,9 @@
    values to a supported non-null fragment. Structs use visible field counts,
    leaf equality and, for empty structs, a provider-specific shape check.
    This avoids whole-struct schema equality. This
-   does not establish independent codec or provider refinement."
+   does not establish independent codec or provider refinement. Wide guards
+   are consecutive assertions under the same unique-slot check; they must
+   execute at one transaction read basis without intervening writes."
   [mapping document-rows journal-rows]
   (let [slots (sort-by pr-str (filter #(= :journal-slot (first %))
                                       (vals (:target-map mapping))))
@@ -237,7 +245,7 @@
       (reject! :missing-frame-prestate-assertion))
     true))
 
-(def guard-profile :gesso.model.mapped-frame/xtdb-2.2.0-beta1-v4)
+(def guard-profile :gesso.model.mapped-frame/xtdb-2.2.0-beta1-v5)
 
 (defn- prefix-value! [v]
   ;; Tag all values, including vectors, so UUID conversion cannot alias

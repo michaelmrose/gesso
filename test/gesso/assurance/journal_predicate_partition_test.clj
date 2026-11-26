@@ -1,11 +1,12 @@
 (ns gesso.assurance.journal-predicate-partition-test
-  "Provider feasibility only; do not use this experimental partitioner for
-   production admission or independent retained replay."
+  "Production wide-guard lowering and pinned-provider regression."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [gesso.choreo.identity :as identity]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.mapped-frame :as frame]
+            [gesso.model.certified-plan :as plan]
+            [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [xtdb.api :as xt]
             [xtdb.node :as xtn]))
 
@@ -19,17 +20,13 @@
       (assert (= (count clauses) (count args)))
       (mapv vector clauses args))))
 
-(defn- partition-prefix [prefix]
-  ;; Test-only transformation of the existing exact generated conjunction.
-  ;; Preserve slot uniqueness and field count, every predicate and operand,
-  ;; and execute all chunks in the same transaction without intervening writes.
-  (let [[_ principal operation :as guard] (peek prefix)]
-    (into (pop prefix)
-          (map (fn [pairs]
-                 (into [(str selector " AND " (str/join " AND " (map first pairs)) ")")
-                        principal operation]
-                       (map second pairs))))
-          (partition-all 12 (predicate-pairs guard)))))
+(def ^:private source
+  {:subject {:kind :operation :id :example/journal :interface {:operation :example/journal}}
+   :state-types {:example/outcome {:type :keyword :nullable? true}}
+   :input-types {} :guard {:readers #{} :expression [:literal true]}
+   :reads #{} :writes #{} :replacements {} :frame #{:example/outcome}})
+
+(def ^:private targets {:example/outcome [:journal-slot "helper-a" :request/claim]})
 
 (defn- attempt! [node ops]
   (try (xt/execute-tx node ops) :committed
@@ -43,10 +40,11 @@
                  :operation :request/claim :arguments {:request-id "r"}}
         items (into [1 :claim/open "open"] (range 3 32))
         row (resolution/command-record binding {:status :claimed :details {:empty {} :items items}} "t1")
-        mapping {:target-map {:outcome [:journal-slot "helper-a" :request/claim]}}
-        original (frame/formatted-prestate-assertions! mapping {} [row])
-        prefix (partition-prefix original)
-        chunks (subvec prefix (dec (count original)))
+        mapping (plan/check-target-mapping! source targets)
+        prefix (frame/formatted-prestate-assertions! mapping {} [row])
+        chunks (subvec prefix 2)
+        constraints (vec (#'lowering/journal-constraints row))
+        check #(lowering/check-prefix! source targets {} [row] %)
         item-path [:gesso.command/outcome :details :items]
         mutations [(assoc-in row (conj item-path 0) 1.0)
                    (assoc-in row (conj item-path 0) 1M)
@@ -64,11 +62,22 @@
         duplicate (resolution/command-record (assoc binding :command-id (identity/command-id "c2"))
                                              (:gesso.command/outcome row) "t1")]
     (is (= 32 (count items)))
-    (is (> (count (predicate-pairs (peek original))) 100))
-    (is (= (pop original) (subvec prefix 0 (dec (count original)))))
-    (is (= (predicate-pairs (peek original)) (vec (mapcat predicate-pairs chunks))))
+    (is (> (count constraints) 100))
+    (is (= [(str selector ")") "helper-a" :request/claim] (first prefix)))
+    (is (= constraints (vec (mapcat predicate-pairs chunks))))
+    (is (= :checked-exact-prefix (:status (check prefix))))
+    (is (= 5 (:version (check prefix))))
+    (is (= :not-established (:sql-refinement (check prefix))))
+    (doseq [bad [(pop prefix) (assoc prefix 2 (peek prefix))
+                 (into (subvec prefix 0 2) (reverse chunks))
+                 (assoc-in prefix [2 3] "wrong-value")]]
+      (is (thrown? clojure.lang.ExceptionInfo (check bad))))
+    (let [narrow (assoc-in row item-path [1 :claim/open])
+          p (frame/formatted-prestate-assertions! mapping {} [narrow])]
+      (is (= 3 (count p)))
+      (is (= :checked-exact-prefix (:status (lowering/check-prefix! source targets {} [narrow] p)))))
     (is (every? #(<= (count (predicate-pairs %)) 12) chunks))
-    (is (every? #(= (subvec (peek original) 1 3) (subvec % 1 3)) chunks))
+    (is (every? #(= (subvec (first prefix) 1 3) (subvec % 1 3)) chunks))
     (with-open [node (xtn/start-node {})]
       (let [written #(xt/q node "SELECT * FROM guard_probe")
             journal #(xt/q node "SELECT * FROM gesso_commands")

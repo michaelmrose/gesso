@@ -1048,7 +1048,7 @@
                             :assert-failed (throw e)))))]
     (is (= :checked-exact-prefix
            (:status (lowering/check-prefix! source targets rows journal prefix))))
-    (is (= 4 (:version (lowering/check-prefix! source targets rows journal prefix))))
+    (is (= 5 (:version (lowering/check-prefix! source targets rows journal prefix))))
     (with-open [node (xtn/start-node {})]
       (xt/execute-tx node [[:put-docs :requests (first (:requests rows))]
                            [:put-docs :gesso_commands empty-args nested-empty]])
@@ -1143,7 +1143,7 @@
                           (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data e)))
                             :assert-failed (throw e)))))]
     (is (= :checked-exact-prefix (:status (lowering/check-prefix! source targets rows journal prefix))))
-    (is (= 4 (:version (lowering/check-prefix! source targets rows journal prefix))))
+    (is (= 5 (:version (lowering/check-prefix! source targets rows journal prefix))))
     ;; Reject lone aliases even when the selected row has no colliding key.
     (doseq [alias [:some/ns_key :some$ns-key :some.ns-key :some/NS-KEY]]
       (let [changed [(update-in occupied nested #(-> % (dissoc :some/ns-key) (assoc alias 2)))]]
