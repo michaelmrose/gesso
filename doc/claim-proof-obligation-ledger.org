@@ -6025,3 +6025,37 @@ Next: replace the fixture's opaque outcome interpretation with a closed
 source-derived case lookup, validate record identity and reject keys
 outside the declared domain, then qualify the replacement against the
 issued admission and the existing persistent recovery trajectory.
+
+* v2771 — close the Claim fixture outcome decoder domain
+
+Replace the fixture's opaque conditional outcome interpretation with a
+closed exact lookup keyed by principal, operation, arguments and concrete
+outcome. Derive the case table from the fixed original catalog, checked
+target mapping and complete fixture concrete declarations using the
+existing finite derivation. Validate the command record structure and
+identity before lookup; reject keys outside the finite table. Keep the
+callback identity stable for snapshot projection, candidate preparation
+and admission reconstruction. Require the fixture's bound catalog to
+equal the original fixture catalog when constructing its mapped source.
+
+The actual issued decoder comparison now matches all eight declared
+samples and throws on all five out-of-domain probes, including the two
+previously accepted probes (foreign operation and principal), incorrect
+request/outcome and mismatched claimed helper. A malformed record identity
+is rejected separately. The test independently enumerates the expected
+concrete cases; the fixture lookup shares the finite case derivation
+rather than providing an independently proved translation.
+
+Focused JVM run of the decoder and genuine persistent Claim recovery
+namespaces: 4 tests / 349 assertions, zero failures or errors. The
+complete existing persistent recovery diagnostic continues to match
+before and after reopening XTDB. Only the test fixture and its decoder
+regression have changed; no production API or admission profile expansion.
+Finite samples, structural record validation and exact lookup do not
+authenticate record origin, clock or principal, and do not establish a
+general decoder theorem or installed-host refinement. No certificate or
+CLM-R2 premise retirement. Full project gates were not rerun.
+
+Next: bind the closed finite decoder construction and its source-relative
+case declaration to the actual issued admission and retained trajectory,
+rather than relying only on callback identity and sampled observations.

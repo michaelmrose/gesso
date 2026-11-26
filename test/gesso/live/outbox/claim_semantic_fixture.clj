@@ -6,6 +6,8 @@
             [gesso.model.tx :as model-tx]
             [gesso.model.mapped-guard :as guard]
             [gesso.model.certified-plan :as plan]
+            [gesso.model.command-resolution :as resolution]
+            [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.model.mapped-projection :as projection]
             [gesso.model.inductive-plan :as inductive-plan]
             [gesso.assurance.transition :as construction]
@@ -83,14 +85,32 @@
 (defn- require! [condition]
   (when-not condition (throw (ex-info "Outside closed Claim observation" {}))))
 
+(declare catalog)
+
+(defn outcome-declarations []
+  (into {} (for [helper (keys helpers) branch [:accept :refuse]]
+             [(alternative-id helper branch)
+              {:arguments {:request-id "r1"}
+               :outcome (if (= :accept branch)
+                          {:outcome :request/claimed :helper helper}
+                          {:outcome :request/not-claimable :reason :already-claimed})}])))
+
+;; The fixture has one fixed catalog. Keep the decoder identity stable across
+;; independently constructed mapped sources and use the same closed cases for
+;; snapshot projection, preparation and installed admission.
+(def ^:private claim-outcome-cases
+  (delay (:cases (outcome/derive-cases! {:inductive-source {:catalog (catalog)}
+                                       :target-map target-map}
+                                      (outcome-declarations)))))
+
 (defn- decode-claim-outcome! [record]
-  (let [binding (:gesso.command/binding record)
-        helper (identity/raw-value (:principal binding))
-        outcome (:gesso.command/outcome record)]
-    (require! (= {:request-id "r1"} (:arguments binding)))
-    (cond (= {:outcome :request/claimed :helper helper} outcome) :accepted
-          (= {:outcome :request/not-claimable :reason :already-claimed} outcome) :rejected
-          :else (throw (ex-info "Unknown Claim outcome" {})))))
+  (let [row (resolution/require-record record)
+        {:keys [principal operation arguments]} (:gesso.command/binding row)
+        k [(identity/raw-value principal) operation arguments (:gesso.command/outcome row)]
+        cases @claim-outcome-cases]
+    (if (contains? cases k)
+      (get cases k)
+      (throw (ex-info "Outside closed Claim outcome cases" {:reason :undeclared-claim-outcome})))))
 
 (defn snapshot!
   "Acquire the closed fixture rows using the supplied query function; delegate
@@ -337,6 +357,7 @@
                 {})])))
 
 (defn mapped-admission-source [bound]
+  (require! (= (catalog) (:catalog bound)))
   {:inductive-source bound :target-map target-map :decode-outcome! decode-claim-outcome!
    :transaction-footprint! submitted-alternative! :auxiliary-tables #{:gesso_live_outbox}
    :document-effects document-effects})

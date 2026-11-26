@@ -58,7 +58,7 @@
         (is (not (contains? r :decoder-observation)))
         (is (= :not-established (:universal-decoder-correspondence r)))))))
 
-(deftest actual-issued-claim-decoder-has-a-wider-domain
+(deftest actual-issued-claim-decoder-matches-closed-domain
   (let [source (claim/physical-mapped-admission-source (claim/bound-inductive-source!))
         admission (induction/build-inductive-mapped-admission! source)
         accepted (fn [helper] {:outcome :request/claimed :helper helper})
@@ -74,17 +74,19 @@
         probes [(record "foreign-op" "helper-1" :request/other {:request-id "r1"} (accepted "helper-1"))
                 (record "foreign-principal" "helper-3" :request/claim {:request-id "r1"} refused)
                 (record "foreign-request" "helper-1" :request/claim {:request-id "r2"} refused)
-                (record "foreign-outcome" "helper-1" :request/claim {:request-id "r1"} {:outcome :other})]
+                (record "foreign-outcome" "helper-1" :request/claim {:request-id "r1"} {:outcome :other})
+                (record "wrong-helper" "helper-1" :request/claim {:request-id "r1"} (accepted "helper-2"))]
         result (decoder/compare-issued! admission source declarations probes)]
-    ;; The actual issued decoder is an opaque fixture callback. A mismatch
-    ;; here identifies its wider domain, not a bypass of the complete writer.
-    (is (= :mismatch (:status result)) (pr-str result))
-    (is (= :outside-decoder-sample-returned (:reason result)))
+    (is (= declarations (claim/outcome-declarations)))
+    (is (= :matched (:status result)) (pr-str result))
+    (is (= :matched-finite-samples (:decoder-observation result)))
     (is (= 4 (:declared-case-count result)))
     (is (= 8 (:positive-match-count result) (:positive-sample-count result)))
-    (is (= 4 (:outside-sample-count result)))
-    (is (= 2 (:outside-return-count result) (:outside-throw-count result)))
+    (is (= 5 (:outside-sample-count result) (:outside-throw-count result)))
+    (is (= 0 (:outside-return-count result)))
     (is (= 0 (:outside-unexpected-exception-count result)))
-    (is (not (contains? result :decoder-observation)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 ((:decode-outcome! source) (assoc (record "valid" "helper-1" :request/claim {:request-id "r1"} (accepted "helper-1"))
+                                                   :xt/id "wrong-record-id"))))
     (is (= :not-established (:universal-decoder-correspondence result)))
     (is (= :not-established (:outcome-provenance result)))))
