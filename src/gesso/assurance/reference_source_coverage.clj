@@ -585,7 +585,7 @@
            :processed-retained-history-binding-profile processed-retained-history-binding-profile)))
 
 (def processed-retained-replay-inputs-profile
-  :xtdb-2.2.0-beta1/selected-processed-retained-replay-inputs-v13)
+  :xtdb-2.2.0-beta1/selected-processed-retained-replay-inputs-v14)
 
 (defn observe-local-processed-retained-replay-inputs!
   "Internal sensitive sample of independently projected replay inputs from

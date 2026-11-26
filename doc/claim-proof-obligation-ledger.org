@@ -5087,3 +5087,29 @@ current-state transaction and worker reference tests. The retained-byte
 projection of wide guards remains unqualified. No production admission
 expansion, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates not rerun.
+
+* v2734 — reconstruct retained partitioned journal assertions
+
+Invert canonical numbered SQL parameters for selected wide journal groups
+without requiring every partial group to be an independently complete
+recursive assertion. Admit provisional groups only within the existing
+physical width limit of twelve predicates plus two slot operands; the
+complete sequence-aware temporal grammar must qualify the transaction
+before a projected input is returned. Preserve the original operation
+order, operands, strict clock restriction and physical failure indices.
+Advance strict retained input, processed acquisition and direct execution
+profiles; leave the clocked profile and physical decoder budgets unchanged.
+
+Focused JVM: 1 test / 66 assertions, zero failures or errors. Nine real
+persistent XTDB transactions exercise production-generated wide guards,
+valid-time visibility, tentative writes, failed assertions and rollback.
+Exact reconstructed operations and bounded execution correspondence match
+before and after reopening. Mutated decoded operations test malformed
+numbering, missing group context, changed slot operands and interrupted
+sequences, including an earlier false assertion. Missing observation
+scope is rejected. Regression JVM: 16 tests / 1225 assertions, zero
+failures or errors across retained replay input, publication, manifest
+and worker fixtures. This is physical interpretation of the retained
+assertions, not proof that they exhaust the source-required predicates.
+No universal compilation bound, certification expansion or CLM-R2
+premise retirement. Full project and independent formal gates not rerun.
