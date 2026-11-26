@@ -2,6 +2,10 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-provider :as provider]
+            [gesso.assurance.reference-mapped-writes :as writes]
+            [gesso.assurance.reference-mapped-evidence :as evidence]
+            [gesso.assurance.reference-mapped-publication :as reference-publication]
+            [gesso.assurance.reference-mapped-residual :as residual]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-transaction :as current]
             [gesso.assurance.xtdb-envelope :as envelope]
@@ -12,6 +16,7 @@
             [gesso.live.outbox.claim-semantic-fixture :as claim]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.model.command :as command]
+            [gesso.model.command-resolution :as resolution]
             [gesso.model.inductive-plan :as induction]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
@@ -94,6 +99,49 @@
                         basis (live-xtdb/tx-result-basis (:tx-result (:receipt @capture)))
                         id (live-xtdb/basis-tx-id basis)
                         expected {:tx-id id :system-time (live-xtdb/basis-system-time basis) :ops (:ops @capture)}]
+                    (let [source (claim/source helper :accept)
+                          admitted (induction/describe-mapped-admission admission)
+                          prepared-docs (:document-rows @prepared)
+                          cases {[helper :request/claim {:request-id "r1"} outcome] :accepted}
+                          spec {:alternative alternative :inputs {} :effects (get claim/document-effects alternative)
+                                :binding binding :outcome outcome :now "t1" :outcome-cases cases}
+                          context (assoc (select-keys admitted [:catalog-fingerprint :induction-fingerprint])
+                                         :selectors (get-in admitted [:input-derivations alternative]))
+                          ops (:ops expected)
+                          prefix (subvec ops 1 10)
+                          derived (writes/derive-transition! source claim/target-map prepared-docs [] spec)
+                          publication-catalog (:publication-derivations admitted)
+                          residual-catalog (:residual-assertion-derivations admitted)
+                          publication (reference-publication/derive-publication! source claim/target-map prepared-docs [] spec source-id publication-catalog)
+                          residuals (residual/derive-assertions! source claim/target-map prepared-docs [] binding residual-catalog)
+                          actual-puts (filterv #(and (= :put-docs (first %)) (write-tables (second %))) ops)
+                          actual-witness (apply dissoc (peek (peek ops)) envelope/binding-keys)
+                          actual-outbox (filterv #(and (= :put-docs (first %)) (= :gesso_live_outbox (second %))) ops)
+                          actual-remaining-guards (filterv #(string? (first %)) (subvec ops 10))]
+                      (is (not= alternative (:operation binding)))
+                      (is (= (:state @prepared) (:before derived)))
+                      (is (= :accepted (get-in derived [:after :journal/one])))
+                      (is (= :claimed (get-in derived [:after :request/status])))
+                      (is (= (writes/put-row-frequencies! (:puts derived)) (writes/put-row-frequencies! actual-puts)))
+                      (is (= :matched (:status (evidence/check-record! source claim/target-map prepared-docs [] prefix spec context actual-witness))))
+                      (is (= alternative (:alternative actual-witness)))
+                      (is (= (:put-ops publication) actual-outbox))
+                      (is (every? #(= :request/claim (:gesso.live.outbox/operation %)) (:intents publication)))
+                      (is (= (frequencies (into (:guard-ops publication) residuals)) (frequencies actual-remaining-guards)))
+                      (doseq [bad [(assoc spec :alternative :request/claim)
+                                   (assoc-in spec [:binding :operation] alternative)
+                                   (assoc-in spec [:binding :principal] (identity/principal "helper-2"))
+                                   (assoc-in spec [:binding :arguments :request-id] "r2")
+                                   (assoc spec :outcome {:outcome :request/claimed :helper "helper-2"})
+                                   (assoc spec :outcome-cases (constantly :accepted))
+                                   (assoc spec :outcome-cases (update-vals cases (constantly :rejected)))]]
+                        (is (thrown? clojure.lang.ExceptionInfo (writes/derive-puts! source claim/target-map prepared-docs [] bad))))
+                      (is (thrown? clojure.lang.ExceptionInfo
+                                   (reference-publication/derive-publication! source claim/target-map prepared-docs [] spec source-id
+                                                                            {:request/claim (get publication-catalog alternative)})))
+                      (is (thrown? clojure.lang.ExceptionInfo
+                                   (residual/derive-assertions! source claim/target-map prepared-docs [] binding
+                                                               {:request/claim (get residual-catalog alternative)}))))
                     (is (= :incorporated (:status r)))
                     (is (= 1 @claimed))
                     (is (= :checked-commit-basis-projection (get-in r [:transaction :mapped-readback :physical-correspondence])))
@@ -129,3 +177,33 @@
           (.awaitSourceBlocking (db/primary-db node) (:tx-id selected) (Duration/ofSeconds 30))
           (is (= :matched (:status (provider/compare-local-processed-retained-transaction! node tables selected))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest distinct-alternative-and-command-identities-with-occupied-journal
+  (let [alternative (claim/alternative-id "helper-2" :refuse)
+        source (claim/source "helper-2" :refuse)
+        bind (fn [id helper] {:command-id (identity/command-id id) :principal (identity/principal helper)
+                              :operation :request/claim :arguments {:request-id "r1"}})
+        accepted {:outcome :request/claimed :helper "helper-1"}
+        rejected {:outcome :request/not-claimable :reason :already-claimed}
+        prior (resolution/command-record (bind "claim-1" "helper-1") accepted "t1")
+        binding (bind "claim-2" "helper-2")
+        docs {:requests [{:xt/id "r1" :status :claimed :revision 1 :updated-at "t1"}]
+              :request_assignments [{:xt/id "primary-r1" :helper "helper-1" :request-id "r1"}]
+              :memberships [{:xt/id "helper-1" :active true} {:xt/id "helper-2" :active true}]}
+        cases {["helper-1" :request/claim {:request-id "r1"} accepted] :accepted
+               ["helper-2" :request/claim {:request-id "r1"} rejected] :rejected}
+        spec {:alternative alternative :inputs {} :effects {} :binding binding
+              :outcome rejected :now "t2" :outcome-cases cases}
+        derive #(writes/derive-transition! source claim/target-map docs [prior] %)
+        result (derive spec)]
+    (is (= :accepted (get-in result [:before :journal/one])))
+    (is (nil? (get-in result [:before :journal/two])))
+    (is (= :accepted (get-in result [:after :journal/one])))
+    (is (= :rejected (get-in result [:after :journal/two])))
+    (is (= [[:put-docs :gesso_commands (resolution/command-record binding rejected "t2")]] (:puts result)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (derive (assoc spec :outcome-cases (dissoc cases ["helper-1" :request/claim {:request-id "r1"} accepted])))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (derive (assoc spec :outcome-cases (assoc cases ["helper-2" :request/claim {:request-id "r1"} rejected] :accepted)))))
+    (is (= {:intents [] :guard-ops [] :put-ops []}
+           (reference-publication/derive-publication! source claim/target-map docs [prior] spec "retained-claim" {alternative nil})))))

@@ -22,13 +22,30 @@
 
 (defn- row-key [[_ _ _ k]] (keyword (str/replace (name k) "_" "-")))
 
-(defn- project! [coords predicates outcome-key]
+(defn- outcome-value! [row {:keys [outcome-key outcome-cases]}]
+  (let [record (resolution/require-record row)
+        {:keys [principal operation arguments]} (:gesso.command/binding record)
+        outcome (:gesso.command/outcome record)
+        v (if outcome-cases
+            (get outcome-cases [(identity/raw-value principal) operation arguments outcome])
+            (get outcome outcome-key))]
+    (when-not (keyword? v) (reject! :invalid-journal-outcome))
+    v))
+
+(defn- outcome-cases? [cases]
+  (and (map? cases) (nil? (meta cases)) (<= 1 (count cases) 128)
+       (every? (fn [[k v]]
+                 (and (vector? k) (nil? (meta k)) (= 4 (count k))
+                      (string? (nth k 0)) (qualified-keyword? (nth k 1))
+                      (map? (nth k 2)) (map? (nth k 3)) (seq (nth k 3))
+                      (keyword? v))) cases)))
+
+(defn- project! [coords predicates spec]
   (into {} (map (fn [[field coord]]
                   (let [[mode row] (get predicates (target coord))]
                     [field (if (= :absent mode) nil
                                (if (= :journal-slot (first coord))
-                                 (let [v (get-in row [:gesso.command/outcome outcome-key])]
-                                   (when-not (keyword? v) (reject! :invalid-journal-outcome)) v)
+                                 (outcome-value! row spec)
                                  (let [k (row-key coord)]
                                    (when-not (contains? row k) (reject! :missing-mapped-field))
                                    (get row k))))]))) coords))
@@ -37,17 +54,25 @@
   "Derive expected complete rows from the original construction, closed
    prepared rows, supplied inputs/effects and explicit command record source.
    Only one inserted journal slot and default-valid-time document puts are
-   supported. The outcome selector is a single supplied keyword, not an
-   arbitrary callback. No authenticated inputs, effects or time provenance."
-  [original targets docs journal {:keys [inputs effects binding outcome now outcome-key] :as spec}]
+   supported. Legacy same-identity sources select a single outcome key.
+   Distinct alternative/command identities require the explicit alternative
+   and finite outcome-cases keyed by [principal operation arguments outcome].
+   No arbitrary decoder callback or authenticated premise provenance."
+  [original targets docs journal {:keys [inputs effects binding outcome now outcome-key outcome-cases alternative] :as spec}]
   (when-not (and (map? spec) (nil? (meta spec)) (map? inputs)
-                 (= #{:inputs :effects :binding :outcome :now :outcome-key} (set (keys spec)))
-                 (simple-keyword? outcome-key) (not-any? :optional? (vals (:state-types original))))
+                 (or (and (= #{:inputs :effects :binding :outcome :now :outcome-key} (set (keys spec)))
+                          (simple-keyword? outcome-key)
+                          (= (get-in original [:subject :id]) (:operation binding)))
+                     (and (= #{:inputs :effects :binding :outcome :now :alternative :outcome-cases} (set (keys spec)))
+                          (qualified-keyword? alternative)
+                          (= alternative (get-in original [:subject :id]))
+                          (outcome-cases? outcome-cases)))
+                 (not-any? :optional? (vals (:state-types original))))
     (reject! :invalid-write-source))
   (let [mapping (plan/check-target-mapping! original targets)
         coords (:target-map mapping)
         predicates (:predicates (prestate/describe! original targets docs journal))
-        before (project! coords predicates outcome-key)
+        before (project! coords predicates spec)
         record (resolution/command-record binding outcome now)
         slot [:journal-slot (identity/raw-value (:principal binding)) (:operation binding)]
         written (:write-targets mapping)
@@ -72,7 +97,7 @@
                                             (merge (or prior {:xt/id id}) (get effects address)) fields)]
                          (assoc m address row)))
                      {slot record} (filter #(= :document (first %)) written))
-        projected (project! coords (reduce-kv #(assoc %1 %2 [:exact-row %3]) predicates rows) outcome-key)
+        projected (project! coords (reduce-kv #(assoc %1 %2 [:exact-row %3]) predicates rows) spec)
         puts (mapv (fn [[address row]]
                      [:put-docs (if (= :journal-slot (first address)) :gesso_commands (second address)) row])
                    (sort-by (comp pr-str key) rows))]

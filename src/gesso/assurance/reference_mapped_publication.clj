@@ -11,7 +11,7 @@
            (java.security MessageDigest)
            (java.util UUID)))
 
-(def profile :selected-mapped-publication-v1)
+(def profile :selected-mapped-publication-v2)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported mapped publication." {::unsupported true :reason reason})))
@@ -55,15 +55,16 @@
   [original targets docs journal spec source-id declarations]
   (let [binding (resolution/require-binding (:binding spec))
         operation (:operation binding)
+        alternative (get-in original [:subject :id])
         principal (identity/raw-value (:principal binding))
         command-id (resolution/record-id binding)
-        _ (when-not (and (= operation (get-in original [:subject :id]))
+        _ (when-not (and (qualified-keyword? alternative)
                          (qualified-keyword? operation)
                          (every? bounded-id? [source-id principal command-id])
                          (map? declarations) (nil? (meta declarations))
-                         (contains? declarations operation))
+                         (contains? declarations alternative))
             (reject! :invalid-publication-source))
-        declaration (get declarations operation)
+        declaration (get declarations alternative)
         puts (writes/derive-puts! original targets docs journal spec)
         mapping (plan/check-target-mapping! original targets)
         addresses (set (filter #(= :document (first %)) (:write-targets mapping)))]

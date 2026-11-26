@@ -12,7 +12,7 @@
             [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]))
 
-(def profile :selected-mapped-evidence-v1)
+(def profile :selected-mapped-evidence-v2)
 (def ^:private guard-profile :gesso.model.mapped-frame/xtdb-2.2.0-beta1-v5)
 
 (defn- reject! [reason]
@@ -58,8 +58,7 @@
   (when-not (and (map? context) (nil? (meta context))
                  (= #{:catalog-fingerprint :induction-fingerprint :selectors} (set (keys context)))
                  (fingerprint? catalog-fingerprint) (fingerprint? induction-fingerprint)
-                 (map? selectors) (nil? (meta selectors))
-                 (= (get-in original [:subject :id]) (get-in spec [:binding :operation])))
+                 (map? selectors) (nil? (meta selectors)))
     (reject! :invalid-evidence-context))
   (let [checked (lowering/check-prefix! original targets docs journal prefix)
         mapping (plan/check-target-mapping! original targets)

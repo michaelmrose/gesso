@@ -7,7 +7,7 @@
             [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]))
 
-(def profile :selected-mapped-residual-v1)
+(def profile :selected-mapped-residual-v2)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported mapped residual declaration." {::unsupported true :reason reason})))
@@ -41,7 +41,7 @@
   (name field))
 
 (defn- table-name! [table]
-  (when-not (and (simple-keyword? table) (re-matches #"gesso_[a-z0-9_]+" (name table)))
+  (when-not (and (simple-keyword? table) (re-matches #"(?:gesso_[a-z0-9_]+|requests|request_assignments|memberships)" (name table)))
     (reject! :unsupported-residual-table))
   (name table))
 
@@ -86,15 +86,16 @@
         binding (resolution/require-binding binding)
         principal (identity/raw-value (:principal binding))
         operation (:operation binding)
+        alternative (get-in original [:subject :id])
         command-id (resolution/record-id binding)
         slots (set (filter #(= :journal-slot (first %)) (:write-targets mapping)))]
-    (when-not (and (= operation (get-in original [:subject :id]))
+    (when-not (and (qualified-keyword? alternative) (qualified-keyword? operation)
                    (string? principal) (not (str/blank? principal))
                    (string? command-id) (not (str/blank? command-id))
                    (= #{[:journal-slot principal operation]} slots)
-                   (map? declarations) (nil? (meta declarations)) (contains? declarations operation))
+                   (map? declarations) (nil? (meta declarations)) (contains? declarations alternative))
       (reject! :invalid-residual-source))
-    (if-let [declaration (get declarations operation)]
+    (if-let [declaration (get declarations alternative)]
       (let [conditions (literal-conditions! original)
             groups (group-by (fn [[_ coord]] (subvec coord 0 3)) (select-keys targets (keys conditions)))
             required (set (for [[[kind table id] _] groups :when (= :document kind)] [table id]))
@@ -146,7 +147,7 @@
                        (when-not (contains? required [table id]) (reject! :invalid-residual-subject))
                        (document-check table id [[(field-name! field true) (value! table id field)]]))))
               subject-checks))
-      (if (nil? (get declarations operation)) [] (reject! :invalid-residual-declaration)))))
+      (if (nil? (get declarations alternative)) [] (reject! :invalid-residual-declaration)))))
 
 (defn check-assertions!
   "Check the complete ordered fragment; no candidate value enters derivation."

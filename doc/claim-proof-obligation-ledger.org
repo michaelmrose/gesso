@@ -5527,3 +5527,36 @@ derivation of the actual remaining suffix, installed input/declaration
 provenance, selected commitment and universal refinement remain open.
 No production admission expansion, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates not rerun.
+
+* v2751 — distinguish abstract alternatives from command identities
+
+Retain the legacy same-identity single-key outcome source and add an
+explicit alternative with a finite supplied outcome case map, bounded
+to 128 cases keyed by principal, command operation, arguments and entire
+outcome. Require the alternative to match the original construction
+and the command binding to match its single writable journal slot.
+Project both existing and newly constructed records using the case
+map, not the production decoder callback. Look up residual and
+publication declarations by abstract alternative while preserving
+command operation identity in the journal, absence guards and outbox
+identity derivation. Qualify the three previously admitted Claim
+application tables in residual source derivation. Advance standalone
+evidence, publication and residual profiles to v2.
+
+JVM: 10 tests / 423 assertions, zero failures or errors across installed
+Claim, mapped writes, mapped evidence, mapped publication, residual
+derivation and selected envelope regressions. The genuine executor
+fixture independently derives exact ordinary puts, unbound evidence,
+publication batch and combined residual/publication guard multiplicities
+from the original alternative and supplied premises; negative controls
+reject wrong alternative, binding, arguments, outcome, callback-shaped
+cases, inconsistent case values and command-keyed declarations. A pure
+refusal fixture preserves the first helper's accepted record, derives
+the second helper's rejected record, rejects missing/incorrect cases
+and requires no publication. The finite case map, supplied inputs and
+effects, declaration catalog, outcome and time remain premises. The
+genuine executor's complete ordered suffix is not yet composed into
+one same-retained-history source-relative diagnostic; full host wiring,
+selected commitment and universal refinement remain open. No expanded
+production admission, certificate or CLM-R2 premise retirement.
+Full project and independent formal gates not rerun.
