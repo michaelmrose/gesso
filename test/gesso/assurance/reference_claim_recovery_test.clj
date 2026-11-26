@@ -5,6 +5,7 @@
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.assurance.reference-mapped-submission :as submission]
+            [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
@@ -137,10 +138,33 @@
                        steps (recovery-steps history)
                        trajectory! #(evidence/compare-local-processed-retained-mapped-executor-outcome-recovery! node %1 mapped-source outcome-declarations %2)
                        issued! #(evidence/compare-local-processed-retained-issued-executor-recovery! node tables admit mapped-source outcome-declarations %)
-                       trajectory (issued! steps)
+                       combined! #(observed-recovery/compare-selected! node %1 admit mapped-source outcome-declarations %2 %3)
+                       trajectory (combined! tables steps @observation-handle)
                        submission! #(submission/compare-selected! admit steps %1 %2)
                        observed (submission! @claims @captured)
                        issued-observation (submission/compare-observed! admit steps @observation-handle)]
+                   (is (= :matched (:status trajectory)) (pr-str trajectory))
+                   (is (= observed-recovery/profile (:observed-recovery-profile trajectory)))
+                   (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage trajectory)))
+                   (is (= :matched-local-issued-policy-window (:observation-origin trajectory)))
+                   (is (= :matched-selected-commit-identities (:returned-transaction-keys trajectory)))
+                   (is (= :not-established (:observation-storage-identity trajectory)))
+                   (is (= :not-established (:aborted-receipt-identity trajectory)))
+                   (is (= :not-established (:submission-provenance trajectory)))
+                   (doseq [[r reason] [[(combined! tables steps @captured) :unissued-framed-submission-observation]
+                                       [(combined! tables (assoc-in steps [1 :expectation :ops] []) @observation-handle)
+                                        :mapped-submission-envelope-mismatch]
+                                       [(combined! tables (assoc-in steps [2 :expectation :tx-id] -1) @observation-handle)
+                                        :mapped-submission-receipt-mismatch]
+                                       [(combined! tables (assoc-in steps [0 :context :catalog-fingerprint] "wrong") @observation-handle)
+                                        :issued-executor-recovery-declaration-mismatch]
+                                       [(combined! (disj tables :memberships) steps @observation-handle)
+                                        :incomplete-mapped-recovery-scope]]]
+                     (is (#{:mismatch :unsupported} (:status r)) (pr-str r))
+                     (is (= reason (:reason r)) (pr-str r))
+                     (is (not-any? #(contains? r %) [:submission-recovery-linkage :observation-origin :framed-handoffs
+                                                    :returned-transaction-keys :issued-admission-binding :closed-decoder-binding
+                                                    :selected-tx-ids :recovery-linkage :outcome-derivations])))
                    (is (= :matched (:status issued-observation)) (pr-str issued-observation))
                    (is (= submission/observed-profile (:observed-profile issued-observation)))
                    (is (= :matched-local-issued-policy-window (:observation-origin issued-observation)))

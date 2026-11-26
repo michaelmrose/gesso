@@ -6225,3 +6225,37 @@ Next: compose the locally issued submission observation with the issued
 admission recovery diagnostic and establish the corresponding observation
 through the real installed host writer policy, keeping historical
 observation distinct from authority.
+
+* v2776 — compose issued submission observation and retained recovery
+
+Add a separate combined diagnostic that checks the locally issued historical
+submission observation and the issued admission-bound retained recovery
+against exactly the same three selected steps. Require the complete
+observation result, then the issued declaration/closed decoder binding,
+selected transaction identities, commitment sequence and journal trajectory
+linkage. Suppress positive fields from both subcomparisons if either fails.
+Do not promote the observation handle to transaction authority or an
+authenticated attestation. Preserve the existing separate diagnostics.
+
+The genuine persistent Claim fixture now uses the combined comparison before
+and after reopening XTDB. Reject a raw report substituted for the issued
+handle, altered aborted-attempt payload, altered successful receipt
+coordinate, substituted catalog fingerprint and incomplete membership
+observation scope. Both observation-side and retained-side failures omit
+positive combined, observation and recovery fields.
+
+Focused persistent JVM integration: 1 test / 462 assertions, zero failures
+or errors. The exact tested source and fixture blobs are committed.
+The composition correlates a process-local observed submission with the
+selected retained trajectory, conditional on the observation's trusted
+local execution and the retained source. The handle does not authenticate
+storage identity across reopening; this is explicitly unestablished,
+alongside aborted receipt identity and authenticated submission origin.
+The fixture policy is not the complete installed host policy. No complete
+writer coverage, universal provider refinement, certificate, production
+admission expansion or CLM-R2 premise retirement. Full gates were not rerun.
+
+Next: exercise the actual installed host writer policy and its framed
+handoff path with the same local observation and retained recovery
+comparison. Keep durable source identity and authenticated command
+provenance as separate obligations.
