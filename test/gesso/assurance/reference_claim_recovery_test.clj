@@ -125,13 +125,25 @@
                                     (evidence/compare-local-processed-retained-mapped-executor-abort!
                                      node scope source claim/target-map document-rows journal tx prefix-count spec context source-id
                                      (:publication-derivations catalog) (:residual-assertion-derivations catalog)))
-                           abort (abort! tx tables)]
+                           abort (abort! tx tables)
+                           commit! (fn [tx scope]
+                                     (evidence/compare-local-processed-retained-mapped-executor-commit!
+                                      node scope source claim/target-map document-rows journal tx prefix-count spec context source-id
+                                      (:publication-derivations catalog) (:residual-assertion-derivations catalog)))
+                           committed (commit! tx tables)
+                           physical (provider/compare-local-processed-retained-committed-transaction! node tables tx)]
                        (if (= idx 2)
                          (do (is (= :mismatch (:status report)) (pr-str report))
                              (is (= :selected-retained-prestate-mismatch (:reason report)))
                              (is (= :checked-exact-prefix (:status (lowering/check-prefix! source claim/target-map document-rows journal (subvec (:ops tx) 1 (inc prefix-count))))))
                              (is (<= 1 (:failed-assertion-index (nth (:history prediction) idx)) prefix-count))
                              (is (= :matched (:status (provider/compare-local-processed-retained-transaction! node tables tx))))
+                             (is (= :mismatch (:status committed)))
+                             (is (= :selected-retained-prestate-mismatch (:reason committed)))
+                             (is (not (contains? committed :selected-transaction-commitment)))
+                             (is (= :mismatch (:status physical)))
+                             (is (= :selected-retained-commitment-not-predicted (:reason physical)))
+                             (is (not (contains? physical :selected-transaction-commitment)))
                              (is (= :matched (:status abort)) (pr-str abort))
                              (is (= :stale-at-retained-predecessor (:prepared-prestate abort)))
                              (is (= :aborted (:selected-transaction-commitment abort)))
@@ -163,6 +175,29 @@
                          (do (is (= :matched (:status report)) (pr-str report))
                              (is (= :matched-source-relative-record (:transition-evidence report)))
                              (is (= :not-asserted (:selected-transaction-commitment report)))
+                             (is (= :matched (:status committed)) (pr-str committed))
+                             (is (= :selected-mapped-retained-executor-commit-v1 (:mapped-retained-evidence-profile committed)))
+                             (is (= :committed (:selected-transaction-commitment committed)))
+                             (is (= :matched (:selected-commitment-outcome committed)))
+                             (is (= :matched-source-relative-record (:transition-evidence committed)))
+                             (is (= :matched-retained-predecessor (:prepared-prestate committed)))
+                             (is (= :none (:authority committed)))
+                             (is (= :not-issued (:certificate committed)))
+                             (is (= :matched (:status physical)))
+                             (is (= :committed (:selected-transaction-commitment physical)))
+                             (is (= :unsupported (:status (commit! tx (disj tables :gesso_live_outbox)))))
+                             (let [query xt/q
+                                   sql ["SELECT committed, error FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ? LIMIT 2" (:tx-id tx)]]
+                               (doseq [[rows status reason] [[[] :unavailable :invalid-retained-commitment-outcome]
+                                                           [[{:committed false}] :mismatch :selected-retained-commitment-outcome-mismatch]
+                                                           [[{:committed true :error (ex-info "Unexpected error" {})}] :mismatch :selected-retained-commitment-outcome-mismatch]]]
+                                 (let [r (with-redefs [xt/q (fn [n q & args]
+                                                            (if (= sql q) rows (apply query n q args)))]
+                                           (commit! tx tables))]
+                                   (is (= status (:status r)) (pr-str r))
+                                   (is (= reason (:reason r)))
+                                   (is (not (contains? r :selected-transaction-commitment)))
+                                   (is (not (contains? r :transition-evidence))))))
                              (is (= :mismatch (:status abort)) (pr-str abort))
                              (is (= :selected-retained-prestate-not-stale (:reason abort)))
                              (is (not (contains? abort :candidate-envelope)))))))))]

@@ -5678,3 +5678,34 @@ premises and capture provenance remain supplied, full host installation
 and successful commitment qualification remain open. No production
 admission expansion, certificate or CLM-R2 premise retirement. Full
 project and independent formal gates not rerun.
+
+* v2756 — positively qualify selected retained physical commitment
+
+Introduce an opt-in selected retained commitment profile and composed
+executor commitment diagnostic. Replay through the exact selected
+transaction, require independent prediction of commitment and a unique
+all-time provider outcome row with true committed and nil error.
+Perform the selected outcome check inside the same stable retained
+observation bracket as complete ledger and physical history comparison.
+Compose with source-derived envelope, historical prepared prestate and
+identity absence checks without a second retained acquisition. Preserve
+earlier candidate and abort APIs and their outcome qualifications.
+A later successful retry under the same command identity cannot
+qualify an earlier aborted transaction as committed.
+
+Focused JVM: 1 test / 200 assertions, zero failures or errors.
+Combined JVM: 5 tests / 427 assertions, zero failures or errors across
+recovery, installed Claim, mapped envelope and retained prestate tests.
+Both successful Claim submissions match the new committed profile
+before and after reopening. The intervening aborted acceptance fails
+both the composed commitment check and the generic physical commitment
+check. Missing outcome row, false commitment and contradictory error
+on a purported committed outcome fail closed, without returning
+commitment or transition-evidence qualification. Missing observation
+scope remains unsupported. These are bounded selected physical
+commitment diagnostics, not authenticated issuance, abstract
+transition refinement or universal correctness. Supplied premise
+provenance, full installed host correspondence and composed recovery
+trajectory correspondence remain open. No production admission
+expansion, certificate or CLM-R2 premise retirement. Full project
+and independent formal gates not rerun.

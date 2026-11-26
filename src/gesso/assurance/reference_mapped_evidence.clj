@@ -288,8 +288,13 @@
    publication batch and final witness. The complete captured vector,
    including actual residual order, is bound to stable retained history.
    Declarations and outcome cases are premises, not authenticated issuance."
-  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations abort?]
-  (let [tag #(assoc % :mapped-retained-evidence-profile (if abort? :selected-mapped-retained-executor-abort-v1 executor-retained-profile))
+  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations mode]
+  (let [abort? (= :abort mode)
+        commit? (= :commit mode)
+        tag #(assoc % :mapped-retained-evidence-profile (case mode
+                                                         :abort :selected-mapped-retained-executor-abort-v1
+                                                         :commit :selected-mapped-retained-executor-commit-v1
+                                                         executor-retained-profile))
         fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
                     :provider-refinement :not-established})
         checked (try
@@ -350,7 +355,7 @@
                       node tables original targets docs journal expectation prefix-count (:id checked))
                      (provider/compare-local-processed-retained-mapped-publication-absence!
                       node tables original targets docs journal expectation prefix-count (:id checked)
-                      (:publication-ids checked) (:residual-ops checked) :publication-first)))]
+                      (:publication-ids checked) (:residual-ops checked) :publication-first commit?)))]
         (if (= :matched (:status r))
           (if abort?
             (assoc r :candidate-envelope :matched-source-relative-attempt
@@ -370,11 +375,18 @@
 (defn compare-local-processed-retained-mapped-executor!
   "Compare the complete selected executor envelope with its historical prestate."
   [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
-  (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations false))
+  (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations :candidate))
 
 (defn compare-local-processed-retained-mapped-executor-abort!
   "Match a complete source-derived candidate whose mapped prefix failed at
    a stale retained predecessor. The candidate witness is not a committed
    transition; only physical abort and rollback are qualified."
   [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
-  (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations true))
+  (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations :abort))
+
+(defn compare-local-processed-retained-mapped-executor-commit!
+  "Match the full source-derived executor envelope and independently qualify
+   successful physical commitment in the same stable retained history.
+   Does not authenticate supplied premises or discharge abstract refinement."
+  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
+  (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations :commit))

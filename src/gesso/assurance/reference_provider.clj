@@ -476,6 +476,49 @@
         r))
     (acquisition-result :unsupported :unsupported-source-expectation)))
 
+(def selected-commitment-profile :selected-retained-commitment-v1)
+
+(defn- selected-commitment-failure [node inputs expectation]
+  ;; All observations are inside compare-retained-replay*'s stable bracket.
+  ;; Replay only through the selected transaction, never infer its outcome
+  ;; from a later successful retry under the same command identity.
+  (let [through (conj (vec (take-while #(not= (:tx-id expectation) (:tx-id %)) inputs)) expectation)
+        prediction (temporal/replay (mapv #(dissoc % :tx-id) through))
+        entry (peek (:history prediction))]
+    (cond
+      (not= :predicted (:status prediction))
+      (acquisition-result :unsupported :unsupported-selected-commitment-prediction)
+      (not (true? (:committed? entry)))
+      (acquisition-result :mismatch :selected-retained-commitment-not-predicted)
+      :else
+      (try
+        (let [rows (xt/q node ["SELECT committed, error FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ? LIMIT 2" (:tx-id expectation)])]
+          (cond
+            (not= 1 (count rows)) (acquisition-result :unavailable :invalid-retained-commitment-outcome)
+            (not (and (true? (:committed (first rows))) (nil? (:error (first rows)))))
+            (acquisition-result :mismatch :selected-retained-commitment-outcome-mismatch)))
+        (catch InterruptedException e (.interrupt (Thread/currentThread)) (throw e))
+        (catch Exception _ (acquisition-result :unavailable :retained-commitment-outcome-unavailable))))))
+
+(defn- tag-commitment [report]
+  (cond-> (assoc report :selected-commitment-profile selected-commitment-profile)
+    (= :matched (:status report))
+    (assoc :selected-transaction-binding :matched :selected-transaction-commitment :committed
+           :selected-commitment-outcome :matched)))
+
+(defn compare-local-processed-retained-committed-transaction!
+  "Require successful selected physical commitment, independently predicted
+   and observed in the same stable retained comparison. Does not establish
+   source-relative construction or abstract transition correspondence."
+  [node tables expectation]
+  (tag-commitment
+   (if (and (source-expectations? [expectation])
+            (instance? Instant (:system-time expectation))
+            (vector? (:ops expectation)) (nil? (meta (:ops expectation)))
+            (<= 1 (count (:ops expectation)) 256))
+     (compare-retained-replay* node tables expectation #(selected-commitment-failure node % expectation))
+     (acquisition-result :unsupported :unsupported-source-expectation))))
+
 (def mapped-retained-execution-profile :selected-mapped-retained-execution-v1)
 
 (def mapped-retained-prestate-profile :selected-mapped-retained-prestate-v1)
@@ -523,9 +566,10 @@
           {:status :unsupported :reason :unsupported-retained-prestate})))))
 
 (defn- compare-mapped-retained*
-  [node tables original target-map docs journal expectation prefix-count prestate? command-id evidence? publication-ids]
+  [node tables original target-map docs journal expectation prefix-count prestate? command-id evidence? publication-ids & [commit?]]
   (let [offset (if evidence? 1 0)
         tag #(cond-> (assoc % :mapped-retained-execution-profile mapped-retained-execution-profile)
+               commit? tag-commitment
                prestate? (assoc :mapped-retained-prestate-profile mapped-retained-prestate-profile)
                command-id (assoc :mapped-retained-command-absence-profile :selected-mapped-retained-command-absence-v1)
                evidence? (assoc :mapped-retained-evidence-absence-profile :selected-mapped-retained-evidence-absence-v1)
@@ -547,11 +591,14 @@
                  (= :none (:authority checked)) (= :not-issued (:certificate checked)))
       (invalid)
       (let [report (tag (compare-retained-replay* node tables expectation
-                                                 (when prestate? #(historical-prestate-failure % expectation (:groups checked) command-id evidence? publication-ids))))]
+                                                 (when (or prestate? commit?)
+                                                   (fn [inputs]
+                                                     (or (when prestate? (historical-prestate-failure inputs expectation (:groups checked) command-id evidence? publication-ids))
+                                                         (when commit? (selected-commitment-failure node inputs expectation)))))))]
         (if (= :matched (:status report))
           (cond-> (assoc report :source-lowering :checked-exact-prefix
                          :selected-transaction-binding :matched
-                         :selected-transaction-commitment :not-asserted
+                         :selected-transaction-commitment (if commit? :committed :not-asserted)
                          :mapped-prestate-lowering-version 5)
             prestate? (assoc :prepared-prestate :matched-retained-predecessor)
             command-id (assoc :global-command-id :absent-at-retained-predecessor)
@@ -614,6 +661,7 @@
    the exact preceding fragment supplied by a separate derivation checker;
    this function checks placement, not residual source correspondence.
    The final arity selects publication-first or residual-first placement.
+   The last arity optionally requires selected successful commitment.
    No publication body check."
   ([node tables original target-map docs journal expectation prefix-count command-id publication-ids]
    (compare-local-processed-retained-mapped-publication-absence!
@@ -622,8 +670,11 @@
    (compare-local-processed-retained-mapped-publication-absence!
     node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops :residual-first))
   ([node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops guard-order]
+   (compare-local-processed-retained-mapped-publication-absence!
+    node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops guard-order false))
+  ([node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops guard-order commit?]
   (let [ops (:ops expectation)]
-    (if (and (set? tables) (every? tables [:gesso_commands :gesso_transition_evidence :gesso_live_outbox])
+    (if (and (boolean? commit?) (set? tables) (every? tables [:gesso_commands :gesso_transition_evidence :gesso_live_outbox])
              (string? command-id) (not (str/blank? command-id)) (<= (count command-id) 1024)
              (vector? publication-ids) (nil? (meta publication-ids)) (<= (count publication-ids) 128)
              (every? uuid? publication-ids) (= (count publication-ids) (count (set publication-ids)))
@@ -639,7 +690,7 @@
                                      (into guards residual-ops) (into residual-ops guards))]
                (= expected-guards (subvec ops (inc prefix-count)
                                           (+ 1 prefix-count (count expected-guards))))))
-      (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true command-id true publication-ids)
+      (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true command-id true publication-ids commit?)
       (assoc (acquisition-result :unsupported :invalid-retained-publication-id-guards)
              :mapped-retained-publication-absence-profile :selected-mapped-retained-publication-absence-v1)))))
 
