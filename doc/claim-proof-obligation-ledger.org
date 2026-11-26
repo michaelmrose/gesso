@@ -6137,3 +6137,42 @@ Next: connect the checked retained candidate to the actual admitted
 submission boundary and transaction receipt, preserving the distinction
 between candidate preparation, provider commitment and authenticated
 command provenance.
+
+* v2774 — selected mapped submission and receipt observations
+
+Compare the actual fixture policy's three claimed framed handoffs and
+adapter call-site capture against the selected retained recovery steps.
+Require three ordered invocation/completion pairs with distinct call
+identities, exact default-option submission envelopes and retained
+operation vectors. Reconstruct the unbound transition evidence from each
+claimed checked candidate and the issued admission; match the candidate's
+command/alternative identity and publication source identifier. Match
+the two returned public TransactionKeys to the selected retained
+transaction identifiers and system times. The intervening adapter throw
+has no public transaction key; its association is conditional on the
+observed order and payload, not an authenticated receipt identity.
+
+The genuine persistent Claim fixture records the checked handoffs at
+its registered policy and captures the actual adapter calls within the
+existing executor invocation. Both the submission observation and the
+previous issued-admission recovery comparison match the same selected
+steps before and after reopening XTDB. Substituted handoff operations,
+command identity, successful receipt and abort completion classification
+are rejected without positive observation fields.
+
+Focused persistent JVM integration: 1 test / 394 assertions, zero
+failures or errors. The diagnostic accepts supplied process-local
+observations; it does not issue or authenticate them. The observed
+policy is the fixture policy, not yet the complete installed writer
+policy and host. The adapter capture is explicitly not authenticated;
+the aborted transaction has no returned receipt identity. The existing
+presentation and receipt interceptions remain. No complete writer
+coverage, authenticated principal/clock provenance, universal provider
+refinement, production admission expansion, certificate or CLM-R2
+premise retirement. Full project gates were not rerun.
+
+Next: qualify the actual submission capture and framed handoff origin
+and lifetime, keeping the observed-abort association distinct from a
+provider-authenticated aborted transaction identity. Integrate with the
+installed host writer policy rather than promoting supplied reports to
+authority.

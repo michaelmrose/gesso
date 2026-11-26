@@ -4,6 +4,7 @@
             [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-outcome :as outcome]
+            [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
@@ -47,6 +48,7 @@
         operations #{[:requests "r1" :claim] [:request_assignments "primary-r1" :create]}
         refusal-guards #{[:requests "r1" :status :claimed] [:requests "r1" :revision 1] [:requests "r1" :updated-at "t1"]}
         snapshots (atom {}) attempts (atom []) admissions (atom 0) recovered (atom 0)
+        claims (atom []) captured (atom nil)
         actor #(identity/raw-value (:principal %))
         mapped-source (claim/physical-mapped-admission-source (claim/bound-inductive-source!))
         admit (induction/build-inductive-mapped-admission! mapped-source)
@@ -135,7 +137,29 @@
                        steps (recovery-steps history)
                        trajectory! #(evidence/compare-local-processed-retained-mapped-executor-outcome-recovery! node %1 mapped-source outcome-declarations %2)
                        issued! #(evidence/compare-local-processed-retained-issued-executor-recovery! node tables admit mapped-source outcome-declarations %)
-                       trajectory (issued! steps)]
+                       trajectory (issued! steps)
+                       submission! #(submission/compare-selected! admit steps %1 %2)
+                       observed (submission! @claims @captured)]
+                   (is (= :matched (:status observed)) (pr-str observed))
+                   (is (= :matched-observed-checked-candidates (:framed-handoffs observed)))
+                   (is (= :matched-selected-retained-operations (:adapter-payloads observed)))
+                   (is (= :matched-selected-commit-identities (:returned-transaction-keys observed)))
+                   (is (= :observed-throw-without-transaction-key (:aborted-call observed)))
+                   (is (= :not-established (:aborted-receipt-identity observed)))
+                   (is (= :not-established (:submission-provenance observed)))
+                   (is (= :none (:authority observed)))
+                   (doseq [[r reason] [[(submission! (assoc-in @claims [1 :submission :tx-ops] []) @captured)
+                                        :mapped-submission-envelope-mismatch]
+                                       [(submission! (assoc-in @claims [2 :checked :identity :command-id] "other") @captured)
+                                        :mapped-submission-handoff-mismatch]
+                                       [(submission! @claims (assoc-in @captured [:events 5 :tx-result]
+                                                                        (get-in @captured [:events 1 :tx-result])))
+                                        :mapped-submission-receipt-mismatch]
+                                       [(submission! @claims (assoc-in @captured [:events 3 :phase] :returned))
+                                        :mapped-submission-abort-observation-mismatch]]]
+                     (is (= :mismatch (:status r)) (pr-str r))
+                     (is (= reason (:reason r)))
+                     (is (not-any? #(contains? r %) [:framed-handoffs :adapter-payloads :returned-transaction-keys])))
                    (is (= :observed (:status sample)))
                    (is (= history actual))
                    (is (= :predicted (:status prediction)))
@@ -291,7 +315,8 @@
       (let [history (with-open [node (xtn/start-node config)]
                       (xt/execute-tx node [[:put-docs :requests before] [:put-docs :memberships (member "helper-1") (member "helper-2")]])
                       (let [release (live-xtdb/register-submission-policy! node (fn [submission]
-                                                                                (when (publication/claim-framed-submission! admit node submission)
+                                                                                (when-let [checked (publication/claim-framed-submission! admit node submission)]
+                                                                                  (swap! claims conj {:submission submission :checked checked})
                                                                                   (swap! admissions inc) true)))
                             execute live-xtdb/execute-tx-from!
                             winning (publication/build-executor (assoc opts :construct! construct))
@@ -316,7 +341,11 @@
                                                                                       (catch Exception e
                                                                                         (swap! attempts conj {:ops ops :error (:xtdb.error/code (ex-data e))})
                                                                                         (throw e))))]
-                                         (invoke! node losing loser))
+                                         (let [capture (live-xtdb/capture-tx-api-calls! #(invoke! node losing loser))]
+                                           (reset! captured capture)
+                                           (if (= :returned (:outcome capture))
+                                             (:result capture)
+                                             (throw (:error capture)))))
                                 basis (live-xtdb/tx-result-basis (:tx-result (:receipt (peek @attempts))))]
                             (is (= :incorporated (:status result)))
                             (is (= refused (:outcome result)))
