@@ -267,6 +267,45 @@
 
 (def ^:private ^ThreadLocal framed-submission (ThreadLocal.))
 
+(def ^:private ^ThreadLocal framed-observation (ThreadLocal.))
+(deftype FramedSubmissionObservation [])
+(def ^:private ^WeakHashMap framed-observations (WeakHashMap.))
+(def ^:private original-policy-capture xtdb/capture-policy-tx-api-calls!)
+
+(defn capture-framed-submissions!
+  "Observe consumed handoffs during one synchronous installed policy window.
+   Issue an opaque local observation only after the window closes intact.
+   The raw capture still reports the thunk result on invalidation. Handles
+   retain historical evidence, not live submission capability; no provider
+   authentication or complete writer coverage is implied. Never log reports."
+  [admission connectable thunk]
+  (when-not (and (nil? (.get framed-observation))
+                 (identical? original-policy-capture xtdb/capture-policy-tx-api-calls!)
+                 (xtdb/current-submission-policy-token connectable))
+    (reject! :invalid-framed-observation-window {}))
+  (let [claims (atom []) valid? (atom true)
+        scope {:admission admission :connectable connectable :claims claims :valid? valid?}
+        capture (try
+                  (.set framed-observation scope)
+                  (original-policy-capture connectable thunk)
+                  (finally (.remove framed-observation)))
+        handle (when (and @valid? (= :matched-local-policy-window (:policy-window capture)))
+                 (let [h (FramedSubmissionObservation.)]
+                   (locking framed-observations
+                     (.put framed-observations h {:admission admission :claims @claims :capture capture}))
+                   h))]
+    {:observation handle :capture capture}))
+
+(defn read-framed-submission-observation!
+  "Read an exact locally issued historical observation for its admission.
+   Does not re-establish a current policy, and does not expose the node."
+  [admission handle]
+  (when (instance? FramedSubmissionObservation handle)
+    (locking framed-observations
+      (let [entry (.get framed-observations handle)]
+        (when (and entry (identical? admission (:admission entry)))
+          (select-keys entry [:claims :capture]))))))
+
 (defn claim-framed-submission!
   "For a trusted installed adapter policy: claim the exact current framed
    admission once, for its original issued registry and connectable. Return
@@ -280,6 +319,14 @@
                (xtdb/same-connectable? connectable (:connectable scope))
                (= submission (:submission scope))
                (compare-and-set! (:available? scope) true false))
+      (when-let [{observed-admission :admission observed-node :connectable
+                  :keys [claims valid?]} (.get framed-observation)]
+        (try
+          (if (and (identical? admission observed-admission)
+                   (xtdb/same-connectable? connectable observed-node))
+            (swap! claims conj {:submission submission :checked (:checked scope)})
+            (reset! valid? false))
+          (catch Exception _ (reset! valid? false))))
       (:checked scope))))
 
 (defn- mapped-rows! [node admission opts]

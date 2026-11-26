@@ -2,6 +2,7 @@
   "Compare local observed framed handoffs and adapter calls to selected retained steps."
   (:require [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.live.consistency.xtdb :as live]
+            [gesso.live.outbox.model-publication :as publication]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.inductive-plan :as induction])
   (:import [xtdb.api TransactionKey]))
@@ -80,3 +81,21 @@
                    :aborted-call :observed-throw-without-transaction-key))))
       (catch clojure.lang.ExceptionInfo e
         (fail :mismatch (or (:reason (ex-data e)) :invalid-mapped-submission-handoff))))))
+
+(def observed-profile :selected-issued-mapped-submission-observation-v1)
+
+(defn compare-observed!
+  "Compare only a locally issued, completed framed observation. The handle
+   binds its actual consumed handoffs to the policy-scoped adapter capture.
+   Historical comparison after policy release is supported; no authority,
+   external authentication or aborted receipt identity is established."
+  [admission steps handle]
+  (if-let [{:keys [claims capture]} (publication/read-framed-submission-observation! admission handle)]
+    (let [result (assoc (compare-selected! admission steps claims capture) :observed-profile observed-profile)]
+      (cond-> result
+        (= :matched (:status result))
+        (assoc :observation-origin :matched-local-issued-policy-window)))
+    {:status :unsupported :reason :unissued-framed-submission-observation
+     :observed-profile observed-profile :authority :none :certificate :not-issued
+     :provider-refinement :not-established :submission-provenance :not-established
+     :aborted-receipt-identity :not-established}))

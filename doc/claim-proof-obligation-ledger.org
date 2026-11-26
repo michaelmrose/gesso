@@ -6176,3 +6176,52 @@ and lifetime, keeping the observed-abort association distinct from a
 provider-authenticated aborted transaction identity. Integrate with the
 installed host writer policy rather than promoting supplied reports to
 authority.
+
+* v2775 — local issued framed submission observation
+
+Add an opt-in synchronous adapter capture that checks the observed physical
+connectable, installed policy generation and owning thread at each adapter
+call. Require the original capture function at entry and the same policy
+generation at completion. An invalidated capture retains its original
+thunk result but cannot qualify as a matched policy window.
+
+At the actual framed handoff consumption point, collect the checked
+candidate and submission in a thread-local observation scope. Require the
+same admission and physical connectable; clear the scope on every exit.
+Issue an opaque historical observation handle in a weak-key registry
+only after the local window closes intact. Compare its registered
+handoffs and adapter capture against the selected recovery steps using
+the v2774 comparator. Reject unissued handles, raw capture reports
+passed as handles, and handles associated with a different admission.
+Existing caller-supplied observation comparison remains diagnostic only.
+
+The genuine persistent Claim fixture qualifies the locally issued
+observation against the same retained trajectory before and after
+database reopening, including successful receipt coordinates. The
+adapter-boundary regression checks foreign connectables, foreign threads,
+policy release during the capture and absent policy at entry. A
+generation invalidation does not replace the thunk result.
+
+Final focused JVM run: 30 tests / 720 assertions, zero failures or errors,
+covering the submission-boundary namespace and persistent Claim recovery
+namespace. The earlier intermediate run also passed (29 tests / 710
+assertions), but the final run is the qualification of these exact blobs.
+
+The observation is process-local and historical, not a live capability
+or a provider-authenticated attestation. Its lifetime is that of the
+opaque handle in the originating process; it is not independently
+recoverable from durable storage. Uncaptured writers, activity outside
+the synchronous window, substituted bound provider functions and
+malicious JVM code remain outside the claim. The fixture still uses
+its local policy, not the full installed host policy; its issued recovery
+and submission observation comparisons use the same steps but remain
+separate diagnostics. The aborted call still has no public receipt
+identity. No authenticated principal/clock provenance, complete writer
+coverage, universal provider refinement, certificate, production
+admission expansion or CLM-R2 premise retirement. Full project gates
+were not rerun.
+
+Next: compose the locally issued submission observation with the issued
+admission recovery diagnostic and establish the corresponding observation
+through the real installed host writer policy, keeping historical
+observation distinct from authority.

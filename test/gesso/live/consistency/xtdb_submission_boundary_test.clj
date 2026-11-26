@@ -535,3 +535,26 @@
           (is (= :submission-policy-refused (:reason (ex-data (:error r)))))
           (is (empty? (:events r))))
         (finally (next-release))))))
+
+(deftest policy-capture-qualifies-only-one-local-generation-and-thread
+  (let [node (Object.) other (Object.) release (live/register-submission-policy! node (constantly true))]
+    (try
+      (with-seams {'*execute-tx* (fn [& _] (transaction-key 73))}
+        (fn []
+          (let [r (live/capture-policy-tx-api-calls! node #(live/execute-tx! node source-ops))]
+            (is (= :matched-local-policy-window (:policy-window r)))
+            (is (= :returned (:outcome r)))
+            (is (= 2 (count (:events r)))))
+          (let [r (live/capture-policy-tx-api-calls! node #(live/execute-tx! other source-ops))]
+            (is (= :invalidated-local-policy-window (:policy-window r)))
+            (is (= :returned (:outcome r))))
+          (let [r (live/capture-policy-tx-api-calls! node #(deref (future (live/execute-tx! node source-ops))))]
+            (is (= :invalidated-local-policy-window (:policy-window r)))
+            (is (= :returned (:outcome r))))
+          (let [r (live/capture-policy-tx-api-calls! node #(do (release) :completed))]
+            (is (= :invalidated-local-policy-window (:policy-window r)))
+            (is (= :completed (:result r))))))
+      (is (= :invalid-policy-capture-window
+             (:reason (try (live/capture-policy-tx-api-calls! node (constantly :unregistered)) nil
+                           (catch clojure.lang.ExceptionInfo e (ex-data e))))))
+      (finally (release)))))

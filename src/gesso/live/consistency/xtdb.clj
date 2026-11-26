@@ -77,6 +77,7 @@
   xt/status)
 
 (def ^:private ^:dynamic *submission-capture* nil)
+(def ^:private ^:dynamic *policy-capture* nil)
 
 (def submission-capture-type
   :gesso.live.consistency.xtdb/adapter-submission-capture)
@@ -266,6 +267,26 @@
   (locking submission-policies
     (:token (.get submission-policies (physical-connectable! connectable)))))
 
+(def ^:private original-submission-capture capture-tx-api-calls!)
+
+(defn capture-policy-tx-api-calls!
+  "Capture one synchronous local policy window. Every observed adapter call
+   must use the same physical node, policy generation and owning thread.
+   This neither authenticates the bound provider API nor covers uncaptured
+   writers. A changed policy invalidates the diagnostic, not the thunk result."
+  [connectable thunk]
+  (let [node (physical-connectable! connectable)
+        token (current-submission-policy-token node)]
+    (when-not (and token (nil? *policy-capture*)
+                   (identical? original-submission-capture capture-tx-api-calls!))
+      (throw (ex-info "Invalid local policy capture window." {:reason :invalid-policy-capture-window})))
+    (let [valid? (atom true)
+          scope {:node node :token token :thread (Thread/currentThread) :valid? valid?}
+          report (binding [*policy-capture* scope] (original-submission-capture thunk))]
+      (assoc report :policy-window
+             (if (and @valid? (submission-policy-current? node token))
+               :matched-local-policy-window :invalidated-local-policy-window)))))
+
 (defn same-connectable?
   "Compare live adapter/node identities without exposing the physical node."
   [a b]
@@ -286,6 +307,11 @@
   (let [[connectable entry] (locking submission-policies
                               (let [node (physical-connectable! connectable)]
                                 [node (.get submission-policies node)]))]
+    (when-let [{:keys [node token thread valid?]} *policy-capture*]
+      (when-not (and (identical? node connectable)
+                     (identical? token (:token entry))
+                     (identical? thread (Thread/currentThread)))
+        (reset! valid? false)))
     (require-submission-admission! api entry tx-ops tx-options)
     ;; Capture immediately adjacent to the *actual* adapter API invocation, not
     ;; by replaying prepare or accepting an application-reported operation list.

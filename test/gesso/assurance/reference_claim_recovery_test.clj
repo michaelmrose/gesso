@@ -48,7 +48,7 @@
         operations #{[:requests "r1" :claim] [:request_assignments "primary-r1" :create]}
         refusal-guards #{[:requests "r1" :status :claimed] [:requests "r1" :revision 1] [:requests "r1" :updated-at "t1"]}
         snapshots (atom {}) attempts (atom []) admissions (atom 0) recovered (atom 0)
-        claims (atom []) captured (atom nil)
+        claims (atom []) captured (atom nil) observation-handle (atom nil)
         actor #(identity/raw-value (:principal %))
         mapped-source (claim/physical-mapped-admission-source (claim/bound-inductive-source!))
         admit (induction/build-inductive-mapped-admission! mapped-source)
@@ -139,7 +139,17 @@
                        issued! #(evidence/compare-local-processed-retained-issued-executor-recovery! node tables admit mapped-source outcome-declarations %)
                        trajectory (issued! steps)
                        submission! #(submission/compare-selected! admit steps %1 %2)
-                       observed (submission! @claims @captured)]
+                       observed (submission! @claims @captured)
+                       issued-observation (submission/compare-observed! admit steps @observation-handle)]
+                   (is (= :matched (:status issued-observation)) (pr-str issued-observation))
+                   (is (= submission/observed-profile (:observed-profile issued-observation)))
+                   (is (= :matched-local-issued-policy-window (:observation-origin issued-observation)))
+                   (is (= :not-established (:submission-provenance issued-observation)))
+                   (is (= :not-established (:aborted-receipt-identity issued-observation)))
+                   (doseq [[a h] [[admit (Object.)] [admit @captured] [(fn [& _] nil) @observation-handle]]]
+                     (let [r (submission/compare-observed! a steps h)]
+                       (is (= :unissued-framed-submission-observation (:reason r)))
+                       (is (not (contains? r :observation-origin)))))
                    (is (= :matched (:status observed)) (pr-str observed))
                    (is (= :matched-observed-checked-candidates (:framed-handoffs observed)))
                    (is (= :matched-selected-retained-operations (:adapter-payloads observed)))
@@ -341,8 +351,10 @@
                                                                                       (catch Exception e
                                                                                         (swap! attempts conj {:ops ops :error (:xtdb.error/code (ex-data e))})
                                                                                         (throw e))))]
-                                         (let [capture (live-xtdb/capture-tx-api-calls! #(invoke! node losing loser))]
+                                         (let [{:keys [observation capture]}
+                                               (publication/capture-framed-submissions! admit node #(invoke! node losing loser))]
                                            (reset! captured capture)
+                                           (reset! observation-handle observation)
                                            (if (= :returned (:outcome capture))
                                              (:result capture)
                                              (throw (:error capture)))))
