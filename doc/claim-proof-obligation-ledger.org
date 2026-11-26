@@ -6965,3 +6965,25 @@ its positive end-to-end path is not yet qualified. Full gates not run.
 Next: qualify the composed path in genuine assembled host recovery,
 including both adjacent and worker-interleaved histories and rejection of
 reopened or copied sources. Keep durable lineage and CLM-R2 premises open.
+
+* v2794 — qualify composed local recovery on assembled hosts
+
+Exercise the strict issued-origin and retained-acquisition comparison in
+both genuine adjacent and worker-interleaved Claim recovery histories.
+Check that its matched result agrees with the historical comparison apart
+from the additional local binding fields. Retain the original acquisition
+handle through host shutdown and check rejection after reopening the same
+store and opening an independent physical copy. Neither a fresh acquisition
+on the substitute node nor a fresh observation paired with the old handle
+transfers the original local binding. Historical content comparison still
+matches. The successful local report does not establish durable storage
+identity, authorized lineage, or authenticated writer provenance.
+
+Focused assembled-host JVM: 2 tests / 190 assertions, zero failures or
+errors. Use a longer execution limit to preserve both real 60-second
+worker polling intervals; previous 120-second attempts timed out. The
+older offline dependency bundle was used; full project gates not run.
+
+Next: specify the durable storage-incarnation and authorized lineage
+trust boundary, including legitimate restore versus arbitrary byte copy.
+Keep authenticated writer provenance and CLM-R2 discharge open.
