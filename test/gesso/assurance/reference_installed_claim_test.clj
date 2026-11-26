@@ -18,12 +18,94 @@
             [gesso.model.command :as command]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.inductive-plan :as induction]
+            [gesso.model.certified-plan :as plan]
+            [gesso.model.mapped-frame :as frame]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
             [xtdb.node :as xtn])
   (:import (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)
            (java.time Duration)))
+
+(defn- submit-refusal! [node admission opts prepare execute source-id tables winner-binding winner-outcome winner-row assignment]
+  (let [helper "helper-2" alternative (claim/alternative-id helper :refuse)
+        source (claim/source helper :refuse)
+        binding {:command-id (identity/command-id "claim-2") :principal (identity/principal helper)
+                 :operation :request/claim :arguments {:request-id "r1"}}
+        cmd (assoc binding :execution-id (identity/execution-id "e2"))
+        outcome {:outcome :request/not-claimable :reason :already-claimed}
+        guards #{[:requests "r1" :status :claimed] [:requests "r1" :revision 1] [:requests "r1" :updated-at "t1"]}
+        guard-targets #{[:requests "r1"]}
+        version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at}
+        captured (atom []) prepared (atom nil)
+        before-outbox (set (xt/q node "SELECT * FROM gesso_live_outbox"))
+        winner-record (resolution/command-record winner-binding winner-outcome "t1")
+        refusal-opts (assoc opts
+                            :construction-contract {:required-guard-tables #{:requests} :allowed-guard-tables #{:requests}
+                                                    :required-write-tables #{:gesso_commands} :allowed-write-tables #{:gesso_commands}}
+                            :target-contract! (fn [& _] {:required-guard-targets guard-targets :allowed-guard-targets guard-targets
+                                                        :required-write-targets #{} :allowed-write-targets #{}})
+                            :predicate-contract! (fn [& _] {:required-guard-checks guards :allowed-guard-checks guards
+                                                           :required-update-checks #{} :allowed-update-checks #{}})
+                            :command-operation-contract! (fn [& _] {:required-command-operations #{} :allowed-command-operations #{}})
+                            :post-state-contract! (fn [& _] {:required-post-state-values #{} :allowed-post-state-values #{}})
+                            :outcome-contract! (fn [& _] {:expected-outcome outcome})
+                            :construct! (fn [{:keys [ctx] :as invocation}]
+                                          (let [snapshot (claim/snapshot-at-frontier! ctx)]
+                                            (reset! prepared snapshot)
+                                            (admission :prepare! alternative (select-keys invocation [:command-id :principal :operation :arguments]) snapshot {}))
+                                          {:spec nil :model-plan {:guards [(command/guard :requests winner-row
+                                                                                         (assoc version :compare-keys [:revision :updated-at :status]))]}
+                                           :outcome outcome :now "t2"}))
+        executor (publication/build-executor refusal-opts)
+        prepare (with-meta prepare (assoc (meta prepare) ::publication/binding (constantly binding)
+                                          ::publication/prepare-model (fn [& _] (throw (ex-info "Refusal must not publish" {})))))
+        result (with-redefs [adapter/project-resolution! (fn [_ result _] result)
+                             live-xtdb/execute-tx-from! (fn [ctx ops & [options]]
+                                                         (let [receipt (execute ctx ops options)]
+                                                           (swap! captured conj {:ops ops :receipt receipt}) receipt))]
+                 (executor (assoc cmd :command cmd :ctx {:xtdb/connectable node publication/preparation-key prepare})))
+        {:keys [ops receipt]} (first @captured)
+        basis (live-xtdb/tx-result-basis (:tx-result receipt))
+        expected {:tx-id (live-xtdb/basis-tx-id basis) :system-time (live-xtdb/basis-system-time basis) :ops ops}
+        docs (:document-rows @prepared) journal (vec (vals (:records @prepared)))
+        admitted (induction/describe-mapped-admission admission)
+        cases {["helper-1" :request/claim {:request-id "r1"} winner-outcome] :accepted
+               [helper :request/claim {:request-id "r1"} outcome] :rejected}
+        spec {:alternative alternative :inputs {} :effects {} :binding binding :outcome outcome :now "t2" :outcome-cases cases}
+        context (assoc (select-keys admitted [:catalog-fingerprint :induction-fingerprint])
+                       :selectors (get-in admitted [:input-derivations alternative]))
+        prefix-count (count (frame/formatted-prestate-assertions! (plan/check-target-mapping! source claim/target-map) docs journal))
+        compose! (fn [n tx scope]
+                   (evidence/compare-local-processed-retained-mapped-executor!
+                    n scope source claim/target-map docs journal tx prefix-count spec context source-id
+                    (:publication-derivations admitted) (:residual-assertion-derivations admitted)))
+        refusal-record (resolution/command-record binding outcome "t2")]
+    (.awaitSourceBlocking (db/primary-db node) (:tx-id expected) (Duration/ofSeconds 30))
+    (is (= :incorporated (:status result)))
+    (is (= outcome (:outcome result)))
+    (is (= 1 (count @captured)))
+    (is (= [winner-record] journal))
+    (is (= :accepted (get-in @prepared [:state :journal/one])))
+    (is (nil? (get-in @prepared [:state :journal/two])))
+    (is (= :checked-commit-basis-projection (get-in result [:transaction :mapped-readback :physical-correspondence])))
+    (is (= [[:put-docs :gesso_commands refusal-record]]
+           (filterv #(and (= :put-docs (first %)) (not= :gesso_transition_evidence (second %))) ops)))
+    (is (= [winner-row] (xt/q node "SELECT * FROM requests")))
+    (is (= [assignment] (xt/q node "SELECT * FROM request_assignments")))
+    (is (= #{winner-record refusal-record} (set (xt/q node "SELECT * FROM gesso_commands"))))
+    (is (= before-outbox (set (xt/q node "SELECT * FROM gesso_live_outbox"))))
+    (is (= #{"claim-1" "claim-2"} (set (map :xt/id (xt/q node "SELECT * FROM gesso_transition_evidence")))))
+    (let [report (compose! node expected tables)]
+      (is (= :matched (:status report)) (pr-str report))
+      (is (= :matched-retained-predecessor (:prepared-prestate report)))
+      (is (= :matched-source-relative-record (:transition-evidence report)))
+      (is (= :matched-source-relative-publication (:publication-fragment report)))
+      (is (= :matched-source-relative-residual (:residual-fragment report)))
+      (is (= :matched-source-derived-puts (:mapped-write-suffix report)))
+      (is (= :not-asserted (:selected-transaction-commitment report))))
+    (is (= :unsupported (:status (compose! node expected (disj tables :gesso_live_outbox)))))
+    {:expected expected :compose! compose!}))
 
 (deftest issued-claim-executor-retained-transaction
   (let [root (Files/createTempDirectory "gesso-issued-claim-replay-" (make-array FileAttribute 0))
@@ -49,7 +131,7 @@
         operations #{[:requests "r1" :claim] [:request_assignments "primary-r1" :create]}
         values (into #{} (mapcat (fn [[table row]] (map (fn [[k v]] [table (:xt/id row) k v]) row)))
                      [[:requests after] [:request_assignments assignment]])
-        capture (atom nil) prepared (atom nil) claimed (atom 0) composition (atom nil)]
+        capture (atom nil) prepared (atom nil) claimed (atom 0) composition (atom nil) refusal (atom nil)]
     (try
       (let [selected
             (with-open [node (xtn/start-node config)]
@@ -206,15 +288,24 @@
                       (is (= :not-issued (:certificate report)))
                       (is (= :mismatch (:status (provider/compare-local-processed-retained-transaction! node tables (update expected :ops pop)))))
                       (is (= :unsupported (:status (provider/compare-local-processed-retained-transaction! node (disj tables :memberships) expected)))))
+                    (reset! refusal (submit-refusal! node admission opts prepare execute source-id tables binding outcome after assignment))
+                    (is (= 2 @claimed))
+                    (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)]
+                      (is (= [expected (:expected @refusal)] (subvec (:replay-inputs sample) 1)))
+                      (is (= :matched (:status (@composition node expected tables)))))
                     expected)
                   (finally (release)))))]
         (with-open [node (xtn/start-node config)]
-          (.awaitSourceBlocking (db/primary-db node) (:tx-id selected) (Duration/ofSeconds 30))
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (:expected @refusal)) (Duration/ofSeconds 30))
           (is (= :matched (:status (provider/compare-local-processed-retained-transaction! node tables selected))))
           (let [report (@composition node selected tables)]
             (is (= :matched (:status report)) (pr-str report))
             (is (= :matched-source-relative-record (:transition-evidence report)))
-            (is (= :absent-at-retained-predecessor (:publication-ids report))))))
+            (is (= :absent-at-retained-predecessor (:publication-ids report))))
+          (let [report ((:compose! @refusal) node (:expected @refusal) tables)]
+            (is (= :matched (:status report)) (pr-str report))
+            (is (= :matched-source-relative-record (:transition-evidence report)))
+            (is (= :matched-source-relative-publication (:publication-fragment report))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
 
 (deftest distinct-alternative-and-command-identities-with-occupied-journal

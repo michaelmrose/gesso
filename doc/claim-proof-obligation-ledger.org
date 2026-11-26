@@ -5589,3 +5589,28 @@ bypasses full host/browser/HTTP paths. The genuine refusal execution,
 selected commitment and universal physical refinement remain open.
 No production admission expansion, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates not rerun.
+
+* v2753 — qualify genuine sequential Claim refusal in the retained history
+
+Extend the issued Claim executor fixture with a second helper's guarded
+journal-only refusal following the first helper's accepted claim, using
+the same admission and registered synchronous submission policy. Capture
+the actual second submission and receipt, derive its complete envelope
+from the refusal alternative and newly acquired prepared rows including
+the occupied winning journal slot, and match it through the existing v4
+retained executor diagnostic. Check both captured transactions in the
+same retained history and repeat both comparisons after persistent
+reopening. Require no domain writes or publication preparation on
+refusal; preserve the winning request, assignment, journal record and
+outbox rows while adding the rejected journal and evidence records.
+
+Focused JVM: 2 tests / 107 assertions, zero failures or errors in
+reference-installed-claim-test. The refusal uses a separate closed
+journal-only executor configuration and fresh snapshot, not recovery
+after an aborted speculative acceptance. The two submissions are
+sequential, not a concurrent race. Outcome case mappings, declarations,
+input values, effects and capture provenance remain premises; full host
+installation, selected commitment correspondence and universal
+refinement remain open. Test-only revision; no production profile or
+admission expansion, certificate or CLM-R2 premise retirement.
+Full project and independent formal gates not rerun.
