@@ -5729,3 +5729,23 @@ standalone over supplied replay history; stable provider bracket and genuine
 executor composition are deferred to the next revision. No authenticated
 input/outcome provenance, provider refinement, certificate, production
 admission expansion or CLM-R2 premise retirement. Full gates not rerun.
+
+* v2760 — same-bracket retained abstract executor comparison
+
+Compose the v2759 independent abstract projection with source-relative
+executor envelope and selected commitment qualification, using the same
+retained history bracket as the historical prestate and provider checks.
+Require observation coverage of every mapped table, including journal
+slots. Use the same supplied input valuation and outcome interpretation as
+the complete envelope; expose a positive abstract-transition result only
+after the entire comparison matches. Preserve the prior commit-only entry
+point and conditional authority/certificate status.
+
+Focused JVM regression: 4 tests / 65 assertions, zero failures or errors.
+The new composition tests use stubbed provider acquisition and outcome
+observations with actual replay, mapped guards, projection and envelope
+checking. They cover changed history, incomplete table coverage, incorrect
+inputs, contradictory commitment and legacy entry-point behavior. Genuine
+persistent Claim executor qualification and full project gates have not
+been rerun. No authenticated premise provenance, universal refinement,
+production admission expansion or CLM-R2 premise retirement.

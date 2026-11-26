@@ -290,10 +290,11 @@
    Declarations and outcome cases are premises, not authenticated issuance."
   [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations mode]
   (let [abort? (= :abort mode)
-        commit? (= :commit mode)
+        commit? (contains? #{:commit :abstract} mode)
         tag #(assoc % :mapped-retained-evidence-profile (case mode
                                                          :abort :selected-mapped-retained-executor-abort-v1
                                                          :commit :selected-mapped-retained-executor-commit-v1
+                                                         :abstract :selected-mapped-retained-executor-abstract-v1
                                                          executor-retained-profile))
         fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
                     :provider-refinement :not-established})
@@ -353,9 +354,14 @@
       (let [r (tag (if abort?
                      (provider/compare-local-processed-retained-mapped-abort!
                       node tables original targets docs journal expectation prefix-count (:id checked))
-                     (provider/compare-local-processed-retained-mapped-publication-absence!
-                      node tables original targets docs journal expectation prefix-count (:id checked)
-                      (:publication-ids checked) (:residual-ops checked) :publication-first commit?)))]
+                     (if (= :abstract mode)
+                       (provider/compare-local-processed-retained-mapped-publication-absence!
+                        node tables original targets docs journal expectation prefix-count (:id checked)
+                        (:publication-ids checked) (:residual-ops checked) :publication-first true
+                        (select-keys spec [:inputs :outcome-key :outcome-cases]))
+                       (provider/compare-local-processed-retained-mapped-publication-absence!
+                        node tables original targets docs journal expectation prefix-count (:id checked)
+                        (:publication-ids checked) (:residual-ops checked) :publication-first commit?))))]
         (if (= :matched (:status r))
           (if abort?
             (assoc r :candidate-envelope :matched-source-relative-attempt
@@ -390,3 +396,11 @@
    Does not authenticate supplied premises or discharge abstract refinement."
   [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
   (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations :commit))
+
+(defn compare-local-processed-retained-mapped-executor-abstract!
+  "Additionally compare the independently replayed abstract pre/poststate
+   and original guarded relation inside the same retained-history bracket.
+   Uses the same supplied inputs and outcome interpretation as the envelope.
+   No authenticated provenance or universal refinement is established."
+  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
+  (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations :abstract))

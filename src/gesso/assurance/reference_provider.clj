@@ -2,6 +2,8 @@
   "Bounded comparison of independently expected execution and supplied observations."
   (:require [clojure.string :as str]
             [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.reference-mapped-poststate :as poststate]
+            [gesso.model.certified-plan :as plan]
             [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.choreo.identity :as identity]
             [gesso.model.command-resolution :as resolution]
@@ -565,11 +567,28 @@
         (catch clojure.lang.ExceptionInfo _
           {:status :unsupported :reason :unsupported-retained-prestate})))))
 
+(defn- abstract-projection-failure [inputs expectation original targets tables spec]
+  (let [required (try
+                   (into #{} (map (fn [[kind table]] (if (= :journal-slot kind) :gesso_commands table)))
+                         (vals (:target-map (plan/check-target-mapping! original targets))))
+                   (catch clojure.lang.ExceptionInfo _ nil))]
+    (if-not (and (set? tables) (some? required) (every? tables required))
+      (acquisition-result :unsupported :incomplete-abstract-projection-scope)
+      (let [r (poststate/compare-selected! inputs expectation original targets spec)]
+        (when-not (and (= :matched (:status r)) (= poststate/profile (:profile r))
+                       (= :matched-retained-projection (:abstract-transition r))
+                       (= :none (:authority r)) (= :not-issued (:certificate r))
+                       (= :not-established (:provider-refinement r)))
+          (if (#{:unsupported :mismatch} (:status r)) r
+              (acquisition-result :unsupported :invalid-abstract-projection-result)))))))
+
 (defn- compare-mapped-retained*
-  [node tables original target-map docs journal expectation prefix-count prestate? command-id evidence? publication-ids & [commit?]]
+  [node tables original target-map docs journal expectation prefix-count prestate? command-id evidence? publication-ids & [commit? abstract-spec]]
   (let [offset (if evidence? 1 0)
         tag #(cond-> (assoc % :mapped-retained-execution-profile mapped-retained-execution-profile)
                commit? tag-commitment
+               (some? abstract-spec) (assoc :selected-abstract-transition-profile poststate/profile)
+               (and (some? abstract-spec) (= :matched (:status %))) (assoc :abstract-transition :matched-retained-projection)
                prestate? (assoc :mapped-retained-prestate-profile mapped-retained-prestate-profile)
                command-id (assoc :mapped-retained-command-absence-profile :selected-mapped-retained-command-absence-v1)
                evidence? (assoc :mapped-retained-evidence-absence-profile :selected-mapped-retained-evidence-absence-v1)
@@ -594,7 +613,9 @@
                                                  (when (or prestate? commit?)
                                                    (fn [inputs]
                                                      (or (when prestate? (historical-prestate-failure inputs expectation (:groups checked) command-id evidence? publication-ids))
-                                                         (when commit? (selected-commitment-failure node inputs expectation)))))))]
+                                                         (when commit? (selected-commitment-failure node inputs expectation))
+                                                         (when (some? abstract-spec)
+                                                           (abstract-projection-failure inputs expectation original target-map tables abstract-spec)))))))]
         (if (= :matched (:status report))
           (cond-> (assoc report :source-lowering :checked-exact-prefix
                          :selected-transaction-binding :matched
@@ -661,7 +682,8 @@
    the exact preceding fragment supplied by a separate derivation checker;
    this function checks placement, not residual source correspondence.
    The final arity selects publication-first or residual-first placement.
-   The last arity optionally requires selected successful commitment.
+   The next arity optionally requires selected successful commitment.
+   The final arity additionally checks the abstract projection when supplied.
    No publication body check."
   ([node tables original target-map docs journal expectation prefix-count command-id publication-ids]
    (compare-local-processed-retained-mapped-publication-absence!
@@ -673,8 +695,11 @@
    (compare-local-processed-retained-mapped-publication-absence!
     node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops guard-order false))
   ([node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops guard-order commit?]
+   (compare-local-processed-retained-mapped-publication-absence!
+    node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops guard-order commit? nil))
+  ([node tables original target-map docs journal expectation prefix-count command-id publication-ids residual-ops guard-order commit? abstract-spec]
   (let [ops (:ops expectation)]
-    (if (and (boolean? commit?) (set? tables) (every? tables [:gesso_commands :gesso_transition_evidence :gesso_live_outbox])
+    (if (and (boolean? commit?) (or (nil? abstract-spec) (and commit? (map? abstract-spec))) (set? tables) (every? tables [:gesso_commands :gesso_transition_evidence :gesso_live_outbox])
              (string? command-id) (not (str/blank? command-id)) (<= (count command-id) 1024)
              (vector? publication-ids) (nil? (meta publication-ids)) (<= (count publication-ids) 128)
              (every? uuid? publication-ids) (= (count publication-ids) (count (set publication-ids)))
@@ -690,7 +715,7 @@
                                      (into guards residual-ops) (into residual-ops guards))]
                (= expected-guards (subvec ops (inc prefix-count)
                                           (+ 1 prefix-count (count expected-guards))))))
-      (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true command-id true publication-ids commit?)
+      (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true command-id true publication-ids commit? abstract-spec)
       (assoc (acquisition-result :unsupported :invalid-retained-publication-id-guards)
              :mapped-retained-publication-absence-profile :selected-mapped-retained-publication-absence-v1)))))
 
