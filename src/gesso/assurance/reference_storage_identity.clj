@@ -124,3 +124,47 @@
      :observation-storage-identity :not-established
      :authorized-historical-lineage :not-established
      :authority :none :certificate :not-issued}))
+
+(def selection-profile :selected-open-storage-premises-v1)
+
+(defn- reject-selection! [reason]
+  (throw (ex-info "Invalid selection of open storage identity premises."
+                  {:error/type ::invalid-selection :reason reason})))
+
+(defn describe-selected-premises
+  "Compose the exact, dependency-closed selection for a declared scope.
+
+   Offered premises must be raw assumption declarations, not reports,
+   fingerprints, handles or verdicts. Re-derive the required premises from
+   scope, require each exactly once and match them structurally using the
+   assumption checker. Return canonical required descriptions, independent
+   of input order. Selection expresses only the proposed conditional
+   premises, not their acceptance by a deployment or their discharge.
+
+   Scope and selection remain sensitive declarative material. This function
+   neither accepts a historical comparison nor authenticates a provider,
+   lifecycle event, writer, or identity relation."
+  [scope offered]
+  (let [description (describe-obligations scope)
+        required (mapv :assumption (:obligations description))
+        ids (set (map :id required))]
+    (when-not (and (vector? offered) (nil? (meta offered))
+                   (<= (count offered) (count required))
+                   (every? #(and (map? %) (not (record? %)) (nil? (meta %))) offered))
+      (reject-selection! :invalid-premise-selection))
+    (let [offered-ids (mapv :id offered)
+          selected-ids (set offered-ids)]
+      (when-not (= (count offered-ids) (count selected-ids))
+        (reject-selection! :duplicate-premise))
+      (when-not (= ids selected-ids)
+        (reject-selection! :incorrect-premise-set))
+      (let [by-id (into {} (map (juxt :id identity)) offered)]
+        (doseq [premise required]
+          (assumption/match-premise! premise (get by-id (:id premise)))
+          (when-not (every? selected-ids (:dependencies premise))
+            (reject-selection! :missing-premise-dependency)))
+        (assoc description
+               :selection-profile selection-profile
+               :selection :exact-structural-only
+               :dependency-closure :complete-for-declared-premises
+               :premise-acceptance :not-performed)))))

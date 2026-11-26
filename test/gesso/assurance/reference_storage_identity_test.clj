@@ -145,3 +145,54 @@
     (is (every? #(= :open (:discharge-state %)) (:obligations r)))
     (is (= :invalid-historical-cut
            (reason #(describe (assoc scope :historical-cut (assoc empty-cut :processed-message-id 0))))))))
+
+(defn- premises [s] (mapv :assumption (:obligations (describe s))))
+
+(deftest selected-premises-are-exact-and-remain-open
+  (doseq [relation storage/relations]
+    (let [s (assoc scope :relation relation)
+          ps (premises s)
+          r (storage/describe-selected-premises s ps)]
+      (is (= storage/selection-profile (:selection-profile r)))
+      (is (= :exact-structural-only (:selection r)))
+      (is (= :complete-for-declared-premises (:dependency-closure r)))
+      (is (= :not-performed (:premise-acceptance r)))
+      (is (= (describe s) (dissoc r :selection-profile :selection :dependency-closure :premise-acceptance)))
+      (is (= r (storage/describe-selected-premises s (vec (reverse ps)))))
+      (is (= r (storage/describe-selected-premises s (edn/read-string (pr-str ps)))))
+      (is (= :none (:authority r)))
+      (is (= :not-issued (:certificate r)))
+      (is (= :not-established (:observation-storage-identity r) (:authorized-historical-lineage r)))
+      (doseq [p (:obligations r)]
+        (is (= :open (:discharge-state p)))
+        (is (= :not-performed (:checking p)))
+        (is (= :not-admitted (:admission p)))))))
+
+(deftest rejects-incomplete-or-substituted-premise-selections
+  (let [[origin acquisition relation :as ps] (premises scope)
+        select! #(storage/describe-selected-premises scope %)]
+    (doseq [bad [nil (seq ps) (set ps) (describe scope) (with-meta ps {:accepted true})
+                 (conj ps origin) (mapv :id ps) (assoc ps 0 (with-meta origin {:trusted true}))]]
+      (is (= :invalid-premise-selection (reason #(select! bad)))))
+    (doseq [bad [[] [origin] [origin acquisition] [relation] [origin relation]]]
+      (is (= :incorrect-premise-set (reason #(select! bad)))))
+    (is (= :duplicate-premise (reason #(select! [origin origin relation]))))
+    (is (= :incorrect-premise-set
+           (reason #(select! (premises (assoc scope :relation :authorized-historical-lineage))))))
+    (doseq [changed [(assoc scope :identity-policy :fixture/other-policy)
+                     (assoc scope :historical-cut (assoc cut :payload-fingerprint (apply str (repeat 64 "b"))))
+                     (assoc scope :origin-observation-ref "different-origin")
+                     (assoc scope :retained-acquisition-ref "different-acquisition")]]
+      (is (= :subject-mismatch (reason #(select! (premises changed))))))
+    (is (= :scope-mismatch (reason #(select! (premises (assoc scope :comparison-id :fixture/other))))))
+    (doseq [modified [(assoc relation :dependencies #{})
+                      (assoc relation :dependencies #{:fixture/unselected})
+                      (assoc relation :dependencies #{(:id relation)})
+                      (assoc relation :proposition [:fixture/always-true])
+                      (assoc relation :implementation-boundary :fixture/other-controller)
+                      (assoc relation :origin :other)]]
+      (is (= :premise-mismatch (reason #(select! [origin acquisition modified])))))
+    (doseq [modified [(assoc relation :discharge-state :discharged)
+                      (assoc relation :certificate "signed")
+                      (assumption/describe-assumption relation)]]
+      (is (some? (reason #(select! [origin acquisition modified])))))))

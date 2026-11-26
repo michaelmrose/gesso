@@ -7114,3 +7114,23 @@ offline dependency bundle; full gates not run.
 Next: compose the exact selected open premises with their dependency
 closure, without accepting or discharging them or promoting a caller
 supplied historical comparison into evidence.
+
+* v2797 — select the exact dependency-closed open premises
+
+Derive the mandatory premises from the versioned storage comparison scope
+and structurally match an explicitly offered vector of raw declarations.
+Require each premise exactly once and preserve its exact dependencies.
+Return canonical required descriptions independent of selection order.
+Reject missing, duplicate, wrong-relation, wrong-cut, wrong-policy and
+altered-dependency declarations, as well as purported discharge evidence.
+Selection is structural only; acceptance, checking, admission and
+discharge remain unperformed. No historical comparison report is accepted
+as input, and neither identity nor lineage is established.
+
+Focused JVM: 30 tests / 873 assertions, zero failures or errors across
+storage identity and assumption namespaces. Older offline dependency
+bundle; full project gates not run.
+
+Next: derive the declared historical cut from actual retained acquisition
+contents and qualify the required prefix against a target sample without
+confusing digest equality with authenticated lifecycle evidence.
