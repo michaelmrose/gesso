@@ -5991,3 +5991,37 @@ retirement. Full project gates were not rerun.
 Next: qualify the relationship between the finite outcome declaration
 and the installed mapped admission decoder, with explicit treatment of
 the supported finite domain and unsupported outcomes.
+
+* v2770 — issued mapped decoder finite-domain comparison
+
+Recheck the exact issued mapped admission against its original supplied
+source before observing its outcome decoder. Independently derive every
+finite declared outcome case and sample each with two record identities
+and clock values. Validate explicit out-of-domain command records and
+distinguish returned values, ExceptionInfo throws and unexpected
+exceptions. No overall match is returned on an incorrect in-domain
+value or an out-of-domain return. A throw is an observation, not a
+universal semantic rejection proof.
+
+Focused JVM regression: 3 tests / 40 assertions, zero failures or errors
+after correcting a synthetic test fixture compilation error. Two tests
+stub the issuance recheck to exercise mismatch handling. The actual
+issued Claim admission test uses the genuine catalog, decoder and
+require-current-mapped-admission! check. All eight in-domain samples
+match the four declared cases. Four out-of-domain samples produce two
+returns and two throws: the current fixture decoder does not restrict
+operation and principal identity to the finite declared domain. The
+diagnostic therefore returns :mismatch with
+:outside-decoder-sample-returned. This is a decoder-domain discrepancy,
+not evidence of an unauthorized committed transaction or a bypass of
+the entire executor.
+
+No production decoder changes, persistent executor regression rerun,
+full gates, certificate, production admission expansion, universal
+decoder correspondence or CLM-R2 premise retirement. The supplied
+concrete declarations and callback purity remain premises.
+
+Next: replace the fixture's opaque outcome interpretation with a closed
+source-derived case lookup, validate record identity and reject keys
+outside the declared domain, then qualify the replacement against the
+issued admission and the existing persistent recovery trajectory.
