@@ -6638,3 +6638,48 @@ Next: compose issued submission observation and activated initialization
 root qualification with the worker-interleaved profile, maintaining
 the full retained sample and explicitly preserving the limits on
 worker observation origin and aborted transaction identity.
+
+* v2786 — activated observed worker-interleaved recovery composition
+
+Share the existing selected submission observation and activation-root
+comparisons between the adjacent and worker-interleaved recovery
+profiles. Add distinct public interleaved entry points and require
+the issued interleaved executor result, provider profile and maintenance
+result shape. Preserve the three mapped call pairs, exact handoff
+envelopes and two successful receipt coordinates. The worker operations
+are independently checked from retained history, not attributed to the
+synchronous mapped observation. Explicitly leave worker observation
+provenance unestablished.
+
+Keep the exact manifest and initializer prefix requirement, with the
+first selected mapped submission immediately following initialization.
+The activation root and nested interleaved recovery must acquire the
+same full retained sample. Return no positive combined evidence on a
+failed constituent comparison. Preserve both adjacent public APIs.
+
+Focused JVM: 11 tests / 257 assertions, zero failures or errors. The
+new synthetic test exercises the full seven-transaction history with
+manifest, initialization, three selected mapped attempts and two
+intervening worker operations. Check the actual submission comparator,
+root bracket, input/outcome/envelope checks and independent replay.
+Require all three physical comparisons to receive the same full
+history and table scope. Reject an unknown handle, missing activation
+root, altered captured operations, extra captured event, changed
+manifest descriptor, changed nested or closing sample and use of the
+adjacent profile. The unactivated interleaved entry point also matches.
+
+The test stubs observation registry reads, admission description and
+registry rechecks, initialization checking, checked handoff witness
+reconstruction, retained acquisition, provider correspondence and
+physical outcome reads. It does not qualify genuine interleaved
+execution, worker capture origin or actual host activation. The
+three mapped calls still require a synchronous local capture without
+extra captured calls. Durable storage identity, authenticated command
+and worker provenance, aborted receipt identity, universal provider
+refinement, certificate and CLM-R2 premise retirement remain
+unestablished. Full project gates were not rerun.
+
+Next: qualify genuine assembled worker-interleaved Claim recovery
+with the actual managed worker and the new activated observation
+profile, without filtering retained transactions or substituting
+provider or worker callbacks.

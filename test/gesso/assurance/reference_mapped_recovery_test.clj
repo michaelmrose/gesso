@@ -7,6 +7,11 @@
             [gesso.assurance.reference-mapped-publication :as publication]
             [gesso.assurance.reference-mapped-writes :as writes]
             [gesso.assurance.reference-mapped-decoder :as decoder]
+            [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
+            [gesso.live.consistency.xtdb :as live]
+            [gesso.live.outbox.initialization :as initialization]
+            [gesso.live.outbox.model-publication :as model-publication]
+            [gesso.model.command-resolution :as resolution]
             [gesso.model.inductive-plan :as induction]
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.reference-temporal :as temporal]
@@ -435,3 +440,104 @@
     (let [bad (run! steps source concrete description true)]
       (is (= :nonadjacent-recovery-selection (:reason bad)))
       (is (not (contains? bad :issued-admission-binding))))))
+
+(deftest activated-worker-interleaved-composes-observations-and-root
+  (let [{:keys [steps history tables source concrete description]} (issued-worker-example)
+        admission (Object.) handle (Object.)
+        source-id (:source-id (first steps))
+        descriptor "selected-fixture"
+        initializer (:ops (first history))
+        fp (:catalog-fingerprint description)
+        checked {:catalog-fingerprint fp :case-fingerprint fp :initialization-fingerprint fp
+                 :tables #{:gesso_requests :gesso_assignments}}
+        manifest (fixture/tx 0 [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_publication_manifests WHERE _id = ?)" source-id]
+                                ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = ?)" source-id]
+                                [:put-docs :gesso_publication_manifests {:xt/id source-id :profile-version 1 :descriptor descriptor}]])
+        manifest (update manifest :system-time #(.minusSeconds % 1))
+        seed (assoc (first history) :tx-id 1 :ops (initialization/transaction source-id initializer (:tables checked) checked))
+        history (into [manifest seed] (map #(update % :tx-id inc) (rest history)))
+        steps (mapv #(update-in % [:expectation :tx-id] inc) steps)
+        tables (into tables #{:gesso_initializations :gesso_publication_manifests})
+        claims (mapv (fn [{:keys [expectation spec source-id]}]
+                       {:submission {:api :execute-tx :tx-ops (:ops expectation) :tx-options (live/tx-opts nil)}
+                        :checked {:identity {:alternative (:alternative spec) :command-id (resolution/record-id (:binding spec))}
+                                  :candidate {:publication-source-id source-id}
+                                  :witness (apply dissoc (peek (peek (:ops expectation))) envelope/binding-keys)}}) steps)
+        events (vec (mapcat (fn [i step claim]
+                              (let [id (java.util.UUID/randomUUID)
+                                    {:keys [tx-id system-time]} (:expectation step)]
+                                [(assoc (:submission claim) :call-id id :phase :invoked)
+                                 (merge {:api :execute-tx :call-id id}
+                                        (if (= i 1) {:phase :threw :exception-class "fixture-abort"}
+                                            {:phase :returned :tx-result (reify xtdb.api.TransactionKey
+                                                                         (getTxId [_] tx-id)
+                                                                         (getSystemTime [_] system-time))}))]))
+                            (range 3) steps claims))
+        observation {:claims claims
+                     :capture {:type live/submission-capture-type :version live/submission-capture-version
+                               :observation-origin :instrumented-xtdb-adapter-call-site
+                               :actual-xtdb-api-authenticated? false :outcome :returned :events events}
+                     :activation-root {:observation (merge (dissoc checked :tables)
+                                                           {:source-id source-id :manifest-tx-id 0 :initialization-tx-id 1
+                                                            :system-time (:system-time seed) :manifest-envelope :matched
+                                                            :initialization-envelope :matched :physical-correspondence :checked-supplied-projection})
+                                       :root {:initializer initializer :descriptor descriptor}}}
+        sample {:status :observed :replay-inputs history}
+        failure-index (:failed-assertion-index (nth (:history (temporal/replay (mapv #(dissoc % :tx-id) history))) 4))
+        comparison {:status :matched :profile provider/profile :acquisition-profile provider/acquisition-profile
+                    :source-binding-profile provider/source-binding-profile :transaction-count 7
+                    :checks {:ledger true :retained-envelopes true :selected-history true}
+                    :authority :none :certificate :not-issued :provider-refinement :not-established}
+        acquired (atom 0) compared (atom [])
+        run! (fn [s h o samples mode]
+               (reset! acquired 0) (reset! compared [])
+               (with-redefs-fn {#'induction/describe-mapped-admission (constantly description)
+                                #'induction/require-current-mapped-admission! (constantly description)
+                                #'induction/check-mapped-initialization! (constantly checked)
+                                #'induction/mapped-transition-evidence! (fn [_ candidate] (:witness candidate))
+                                #'model-publication/read-framed-submission-observation! (fn [a token] (when (and (identical? a admission) (identical? token handle)) o))
+                                #'provider/observe-replay-history! (fn [_] (nth samples (dec (swap! acquired inc))))
+                                #'provider/compare-source-bound-execution! (fn [_ inputs scope] (swap! compared conj [inputs scope]) comparison)
+                                #'xt/q (fn [_ query] (if (= 4 (last query))
+                                                      [{:committed false :error (ex-info "abort" {:xtdb.error/code :xtdb/assert-failed :tx-op-idx failure-index})}]
+                                                      [{:committed true}]))}
+                 #((case mode
+                     :activated observed-recovery/compare-activated-worker-interleaved!
+                     :adjacent observed-recovery/compare-activated!
+                     :observed observed-recovery/compare-worker-interleaved!)
+                   nil tables admission source concrete s h)))
+        stable (vec (repeat 12 sample))
+        r (run! steps handle observation stable :activated)]
+    (is (= :matched (:status r)) (pr-str r))
+    (is (= observed-recovery/activated-interleaved-profile (:activated-recovery-profile r)))
+    (is (= observed-recovery/interleaved-profile (:observed-recovery-profile r)))
+    (is (= :matched-local-activated-retained-root (:activation-root-binding r)))
+    (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
+    (is (= :matched-local-issued-policy-window (:observation-origin r)))
+    (is (= :matched-selected-commit-identities (:returned-transaction-keys r)))
+    (is (= [2 4 6] (:selected-tx-ids r)))
+    (is (= [3 5] (mapv :tx-id (:intervening-maintenance r))))
+    (is (= 7 (:replayed-transaction-count r)))
+    (is (= (vec (repeat 3 [history tables])) @compared))
+    (is (= 10 @acquired))
+    (is (= :not-established (:worker-observation-provenance r) (:submission-provenance r)
+           (:aborted-receipt-identity r) (:observation-storage-identity r) (:provider-refinement r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (let [r (run! steps handle (dissoc observation :activation-root) stable :observed)]
+      (is (= :matched (:status r)) (pr-str r))
+      (is (= 8 @acquired))
+      (is (not (contains? r :activation-root-binding))))
+    (doseq [[s h o samples mode reason]
+            [[steps (Object.) observation stable :activated :unissued-framed-submission-observation]
+             [steps handle (dissoc observation :activation-root) stable :activated :missing-selected-activation-root]
+             [steps handle (assoc-in observation [:capture :events 0 :tx-ops] []) stable :activated :mapped-submission-envelope-mismatch]
+             [steps handle (update-in observation [:capture :events] conj (first events)) stable :activated :invalid-mapped-submission-observations]
+             [steps handle (assoc-in observation [:activation-root :root :descriptor] "changed") stable :activated :selected-activation-root-mismatch]
+             [steps handle observation (assoc stable 1 (assoc sample :changed true)) :activated :source-log-changed-during-recovery-comparison]
+             [steps handle observation (assoc stable 9 (assoc sample :changed true)) :activated :source-log-changed-during-recovery-comparison]
+             [steps handle observation stable :adjacent :nonadjacent-recovery-selection]]]
+      (let [bad (run! s h o samples mode)]
+        (is (= reason (:reason bad)) (pr-str bad))
+        (is (not-any? #(contains? bad %) [:activation-root-binding :submission-recovery-linkage :observation-origin
+                                          :issued-admission-binding :intervening-maintenance :selected-tx-ids]))))))

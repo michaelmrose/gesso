@@ -9,14 +9,11 @@
 
 (def profile :selected-issued-observed-mapped-recovery-v1)
 
-(defn compare-selected!
-  "Check one locally issued submission observation and the issued recovery
-   comparison against exactly the same selected steps. Do not expose a
-   positive subcomparison when either side fails. Historical observation
-   does not authenticate the provider, prove storage identity across reopen,
-   establish an aborted receipt identity, or cover other writers."
-  [node tables admission source outcome-declarations steps handle]
-  (let [base {:observed-recovery-profile profile :authority :none :certificate :not-issued
+(def interleaved-profile :selected-issued-observed-mapped-worker-interleaved-recovery-v1)
+
+(defn- compare-selected*
+  [node tables admission source outcome-declarations steps handle interleaved?]
+  (let [base {:observed-recovery-profile (if interleaved? interleaved-profile profile) :authority :none :certificate :not-issued
               :provider-refinement :not-established :source-provenance :not-established
               :outcome-provenance :not-established :submission-provenance :not-established
               :aborted-receipt-identity :not-established :observation-storage-identity :not-established}
@@ -38,32 +35,54 @@
                     (= :observed-throw-without-transaction-key (:aborted-call observed))))
           (fail :unsupported :invalid-observed-recovery-submission-comparison)
           :else
-          (let [retained (evidence/compare-local-processed-retained-issued-executor-recovery!
+          (let [retained ((if interleaved?
+                           evidence/compare-local-processed-retained-issued-executor-worker-interleaved-recovery!
+                           evidence/compare-local-processed-retained-issued-executor-recovery!)
                           node tables admission source outcome-declarations steps)]
             (cond
               (not= :matched (:status retained)) (fail (:status retained) (:reason retained))
-              (not (and (= evidence/issued-executor-recovery-profile (:issued-executor-recovery-profile retained))
+              (not (and (= (if interleaved? evidence/issued-executor-interleaved-recovery-profile
+                                             evidence/issued-executor-recovery-profile)
+                           (:issued-executor-recovery-profile retained))
                         (= :matched-issued-declarations (:issued-admission-binding retained))
                         (= :matched-issued-closed-construction (:closed-decoder-binding retained))
                         (= (mapv #(get-in % [:expectation :tx-id]) steps) (:selected-tx-ids retained))
                         (= [:committed :aborted :committed] (:selected-commitments retained))
-                        (= :matched-retained-journal-trajectory (:recovery-linkage retained))))
+                        (= :matched-retained-journal-trajectory (:recovery-linkage retained))
+                        (or (not interleaved?)
+                            (and (= provider/mapped-interleaved-recovery-profile (:mapped-recovery-profile retained))
+                                 (vector? (:intervening-maintenance retained))
+                                 (integer? (:replayed-transaction-count retained))))))
               (fail :unsupported :invalid-observed-recovery-retained-comparison)
               :else (merge retained
                            (select-keys observed [:observed-profile :observation-origin :framed-handoffs
                                                  :adapter-payloads :returned-transaction-keys :aborted-call])
-                           base {:status :matched :submission-recovery-linkage :matched-local-observed-retained-steps}))))))))
+                           base {:status :matched :submission-recovery-linkage :matched-local-observed-retained-steps}
+                           (when interleaved? {:worker-observation-provenance :not-established})))))))))
+
+(defn compare-selected!
+  "Check one locally issued submission observation and the issued recovery
+   comparison against exactly the same selected steps. Do not expose a
+   positive subcomparison when either side fails. Historical observation
+   does not authenticate the provider, prove storage identity across reopen,
+   establish an aborted receipt identity, or cover other writers."
+  [node tables admission source outcome-declarations steps handle]
+  (compare-selected* node tables admission source outcome-declarations steps handle false))
+
+(defn compare-worker-interleaved!
+  "Match the three observed mapped submissions against the full retained
+   worker-interleaved history. Worker envelopes are checked from history,
+   not attributed to the synchronous submission observation."
+  [node tables admission source outcome-declarations steps handle]
+  (compare-selected* node tables admission source outcome-declarations steps handle true))
 
 (def activated-profile :selected-activated-observed-mapped-recovery-v1)
 
-(defn compare-activated!
-  "Require an observation captured under the same locally recorded activated
-   writer generation, and its exact manifest and initialization as the first
-   two retained transactions immediately preceding the selected recovery.
-   Reconstruct the seed envelope from the issued admission. Historical root
-   matching is not durable storage authentication or full host refinement."
-  [node tables admission source outcome-declarations steps handle]
-  (let [base {:activated-recovery-profile activated-profile :authority :none :certificate :not-issued
+(def activated-interleaved-profile :selected-activated-observed-mapped-worker-interleaved-recovery-v1)
+
+(defn- compare-activated*
+  [node tables admission source outcome-declarations steps handle interleaved?]
+  (let [base {:activated-recovery-profile (if interleaved? activated-interleaved-profile activated-profile) :authority :none :certificate :not-issued
               :provider-refinement :not-established :observation-storage-identity :not-established
               :submission-provenance :not-established :aborted-receipt-identity :not-established}
         fail #(assoc base :status %1 :reason %2)]
@@ -98,8 +117,8 @@
               (fail :mismatch :selected-activation-initialization-mismatch)
               (let [r (provider/compare-with-retained-root!
                        node manifest init (get-in steps [0 :expectation :tx-id])
-                       #(compare-selected! node tables admission source outcome-declarations steps handle))]
-                (if (and (= :matched (:status r)) (= profile (:observed-recovery-profile r))
+                       #(compare-selected* node tables admission source outcome-declarations steps handle interleaved?))]
+                (if (and (= :matched (:status r)) (= (if interleaved? interleaved-profile profile) (:observed-recovery-profile r))
                          (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
                   (merge r base {:status :matched :activation-root-binding :matched-local-activated-retained-root
                                  :initialization-tx-id initialization-tx-id :manifest-tx-id manifest-tx-id})
@@ -107,3 +126,19 @@
                         (or (:reason r) :invalid-activated-recovery-comparison))))))))
       (catch clojure.lang.ExceptionInfo e
         (fail :unsupported (or (:reason (ex-data e)) :invalid-activated-recovery-source))))))
+
+(defn compare-activated!
+  "Require an observation captured under the same locally recorded activated
+   writer generation, and its exact manifest and initialization as the first
+   two retained transactions immediately preceding the selected recovery.
+   Reconstruct the seed envelope from the issued admission. Historical root
+   matching is not durable storage authentication or full host refinement."
+  [node tables admission source outcome-declarations steps handle]
+  (compare-activated* node tables admission source outcome-declarations steps handle false))
+
+(defn compare-activated-worker-interleaved!
+  "Bind the activated initialization root and the three locally observed
+   mapped submissions to one complete worker-interleaved retained sample.
+   The root must still immediately precede the first selected submission."
+  [node tables admission source outcome-declarations steps handle]
+  (compare-activated* node tables admission source outcome-declarations steps handle true))
