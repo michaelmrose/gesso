@@ -5929,3 +5929,35 @@ refinement, admission expansion or CLM-R2 retirement. Full gates not rerun.
 Next: source-relative outcome interpretation and explicit binding of the
 selected candidate outcome to the original declared alternative, without
 treating a supplied decoder or outcome table as authenticated issuance.
+
+* v2768 — source-relative selected mapped outcome derivation
+
+Introduce a closed finite diagnostic declaration for the concrete argument
+and outcome pair of each journal-writing alternative. Derive the principal,
+operation and abstract keyword value from the original checked target
+mapping and literal journal replacement, not from a caller-selected
+outcome interpretation. Require complete coverage of journal-writing
+alternatives, exclude journal-free alternatives, and reject ambiguous
+concrete cases even if their abstract values agree. Compare the entire
+derived finite case table with the selected specification and bind the
+single candidate command record to the exact original alternative.
+
+Focused pure JVM regression: 2 tests / 28 assertions, zero failures or
+errors after correcting an unused input declaration in the synthetic
+replay fixture. Exercises acceptance/refusal, journal-free replay
+exclusion, incomplete and ambiguous declarations, substituted decoder
+cases, incorrect alternative, concrete outcome and record mismatch,
+and duplicate candidate records. The opaque runtime decoder is never
+invoked by the diagnostic. Current admission source still has an opaque
+decoder; the separate concrete argument/outcome declarations remain
+supplied premises, not authenticated issuance. This narrow profile
+supports one literal keyword journal replacement and one concrete
+case per journal-writing alternative, not arbitrary outcome functions.
+Persistent recovery composition and installed decoder correspondence
+remain outstanding. No commitment claim, universal provider refinement,
+certificate, production admission expansion or CLM-R2 premise retirement.
+Full gates not rerun.
+
+Next: use complete concrete outcome declarations for all Claim journal
+writers and compose the outcome check with the input-qualified retained
+executor trajectory, keeping source and decoder authentication explicit.
