@@ -8,7 +8,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v17)
+(def profile :selected-retained-replay-input-v18)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -135,12 +135,14 @@
                      (<= (count args) 14)))
         op))))
 
-(defn- project-mapped-assertion [query args]
-  ;; Invert only the canonical numbered placeholders of the selected mapped
-  ;; guard. Round-trip text equality excludes reordered, repeated and
-  ;; noncanonical parameters; the independent operation grammar checks the
-  ;; complete predicate, repeated scalar operands and identity.
-  (when (and (string? query) (<= 4 (count args) 769)
+(defn- project-document-assertion [query args]
+  ;; Mapped triple and ordinary residual equality share canonical numbered
+  ;; parameter inversion, not equality semantics. The independent grammar
+  ;; distinguishes their exact predicates, checks operand domains and
+  ;; rejects invalid identifiers. Round-trip numbering excludes reordered,
+  ;; repeated and noncanonical parameters, preserving quoted dollar names.
+  ;; A single-field residual has three operands; mapped triples need more.
+  (when (and (string? query) (<= 3 (count args) 769)
              (str/starts-with? query "ASSERT $1 = (SELECT COUNT(*) FROM gesso_"))
     (let [sql (str/replace query #"\$[0-9]+" "?")
           n (volatile! 0)
@@ -159,7 +161,7 @@
              (not clocked?) (or (project-state-assertion query args)
                                 (project-mapped-absence query args)
                                 (project-writer-absence query args)
-                                (project-mapped-assertion query args)
+                                (project-document-assertion query args)
                                 (project-field-count-assertion query args)
                                 (project-publication-absence query args)
                                 (project-worker-assertion query args)
@@ -220,7 +222,7 @@
 (defn decode-replay-input
   "Project selected retained operations with explicit time precedence.
    Includes exact quoted-table row-read, row-count, mapped scalar and
-   document field-count, publication identity/source and manifest absence, journal slot,
+   ordinary residual equality, document field-count, publication identity/source and manifest absence, journal slot,
    selected recursive journal value (including canonical wide groups) and
    worker clock/version assertions; the history must qualify for strictly
    increasing temporal replay.

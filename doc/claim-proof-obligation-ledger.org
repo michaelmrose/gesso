@@ -5411,3 +5411,28 @@ universal SQL equivalence, retained residual decoding or whole-envelope
 composition is established. No production admission expansion, certificate
 or CLM-R2 premise retirement. Full project and independent formal gates
 not rerun.
+
+* v2747 — qualify retained residual assertion reconstruction
+
+Reuse the canonical numbered-parameter projection for both mapped
+triple assertions and ordinary residual equality, with admission by the
+distinct independent operation grammar. Lower its minimum argument count
+from four to three to admit the production single-field residual subject
+check; retain canonical round-trip numbering, quoted qualified identifiers
+and all existing independent operand and scope checks. Advance strict
+retained input, acquisition and execution profiles, without expanding
+clocked/equal-time replay or ordinary SQL coercion semantics.
+
+JVM: 15 tests / 1127 assertions, zero failures or errors across residual
+derivation, retained replay input and the new persistent residual fixture.
+The new fixture contributes 56 assertions across seven actual transactions:
+production residual lowerer parity, exact retained operation reconstruction,
+future validity, expiry, failed version/subject checks, physical failure
+indices, tentative rollback, subsequent success and persistent reopening.
+Malformed numbering, count, identity, argument arity, qualified field
+and incomplete observation scope are rejected. The first fixture run
+exposed the three-argument projection gap and failed; the corrected full
+selected regression run passed. Complete residual envelope composition,
+installed declaration/input provenance and selected commitment remain
+unqualified. No production admission expansion, certificate or CLM-R2
+premise retirement. Full project and independent formal gates not rerun.
