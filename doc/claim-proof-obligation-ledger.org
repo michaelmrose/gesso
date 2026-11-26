@@ -6987,3 +6987,103 @@ older offline dependency bundle was used; full project gates not run.
 Next: specify the durable storage-incarnation and authorized lineage
 trust boundary, including legitimate restore versus arbitrary byte copy.
 Keep authenticated writer provenance and CLM-R2 discharge open.
+
+* v2795 — durable identity trust boundary and lifecycle policy
+
+** Decision and scope
+
+Use an explicit trusted deployment/lifecycle premise for the initial
+single-node profile. Do not require a new identity service, cryptographic
+journal or remote coordination system for ordinary Gesso applications.
+A deployment may later supply stronger independently qualified evidence;
+that is a separate identity-policy profile, not a change to operation
+semantics or a prerequisite to running an uncertified application.
+
+The logical publication source identifies the application source domain.
+A storage incarnation identifies one operationally controlled store.
+A host/session identifies a particular running instance of that store.
+None of these identifiers is a credential. A durable incarnation claim
+requires an independent lifecycle binding, not just an equal source ID.
+The locally issued handles from v2791–v2794 remain process-local; they
+cannot be serialized, restored or promoted into durable credentials.
+
+** Required trust boundary
+
+The selected policy must identify the deployment/controller responsible
+for opening and closing the actual embedded store, and for authorizing
+restoration or replica creation. A stronger evidence profile must obtain
+its lifecycle records from an authority outside the copyable store and
+bind them to the actual opened provider (log and storage together). The
+authority and its evidence acquisition must themselves be qualified.
+Reading a sidecar UUID, directory name, inode, config, digest, manifest
+or signed but unbound historical record from the store cannot do this.
+A trusted controller that does not control out-of-band substitution must
+name that limitation as an environment assumption. There is no claim of
+resistance to an administrator who can replace both store and authority.
+
+The original observation binding must be made while the originating
+provider and issued observation are available. Preserve the comparison
+scope, source domain, selected identity policy, original incarnation,
+observation reference and exact relevant historical cut. The acquisition
+binding must independently join the complete selected retained sample to
+its actual target incarnation and cut. The relation authority must use
+these bound endpoints, not endpoint labels copied from supplied reports.
+If origin evidence was never captured, do not reconstruct it by matching
+later content. Any retrospective continuity claim remains an assumption.
+
+The cut is source-relative: the required ordered prefix and transaction
+identities, including aborted entries where relevant, and the qualified
+processed frontier. Numeric transaction IDs or timestamps alone are not
+portable across unrelated stores. Preserve exact selected-content and
+physical correspondence checks in addition to the identity relation.
+Even a legitimately identified store may have been rolled back or lost
+history; identity alone cannot establish prefix preservation.
+
+** Lifecycle rules for the selected relations
+
+| Event | Same incarnation | Authorized historical lineage |
+|-------+------------------+-------------------------------|
+| Managed close/reopen of the original store | Conditional on trusted uninterrupted custody | Conditional on authorized custody and preservation of required prefix |
+| Arbitrary byte copy or unrecorded replacement | Not established | Not established |
+| Explicitly authorized restore to a new store | No | Conditional on authorization and required prefix |
+| Explicitly authorized replica acquisition | No | Conditional on authorization and required prefix |
+| Rollback below the required cut | Does not alone settle identity | Refuse the selected historical claim |
+| Unknown lifecycle or missing original binding | Not established | Not established |
+
+For a restore, a new incarnation must be distinguished from its parent;
+restoring over the old path does not make it the same incarnation. The
+lineage claim is directional, scoped to the required historical cut.
+Multiple authorized descendants may exist. A chain of authorized descent
+can support lineage only if each edge is qualified and preserves the
+required prefix. Neither relation authorizes writer promotion, current
+policy, exclusive leadership, nor continued absence of forks.
+
+** Admission and acceptance plan
+
+Keep =reference-storage-identity/describe-obligations= as the sole
+source of the three scoped open obligation descriptions. A selected
+operational-premise path must preserve all three exact premise identities
+and their dependency closure; accepting trust is not proof discharge.
+Reports must explicitly distinguish conditional historical correspondence
+from an independently established identity relation, carry the named
+trusted assumptions, and never emit a positive identity or certificate
+from an arbitrary caller-supplied record or Boolean. Missing, changed or
+unaccepted mandatory premises block the stronger claim, not the existing
+content-only diagnostic. Do not weaken the original local comparison.
+
+Next implement a narrow conditional-result composition using the existing
+assumption vocabulary: version the comparison scope to bind the selected
+cut explicitly (the v2790 reference strings alone do not specify it),
+derive the required premises and require exact structural correspondence
+of explicitly selected premises, without admitting or discharging them.
+Exercise missing,
+substituted, wrong-relation, wrong-cut and policy-mismatched premises and
+verify that no unconditional authority follows. Separately qualify the
+actual deployment bindings if a stronger durable identity claim is needed.
+The future multi-node deployment must supply its own qualified lifecycle
+and source-domain policy; the single-node operational premise cannot be
+silently extended to it.
+
+Documentation-only decision. No runtime change, new trust grant, identity
+establishment, authenticated writer provenance, certificate or CLM-R2
+premise discharge. No tests run for this revision.
