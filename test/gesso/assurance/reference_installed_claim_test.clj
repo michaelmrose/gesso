@@ -49,7 +49,7 @@
         operations #{[:requests "r1" :claim] [:request_assignments "primary-r1" :create]}
         values (into #{} (mapcat (fn [[table row]] (map (fn [[k v]] [table (:xt/id row) k v]) row)))
                      [[:requests after] [:request_assignments assignment]])
-        capture (atom nil) prepared (atom nil) claimed (atom 0)]
+        capture (atom nil) prepared (atom nil) claimed (atom 0) composition (atom nil)]
     (try
       (let [selected
             (with-open [node (xtn/start-node config)]
@@ -117,7 +117,42 @@
                           actual-puts (filterv #(and (= :put-docs (first %)) (write-tables (second %))) ops)
                           actual-witness (apply dissoc (peek (peek ops)) envelope/binding-keys)
                           actual-outbox (filterv #(and (= :put-docs (first %)) (= :gesso_live_outbox (second %))) ops)
-                          actual-remaining-guards (filterv #(string? (first %)) (subvec ops 10))]
+                          actual-remaining-guards (filterv #(string? (first %)) (subvec ops 10))
+                          compose! (fn [n tx scope]
+                                     (evidence/compare-local-processed-retained-mapped-executor!
+                                      n scope source claim/target-map prepared-docs [] tx 9 spec context
+                                      source-id publication-catalog residual-catalog))
+                          compare! (partial compose! node)
+                          rebind (fn [xs] (envelope/bind-transition-envelope!
+                                          (update-in xs [(dec (count xs)) 2] #(apply dissoc % envelope/binding-keys))))
+                          residual-index (+ 10 (count (:guard-ops publication)))
+                          put-index (+ residual-index (count residuals))]
+                      (reset! composition compose!)
+                      (.awaitSourceBlocking (db/primary-db node) id (Duration/ofSeconds 30))
+                      (let [report (compare! expected tables)]
+                        (is (= :matched (:status report)) (pr-str report))
+                        (is (= evidence/executor-retained-profile (:mapped-retained-evidence-profile report)))
+                        (is (= :matched-retained-predecessor (:prepared-prestate report)))
+                        (is (= :absent-at-retained-predecessor (:publication-ids report)))
+                        (is (= :matched-source-relative-residual (:residual-fragment report)))
+                        (is (= :matched-source-relative-publication (:publication-fragment report)))
+                        (is (= :matched-source-relative-record (:transition-evidence report)))
+                        (is (= :matched-source-derived-puts (:mapped-write-suffix report)))
+                        (is (= :matched (:transition-envelope-binding report)))
+                        (is (= :not-asserted (:selected-transaction-commitment report)))
+                        (is (= :none (:authority report)))
+                        (is (= :not-issued (:certificate report))))
+                      (doseq [[bad reason] [[(assoc-in ops [10 1] (java.util.UUID. 0 1)) :publication-fragment-mismatch]
+                                            [(assoc ops residual-index ["ASSERT TRUE"]) :residual-assertion-fragment-mismatch]
+                                            [(assoc ops put-index [:put-docs :requests (assoc after :revision 99)]) :selected-retained-write-suffix-mismatch]
+                                            [(assoc-in ops [(dec (count ops)) 2 :poststate-fingerprint] "bad") :transition-evidence-record-mismatch]
+                                            [(assoc ops residual-index (nth ops (inc residual-index))
+                                                        (inc residual-index) (nth ops residual-index)) :selected-retained-transaction-mismatch]]]
+                        (let [report (compare! (assoc expected :ops (rebind bad)) tables)]
+                          (is (= :mismatch (:status report)) (pr-str report))
+                          (is (= reason (:reason report)) (pr-str report))
+                          (is (not (contains? report :transition-evidence)))))
+                      (is (= :unsupported (:status (compare! expected (disj tables :gesso_live_outbox)))))
                       (is (not= alternative (:operation binding)))
                       (is (= (:state @prepared) (:before derived)))
                       (is (= :accepted (get-in derived [:after :journal/one])))
@@ -175,7 +210,11 @@
                   (finally (release)))))]
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (:tx-id selected) (Duration/ofSeconds 30))
-          (is (= :matched (:status (provider/compare-local-processed-retained-transaction! node tables selected))))))
+          (is (= :matched (:status (provider/compare-local-processed-retained-transaction! node tables selected))))
+          (let [report (@composition node selected tables)]
+            (is (= :matched (:status report)) (pr-str report))
+            (is (= :matched-source-relative-record (:transition-evidence report)))
+            (is (= :absent-at-retained-predecessor (:publication-ids report))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
 
 (deftest distinct-alternative-and-command-identities-with-occupied-journal

@@ -5560,3 +5560,32 @@ one same-retained-history source-relative diagnostic; full host wiring,
 selected commitment and universal refinement remain open. No expanded
 production admission, certificate or CLM-R2 premise retirement.
 Full project and independent formal gates not rerun.
+
+* v2752 — compose genuine Claim executor retained envelope
+
+Add a distinct selected mapped-retained evidence v4 diagnostic for
+the executor's publication-first guard layout. Independently derive
+the full residual multiset, consume each actual candidate assertion
+once for canonical operand validation, check exact publication guards
+and batch, compare complete ordinary put multiplicities, derive the
+unbound witness and recompute ordered envelope binding. Bind the
+entire captured vector, including actual residual order, to the same
+stable independent retained replay and historical prepared prestate,
+with all three identity absence domains. Preserve the earlier
+residual-first diagnostic arities and profiles.
+
+JVM: 7 tests / 346 assertions, zero failures or errors across installed
+Claim, selected envelope, mapped evidence and mapped publication tests.
+The genuine issued acceptance executor now satisfies the composed
+diagnostic before and after persistent reopening. Rebound changes to
+publication identity, residual guard, ordinary put and witness fail;
+a residual permutation with the same multiset fails exact retained
+transaction binding; incomplete outbox scope fails closed. The initial
+run passed 343 assertions; final run includes exact candidate
+consumption and composed reopening. Supplied outcome cases, input
+values, effects, declarations, context and capture provenance remain
+premises; the harness directly wires publication preparation and
+bypasses full host/browser/HTTP paths. The genuine refusal execution,
+selected commitment and universal physical refinement remain open.
+No production admission expansion, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates not rerun.
