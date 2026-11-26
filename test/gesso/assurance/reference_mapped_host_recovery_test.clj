@@ -6,6 +6,7 @@
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-historical-cut :as cut]
+            [gesso.assurance.reference-storage-identity :as storage]
             [gesso.assurance.reference-retained-acquisition :as acquisition]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.choreo.identity :as identity]
@@ -98,7 +99,41 @@
           (is (some? new-handle))
           (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)]
             (is (= :exact-content (:cut-correspondence (cut/compare-prefix-cut! required reopened new-handle))))
-            (is (nil? (observed-recovery/read-local-recovery-cut! admit (:observation fresh) cut-handle))))
+            (is (nil? (observed-recovery/read-local-recovery-cut! admit (:observation fresh) cut-handle)))
+            (let [policy {:comparison-id :fixture/recovery :relation :authorized-historical-lineage
+                          :identity-policy :fixture/custody :origin-boundary :fixture/origin
+                          :acquisition-boundary :fixture/acquisition :identity-boundary :fixture/controller}
+                  prepare! #(observed-recovery/prepare-conditional-recovery!
+                             admit observation cut-handle reopened %1 %2)
+                  prepared (prepare! new-handle policy)
+                  handle (:conditional-recovery prepared)
+                  scope (observed-recovery/read-conditional-recovery-scope! handle)
+                  premises (mapv :assumption (:obligations (storage/describe-obligations scope)))
+                  select! #(observed-recovery/select-conditional-recovery-premises! %1 %2)
+                  selected (select! handle premises)
+                  other (:conditional-recovery (prepare! new-handle policy))]
+              (is (= :prepared (:status prepared)))
+              (is (= required (:historical-cut scope)))
+              (is (= (:source-id (first steps)) (:publication-source-id scope)))
+              (is (= :conditional (:status selected)))
+              (is (= :conditional-on-open-premises (:historical-assurance selected)))
+              (is (= :exact-content (:cut-correspondence selected)))
+              (is (= :not-performed (:premise-acceptance selected)))
+              (is (= premises (mapv :assumption (:obligations selected))))
+              (is (every? #(= :open (:discharge-state %)) (:obligations selected)))
+              (is (= :none (:authority selected)))
+              (is (= :not-issued (:certificate selected)))
+              (is (= :not-established (:observation-storage-identity selected)
+                     (:authorized-historical-lineage selected)))
+              (is (= :subject-mismatch (:reason (select! other premises))))
+              (is (= :incorrect-premise-set (:reason (select! handle (pop premises)))))
+              (is (= :unissued-conditional-recovery (:reason (select! prepared premises))))
+              (is (= :unissued-retained-acquisition (:reason (prepare! retained-handle policy))))
+              (is (= :invalid-lifecycle-policy (:reason (prepare! new-handle (assoc policy :historical-cut required)))))
+              (with-redefs [storage/describe-selected-premises (constantly selected)]
+                (is (= :conditional-recovery-boundary-replaced (:reason (select! handle premises)))))
+              (with-redefs [cut/compare-prefix-cut! (constantly {:status :matched})]
+                (is (= :conditional-recovery-boundary-replaced (:reason (prepare! new-handle policy)))))))
           (is (nil? (acquisition/read-acquisition! reopened retained-handle)))
           (doseq [[obs handle reason] [[observation retained-handle :submission-origin-mismatch]
                                        [observation new-handle :submission-origin-mismatch]

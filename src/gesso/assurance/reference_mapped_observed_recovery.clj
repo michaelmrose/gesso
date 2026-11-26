@@ -4,6 +4,7 @@
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.assurance.reference-provider :as provider]
+            [gesso.assurance.reference-storage-identity :as storage]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.model.inductive-plan :as induction]))
@@ -234,7 +235,8 @@
               (let [handle (RecoveryCutObservation.)]
                 (locking recovery-cuts
                   (.put recovery-cuts handle {:admission admission :observation observation
-                                              :historical-cut (:historical-cut derived)}))
+                                              :historical-cut (:historical-cut derived)
+                                              :publication-source-id (:source-id (first steps))}))
                 (merge r base {:recovery-cut-observation handle
                                :recovery-cut-binding :matched-local-recovery-cut})))))))))
 
@@ -249,3 +251,99 @@
         (when (and entry (identical? admission (:admission entry))
                    (identical? observation (:observation entry)))
           (:historical-cut entry))))))
+
+(def conditional-profile :selected-conditional-historical-recovery-v1)
+(deftype ConditionalRecovery [])
+(def ^:private conditional-recoveries (java.util.WeakHashMap.))
+(def ^:private original-prefix-comparison cut/compare-prefix-cut!)
+(def ^:private original-premise-selector storage/describe-selected-premises)
+(def ^:private original-obligation-description storage/describe-obligations)
+(def ^:private policy-keys
+  #{:comparison-id :relation :identity-policy :origin-boundary
+    :acquisition-boundary :identity-boundary})
+
+(defn- conditional-report [status]
+  {:conditional-recovery-profile conditional-profile :status status
+   :observation-storage-identity :not-established
+   :authorized-historical-lineage :not-established
+   :authority :none :certificate :not-issued})
+
+(defn- conditional-boundaries-current? []
+  (and (identical? original-prefix-comparison cut/compare-prefix-cut!)
+       (identical? original-premise-selector storage/describe-selected-premises)
+       (identical? original-obligation-description storage/describe-obligations)))
+
+(defn prepare-conditional-recovery!
+  "Prepare a historical comparison of the exact locally issued original cut
+   and target acquisition. The caller declares only the lifecycle policy;
+   the cut, source and fresh local endpoint references are derived here.
+   A matching copy may prepare a conditional comparison, but cannot thereby
+   establish lifecycle authority. No current-state or durable receipt claim."
+  [admission observation original-cut node target policy]
+  (let [fail #(assoc (conditional-report %1) :reason %2)
+        origin (when (instance? RecoveryCutObservation original-cut)
+                 (locking recovery-cuts (.get recovery-cuts original-cut)))]
+    (cond
+      (not (conditional-boundaries-current?))
+      (fail :unsupported :conditional-recovery-boundary-replaced)
+      (not (and origin (identical? admission (:admission origin))
+                (identical? observation (:observation origin))))
+      (fail :unsupported :unissued-recovery-cut)
+      (not (and (map? policy) (not (record? policy)) (nil? (meta policy))
+                (= policy-keys (set (keys policy)))))
+      (fail :unsupported :invalid-lifecycle-policy)
+      :else
+      (let [scope (assoc policy
+                         :publication-source-id (:publication-source-id origin)
+                         :origin-observation-ref (str (random-uuid))
+                         :retained-acquisition-ref (str (random-uuid))
+                         :historical-cut (:historical-cut origin))]
+        (try
+          (original-obligation-description scope)
+          (let [r (original-prefix-comparison (:historical-cut origin) node target)]
+            (cond
+              (not (conditional-boundaries-current?))
+              (fail :unsupported :conditional-recovery-boundary-replaced)
+              (not= :matched (:status r)) (fail (:status r) (:reason r))
+              (not (contains? #{:exact-content :prefix-content} (:cut-correspondence r)))
+              (fail :unsupported :invalid-prefix-comparison)
+              :else
+              (let [handle (ConditionalRecovery.)]
+                (locking conditional-recoveries
+                  (.put conditional-recoveries handle
+                        {:scope scope :cut-correspondence (:cut-correspondence r)
+                         :original-cut original-cut :target target}))
+                (assoc (conditional-report :prepared) :conditional-recovery handle))))
+          (catch clojure.lang.ExceptionInfo e
+            (fail :unsupported (or (:reason (ex-data e)) :invalid-lifecycle-policy))))))))
+
+(defn- conditional-entry [handle]
+  (when (instance? ConditionalRecovery handle)
+    (locking conditional-recoveries (.get conditional-recoveries handle))))
+
+(defn read-conditional-recovery-scope!
+  "Read sensitive declared scope of a prepared comparison. Endpoint refs
+   are fresh process-local labels, not durable identifiers. Do not publish."
+  [handle]
+  (:scope (conditional-entry handle)))
+
+(defn select-conditional-recovery-premises!
+  "Compose the already compared historical endpoints with their exact open
+   lifecycle premises. No caller-supplied content report is accepted.
+   The returned canonical obligations contain sensitive cut material and
+   are for internal use only. Conditional does not mean accepted or proved."
+  [handle offered]
+  (let [fail #(assoc (conditional-report :unsupported) :reason %)]
+    (if-not (conditional-boundaries-current?)
+      (fail :conditional-recovery-boundary-replaced)
+      (if-let [{:keys [scope cut-correspondence]} (conditional-entry handle)]
+        (try
+          (let [r (original-premise-selector scope offered)]
+            (if-not (conditional-boundaries-current?)
+              (fail :conditional-recovery-boundary-replaced)
+              (merge r (conditional-report :conditional)
+                     {:cut-correspondence cut-correspondence
+                      :historical-assurance :conditional-on-open-premises})))
+          (catch clojure.lang.ExceptionInfo e
+            (fail (or (:reason (ex-data e)) :invalid-premise-selection))))
+        (fail :unissued-conditional-recovery)))))

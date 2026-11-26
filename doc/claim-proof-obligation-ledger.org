@@ -7204,3 +7204,33 @@ Next: compose the issued original recovery cut with an independently
 issued target acquisition and exact selected lifecycle premises. Keep
 conditional content correspondence separate from trust acceptance,
 durable identity and CLM-R2 premise discharge.
+
+* v2801 — compose conditional historical recovery
+
+Prepare a historical comparison from the exact issued original recovery
+cut and independently issued target acquisition. Derive the publication
+source and required cut from the original local registry, rather than
+accepting them from the caller. Generate fresh comparison-local endpoint
+references and retain the actual endpoint handles in a weak-key registry.
+Select only the exact open dependency-closed premises for that prepared
+scope. Reject incomplete and transferred selections, forged reports,
+unissued target acquisitions, caller-supplied cut declarations and
+replaced comparison or premise-selection boundaries.
+
+The canonical conditional result contains sensitive internal premise
+descriptions. Selection is structural only; acceptance, checking,
+admission and discharge remain unperformed. Equal content in a copied
+store permits the same conditional diagnostic, not evidence of authorized
+lineage. The process-local references are not durable identity credentials.
+No current-state, authenticated writer, storage custody or CLM-R2 proof
+claim follows.
+
+Focused JVM: 10 tests / 526 assertions, zero failures or errors across
+historical cut, assembled host recovery and storage identity namespaces.
+Genuine adjacent and worker-interleaved recovery, original-store reopen
+and physical copy are exercised with unchanged worker polling intervals.
+Older offline dependency bundle; full project gates not run.
+
+Next: qualify the conditional composition against extended target history
+and both lifecycle relations, then connect the exact open premises to
+explicit deployment acceptance without treating acceptance as proof.
