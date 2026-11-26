@@ -6519,3 +6519,40 @@ Next: compose this interleaved relation with actual retained acquisition,
 provider worker-envelope verification and selected mapped executor
 correspondence under one stable history bracket, preserving the strict
 adjacent API.
+
+* v2783 — bind worker-interleaved recovery to retained provider comparison
+
+Extract the shared retained mapped recovery bracket and add a distinct,
+explicit worker-interleaved entry point. Require the v2782 pure
+interleaving relation over the full acquired history, including exact
+maintenance envelopes, protected-state stuttering and journal linkage.
+The existing selected commitment, stale-prefix abort and abstract
+projection comparisons each acquire that same complete sample, not a
+filtered history. Check the linkage profile, selected transaction IDs
+and complete replay count before exposing intervening maintenance
+identities. Preserve the adjacent-selection entry point and profile.
+
+Focused JVM regression: 8 tests / 158 assertions, zero failures or
+errors. Includes the v2782 trajectory regressions and new provider
+composition case with lease acquisition before the abort and dispatch
+acknowledgment after it. Verify that all three nested provider
+comparisons receive the exact full six-transaction history and table
+scope. Reject the old adjacent profile on that selection, absent or
+wrong source identity, an altered intervening envelope, incomplete
+outbox scope, changed nested or closing acquisition samples, and a
+truncated nested transaction count, without positive linkage fields.
+
+The new test stubs retained acquisition, physical provider comparison
+and transaction outcome reads; it executes actual temporal replay,
+worker-envelope derivation and selected mapped projection checks.
+Genuine worker-interleaved persistent qualification has not yet run.
+This is a provider-bracket diagnostic, conditional on the selected
+mapped expectations and worker source identity; it does not derive
+complete executor envelopes, authenticate origin, or classify arbitrary
+prefix and suffix operations as workers. No production admission
+expansion, universal provider refinement, certificate or CLM-R2 premise
+retirement. Full project gates were not rerun.
+
+Next: compose the new interleaved provider bracket with complete
+source-derived executor-envelope checking, retaining the existing
+adjacent API and explicit maintenance qualification.

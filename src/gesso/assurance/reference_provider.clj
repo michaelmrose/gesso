@@ -798,14 +798,11 @@
 
 (def mapped-recovery-profile :selected-mapped-retained-recovery-v1)
 
-(defn compare-local-processed-retained-mapped-recovery!
-  "Bind three adjacent selected attempts to one observed retained sample.
-   Check both committed abstract projections, the stale mapped-prefix abort,
-   and exact journal linkage. Each nested comparison must observe that same
-   sample, not merely a separately stable history. Supplied mapped expectations
-   are premises; this does not derive the complete executor envelopes."
-  [node tables steps expected]
-  (let [tag #(assoc % :mapped-recovery-profile mapped-recovery-profile)
+(def mapped-interleaved-recovery-profile :selected-mapped-retained-worker-interleaved-recovery-v1)
+
+(defn- compare-mapped-recovery*
+  [node tables steps expected interleaved? source-id]
+  (let [tag #(assoc % :mapped-recovery-profile (if interleaved? mapped-interleaved-recovery-profile mapped-recovery-profile))
         fail #(tag (acquisition-result %1 %2))
         roles [:winner :abort :recovery]
         common #{:original :targets :docs :journal :expectation :prefix-count :command-id}
@@ -832,7 +829,9 @@
           (fail :unavailable :source-log-changed-during-recovery-comparison)
           :else
           (let [selected (mapv :expectation steps)
-                linkage (trajectory/compare-selected! (:replay-inputs before) selected expected)
+                linkage (if interleaved?
+                          (trajectory/compare-worker-interleaved! (:replay-inputs before) selected expected source-id)
+                          (trajectory/compare-selected! (:replay-inputs before) selected expected))
                 check-step (fn [{:keys [original targets docs journal expectation prefix-count command-id
                                         publication-ids residual-ops abstract-spec]} role]
                              (if (= :abort role)
@@ -859,13 +858,38 @@
                         (= [:committed :aborted :committed] (mapv :selected-transaction-commitment reports))
                         (= [:matched-retained-projection nil :matched-retained-projection] (mapv :abstract-transition reports))
                         (= :none-at-selected-abort (:durable-effects (second reports)))
-                        (= :matched-retained-journal-trajectory (:recovery-linkage linkage))))
+                        (= :matched-retained-journal-trajectory (:recovery-linkage linkage))
+                        (= (if interleaved? trajectory/interleaved-profile trajectory/profile) (:profile linkage))
+                        (= (mapv :tx-id selected) (:selected-tx-ids linkage))
+                        (or (not interleaved?)
+                            (and (vector? (:intervening-maintenance linkage))
+                                 (= (count (:replay-inputs before)) (:replayed-transaction-count linkage))))))
               (fail :unsupported :invalid-mapped-recovery-comparison)
-              :else (tag (assoc base :status :matched
+              :else (tag (cond-> (assoc base :status :matched
                                 :recovery-linkage :matched-retained-journal-trajectory
                                 :selected-tx-ids (:selected-tx-ids linkage)
                                 :selected-commitments [:committed :aborted :committed]
-                                :abstract-transitions [:matched-retained-projection :not-committed :matched-retained-projection])))))))))
+                                :abstract-transitions [:matched-retained-projection :not-committed :matched-retained-projection])
+                           interleaved? (assoc :intervening-maintenance (:intervening-maintenance linkage)
+                                               :replayed-transaction-count (:replayed-transaction-count linkage)))))))))))
+
+(defn compare-local-processed-retained-mapped-recovery!
+  "Bind three adjacent selected attempts to one observed retained sample.
+   Check both committed abstract projections, the stale mapped-prefix abort,
+   and exact journal linkage. Each nested comparison must observe that same
+   sample, not merely a separately stable history. Supplied mapped expectations
+   are premises; this does not derive the complete executor envelopes."
+  [node tables steps expected]
+  (compare-mapped-recovery* node tables steps expected false nil))
+
+(defn compare-local-processed-retained-mapped-worker-interleaved-recovery!
+  "Bind nonadjacent selected attempts to one complete observed retained sample.
+   Require exact intervening worker envelopes and protected-state stuttering,
+   then the existing selected physical and abstract comparisons over the same
+   full history. Source identity and mapped expectations remain premises;
+   no authenticated writer or provider refinement is established."
+  [node tables steps expected source-id]
+  (compare-mapped-recovery* node tables steps expected true source-id))
 
 (defn compare-with-retained-root!
   "Constrain a synchronous recovery comparison to an exact two-transaction

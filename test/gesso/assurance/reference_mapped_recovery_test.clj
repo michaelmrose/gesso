@@ -176,3 +176,62 @@
                   #(provider/compare-local-processed-retained-mapped-recovery! nil tables steps recovery/expected))]
       (is (= :source-log-changed-during-recovery-comparison (:reason r)))
       (is (not (contains? r :recovery-linkage))))))
+
+(deftest worker-interleaved-provider-comparison-shares-the-full-history
+  (let [{:keys [steps tables]} (example)
+        {worker-history :history id :id} (#'recovery/worker-history)
+        [w a r] steps
+        pending (peek (:ops (nth worker-history 1)))
+        w (update-in w [:expectation :ops] conj pending)
+        a (update a :expectation #(fixture/tx 3 (:ops %)))
+        r (update r :expectation #(fixture/tx 5 (:ops %)))
+        steps [w a r]
+        history [fixture/initial (:expectation w) (nth worker-history 2)
+                 (:expectation a) (nth worker-history 4) (:expectation r)]
+        sample {:status :observed :replay-inputs history}
+        failure-index (:failed-assertion-index (nth (:history (temporal/replay (mapv #(dissoc % :tx-id) history))) 3))
+        comparison {:status :matched :profile provider/profile :acquisition-profile provider/acquisition-profile
+                    :source-binding-profile provider/source-binding-profile :transaction-count 6
+                    :checks {:ledger true :retained-envelopes true :selected-history true}
+                    :authority :none :certificate :not-issued :provider-refinement :not-established}
+        observed (atom [])
+        run! (fn [samples scope source-id adjacent? result]
+               (reset! observed [])
+               (let [remaining (atom samples)]
+                 (with-redefs-fn {#'provider/observe-replay-history! (fn [_] (let [s (first @remaining)] (swap! remaining next) s))
+                                  #'provider/compare-source-bound-execution! (fn [_ inputs scope] (swap! observed conj [inputs scope]) result)
+                                  #'xt/q (fn [_ query] (if (= 3 (last query))
+                                                        [{:committed false :error (ex-info "abort" {:xtdb.error/code :xtdb/assert-failed :tx-op-idx failure-index})}]
+                                                        [{:committed true}]))}
+                   #(if adjacent?
+                      (provider/compare-local-processed-retained-mapped-recovery! nil scope steps recovery/expected)
+                      (provider/compare-local-processed-retained-mapped-worker-interleaved-recovery! nil scope steps recovery/expected source-id)))))
+        stable (vec (repeat 8 sample))
+        matched (run! stable tables "s" false comparison)]
+    (is (= :matched (:status matched)) (pr-str matched))
+    (is (= provider/mapped-interleaved-recovery-profile (:mapped-recovery-profile matched)))
+    (is (= [1 3 5] (:selected-tx-ids matched)))
+    (is (= [:committed :aborted :committed] (:selected-commitments matched)))
+    (is (= [:matched-retained-projection :not-committed :matched-retained-projection] (:abstract-transitions matched)))
+    (is (= [{:tx-id 2 :maintenance :lease-acquisition :intent-id id}
+            {:tx-id 4 :maintenance :dispatch-acknowledgment :intent-id id}]
+           (:intervening-maintenance matched)))
+    (is (= 6 (:replayed-transaction-count matched)))
+    (is (= (vec (repeat 3 [history tables])) @observed))
+    (is (= :not-established (:provider-refinement matched)))
+    (is (= :none (:authority matched)))
+    (is (= :not-issued (:certificate matched)))
+    (doseq [[samples scope source-id adjacent? result reason]
+            [[stable tables "s" true comparison :nonadjacent-recovery-selection]
+             [stable tables nil false comparison :invalid-recovery-linkage-source]
+             [stable tables "wrong" false comparison :unqualified-intervening-worker]
+             [(vec (repeat 8 (update-in sample [:replay-inputs 2 :ops] #(into [["ASSERT TRUE"]] %))))
+              tables "s" false comparison :unqualified-intervening-worker]
+             [stable (disj tables :gesso_live_outbox) "s" false comparison :incomplete-mapped-recovery-scope]
+             [(assoc stable 3 (assoc sample :changed true)) tables "s" false comparison :source-log-changed-during-recovery-comparison]
+             [(assoc stable 7 (assoc sample :changed true)) tables "s" false comparison :source-log-changed-during-recovery-comparison]
+             [stable tables "s" false (assoc comparison :transaction-count 4) :invalid-retained-replay-execution-comparison]]]
+      (let [r (run! samples scope source-id adjacent? result)]
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not-any? #(contains? r %) [:selected-tx-ids :recovery-linkage :intervening-maintenance
+                                        :replayed-transaction-count :abstract-transitions]))))))
