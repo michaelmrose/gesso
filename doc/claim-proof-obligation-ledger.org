@@ -7157,3 +7157,26 @@ project gates not run. No durable identity, lineage or CLM-R2 discharge.
 
 Next: acquire the selected required prefix digest within the same
 qualified full retained acquisition, then compare a genuine extension.
+
+* v2799 — verify prefix content within an issued acquisition
+
+Compute bounded frame-prefix SHA-256 digests from the same validated bytes
+as the complete processed retained replay sample. Share the existing frame
+encoding and clone the digest state at each boundary, including the empty
+prefix. Keep prefix digests in the local issuance registry without altering
+the ordinary replay report or historical full-cut comparison. A digest
+provider without clone support fails closed in prefix acquisition mode.
+Compare the exact projected transaction membership and ordered coordinates
+before comparing the issued prefix digest. Reject truncated histories,
+changed digests, omitted transaction identities and substituted readers.
+No digest is exposed by the comparison, and a match establishes content
+correspondence only, not storage custody or authorized lineage.
+
+Focused JVM: 34 tests / 971 assertions, zero failures or errors across
+historical cut, retained acquisition, storage identity and assumption
+namespaces. Genuine persistent history tests qualify empty, exact and
+extended cuts. Older offline dependency bundle; full gates not run.
+
+Next: bind the required cut to the original issued submission observation
+and independently qualified local recovery, rather than accepting a cut
+whose provenance is merely declared. Durable lifecycle premises remain open.

@@ -52,18 +52,34 @@
           (submit! "b" (.plusSeconds time 1))
           (let [later-handle (capture!)
                 later (:historical-cut (cut/derive-cut! node later-handle))
-                extension (compare! required later-handle)]
+                extension (compare! required later-handle)
+                prefix! #(cut/compare-prefix-cut! %1 node %2)]
             (is (= :matched (:status (compare! later later-handle))))
+            (is (= :prefix-content (:cut-correspondence (prefix! required later-handle))))
+            (is (= :prefix-content (:cut-correspondence (prefix! empty-cut later-handle))))
+            (is (= :exact-content (:cut-correspondence (prefix! later later-handle))))
+            (is (= :required-cut-coordinates-not-preserved (:reason (prefix! later handle))))
+            (is (= :required-cut-coordinates-not-preserved
+                   (:reason (prefix! (assoc required :transaction-ids []) later-handle))))
+            (is (= :required-cut-content-mismatch
+                   (:reason (prefix! (assoc required :payload-fingerprint (apply str (repeat 64 "0"))) later-handle))))
+            (is (= :unissued-retained-acquisition (:reason (prefix! required sample))))
+            (is (= :invalid-required-cut (:reason (prefix! nil later-handle))))
+            (is (nil? (acquisition/read-prefix-fingerprint! (Object.) later-handle 1)))
+            (is (nil? (acquisition/read-prefix-fingerprint! node later-handle 1024)))
+            (is (not (contains? (acquisition/read-acquisition! node later-handle) :prefix-fingerprints)))
+            (with-redefs [acquisition/read-prefix-fingerprint! (constantly (:payload-fingerprint required))]
+              (is (= :prefix-reader-replaced (:reason (prefix! required later-handle)))))
             (is (= :unsupported (:status extension)))
             (is (= :qualified-prefix-digest-required (:reason extension)))
             (is (= :required-cut-coordinates-not-preserved (:reason (compare! later handle))))
             (is (= :matched (:status (compare! required handle))))
-            (doseq [report [r extension (compare! required handle) (compare! required sample)]]
+            (doseq [report [r extension (compare! required handle) (compare! required sample) (prefix! required later-handle)]]
               (is (= :none (:authority report)))
               (is (= :not-issued (:certificate report)))
               (is (= :not-established (:observation-storage-identity report)
                      (:authorized-historical-lineage report))))
-            (doseq [report [extension (compare! required handle) (compare! required sample)]]
+            (doseq [report [extension (compare! required handle) (compare! required sample) (prefix! required later-handle)]]
               (is (not (contains? report :historical-cut)))
               (is (not (contains? report :payload-fingerprint)))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

@@ -291,7 +291,7 @@
 (defn- compare-local-payloads [report frames bytes records node target]
   ;; Compare only after coordinates, order and cardinality have matched.
   ;; Operation comparisons and replay projection use the same framed bytes.
-  (let [replay? (= :replay target)
+  (let [replay? (contains? #{:replay :replay-prefixes} target)
         clocked? (= :clocked-replay target)
         all? (or replay? clocked? (= :all target))]
     (cond
@@ -348,18 +348,32 @@
 
 (def payload-binding-profile :xtdb-2.2.0-beta1/selected-local-payload-binding-v1)
 
+(defn- update-frame-digest! [^MessageDigest digest [offset micros length] ^bytes body]
+  (let [header (doto (ByteBuffer/allocate 24)
+                 (.putLong (long offset))
+                 (.putLong (long micros))
+                 (.putLong (long length)))]
+    (.update digest (.array header))
+    (.update digest body)))
+
 (defn- payload-fingerprint [frames bytes]
   ;; Fixed-width big-endian coordinates and lengths bind the ordered
   ;; payloads, including maintenance. Internal equality sample, not a receipt.
   (let [digest (MessageDigest/getInstance "SHA-256")]
-    (doseq [[[offset micros length] ^bytes body] (map vector frames bytes)]
-      (let [header (doto (ByteBuffer/allocate 24)
-                     (.putLong (long offset))
-                     (.putLong (long micros))
-                     (.putLong (long length)))]
-        (.update digest (.array header))
-        (.update digest body)))
+    (doseq [[frame body] (map vector frames bytes)]
+      (update-frame-digest! digest frame body))
     (.formatHex (HexFormat/of) (.digest digest))))
+
+(defn- prefix-fingerprints [frames bytes]
+  ;; Clone the digest state at each frame boundary, including empty history.
+  ;; A provider without clone support fails closed through the reader.
+  (let [digest (MessageDigest/getInstance "SHA-256")
+        snapshot #(let [^MessageDigest copy (.clone digest)]
+                    (.formatHex (HexFormat/of) (.digest copy)))]
+    (reduce (fn [out [frame body]]
+              (update-frame-digest! digest frame body)
+              (conj out (snapshot)))
+            [(snapshot)] (map vector frames bytes))))
 
 (defn- observe-local* [node payload? bind? target]
   (if-not (db/<-node node)
@@ -395,7 +409,11 @@
                         (local-result :unavailable :source-log-changed-during-observation)
                         :else (cond-> report
                                 (and bind? (= :observed (:status report)))
-                                (assoc :payload-fingerprint (payload-fingerprint frames bytes))))))))))))
+                                (merge (if (= :replay-prefixes target)
+                                         (let [prefixes (prefix-fingerprints frames bytes)]
+                                           {:payload-fingerprint (peek prefixes)
+                                            :prefix-fingerprints prefixes})
+                                         {:payload-fingerprint (payload-fingerprint frames bytes)}))))))))))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
         (throw e))
@@ -592,10 +610,12 @@
    the same framed payloads as complete operation correspondence. Require
    stable bytes and processed frontiers, exact ordered identities and
    increasing independently resolved system times. Empty history yields no inputs.
-   Do not publish inputs or fingerprints. No execution comparison or proof."
-  [node]
-  (let [sample (observe-processed-retained-history*
-                node #(assoc (observe-local* % true true :replay)
+   Do not publish inputs or fingerprints. No execution comparison or proof.
+   Optional prefix mode derives bounded prefix digests from the same bytes."
+  ([node] (observe-local-processed-retained-replay-inputs! node false))
+  ([node prefixes?]
+   (let [sample (observe-processed-retained-history*
+                node #(assoc (observe-local* % true true (if prefixes? :replay-prefixes :replay))
                              :retained-history-profile retained-history-profile
                              :payload-profile local-payload-profile
                              :decoder-profile payload/profile))
@@ -613,7 +633,7 @@
     (cond-> (assoc sample :processed-retained-replay-inputs-profile processed-retained-replay-inputs-profile
                    :processed-retained-history-binding-profile processed-retained-history-binding-profile
                    :payload-binding-profile payload-binding-profile)
-      (not= :observed (:status sample)) (dissoc :replay-inputs :payload-fingerprint))))
+      (not= :observed (:status sample)) (dissoc :replay-inputs :payload-fingerprint :prefix-fingerprints)))))
 
 (def processed-retained-clocked-inputs-profile
   :xtdb-2.2.0-beta1/selected-processed-retained-clocked-inputs-v2)

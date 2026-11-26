@@ -31,7 +31,7 @@
         (report :unsupported :embedded-primary-log-required)
         (let [^Database database (db/primary-db node)
               log (.getSourceLog database)
-              sample (original-reader node)
+              sample (original-reader node true)
               ^Database after (db/primary-db node)]
           (cond
             (not (and (identical? database after)
@@ -44,13 +44,21 @@
             (not (and (= coverage/processed-retained-replay-inputs-profile
                          (:processed-retained-replay-inputs-profile sample))
                       (= :none (:authority sample))
-                      (= :not-issued (:certificate sample))))
+                      (= :not-issued (:certificate sample))
+                      (vector? (:prefix-fingerprints sample))
+                      (= (inc (count (:record-offsets sample)))
+                         (count (:prefix-fingerprints sample)))
+                      (= (:payload-fingerprint sample) (peek (:prefix-fingerprints sample)))
+                      (every? #(and (string? %) (re-matches #"[0-9a-f]{64}" %))
+                              (:prefix-fingerprints sample))))
             (report :unsupported :invalid-retained-acquisition)
 
             :else
             (let [handle (RetainedAcquisition.)]
               (locking acquisitions
-                (.put acquisitions handle {:node node :sample sample}))
+                (.put acquisitions handle {:node node
+                                           :sample (dissoc sample :prefix-fingerprints)
+                                           :prefixes (:prefix-fingerprints sample)}))
               (assoc (dissoc (report :issued nil) :reason) :acquisition handle)))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
@@ -69,3 +77,13 @@
       (let [entry (.get acquisitions handle)]
         (when (and entry (identical? node (:node entry)))
           (:sample entry))))))
+
+(defn read-prefix-fingerprint!
+  "Sensitive digest of the first n complete frames of the issued sample.
+   No new read, caller-supplied digest, receipt or durable identity."
+  [node handle n]
+  (when (and (instance? RetainedAcquisition handle) (integer? n) (<= 0 n 1024))
+    (locking acquisitions
+      (let [entry (.get acquisitions handle)]
+        (when (and entry (identical? node (:node entry)))
+          (get (:prefixes entry) (int n)))))))

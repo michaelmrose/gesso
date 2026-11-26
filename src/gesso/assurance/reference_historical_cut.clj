@@ -6,6 +6,7 @@
 
 (def profile :selected-issued-historical-cut-v1)
 (def ^:private original-reader acquisition/read-acquisition!)
+(def ^:private original-prefix-reader acquisition/read-prefix-fingerprint!)
 (def ^:private cut-keys
   [:payload-binding-profile :record-offsets :transaction-ids
    :processed-message-id :payload-fingerprint])
@@ -60,3 +61,31 @@
         (= (:record-offsets required) (:record-offsets observed))
         (result :mismatched :required-cut-content-mismatch)
         :else (result :unsupported :qualified-prefix-digest-required)))))
+
+(defn compare-prefix-cut!
+  "Compare a required prefix with the exact issued target sample. Verify
+   projected transaction membership, coordinates and the prefix digest.
+   Content only; provenance and lifecycle remain open. No digest returned."
+  [required node handle]
+  (if-not (identical? original-prefix-reader acquisition/read-prefix-fingerprint!)
+    (result :unsupported :prefix-reader-replaced)
+    (if-not (storage/historical-cut? required)
+      (result :unsupported :invalid-required-cut)
+      (let [r (derive-cut! node handle)
+            observed (:historical-cut r)
+            offsets (:record-offsets required)]
+        (cond
+          (not= :derived (:status r)) (result (:status r) (:reason r))
+          (not (and (prefix? offsets (:record-offsets observed))
+                    (= (:transaction-ids required)
+                       (filterv (set offsets) (:transaction-ids observed)))))
+          (result :mismatched :required-cut-coordinates-not-preserved)
+          :else
+          (let [digest (original-prefix-reader node handle (count offsets))]
+            (cond
+              (nil? digest) (result :unsupported :qualified-prefix-digest-required)
+              (not= digest (:payload-fingerprint required))
+              (result :mismatched :required-cut-content-mismatch)
+              :else (assoc (dissoc (result :matched nil) :reason)
+                           :cut-correspondence (if (= required observed)
+                                                 :exact-content :prefix-content)))))))))
