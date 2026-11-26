@@ -5334,3 +5334,29 @@ whole retained envelope check; guard placement, historical outbox identity
 absence, installed declaration/source provenance and selected commitment
 remain open. No production admission expansion, certificate or CLM-R2
 premise retirement. Full project and independent formal gates not rerun.
+
+* v2744 — compose retained publication envelope and identity absence
+
+Require the exact ordered publication guard fragment after the mapped
+prefix and before command absence, followed by complete ordinary mapped
+puts, the exact publication put fragment and final bound evidence record.
+Compare source-derived intents and witness before binding the entire
+retained transaction; check UUID identity absence in the same historical
+predecessor as command/evidence identities and prepared rows. Require
+outbox observation scope even for a declared empty publication. Preserve
+prior diagnostic APIs; reject reserved auxiliary tables as mapped writes.
+
+JVM: 7 tests / 330 assertions, zero failures or errors across mapped
+publication, mapped evidence, mapped writes and persistent publication
+replay. The new fixture contributes 48 assertions: occupied outbox ID
+aborts despite fresh command/evidence identities, fresh IDs commit,
+reopening preserves correspondence, altered or reordered publication
+guards and altered or incomplete outbox batches fail even when rebound,
+and explicit empty publication matches in a separate persistent history
+without additional outbox records. Missing declarations and observation
+scope fail closed. Fixtures use production encoding with manually assembled
+transactions. Residual assertions, installed source/declaration and input
+provenance, successful selected commitment and universal provider
+refinement remain unqualified. No production admission expansion,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates not rerun.
