@@ -384,7 +384,7 @@
                :retained-execution-profile retained-execution-profile)
         (dissoc r :source-coverage)))))
 
-(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v17)
+(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v18)
 
 (defn- valid-replay-history? [sample]
   (let [inputs (:replay-inputs sample)]
@@ -460,7 +460,7 @@
 
 (def mapped-retained-prestate-profile :selected-mapped-retained-prestate-v1)
 
-(defn- historical-prestate-failure [inputs expectation groups]
+(defn- historical-prestate-failure [inputs expectation groups command-id]
   ;; Use the predecessor system snapshot but the selected transaction's
   ;; valid instant. Neither its own writes nor a later commit may supply
   ;; the prepared rows. The empty predecessor is the initial empty state.
@@ -484,15 +484,21 @@
                              :absent (empty? actual)
                              :exact-row (= [row] actual)
                              false)))]
-          (when-not (every? matches? groups)
-            {:status :mismatch :reason :selected-retained-prestate-mismatch}))
+          (cond
+            (not (every? matches? groups))
+            {:status :mismatch :reason :selected-retained-prestate-mismatch}
+            (and command-id (not-every? string? (keys (get visible :gesso_commands))))
+            {:status :unsupported :reason :unsupported-retained-command-id-domain}
+            (and command-id (contains? (get visible :gesso_commands) command-id))
+            {:status :mismatch :reason :selected-retained-command-id-present}))
         (catch clojure.lang.ExceptionInfo _
           {:status :unsupported :reason :unsupported-retained-prestate})))))
 
 (defn- compare-mapped-retained*
-  [node tables original target-map docs journal expectation prefix-count prestate?]
+  [node tables original target-map docs journal expectation prefix-count prestate? command-id]
   (let [tag #(cond-> (assoc % :mapped-retained-execution-profile mapped-retained-execution-profile)
-               prestate? (assoc :mapped-retained-prestate-profile mapped-retained-prestate-profile))
+               prestate? (assoc :mapped-retained-prestate-profile mapped-retained-prestate-profile)
+               command-id (assoc :mapped-retained-command-absence-profile :selected-mapped-retained-command-absence-v1))
         invalid #(tag (acquisition-result :unsupported :invalid-mapped-retained-prefix))
         checked (when (and (source-expectations? [expectation])
                            (instance? Instant (:system-time expectation))
@@ -510,13 +516,14 @@
                  (= :none (:authority checked)) (= :not-issued (:certificate checked)))
       (invalid)
       (let [report (tag (compare-retained-replay* node tables expectation
-                                                 (when prestate? #(historical-prestate-failure % expectation (:groups checked)))))]
+                                                 (when prestate? #(historical-prestate-failure % expectation (:groups checked) command-id))))]
         (if (= :matched (:status report))
           (cond-> (assoc report :source-lowering :checked-exact-prefix
                          :selected-transaction-binding :matched
                          :selected-transaction-commitment :not-asserted
                          :mapped-prestate-lowering-version 5)
-            prestate? (assoc :prepared-prestate :matched-retained-predecessor))
+            prestate? (assoc :prepared-prestate :matched-retained-predecessor)
+            command-id (assoc :global-command-id :absent-at-retained-predecessor))
           report)))))
 
 (defn compare-local-processed-retained-mapped-execution!
@@ -530,7 +537,7 @@
    guard execution, authenticated provenance or refinement is established.
    Return only diagnostic status and profile metadata, not sensitive inputs."
   [node tables original target-map docs journal expectation prefix-count]
-  (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count false))
+  (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count false nil))
 
 (defn compare-local-processed-retained-mapped-prestate!
   "Additionally compare every complete prepared target row or absence to
@@ -540,7 +547,18 @@
    journal records fail closed. Does not authenticate acquisition, prove
    commitment, qualify suffix lowering or establish universal refinement."
   [node tables original target-map docs journal expectation prefix-count]
-  (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true))
+  (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true nil))
+
+(defn compare-local-processed-retained-mapped-command-absence!
+  "Additionally require string command identity absence across the entire
+   visible journal at the selected prestate, not just the mapped slot. The
+   caller supplies the ID; this does not check guard placement or writes."
+  [node tables original target-map docs journal expectation prefix-count command-id]
+  (if (and (set? tables) (contains? tables :gesso_commands)
+           (string? command-id) (not (str/blank? command-id)) (<= (count command-id) 1024))
+    (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true command-id)
+    (assoc (acquisition-result :unsupported :invalid-retained-command-id)
+           :mapped-retained-command-absence-profile :selected-mapped-retained-command-absence-v1)))
 
 (def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v2)
 

@@ -112,3 +112,39 @@
                  (if (= :matched (:status r))
                    (assoc r :mapped-write-suffix :matched-source-derived-puts)
                    r)))))
+
+(def guarded-profile :selected-mapped-retained-writes-v2)
+
+(defn compare-local-processed-retained-guarded-mapped-writes!
+  "Require the exact command-ID absence guard immediately after the mapped
+   prefix, then the entire derived put suffix. Match global journal identity
+   absence at the same independently reconstructed predecessor. This selected
+   envelope is not the complete production publication/evidence envelope."
+  [node tables original targets docs journal expectation prefix-count spec]
+  (let [tag #(assoc % :mapped-retained-writes-profile guarded-profile)
+        fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
+                    :provider-refinement :not-established})
+        checked (try
+                  (let [id (resolution/record-id (:binding spec))
+                        ops (:ops expectation)]
+                    (if (and (string? id) (vector? ops) (integer? prefix-count)
+                             (<= 1 prefix-count (- (count ops) 2))
+                             (contains? #{["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" id]
+                                          ["ASSERT ? = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" 0 id]}
+                                        (nth ops prefix-count))
+                             (= #{:gesso_commands} (current/operation-tables (nth ops prefix-count))))
+                      (if (= (rows-of! (derive-puts! original targets docs journal spec))
+                             (rows-of! (subvec ops (inc prefix-count))))
+                        {:status :matched :id id}
+                        {:status :mismatch :reason :selected-retained-write-suffix-mismatch})
+                      {:status :unsupported :reason :invalid-command-id-absence-guard}))
+                  (catch clojure.lang.ExceptionInfo _
+                    {:status :unsupported :reason :invalid-mapped-write-source-or-suffix}))]
+    (if (= :matched (:status checked))
+      (let [r (tag (provider/compare-local-processed-retained-mapped-command-absence!
+                    node tables original targets docs journal expectation prefix-count (:id checked)))]
+        (if (= :matched (:status r))
+          (assoc r :mapped-write-suffix :matched-source-derived-puts
+                   :command-id-absence-guard :matched)
+          r))
+      (fail (:status checked) (:reason checked)))))

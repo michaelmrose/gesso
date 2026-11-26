@@ -102,3 +102,68 @@
           (is (= :mismatch (:status (compare! node (assoc expected :ops (into prefix (reverse puts))) spec tables))))
           (is (= :unsupported (:status (compare! node expected spec #{:gesso_requests :gesso_commands}))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest global-command-absence-is-not-slot-absence
+  (let [root (Files/createTempDirectory "gesso-global-command-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        row {:xt/id "r1" :amount 2 :enabled true :revision 0 :extra "preserve"}
+        docs {:gesso_requests [row] :gesso_assignments []}
+        binding {:command-id (identity/command-id "c1") :principal (identity/principal "helper-a")
+                 :operation :example/claim :arguments {:request-id "r1"}}
+        spec {:inputs {:example/next-count 3} :effects {[:document :gesso_requests "r1"] {:revision 1}
+                                                       [:document :gesso_assignments "a1"] {:revision 0}}
+              :binding binding :outcome {:status :claimed} :now "t1" :outcome-key :status}
+        fresh (assoc-in spec [:binding :command-id] (identity/command-id "c2"))
+        occupied (resolution/command-record (assoc binding :principal (identity/principal "helper-b"))
+                                            {:status :claimed} "t0")
+        prefix (frame/formatted-prestate-assertions! (plan/check-target-mapping! source targets) docs [])
+        literal ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" "c1"]
+        bound ["ASSERT ? = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" 0 "c2"]
+        puts (writes/derive-puts! source targets docs [] fresh)
+        txs [[[:put-docs :gesso_requests row] [:put-docs :gesso_commands occupied]]
+             (into (conj prefix literal) (writes/derive-puts! source targets docs [] spec))
+             (into (conj prefix bound) puts)]
+        tables #{:gesso_requests :gesso_assignments :gesso_commands}
+        check! (fn [node tx s]
+                 (writes/compare-local-processed-retained-guarded-mapped-writes!
+                  node tables source targets docs [] tx (count prefix) s))]
+    (try
+      (let [history (with-open [node (xtn/start-node config)]
+                      (let [database (db/primary-db node)
+                            history (mapv (fn [i ops]
+                                            (let [time (.plusSeconds t i)
+                                                  id (:tx-id (xt/submit-tx node ops {:system-time time}))]
+                                              (.awaitTxBlocking database id (Duration/ofSeconds 30))
+                                              {:tx-id id :system-time time :ops ops})) (range) txs)]
+                        (.awaitSourceBlocking database (:tx-id (peek history)) (Duration/ofSeconds 30))
+                        (is (= [true false true]
+                               (mapv (fn [tx] (:committed (first (xt/q node ["SELECT committed FROM xt.txs WHERE _id = ?" (:tx-id tx)])))) history)))
+                        (is (= [occupied] (xt/q node ["SELECT * FROM gesso_commands WHERE _id = ?" "c1"])))
+                        (let [collision (check! node (second history) spec)
+                              success (check! node (peek history) fresh)]
+                          (is (= :mismatch (:status collision)) (pr-str collision))
+                          (is (= :selected-retained-command-id-present (:reason collision)))
+                          (is (not (contains? collision :global-command-id)))
+                          (is (= :matched (:status success)) (pr-str success))
+                          (is (= writes/guarded-profile (:mapped-retained-writes-profile success)))
+                          (is (= :absent-at-retained-predecessor (:global-command-id success)))
+                          (is (= :matched (:command-id-absence-guard success)))
+                          (is (= :matched-source-derived-puts (:mapped-write-suffix success)))
+                          (is (= :not-asserted (:selected-transaction-commitment success)))
+                          (is (= :none (:authority success)))
+                          (is (= :not-issued (:certificate success))))
+                        (doseq [ops [(into prefix puts)
+                                     (into (conj prefix (assoc bound 2 "other")) puts)
+                                     (into (conj prefix (assoc bound 1 1)) puts)
+                                     (conj (into prefix puts) bound)
+                                     (into (conj prefix bound) (conj puts bound))]]
+                          (let [r (check! node (assoc (peek history) :ops ops) fresh)]
+                            (is (= :unsupported (:status r)) (pr-str r))
+                            (is (not (contains? r :global-command-id)))))
+                        history))]
+        (with-open [node (xtn/start-node config)]
+          (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek history)) (Duration/ofSeconds 30))
+          (is (= :matched (:status (check! node (peek history) fresh))))
+          (is (= :selected-retained-command-id-present (:reason (check! node (second history) spec))))))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

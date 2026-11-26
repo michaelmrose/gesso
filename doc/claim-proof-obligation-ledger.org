@@ -5211,3 +5211,27 @@ absence outside mapped slots, complete production envelope correspondence,
 selected commitment and universal provider refinement remain open. No
 production admission expansion, certificate or CLM-R2 premise retirement.
 Full project and independent formal gates not rerun.
+
+* v2739 — bind global command identity absence to retained writes
+
+Add a separate guarded mapped-write diagnostic requiring one exact string
+command-ID absence assertion immediately after the checked mapped prefix,
+followed exclusively by the derived put suffix. Accept the literal zero
+raw-writer guard and the bound zero model guard; require the same ID as
+the derived command record. Check absence across the complete visible
+journal at the selected retained predecessor, not merely its mapped
+principal/operation slot. Reject mixed journal identity domains and retain
+v1 diagnostics. Qualify literal command-ID guard projection in strict
+retained replay and advance retained input, acquisition and execution
+profiles. No UUID identity domain expansion.
+
+JVM: 4 tests / 207 assertions, zero failures or errors across mapped
+writes, mapped prestate and mapped retained execution fixtures. The new
+persistent fixture contributes 25 assertions: a collision in another
+principal's slot aborts, a fresh identity commits, both retained guard
+forms reconstruct, wrong, missing or misplaced guards fail closed, and
+reopening preserves both diagnostic results. This selected envelope is
+not the complete production envelope; publication, transition evidence,
+residual guards, authenticated provenance and selected commitment remain
+unqualified. No production admission expansion, certificate or CLM-R2
+premise retirement. Full project and independent formal gates not rerun.
