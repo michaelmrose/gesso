@@ -6,6 +6,7 @@
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.choreo.identity :as identity]
             [gesso.live.consistency.xtdb :as live-xtdb]
             [gesso.live.optimistic.resolved-operation :as adapter]
@@ -119,16 +120,52 @@
                            spec {:alternative id :inputs {} :effects (get claim/document-effects id) :binding b :outcome outcome :now now :outcome-cases cases}
                            context (assoc (select-keys catalog [:catalog-fingerprint :induction-fingerprint]) :selectors (get-in catalog [:input-derivations id]))
                            report (evidence/compare-local-processed-retained-mapped-executor! node tables source claim/target-map document-rows journal tx prefix-count spec context source-id
-                                                                                              (:publication-derivations catalog) (:residual-assertion-derivations catalog))]
+                                                                                              (:publication-derivations catalog) (:residual-assertion-derivations catalog))
+                           abort! (fn [tx scope]
+                                    (evidence/compare-local-processed-retained-mapped-executor-abort!
+                                     node scope source claim/target-map document-rows journal tx prefix-count spec context source-id
+                                     (:publication-derivations catalog) (:residual-assertion-derivations catalog)))
+                           abort (abort! tx tables)]
                        (if (= idx 2)
                          (do (is (= :mismatch (:status report)) (pr-str report))
                              (is (= :selected-retained-prestate-mismatch (:reason report)))
                              (is (= :checked-exact-prefix (:status (lowering/check-prefix! source claim/target-map document-rows journal (subvec (:ops tx) 1 (inc prefix-count))))))
                              (is (<= 1 (:failed-assertion-index (nth (:history prediction) idx)) prefix-count))
-                             (is (= :matched (:status (provider/compare-local-processed-retained-transaction! node tables tx)))))
+                             (is (= :matched (:status (provider/compare-local-processed-retained-transaction! node tables tx))))
+                             (is (= :matched (:status abort)) (pr-str abort))
+                             (is (= :stale-at-retained-predecessor (:prepared-prestate abort)))
+                             (is (= :aborted (:selected-transaction-commitment abort)))
+                             (is (= :matched (:assertion-error abort)))
+                             (is (= (:failed-assertion-index (nth (:history prediction) idx)) (:mapped-prefix-failure-index abort)))
+                             (is (= :none-at-selected-abort (:durable-effects abort)))
+                             (is (= :matched-source-relative-attempt (:candidate-envelope abort)))
+                             (is (= :matched-uncommitted-record (:candidate-transition-evidence abort)))
+                             (is (= :none (:authority abort)))
+                             (is (= :not-issued (:certificate abort)))
+                             (is (not (contains? abort :transition-evidence)))
+                             (is (= :unsupported (:status (abort! tx (disj tables :gesso_live_outbox)))))
+                             (let [query xt/q
+                                   r (with-redefs [xt/q (fn [n sql & args]
+                                                          (if (= ["SELECT committed, error FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ? LIMIT 2" (:tx-id tx)] sql)
+                                                            [{:committed false :error (ex-info "Wrong index" {:xtdb.error/code :xtdb/assert-failed :tx-op-idx 0})}]
+                                                            (apply query n sql args)))]
+                                       (abort! tx tables))]
+                               (is (= :mismatch (:status r)))
+                               (is (= :selected-retained-abort-error-mismatch (:reason r)))
+                               (is (not (contains? r :candidate-envelope))))
+                             (let [ops (:ops tx) altered (envelope/bind-transition-envelope!
+                                                         (-> ops (assoc-in [(dec (count ops)) 2 :poststate-fingerprint] "bad")
+                                                             (update-in [(dec (count ops)) 2] #(apply dissoc % envelope/binding-keys))))
+                                   r (abort! (assoc tx :ops altered) tables)]
+                               (is (= :mismatch (:status r)))
+                               (is (= :transition-evidence-record-mismatch (:reason r)))
+                               (is (not (contains? r :candidate-envelope)))))
                          (do (is (= :matched (:status report)) (pr-str report))
                              (is (= :matched-source-relative-record (:transition-evidence report)))
-                             (is (= :not-asserted (:selected-transaction-commitment report)))))))))]
+                             (is (= :not-asserted (:selected-transaction-commitment report)))
+                             (is (= :mismatch (:status abort)) (pr-str abort))
+                             (is (= :selected-retained-prestate-not-stale (:reason abort)))
+                             (is (not (contains? abort :candidate-envelope)))))))))]
     (try
       (let [history (with-open [node (xtn/start-node config)]
                       (xt/execute-tx node [[:put-docs :requests before] [:put-docs :memberships (member "helper-1") (member "helper-2")]])

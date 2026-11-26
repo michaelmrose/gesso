@@ -282,14 +282,14 @@
 
 (def executor-retained-profile :selected-mapped-retained-evidence-v4)
 
-(defn compare-local-processed-retained-mapped-executor!
+(defn- compare-executor*
   "Check the selected executor ordering: evidence guard, mapped prefix,
    canonical publication guards, residual guard multiset, ordinary puts,
    publication batch and final witness. The complete captured vector,
    including actual residual order, is bound to stable retained history.
    Declarations and outcome cases are premises, not authenticated issuance."
-  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
-  (let [tag #(assoc % :mapped-retained-evidence-profile executor-retained-profile)
+  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations abort?]
+  (let [tag #(assoc % :mapped-retained-evidence-profile (if abort? :selected-mapped-retained-executor-abort-v1 executor-retained-profile))
         fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
                     :provider-refinement :not-established})
         checked (try
@@ -345,17 +345,36 @@
                   (catch clojure.lang.ExceptionInfo _
                     {:status :unsupported :reason :invalid-mapped-executor-source-or-envelope}))]
     (if (= :matched (:status checked))
-      (let [r (tag (provider/compare-local-processed-retained-mapped-publication-absence!
-                    node tables original targets docs journal expectation prefix-count (:id checked)
-                    (:publication-ids checked) (:residual-ops checked) :publication-first))]
+      (let [r (tag (if abort?
+                     (provider/compare-local-processed-retained-mapped-abort!
+                      node tables original targets docs journal expectation prefix-count (:id checked))
+                     (provider/compare-local-processed-retained-mapped-publication-absence!
+                      node tables original targets docs journal expectation prefix-count (:id checked)
+                      (:publication-ids checked) (:residual-ops checked) :publication-first)))]
         (if (= :matched (:status r))
-          (assoc r :mapped-write-suffix :matched-source-derived-puts
+          (if abort?
+            (assoc r :candidate-envelope :matched-source-relative-attempt
+                   :candidate-transition-evidence :matched-uncommitted-record
+                   :transition-envelope-binding :matched)
+            (assoc r :mapped-write-suffix :matched-source-derived-puts
                    :evidence-id-absence-guard :matched
                    :command-id-absence-guard (if (some #{["ASSERT ? = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" 0 (:id checked)]}
                                                        (:residual-ops checked)) :matched :not-declared)
                    :transition-evidence :matched-source-relative-record
                    :transition-envelope-binding :matched
                    :publication-fragment :matched-source-relative-publication
-                   :residual-fragment :matched-source-relative-residual)
+                   :residual-fragment :matched-source-relative-residual))
           r))
       (fail (:status checked) (:reason checked)))))
+
+(defn compare-local-processed-retained-mapped-executor!
+  "Compare the complete selected executor envelope with its historical prestate."
+  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
+  (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations false))
+
+(defn compare-local-processed-retained-mapped-executor-abort!
+  "Match a complete source-derived candidate whose mapped prefix failed at
+   a stale retained predecessor. The candidate witness is not a committed
+   transition; only physical abort and rollback are qualified."
+  [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
+  (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations true))

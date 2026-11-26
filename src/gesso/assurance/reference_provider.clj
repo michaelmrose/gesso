@@ -421,6 +421,9 @@
       (fail (:status before) (:reason before))
       (let [inputs (:replay-inputs before)
             comparison (compare-source-bound-execution! node inputs tables)
+            selected-failure (when (and prestate-check (= :matched (:status comparison))
+                                        (or (nil? expectation) (= expectation (some #(when (= (:tx-id expectation) (:tx-id %)) %) inputs))))
+                               (prestate-check inputs))
             after (observe-replay-history! node)]
         (cond
           (not= :observed (:status after)) (fail (:status after) (:reason after))
@@ -436,7 +439,7 @@
                     (= :not-established (:provider-refinement comparison))))
           (fail :unsupported :invalid-retained-replay-execution-comparison)
           :else
-          (if-let [failure (when prestate-check (prestate-check inputs))]
+          (if-let [failure selected-failure]
             (fail (:status failure) (:reason failure))
             (tag (assoc base :status :matched :acquisition-profile acquisition-profile
                       :source-binding-profile source-binding-profile
@@ -639,6 +642,72 @@
       (compare-mapped-retained* node tables original target-map docs journal expectation prefix-count true command-id true publication-ids)
       (assoc (acquisition-result :unsupported :invalid-retained-publication-id-guards)
              :mapped-retained-publication-absence-profile :selected-mapped-retained-publication-absence-v1)))))
+
+(def mapped-retained-abort-profile :selected-mapped-retained-abort-v1)
+
+(defn compare-local-processed-retained-mapped-abort!
+  "Check an exact source-relative prefix against a stale retained predecessor,
+   predict its assertion abort and unchanged bitemporal rectangles, and check
+   the provider's recorded error kind and physical index within the same
+   bracketed replay observation. Does not derive the remaining envelope."
+  [node tables original target-map docs journal expectation prefix-count command-id]
+  (let [tag #(assoc % :mapped-retained-abort-profile mapped-retained-abort-profile)
+        fail #(acquisition-result %1 %2)
+        checked (when (and (set? tables) (every? tables [:gesso_commands :gesso_transition_evidence :gesso_live_outbox])
+                           (source-expectations? [expectation]) (instance? Instant (:system-time expectation))
+                           (vector? (:ops expectation)) (nil? (meta (:ops expectation)))
+                           (string? command-id) (not (str/blank? command-id)) (<= (count command-id) 1024)
+                           (integer? prefix-count) (<= 1 prefix-count (dec (count (:ops expectation))) 256)
+                           (= ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" command-id]
+                              (first (:ops expectation))))
+                  (try (lowering/check-prefix! original target-map docs journal
+                                                (subvec (:ops expectation) 1 (inc prefix-count)))
+                       (catch clojure.lang.ExceptionInfo _ nil)))
+        index (volatile! nil)]
+    (if-not (and (= :checked-exact-prefix (:status checked))
+                 (= :gesso.assurance.proof.mapped-prestate-lowering/mapped-prestate-lowering (:type checked))
+                 (= 5 (:version checked)) (= prefix-count (:assertion-count checked))
+                 (= :source-relative-syntactic-prefix (:scope checked))
+                 (= :not-established (:sql-refinement checked))
+                 (= :none (:authority checked)) (= :not-issued (:certificate checked)))
+      (tag (fail :unsupported :invalid-mapped-retained-abort-prefix))
+      (let [check! (fn [inputs]
+                     (let [stale (historical-prestate-failure inputs expectation (:groups checked) nil false nil)
+                           prior (vec (take-while #(not= (:tx-id expectation) (:tx-id %)) inputs))
+                           replay #(temporal/replay (mapv (fn [tx] (dissoc tx :tx-id)) %))
+                           before (when (seq prior) (replay prior))
+                           after (replay (conj prior expectation))
+                           entry (peek (:history after)) i (:failed-assertion-index entry)]
+                       (cond
+                         (and stale (not= :mismatch (:status stale))) stale
+                         (not= :selected-retained-prestate-mismatch (:reason stale))
+                         (fail :mismatch :selected-retained-prestate-not-stale)
+                         (not (and (= :predicted (:status before) (:status after))
+                                   (false? (:committed? entry)) (integer? i) (<= 1 i prefix-count)))
+                         (fail :mismatch :selected-retained-mapped-prefix-abort-not-predicted)
+                         (not (and (= (:segments (peek (:history before))) (:segments entry))
+                                   (= (:rectangles before) (:rectangles after))))
+                         (fail :mismatch :selected-retained-abort-effects)
+                         :else
+                         (try
+                           (let [rows (xt/q node ["SELECT committed, error FROM xt.txs FOR VALID_TIME ALL FOR SYSTEM_TIME ALL WHERE _id = ? LIMIT 2" (:tx-id expectation)])
+                                 {:keys [committed error]} (first rows) data (ex-data error)]
+                             (cond
+                               (not= 1 (count rows)) (fail :unavailable :invalid-retained-abort-outcome)
+                               (not (and (false? committed) (= :xtdb/assert-failed (:xtdb.error/code data))
+                                         (= i (:tx-op-idx data))))
+                               (fail :mismatch :selected-retained-abort-error-mismatch)
+                               :else (do (vreset! index i) nil)))
+                           (catch InterruptedException e (.interrupt (Thread/currentThread)) (throw e))
+                           (catch Exception _ (fail :unavailable :retained-abort-outcome-unavailable))))))
+            report (tag (compare-retained-replay* node tables expectation check!))]
+        (if (= :matched (:status report))
+          (assoc report :source-lowering :checked-exact-prefix
+                 :selected-transaction-binding :matched :selected-transaction-commitment :aborted
+                 :prepared-prestate :stale-at-retained-predecessor
+                 :mapped-prefix-failure-index @index :assertion-error :matched
+                 :durable-effects :none-at-selected-abort)
+          report)))))
 
 (def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v3)
 

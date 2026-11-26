@@ -5648,3 +5648,33 @@ callbacks and bypasses full host/browser wiring. No new abort-specific
 authoritative diagnostic, selected commitment qualification, certificate,
 production admission expansion or CLM-R2 premise retirement.
 Full project and independent formal gates not rerun.
+
+* v2755 — compose positive retained stale-attempt abort correspondence
+
+Share complete source-relative executor envelope derivation between the
+existing successful-prestate diagnostic and a separate selected abort
+profile. Require an exact retained transaction binding, qualified mapped
+prefix, stale historical prepared prestate, independently predicted abort
+within that prefix and unchanged selected bitemporal segments/rectangles.
+Compare XTDB's all-time recorded assertion error kind and physical
+operation index to the independent prediction. Run the selected check
+inside the stable retained observation bracket. Require complete
+observation scope including auxiliary tables. Return only candidate
+envelope/witness correspondence and selected abort/no-durable-effects
+diagnostics, not committed transition evidence or successful historical
+identity absence claims. Preserve earlier successful-prestate API and
+profiles.
+
+Initial focused JVM: 1 test / 90 assertions, zero failures or errors.
+Final combined JVM: 5 tests / 323 assertions, zero failures or errors
+across recovery, installed Claim, mapped envelope and retained prestate.
+Extend the actual interleaved Claim recovery fixture to match positive
+abort correspondence before and after reopening; reject both successful
+submissions as non-stale, missing outbox scope, rebound altered evidence,
+and a deliberately incorrect provider error index. The selected profile
+covers stale mapped-prefix assertion aborts, not every possible abort
+or a proof that a recovery invocation is entitled to commit. Candidate
+premises and capture provenance remain supplied, full host installation
+and successful commitment qualification remain open. No production
+admission expansion, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates not rerun.
