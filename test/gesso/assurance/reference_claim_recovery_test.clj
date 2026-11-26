@@ -101,24 +101,59 @@
         cases {["helper-1" :request/claim {:request-id "r1"} (accepted "helper-1")] :accepted
                ["helper-2" :request/claim {:request-id "r1"} (accepted "helper-2")] :accepted
                ["helper-2" :request/claim {:request-id "r1"} refused] :rejected}
+        recovery-steps (fn [history]
+                         (mapv (fn [[idx b branch outcome now]]
+                                 (let [id (claim/alternative-id (actor b) branch)
+                                       source (claim/source (actor b) branch)
+                                       {:keys [document-rows records]} (get @snapshots id)
+                                       journal (vec (vals records))
+                                       prefix-count (count (frame/formatted-prestate-assertions!
+                                                            (plan/check-target-mapping! source claim/target-map)
+                                                            document-rows journal))]
+                                   {:original source :targets claim/target-map :docs document-rows :journal journal
+                                    :expectation (nth history idx) :prefix-count prefix-count
+                                    :spec {:alternative id :inputs {} :effects (get claim/document-effects id)
+                                           :binding b :outcome outcome :now now :outcome-cases cases}
+                                    :context (assoc (select-keys catalog [:catalog-fingerprint :induction-fingerprint])
+                                                    :selectors (get-in catalog [:input-derivations id]))
+                                    :source-id source-id :declarations (:publication-derivations catalog)
+                                    :residual-declarations (:residual-assertion-derivations catalog)}))
+                               [[1 winner :accept (accepted "helper-1") "t1"]
+                                [2 loser :accept (accepted "helper-2") "t1"]
+                                [3 loser :refuse refused "t2"]]))
         check! (fn [node history]
                  (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
                        actual (:replay-inputs sample)
-                       prediction (temporal/replay (mapv #(dissoc % :tx-id) actual))]
+                       prediction (temporal/replay (mapv #(dissoc % :tx-id) actual))
+                       steps (recovery-steps history)
+                       trajectory! #(evidence/compare-local-processed-retained-mapped-executor-recovery! node %1 %2)
+                       trajectory (trajectory! tables steps)]
                    (is (= :observed (:status sample)))
                    (is (= history actual))
                    (is (= :predicted (:status prediction)))
                    (is (= [true true false true] (mapv :committed? (:history prediction))))
                    (is (= (:segments (nth (:history prediction) 1)) (:segments (nth (:history prediction) 2))))
-                   (doseq [[idx b branch outcome now] [[1 winner :accept (accepted "helper-1") "t1"]
-                                                       [2 loser :accept (accepted "helper-2") "t1"]
-                                                       [3 loser :refuse refused "t2"]]]
-                     (let [id (claim/alternative-id (actor b) branch) source (claim/source (actor b) branch)
-                           {:keys [document-rows records]} (get @snapshots id) journal (vec (vals records))
-                           prefix-count (count (frame/formatted-prestate-assertions! (plan/check-target-mapping! source claim/target-map) document-rows journal))
-                           tx (nth history idx)
-                           spec {:alternative id :inputs {} :effects (get claim/document-effects id) :binding b :outcome outcome :now now :outcome-cases cases}
-                           context (assoc (select-keys catalog [:catalog-fingerprint :induction-fingerprint]) :selectors (get-in catalog [:input-derivations id]))
+                   (is (= :matched (:status trajectory)) (pr-str trajectory))
+                   (is (= evidence/executor-recovery-profile (:executor-recovery-profile trajectory)))
+                   (is (= provider/mapped-recovery-profile (:mapped-recovery-profile trajectory)))
+                   (is (= (mapv :tx-id (subvec history 1)) (:selected-tx-ids trajectory)))
+                   (is (= [:committed :aborted :committed] (:selected-commitments trajectory)))
+                   (is (= [:matched-retained-projection :not-committed :matched-retained-projection]
+                          (:abstract-transitions trajectory)))
+                   (is (= :matched-retained-journal-trajectory (:recovery-linkage trajectory)))
+                   (is (= [:matched-source-relative-record :matched-uncommitted-record :matched-source-relative-record]
+                          (:executor-envelopes trajectory)))
+                   (is (= :none (:authority trajectory)))
+                   (is (= :not-issued (:certificate trajectory)))
+                   (is (= :not-established (:provider-refinement trajectory)))
+                   (doseq [[bad reason] [[(trajectory! (disj tables :memberships) steps) :incomplete-mapped-recovery-scope]
+                                         [(trajectory! tables [(nth steps 0) (nth steps 2) (nth steps 1)]) :nonadjacent-recovery-selection]]]
+                     (is (#{:mismatch :unsupported} (:status bad)) (pr-str bad))
+                     (is (= reason (:reason bad)) (pr-str bad))
+                     (is (not-any? #(contains? bad %) [:recovery-linkage :selected-tx-ids :selected-commitments
+                                                      :abstract-transitions :executor-envelopes])))
+                   (doseq [[i {:keys [original docs journal expectation prefix-count spec context]}] (map-indexed vector steps)]
+                     (let [idx (inc i) source original document-rows docs tx expectation
                            report (evidence/compare-local-processed-retained-mapped-executor! node tables source claim/target-map document-rows journal tx prefix-count spec context source-id
                                                                                               (:publication-derivations catalog) (:residual-assertion-derivations catalog))
                            abort! (fn [tx scope]

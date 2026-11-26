@@ -5843,3 +5843,33 @@ outstanding. Source identity, catalog content, selectors, inputs and
 outcome interpretation remain supplied premises. No authenticated
 provenance, universal provider refinement, certificate, production
 admission expansion or CLM-R2 retirement. Full gates not rerun.
+
+* v2765 — genuine persistent executor recovery trajectory
+
+Extend the installed Claim fixture to qualify the complete selected
+winning acceptance, stale competing abort and guarded refusal using
+the v2764 combined executor recovery diagnostic. Derive one shared
+step specification from the recorded prepared snapshots and fixture
+command declarations for both the individual and composed diagnostics.
+Require exact selected transaction identities, the commit/abort/commit
+sequence, both abstract projection matches, journal linkage and all
+three source-relative envelope results. Repeat the comparison after
+closing and reopening the persistent XTDB database. Reject incomplete
+membership observation scope and reordered attempts without exposing
+positive trajectory fields.
+
+Focused persistent JVM integration: 1 test / 276 assertions, zero
+failures or errors, with the project JVM flags and offline dependencies.
+Actual provider observations and genuine executor submissions are
+used for the positive combined comparison; the existing fixture
+interceptions of presentation and transaction receipts remain. This
+is bounded evidence for the selected adjacent recovery trajectory,
+conditional on the supplied source catalog, selectors, prepared
+snapshots, command inputs and outcome interpretation. It does not
+authenticate those premises or establish universal provider refinement.
+No production admission expansion, certificate or CLM-R2 premise
+retirement. Full project gates were not rerun.
+
+Next: qualify source-derived input and outcome provenance, beginning
+with exact linkage between the original alternative declaration,
+trusted command binding, input derivation and retained command outcome.
