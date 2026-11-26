@@ -55,5 +55,5 @@
                                     :else :smoothed)
                  :reason (if older? :invalid-system-time :clock-admitted)))))))
 
-(def clocked-input-profile :selected-retained-clocked-replay-input-v1)
+(def clocked-input-profile :selected-retained-clocked-replay-input-v2)
 

@@ -5,7 +5,7 @@
   (:require [clojure.string :as str])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-current-state-transaction-v14)
+(def profile :selected-current-state-transaction-v15)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -84,6 +84,18 @@
     (update doc lease-key #(.atZone ^Instant % utc))
     doc))
 
+(defn- evidence-valuation? [v budget]
+  ;; The v4 writer stores a bounded vector of encoded valuation entries.
+  ;; Interpret these as opaque physical strings, not as typed semantics.
+  (and (vector? v) (nil? (meta v)) (<= (count v) 64)
+       (not (neg? (vswap! budget dec)))
+       (every? (fn [entry]
+                 (and (vector? entry) (nil? (meta entry))
+                      (<= 3 (count entry) 5)
+                      (not (neg? (vswap! budget dec)))
+                      (every? #(and (string? %) (<= (count %) 2048)
+                                    (document-value? % 2 budget)) entry))) v)))
+
 (defn- document? [table doc]
   (and (map? doc) (nil? (meta doc))
        (or (uuid? (:xt/id doc))
@@ -93,9 +105,17 @@
          (every? (fn [[k v]]
                    (or (= :xt/id k)
                        (and (value-key? k)
-                            (if (and (= :gesso_live_outbox table) (= lease-key k))
+                            (cond
+                              (and (= :gesso_live_outbox table) (= lease-key k))
                               (lease-timestamp? v)
-                              (document-value? v 0 budget))))) doc))))
+                              (and (= :gesso_transition_evidence table) (= 4 (:profile-version doc))
+                                   (#{:prestate-witness :input-witness} k))
+                              (evidence-valuation? v budget)
+                              (and (= :gesso_transition_evidence table) (= 4 (:profile-version doc))
+                                   (= :guard-profile k)
+                                   (= :gesso.model.mapped-frame/xtdb-2.2.0-beta1-v5 v))
+                              (not (neg? (vswap! budget dec)))
+                              :else (document-value? v 0 budget))))) doc))))
 
 (defn- check-state! [state]
   (when-not (and (map? state) (nil? (meta state)) (<= (count state) 256)

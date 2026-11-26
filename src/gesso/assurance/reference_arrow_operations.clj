@@ -5,7 +5,7 @@
    SQL and nested argument bytes are sensitive internal observations."
   (:require [gesso.assurance.reference-arrow-framing :refer [max-bytes max-rows require! message! field! buffers! offsets! value-bytes! present?]]
             [gesso.assurance.reference-arrow-schema :refer [scalar-kind!]]
-            [gesso.assurance.reference-arrow-values :refer [node-count buffer-count value-reader! sql-argument-reader! with-value-budget]]
+            [gesso.assurance.reference-arrow-values :refer [node-count buffer-count value-reader! sql-argument-reader! with-value-budget *allow-evidence-guard-profile?*]]
             [gesso.assurance.reference-document-iid :as iid]
             [gesso.assurance.reference-arrow-put :as put])
   (:import (java.nio ByteBuffer ByteOrder)
@@ -1055,7 +1055,7 @@
   (with-value-budget
     #(decode-mixed-sql-put* bytes mixed-bounded-sql-put-profile positional-sql-rows!)))
 
-(def bounded-operation-profile :xtdb-2.2.0-beta1/selected-bounded-sql-put-operations-arrow-v3)
+(def bounded-operation-profile :xtdb-2.2.0-beta1/selected-bounded-sql-put-operations-arrow-v4)
 
 (defn decode-bounded-operations
   "Interpret selected SQL-only, put-only or mixed streams with one shared
@@ -1065,8 +1065,9 @@
    and up to 1024 argument columns within the same aggregate value budget. SQL-only
    streams have no IID obligation. Diagnostic only; retain mixed limits."
   [bytes]
-  (with-value-budget
-    #(decode-mixed-sql-put* bytes bounded-operation-profile
+  (binding [*allow-evidence-guard-profile?* true]
+    (with-value-budget
+      #(decode-mixed-sql-put* bytes bounded-operation-profile
                              (fn [args] (scalar-rows! args #{:integer :boolean :string :keyword :uuid :timestamp :timestamp-utc
                                                             :empty-list :recursive-list :nullable-sql-columns :reordered-sql-columns :sql-int32 :wide-sql-columns}))
-                             true)))
+                             true))))

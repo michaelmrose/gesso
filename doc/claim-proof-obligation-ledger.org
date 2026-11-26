@@ -5235,3 +5235,32 @@ not the complete production envelope; publication, transition evidence,
 residual guards, authenticated provenance and selected commitment remain
 unqualified. No production admission expansion, certificate or CLM-R2
 premise retirement. Full project and independent formal gates not rerun.
+
+* v2740 — reconstruct retained transition-evidence records and absence
+
+Project the exact framework-owned literal-zero evidence-ID guard through
+independent string-ID count semantics. Qualify bounded nested string
+vectors only for the v4 prestate/input witness fields on the transition
+evidence table; treat encoded entries as opaque physical values, not typed
+witness validity. Admit the exact v5 guard-profile keyword in the bounded
+Arrow decoder and restrict its new document interpretation to the evidence
+field. Advance affected decoder, operation-correspondence, transaction,
+temporal, retained-input, acquisition and execution profiles. Equal-time
+and clocked state-dependent assertion restrictions remain unchanged; their
+profiles advance because the shared put domain changed.
+
+Focused JVM: 1 test / 70 assertions, zero failures or errors. Use the
+production evidence-record encoder and envelope binder with fixture
+premises (not an installed admitted application). Three persistent XTDB
+transactions establish two identities and reject a duplicate, with tentative
+write rollback, exact retained reconstruction, selected all-time comparison,
+required evidence observation scope and reopening. Mutated decoded
+operations reject malformed parameters, wrong identity domains and
+out-of-domain witness shapes. Regression JVM: 32 tests / 2926 assertions,
+zero failures or errors across mapped writes, operation correspondence,
+retained replay input and current-state reference transaction tests.
+Physical witness equality is not source-derived witness correspondence,
+envelope authenticity, successful selected commitment or universal
+refinement. Full production mapped envelope composition remains open. No
+production admission expansion, certificate or CLM-R2 premise retirement.
+Full project and independent formal gates not rerun.

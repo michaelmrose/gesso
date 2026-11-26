@@ -585,7 +585,7 @@
            :processed-retained-history-binding-profile processed-retained-history-binding-profile)))
 
 (def processed-retained-replay-inputs-profile
-  :xtdb-2.2.0-beta1/selected-processed-retained-replay-inputs-v16)
+  :xtdb-2.2.0-beta1/selected-processed-retained-replay-inputs-v17)
 
 (defn observe-local-processed-retained-replay-inputs!
   "Internal sensitive sample of independently projected replay inputs from
@@ -616,7 +616,7 @@
       (not= :observed (:status sample)) (dissoc :replay-inputs :payload-fingerprint))))
 
 (def processed-retained-clocked-inputs-profile
-  :xtdb-2.2.0-beta1/selected-processed-retained-clocked-inputs-v1)
+  :xtdb-2.2.0-beta1/selected-processed-retained-clocked-inputs-v2)
 
 (defn observe-local-processed-retained-clocked-inputs!
   "Internal sensitive sample of ordered clock-qualified attempts. Bind each

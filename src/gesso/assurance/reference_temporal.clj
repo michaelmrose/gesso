@@ -6,7 +6,7 @@
             [gesso.assurance.reference-clock :as clock])
   (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-bitemporal-transaction-v12)
+(def profile :selected-bitemporal-transaction-v13)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -253,9 +253,9 @@
               (recur working advance (next remaining))
               {:state prior :committed? false :failed-assertion-index failed})))))))
 
-(def equal-time-profile :selected-bitemporal-equal-time-transaction-v1)
+(def equal-time-profile :selected-bitemporal-equal-time-transaction-v2)
 
-(def clocked-profile :selected-bitemporal-clocked-transaction-v1)
+(def clocked-profile :selected-bitemporal-clocked-transaction-v2)
 
 (defn- clocked-transactions! [inputs]
   (when-not (and (vector? inputs) (nil? (meta inputs)) (<= 1 (count inputs) 256))

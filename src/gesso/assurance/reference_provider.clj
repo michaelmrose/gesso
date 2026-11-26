@@ -384,7 +384,7 @@
                :retained-execution-profile retained-execution-profile)
         (dissoc r :source-coverage)))))
 
-(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v18)
+(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v19)
 
 (defn- valid-replay-history? [sample]
   (let [inputs (:replay-inputs sample)]
@@ -560,7 +560,7 @@
     (assoc (acquisition-result :unsupported :invalid-retained-command-id)
            :mapped-retained-command-absence-profile :selected-mapped-retained-command-absence-v1)))
 
-(def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v2)
+(def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v3)
 
 (defn- observe-clocked-history! [node]
   (let [sample (coverage/observe-local-processed-retained-clocked-inputs! node)

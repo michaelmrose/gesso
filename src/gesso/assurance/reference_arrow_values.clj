@@ -17,11 +17,15 @@
               :unsupported-arrow-timestamp-range)
     (.atZone instant zone)))
 
+(def ^:dynamic *allow-evidence-guard-profile?* false)
+
 (defn- keyword-value! [s]
   ;; Match the selected reference transaction keyword domain. The retained
   ;; symbol spelling has no leading colon. Reject before interning.
   (require! (and (<= 1 (count s) 4095)
-                 (re-matches #"(?:[a-zA-Z][a-zA-Z0-9_.-]*/)?[a-zA-Z][a-zA-Z0-9_-]*" s))
+                 (or (re-matches #"(?:[a-zA-Z][a-zA-Z0-9_.-]*/)?[a-zA-Z][a-zA-Z0-9_-]*" s)
+                     (and *allow-evidence-guard-profile?*
+                          (= "gesso.model.mapped-frame/xtdb-2.2.0-beta1-v5" s))))
             :unsupported-arrow-keyword)
   (keyword s))
 
