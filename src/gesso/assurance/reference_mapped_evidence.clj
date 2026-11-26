@@ -416,16 +416,14 @@
 
 (def executor-recovery-profile :selected-mapped-retained-executor-recovery-v1)
 
-(defn compare-local-processed-retained-mapped-executor-recovery!
-  "Derive all three complete envelopes before checking their shared retained
-   provider bracket. The journal records, publication IDs, residual operands
-   and abstract inputs come from the same source-relative checks. The source
-   catalog, selectors, inputs and outcome interpretation remain premises."
-  [node tables steps]
+(def executor-interleaved-recovery-profile :selected-mapped-retained-executor-worker-interleaved-recovery-v1)
+
+(defn- compare-executor-recovery*
+  [node tables steps interleaved?]
   (let [roles [:winner :abort :recovery]
         required #{:original :targets :docs :journal :expectation :prefix-count
                    :spec :context :source-id :declarations :residual-declarations}
-        tag #(assoc % :executor-recovery-profile executor-recovery-profile)
+        tag #(assoc % :executor-recovery-profile (if interleaved? executor-interleaved-recovery-profile executor-recovery-profile))
         fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
                     :provider-refinement :not-established})]
     (if-not (and (vector? steps) (nil? (meta steps)) (= 3 (count steps))
@@ -451,12 +449,41 @@
                                         :residual-ops (:residual-ops report)
                                         :abstract-spec (select-keys (:spec step) [:inputs :outcome-key :outcome-cases]))))
                              steps checked roles)
-                result (tag (provider/compare-local-processed-retained-mapped-recovery! node tables mapped expected))]
-            (cond-> result
-              (= :matched (:status result))
-              (assoc :executor-envelopes [:matched-source-relative-record
-                                          :matched-uncommitted-record
-                                          :matched-source-relative-record]))))))))
+                result (tag (if interleaved?
+                              (provider/compare-local-processed-retained-mapped-worker-interleaved-recovery!
+                               node tables mapped expected (:source-id (first steps)))
+                              (provider/compare-local-processed-retained-mapped-recovery! node tables mapped expected)))]
+            (cond
+              (not= :matched (:status result)) result
+              (not (and (= (if interleaved? provider/mapped-interleaved-recovery-profile provider/mapped-recovery-profile)
+                           (:mapped-recovery-profile result))
+                        (= (mapv #(get-in % [:expectation :tx-id]) steps) (:selected-tx-ids result))
+                        (= [:committed :aborted :committed] (:selected-commitments result))
+                        (= :matched-retained-journal-trajectory (:recovery-linkage result))
+                        (or (not interleaved?)
+                            (and (vector? (:intervening-maintenance result))
+                                 (integer? (:replayed-transaction-count result))))))
+              (fail :unsupported :invalid-executor-recovery-provider-comparison)
+              :else (assoc result :executor-envelopes [:matched-source-relative-record
+                                                       :matched-uncommitted-record
+                                                       :matched-source-relative-record]))))))))
+
+(defn compare-local-processed-retained-mapped-executor-recovery!
+  "Derive all three complete envelopes before checking their shared retained
+   provider bracket. The journal records, publication IDs, residual operands
+   and abstract inputs come from the same source-relative checks. The source
+   catalog, selectors, inputs and outcome interpretation remain premises."
+  [node tables steps]
+  (compare-executor-recovery* node tables steps false))
+
+(defn compare-local-processed-retained-mapped-executor-worker-interleaved-recovery!
+  "Derive all three complete candidate envelopes and compare the same full
+   retained history, including independently checked intervening worker
+   transactions. Use the common candidate publication source for worker
+   qualification; do not accept a separate worker source premise. Catalog,
+   inputs, outcomes and actual execution provenance remain conditional."
+  [node tables steps]
+  (compare-executor-recovery* node tables steps true))
 
 (def executor-input-recovery-profile :selected-mapped-retained-executor-input-recovery-v1)
 

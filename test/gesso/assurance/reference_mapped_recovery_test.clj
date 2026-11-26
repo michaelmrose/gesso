@@ -4,6 +4,7 @@
             [gesso.assurance.reference-recovery-trajectory-test :as recovery]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-mapped-evidence :as evidence]
+            [gesso.assurance.reference-mapped-publication :as publication]
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.model.certified-plan :as plan]
@@ -235,3 +236,96 @@
         (is (= reason (:reason r)) (pr-str r))
         (is (not-any? #(contains? r %) [:selected-tx-ids :recovery-linkage :intervening-maintenance
                                         :replayed-transaction-count :abstract-transitions]))))))
+
+(defn- complete-worker-example []
+  (let [{:keys [steps tables]} (complete-example)
+        declarations {:example/claim {:purpose :example/refresh
+                                      :contributions [{:target [:document :gesso_requests "r1"] :topic :example/request :field :xt/id}
+                                                      {:target [:document :gesso_assignments "a1"] :topic :example/assignment :field :xt/id}]}
+                      :example/refuse nil}
+        residuals {:example/claim nil :example/refuse nil}
+        complete (mapv (fn [i step]
+                         (let [{:keys [original targets docs journal expectation prefix-count spec context source-id]} step
+                               original (if (= 2 i) (assoc-in original [:subject :id] :example/refuse) original)
+                               spec (-> spec (dissoc :outcome-key)
+                                        (assoc :alternative (get-in original [:subject :id])
+                                               :outcome-cases {["helper-a" :example/claim {:request-id "r1"} {:status :claimed}] :claimed
+                                                               ["helper-b" :example/claim {:request-id "r1"} {:status :claimed}] :claimed
+                                                               ["helper-b" :example/claim {:request-id "r1"} {:status :refused}] :refused}))
+                               {:keys [guard-ops put-ops]} (publication/derive-publication! original targets docs journal spec source-id declarations)
+                               ops (:ops expectation)
+                               prefix (subvec ops 1 (inc prefix-count))
+                               witness (evidence/derive-record! original targets docs journal prefix spec context)
+                               ops (envelope/bind-transition-envelope!
+                                    (vec (concat (subvec ops 0 (inc prefix-count)) guard-ops
+                                                 (subvec ops (inc prefix-count) (dec (count ops))) put-ops
+                                                 [[:put-docs :gesso_transition_evidence witness]])))]
+                           (assoc step :original original :spec spec :declarations declarations :residual-declarations residuals
+                                  :expectation (fixture/tx (inc (* 2 i)) ops)))) (range 3) steps)
+        [w a r] (mapv :expectation complete)
+        pending (nth (first (filter #(= [:put-docs :gesso_live_outbox] (vec (take 2 %))) (:ops w))) 2)
+        id (:xt/id pending)
+        worker-history (:history (#'recovery/worker-history))
+        acquisition (nth worker-history 2) acknowledgment (nth worker-history 4)
+        lease-fields [:gesso.live.outbox/status :gesso.live.outbox/lease-id :gesso.live.outbox/lease-owner :gesso.live.outbox/lease-until]
+        ack-fields (into lease-fields [:gesso.live.outbox/dispatch-receipt-id :gesso.live.outbox/dispatch-adapter])
+        acquire (-> acquisition (assoc-in [:ops 0 1] id)
+                    (update-in [:ops 3 2] #(merge pending (select-keys % lease-fields))))
+        ack (-> acknowledgment (assoc-in [:ops 0 1] id)
+                (update-in [:ops 1 2] #(merge pending (select-keys % ack-fields))))]
+    {:steps complete :tables tables :history [fixture/initial w acquire a ack r] :id id}))
+
+(deftest complete-worker-interleaved-executor-composition
+  (let [{:keys [steps history tables id]} (complete-worker-example)
+        sample {:status :observed :replay-inputs history}
+        failure-index (:failed-assertion-index (nth (:history (temporal/replay (mapv #(dissoc % :tx-id) history))) 3))
+        comparison {:status :matched :profile provider/profile :acquisition-profile provider/acquisition-profile
+                    :source-binding-profile provider/source-binding-profile :transaction-count 6
+                    :checks {:ledger true :retained-envelopes true :selected-history true}
+                    :authority :none :certificate :not-issued :provider-refinement :not-established}
+        observations (atom 0) compared (atom [])
+        run! (fn [s h scope adjacent?]
+               (reset! observations 0) (reset! compared [])
+               (with-redefs-fn {#'provider/observe-replay-history! (fn [_] (swap! observations inc) (assoc sample :replay-inputs h))
+                                #'provider/compare-source-bound-execution! (fn [_ inputs scope] (swap! compared conj [inputs scope]) comparison)
+                                #'xt/q (fn [_ query] (if (= 3 (last query))
+                                                      [{:committed false :error (ex-info "abort" {:xtdb.error/code :xtdb/assert-failed :tx-op-idx failure-index})}]
+                                                      [{:committed true}]))}
+                 #(if adjacent?
+                    (evidence/compare-local-processed-retained-mapped-executor-recovery! nil scope s)
+                    (evidence/compare-local-processed-retained-mapped-executor-worker-interleaved-recovery! nil scope s))))
+        matched (run! steps history tables false)]
+    (is (= :matched (:status matched)) (pr-str matched))
+    (is (= evidence/executor-interleaved-recovery-profile (:executor-recovery-profile matched)))
+    (is (= provider/mapped-interleaved-recovery-profile (:mapped-recovery-profile matched)))
+    (is (= [1 3 5] (:selected-tx-ids matched)))
+    (is (= [:matched-source-relative-record :matched-uncommitted-record :matched-source-relative-record] (:executor-envelopes matched)))
+    (is (= [{:tx-id 2 :maintenance :lease-acquisition :intent-id id}
+            {:tx-id 4 :maintenance :dispatch-acknowledgment :intent-id id}] (:intervening-maintenance matched)))
+    (is (= 6 (:replayed-transaction-count matched)))
+    (is (= (vec (repeat 3 [history tables])) @compared))
+    (is (= 8 @observations))
+    (is (= :none (:authority matched)))
+    (is (= :not-issued (:certificate matched)))
+    (is (= :not-established (:provider-refinement matched)))
+    (doseq [i (range 3)]
+      (let [ops (get-in steps [i :expectation :ops])
+            corrupted (assoc-in steps [i :expectation :ops (dec (count ops)) 2 :profile-version] 99)
+            r (run! corrupted history tables false)]
+        (is (= :transition-evidence-record-mismatch (:reason r)) (pr-str r))
+        (is (zero? @observations))
+        (is (not (contains? r :executor-envelopes)))))
+    (let [ops (get-in steps [0 :expectation :ops])
+          index (dec (- (count ops) 1))
+          corrupted (assoc-in steps [0 :expectation :ops index 2 :gesso.live.outbox/topic] :example/wrong)
+          r (run! corrupted history tables false)]
+      (is (= :publication-fragment-mismatch (:reason r)) (pr-str r))
+      (is (zero? @observations)))
+    (doseq [[s h scope adjacent? reason]
+            [[steps history tables true :nonadjacent-recovery-selection]
+             [(assoc-in steps [1 :source-id] "different") history tables false :invalid-executor-recovery-source]
+             [steps (assoc-in history [2 :ops 3 2 :gesso.live.outbox/source-id] "different") tables false :unqualified-intervening-worker]
+             [steps history (disj tables :gesso_live_outbox) false :incomplete-mapped-recovery-scope]]]
+      (let [r (run! s h scope adjacent?)]
+        (is (= reason (:reason r)) (pr-str r))
+        (is (not-any? #(contains? r %) [:executor-envelopes :intervening-maintenance :recovery-linkage :selected-tx-ids]))))))

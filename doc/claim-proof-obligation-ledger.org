@@ -6556,3 +6556,44 @@ retirement. Full project gates were not rerun.
 Next: compose the new interleaved provider bracket with complete
 source-derived executor-envelope checking, retaining the existing
 adjacent API and explicit maintenance qualification.
+
+* v2784 — complete worker-interleaved executor envelope composition
+
+Extract the shared three-candidate executor envelope comparison and add
+an explicit worker-interleaved entry point. Derive the exact expected
+journal records, mapped writes, publication intent IDs, residual
+assertions and transition witnesses before acquisition, using the
+existing independent envelope checker. Derive worker source identity
+from the common candidate publication source, rather than accepting a
+separate worker source argument. Delegate the unchanged selected steps
+and derived expectations to the complete retained provider bracket.
+Require the matching provider profile, selected IDs, commitment sequence,
+journal linkage and interleaved result shape before exposing positive
+executor-envelope evidence. Preserve the adjacent API and profile.
+
+Focused JVM: 9 tests / 189 assertions, zero failures or errors.
+The regression constructs complete acceptance, stale competing acceptance
+and refusal envelopes, including source-derived publication intents.
+It checks a lease acquisition before the abort and acknowledgment after
+it, all against the full six-transaction history including the seed.
+Reject corrupted witnesses at each candidate and changed publication
+content before provider acquisition. Also reject the adjacent profile
+on the interleaved selection, differing candidate sources, changed worker
+source and missing outbox scope. The original adjacent regression still
+passes. The initial fixture run rejected a distinct refusal alternative
+using a legacy same-operation outcome-key specification; corrected the
+fixture to explicit alternative and outcome-case declarations, then
+reran successfully.
+
+Provider acquisition, physical correspondence and outcome reads remain
+stubbed in this test. Actual replay, complete source-relative envelope
+derivation, historical worker checking and mapped projection comparison
+are executed. Genuine persistent interleaved execution, issued input
+and outcome qualification, observation and activation composition remain
+outstanding. No authenticated provenance, universal provider refinement,
+production admission expansion, certificate or CLM-R2 premise retirement.
+Full project gates were not rerun.
+
+Next: compose source-relative input and outcome derivation and issued
+admission qualification with the interleaved executor profile; retain
+explicit source, decoder and maintenance provenance limits.
