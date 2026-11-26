@@ -4935,3 +4935,23 @@ a mixed reader on SQL-only bytes; corrected to actual mixed streams.
 Physical capacity is not provider query compilation capacity. No production
 admission, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates not rerun.
+
+* v2727 — project retained publication absence assertions
+
+Admit the two exact retained numbered SQL guards for outbox UUID identity
+absence and outbox source-string absence in the strictly increasing replay
+profile. Preserve dollar-bearing column identifiers and check operands with
+independent current-state operation grammar. Require complete outbox table
+observation. Version strict input, processed acquisition and direct replay
+profiles; leave the clocked state-dependent grammar unchanged.
+
+Focused JVM: 55 tests / 5163 assertions, zero failures or errors across
+publication replay, replay input, transaction, temporal and provider
+namespaces (including the new fixture's 60 assertions). The new persistent
+fixture uses the actual publication guard constructor and manifest source
+absence guard, exercises matching and nonmatching identities/sources,
+tentative writes, abort/rollback and reopening, and rejects noncanonical
+parameters, wrong operand domains, altered predicates and incomplete table
+scope. The complete manifest-establishment transaction is not qualified by
+this change. No production admission, certificate or CLM-R2 premise
+retirement; full project and independent formal gates not rerun.

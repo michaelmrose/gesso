@@ -8,7 +8,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v10)
+(def profile :selected-retained-replay-input-v11)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -57,6 +57,15 @@
     (let [op (into [(str/replace query #"\$[12]" "?")] args)]
       (when (seq (current/operation-tables op)) op))))
 
+(defn- project-publication-absence [query args]
+  ;; Only the two exact outbox guards; dollar-bearing column names are
+  ;; identifiers, not placeholders. Reuse the independent operand grammar.
+  (when (and (= 1 (count args))
+             (#{"ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = $1)"
+                "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = $1)"} query))
+    (let [op (into [(str/replace query "$1" "?")] args)]
+      (when (= #{:gesso_live_outbox} (current/operation-tables op)) op))))
+
 (defn- project-journal-slot-assertion [query args]
   ;; Exact slot selector; dollar signs in column names are not parameters.
   (when (and (= 2 (count args))
@@ -102,6 +111,7 @@
              (not clocked?) (or (project-state-assertion query args)
                                 (project-mapped-assertion query args)
                                 (project-field-count-assertion query args)
+                                (project-publication-absence query args)
                                 (project-journal-slot-assertion query args)
                                 (project-journal-value-assertion query args))))
     :put-docs (when (and (= #{:kind :table :documents :iids :bounds} (set (keys op)))
@@ -157,8 +167,9 @@
 (defn decode-replay-input
   "Project selected retained operations with explicit time precedence.
    Includes exact quoted-table row-read, row-count, mapped scalar and
-   document field-count, journal slot and selected recursive journal value
-   assertions; the history must qualify for strictly increasing temporal replay.
+   document field-count, publication identity/source absence, journal slot
+   and selected recursive journal value assertions; the history must qualify
+   for strictly increasing temporal replay.
    The four-argument form resolves implicit times from the frame and prior
    time; the two-argument form requires explicit time. Clock rejection
    and equal-time history qualification are outside this legacy profile."
