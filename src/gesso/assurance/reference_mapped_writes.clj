@@ -85,7 +85,9 @@
   [original targets docs journal spec]
   (:puts (derive-transition! original targets docs journal spec)))
 
-(defn- rows-of! [puts]
+(defn put-row-frequencies!
+  "Validate an ordinary put-only sequence and return exact table/row multiplicities."
+  [puts]
   (when-not (and (vector? puts) (seq puts)
                  (every? #(and (vector? %) (= :put-docs (first %)) (simple-keyword? (second %))
                                (<= 3 (count %)) (every? map? (drop 2 %))) puts)
@@ -105,8 +107,8 @@
         checked (try
                   (if (and (vector? (:ops expectation)) (integer? prefix-count)
                            (<= 1 prefix-count (dec (count (:ops expectation)))))
-                    (if (= (rows-of! (derive-puts! original targets docs journal spec))
-                           (rows-of! (subvec (:ops expectation) prefix-count))) :matched :mismatch)
+                    (if (= (put-row-frequencies! (derive-puts! original targets docs journal spec))
+                           (put-row-frequencies! (subvec (:ops expectation) prefix-count))) :matched :mismatch)
                     :unsupported)
                   (catch clojure.lang.ExceptionInfo _ :unsupported))]
     (case checked
@@ -138,8 +140,8 @@
                                           ["ASSERT ? = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" 0 id]}
                                         (nth ops prefix-count))
                              (= #{:gesso_commands} (current/operation-tables (nth ops prefix-count))))
-                      (if (= (rows-of! (derive-puts! original targets docs journal spec))
-                             (rows-of! (subvec ops (inc prefix-count))))
+                      (if (= (put-row-frequencies! (derive-puts! original targets docs journal spec))
+                             (put-row-frequencies! (subvec ops (inc prefix-count))))
                         {:status :matched :id id}
                         {:status :mismatch :reason :selected-retained-write-suffix-mismatch})
                       {:status :unsupported :reason :invalid-command-id-absence-guard}))

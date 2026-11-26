@@ -4,6 +4,8 @@
   (:require [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.assurance.proof.typed-value-semantics :as values]
             [gesso.assurance.reference-mapped-writes :as writes]
+            [gesso.assurance.reference-provider :as provider]
+            [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.subject :as subject]
             [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]))
@@ -89,3 +91,53 @@
         (assoc base :status :mismatch :reason :transition-evidence-record-mismatch))
       (catch clojure.lang.ExceptionInfo _
         (assoc base :status :unsupported :reason :invalid-transition-evidence-source)))))
+
+(def retained-profile :selected-mapped-retained-evidence-v1)
+
+(defn compare-local-processed-retained-mapped-evidence!
+  "Compose the selected evidence-bearing mapped envelope: leading evidence
+   absence, exact mapped prefix, command-ID absence, complete derived puts,
+   and final bound v4 record. Recompute the shared envelope digest and check
+   both identities at the same retained predecessor. No publication, other
+   guards, authenticated provenance or selected commitment is established."
+  [node tables original targets docs journal expectation prefix-count spec context]
+  (let [tag #(assoc % :mapped-retained-evidence-profile retained-profile)
+        fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
+                    :provider-refinement :not-established})
+        checked (try
+                  (let [ops (:ops expectation) id (resolution/record-id (:binding spec))]
+                    (if-not (and (vector? ops) (integer? prefix-count)
+                                 (<= 1 prefix-count (- (count ops) 4))
+                                 (= ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" id]
+                                    (first ops))
+                                 (contains? #{["ASSERT 0 = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" id]
+                                              ["ASSERT ? = (SELECT COUNT(*) FROM gesso_commands WHERE _id = ?)" 0 id]}
+                                            (nth ops (inc prefix-count)))
+                                 (vector? (peek ops)) (= 3 (count (peek ops)))
+                                 (= [:put-docs :gesso_transition_evidence] (subvec (peek ops) 0 2))
+                                 (map? (peek (peek ops))))
+                      {:status :unsupported :reason :invalid-mapped-evidence-envelope}
+                      (let [prefix (subvec ops 1 (inc prefix-count))
+                            witness (peek (peek ops))
+                            expected (derive-record! original targets docs journal prefix spec context)]
+                        (cond
+                          (not= expected (apply dissoc witness envelope/binding-keys))
+                          {:status :mismatch :reason :transition-evidence-record-mismatch}
+                          (not= (writes/put-row-frequencies! (writes/derive-puts! original targets docs journal spec))
+                                (writes/put-row-frequencies! (subvec ops (+ 2 prefix-count) (dec (count ops)))))
+                          {:status :mismatch :reason :selected-retained-write-suffix-mismatch}
+                          (not (envelope/bound-transition-envelope? ops))
+                          {:status :mismatch :reason :transition-evidence-envelope-binding-mismatch}
+                          :else {:status :matched :id id}))))
+                  (catch clojure.lang.ExceptionInfo _
+                    {:status :unsupported :reason :invalid-mapped-evidence-source-or-envelope}))]
+    (if (= :matched (:status checked))
+      (let [r (tag (provider/compare-local-processed-retained-mapped-evidence-absence!
+                    node tables original targets docs journal expectation prefix-count (:id checked)))]
+        (if (= :matched (:status r))
+          (assoc r :mapped-write-suffix :matched-source-derived-puts
+                   :command-id-absence-guard :matched :evidence-id-absence-guard :matched
+                   :transition-evidence :matched-source-relative-record
+                   :transition-envelope-binding :matched)
+          r))
+      (fail (:status checked) (:reason checked)))))

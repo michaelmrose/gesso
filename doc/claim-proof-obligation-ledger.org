@@ -5284,3 +5284,28 @@ source and prefix, and unexpected envelope fields. Full retained envelope
 binding, evidence-ID absence at the historical predecessor and selected
 commitment remain open. No production admission expansion, certificate or
 CLM-R2 premise retirement. Full project and independent formal gates not rerun.
+
+* v2742 — compose retained transition evidence and identity absence
+
+Qualify a selected evidence-bearing mapped envelope with an exact leading
+framework evidence-ID absence guard, independently checked mapped prefix,
+command-ID absence guard, complete derived ordinary puts and one final
+bound v4 witness. Compare the unbound witness to forward source derivation,
+then recompute the ordered envelope binding through the existing shared
+encoder. Require exact retained transaction identity/time/operations and
+both global string identities absent at the same historical predecessor.
+Preserve prefix-only, prestate-only and guarded-write diagnostic behavior.
+
+JVM: 7 tests / 377 assertions, zero failures or errors across mapped
+evidence, mapped writes, historical prestate, mapped retained execution
+and physical transition-evidence replay. The new persistent fixture adds
+54 assertions: an orphan evidence record aborts an otherwise fresh
+command; a fresh identity succeeds; altered witness with recomputed digest,
+changed puts, reordered bound operations, wrong or missing guards and
+incomplete observation scope fail closed. Reopening preserves the results.
+The fixture uses production encoding and manually assembled operations,
+not an installed admission or actual publication executor. Publication,
+residual assertions, supplied input/selector/catalog premises, authenticated
+provenance and selected commitment remain unqualified. No production
+admission expansion, certificate or CLM-R2 premise retirement. Full
+project and independent formal gates not rerun.
