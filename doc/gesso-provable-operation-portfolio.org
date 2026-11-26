@@ -1,0 +1,563 @@
+#+TITLE: Gesso — A General Portfolio of Provable Application Operations
+#+SUBTITLE: Design investigation and reusable certification strategy
+#+DATE: 2026-11-25
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Status and purpose
+
+This non-normative design note explores how Gesso can support a broad
+portfolio of applications whose important business rules are mechanically
+checked. It supplements canonical Gessoplan R5.1; it neither changes that
+specification nor introduces a runtime API, proof rule, admission policy,
+certificate, or new completion criterion.
+
+The implementation baseline is v2756, =03e5e689e3cf=, on =typed-clojure=.
+The source observations below are grounded in that snapshot. Proposed
+constructors, mathematical examples, and application portfolios describe
+possible development, not features already available.
+
+The objective is not to prove arbitrary Clojure programs, nor to require
+application authors to become users of Typed Clojure, Ansatz, Recife, TLA+
+or Quint. Authors describe their domain and Gesso constructions in ordinary
+Clojure data. Gesso derives the executable semantic objects, obligations,
+and, where supported, their mechanically checkable evidence.
+
+The central hypothesis is that a relatively small vocabulary of composable,
+well-specified operations can cover much of the correctness-critical behavior
+of conventional database-backed applications. Generality should be measured
+by the number of different business rules and application domains that can
+reuse the same qualified constructions, not by the number of hardcoded
+business operations in the framework.
+
+* Why Claim is a representative proving problem
+
+HumanHelp Claim is a useful vertical slice because it combines several
+otherwise independent obligations:
+
+- Trusted actor, command identity, and operation resolution.
+- Eligibility depending on current authoritative Request, Membership and
+  organizational policy.
+- Exclusive ownership and the relationship between Request and assignment.
+- Competing preparations and guarded atomic incorporation.
+- Exact durable changes, evidence, journal and publication intents.
+- Stale-attempt abort, guarded refusal recovery, and replay of an incorporated
+  result without repeating the operation.
+- Authoritative observation, invalidation, and eventual client settlement.
+
+A scalar owner field alone does not prove the desired ownership theorem.
+The invariant concerns the relevant active primary assignments, the admitted
+lifecycle and the physical writers capable of modifying those facts. The
+initial ownership epoch and subsequent legitimate release/reclaim behavior
+must not be conflated.
+
+The same structural problem occurs in reserving a seat, assigning a support
+case, allocating equipment or appointing a responsible employee. Those
+applications differ in their eligibility, lifecycle and effect declarations,
+not necessarily in the mechanics of protected selection and atomic writes.
+
+The reusable result of Claim should therefore be a set of source-derived
+constructions and correspondence arguments, with a domain-specific instance
+of their obligations. A second application should not need to reproduce the
+entire Claim investigation merely to choose a different entity and guard.
+
+As of v2756, independently reconstructed retained XTDB history can qualify
+selected genuine executor commitments and stale mapped-prefix aborts.
+Abstract committed transition refinement, recovery-trajectory composition,
+authenticated premise provenance, complete installed-host correspondence
+and CLM-R2 premise discharge remain open. These are important distinctions:
+a successful selected diagnostic is not yet a theorem about all deployed
+executions.
+
+* The common mathematical model
+
+** Typed guarded transitions
+
+Let S be the well-typed declared state space, X_i the input space for
+operation i, and T_i(s,x,s') its transition relation. For the guarded
+replacement case, T_i holds only when the domains are satisfied, the guard
+is true on the protected prestate and input, each assignment produces its
+specified poststate value, and the frame preserves the presence and value
+of every unwritten declared field.
+
+#+begin_example
+T_i(s,x,s') =
+  well-typed(s,x,s')
+  and G_i(s,x)
+  and A_i(s,x,s')
+  and F_i(s,s')
+#+end_example
+
+Assignments are simultaneous, not an implicit sequence of mutations.
+The frame is relative to the declared projection; an actual transaction
+must separately establish the complete relevant physical effect footprint.
+
+This baseline is intentionally not the definition of every possible future
+operation. Allocation, deletion, relational update, arithmetic, external
+effects and resource transfer need their own explicit semantics. They may
+share the transition interface without being disguised as scalar replacement.
+
+** Simultaneous invariant preservation
+
+For invariants I_1 ... I_n, define Inv(s) as their conjunction. For the
+original declared initialization predicate and every admitted operation,
+derive the following obligation cross-product:
+
+#+begin_example
+Initial(s)             => I_j(s)   for every j
+Inv(s) and T_i(s,x,s') => I_j(s')  for every i,j
+#+end_example
+
+A proof of one invariant may depend on another invariant of the same
+prestate. It need not preserve itself in isolation. If an invariant's
+dependency footprint is disjoint from the actual changes, a sound frame
+argument can often discharge that obligation automatically.
+
+An initial predicate implying Inv is not evidence that an installed
+database satisfies that predicate. A proof over the declared operation
+catalog is not evidence that the catalog enumerates every deployed writer.
+The inductive argument is applicable to real execution only when these
+premises and the refinement relationship have been established.
+
+Guards must not make an operation vacuously safe by disabling every
+execution. Where an operation is intended to be usable, require reachable
+or otherwise appropriately qualified positive witnesses, in addition to
+preservation. Availability and progress require their own temporal claims.
+
+** Physical and observational refinement
+
+Let P be the relevant physical database state and alpha its declared
+abstraction into S. For a qualified committed execution e with protected
+prestate p and poststate p', the desired correspondence has the form:
+
+#+begin_example
+PhysicalCommit_i(p,x,e,p') =>
+  T_i(alpha(p), x, alpha(p'))
+#+end_example
+
+This is schematic: identity, basis, trusted input, exact outcome and
+physical effect witnesses must be bound to the same execution. The relation
+must also account for durable command and publication facts where they are
+within the certified subject.
+
+An aborted attempt is not a committed transition. It requires an appropriate
+no-durable-effects or permitted-effects argument for its scope. A retry
+cannot retroactively make an earlier attempt a successful commitment.
+A duplicate returning an existing result is not another incorporation.
+A commit-unknown observation establishes neither rejection nor success.
+Recovery and subsequent browser settlement have distinct obligations.
+
+For a workflow, prove the relevant composition of those steps, including
+interference and recovery, rather than treating a final database snapshot
+as evidence that every intermediate transition was valid.
+
+* Present capabilities and their boundaries
+
+** Existing foundation at v2756
+
+The following source is useful for understanding the current starting
+point:
+
+- [[file:../src/gesso/assurance/rule.clj][Closed rule syntax]],
+  [[file:../src/gesso/assurance/rule_type.clj][rule typing]] and
+  [[file:../src/gesso/assurance/rule_eval.clj][evaluation]].
+- [[file:../src/gesso/assurance/transition.clj][Guarded replacement construction]]
+  and [[file:../src/gesso/assurance/proof/transition.clj][abstract transition checking]].
+- [[file:../src/gesso/assurance/application_induction.clj][Application induction]],
+  [[file:../src/gesso/assurance/proof/induction.clj][induction proof machinery]]
+  and [[file:../src/gesso/model/operation_family.clj][operation families]].
+- [[file:../src/gesso/assurance/example/single_node_proving.clj][Reservation-oriented proving example]]
+  and [[file:../test/gesso/assurance/ansatz_reservation_pilot.clj][Ansatz reservation pilot]].
+- [[file:claim-proof-obligation-ledger.org][Claim proof obligation ledger]],
+  particularly v2754 through v2756.
+
+The closed scalar rule AST supports literal, read, presence, Boolean
+connectives, equality, inequality, comparisons, membership and implication.
+Its guarded replacement baseline assigns a literal or a required typed
+prestate/input reader. It checks exact read/write declarations and frame
+coverage within the declared projection. The syntax and constructor are
+not themselves admission or proof.
+
+The repository also contains opt-in signed-integer bound, nominal enum,
+mixed induction, typed-read and mapped-prestate cardinality pilots. These
+are substantial foundations, but their individual supported source shapes,
+assumptions and proof scopes matter. For example, the reservation pilot
+checks quantified propositions derived from an exact known catalog shape;
+it does not establish general source-to-Ansatz translation soundness or
+installed physical refinement. Integer ordering does not imply a general
+arithmetic update language, and a mapped cardinality pilot does not imply
+arbitrary relational aggregation is certified.
+
+** Claim is not the entire framework
+
+We should distinguish at least the following questions for any proposed
+operation family:
+
+- Can its intended behavior be expressed in the architecture?
+- Is there an implemented closed construction for that behavior?
+- Can Gesso derive and check the relevant abstract obligations?
+- Is the derivation sound for that construction's supported domain?
+- Are the actual installed writers, reads, effects and outcomes bound to
+  those obligations?
+- Does the evidence satisfy the requested application admission profile?
+
+An affirmative answer at one level is not an affirmative answer at the
+next. Application breadth must not be represented by invented coverage
+percentages or by counting example tests as certified operation families.
+
+* A reusable operation vocabulary
+
+The following catalog is a proposal for organizing development. The first
+families reuse the existing scalar and guarded-transition foundations;
+others require additional semantic and physical qualification. None is
+declared completely certified by appearing here.
+
+** State and identity
+
+- Lifecycle transitions: explicit allowed changes between nominal states;
+  publish, archive, cancel, approve and reopen.
+- Conditional replacement: change fields under typed prestate/input guards
+  with an exact frame.
+- Creation and deletion: fresh or deliberately reused identity, absence,
+  existence, uniqueness, referential integrity, and lifecycle of references.
+  Distinguish logical deletion from physical erasure and historical retention.
+- Relationship updates: membership, ownership, assignment, parent/child
+  associations, and changes to an explicitly scoped relation.
+- Monotonic progression: version, epoch, generation and sequence changes.
+  A new generation may permit an operation forbidden in the previous one.
+
+** Quantities, sets and time
+
+- Exact arithmetic: addition, subtraction, bounds and comparisons over
+  integers or explicitly selected exact numeric domains.
+- Fixed-point monetary quantities: declared currency and scale, rounding,
+  overflow policy, conservation and explicit fee or adjustment accounts.
+  Floating-point equivalence must not be presumed.
+- Set and relation membership: insertion, removal, uniqueness, bounded
+  cardinality, disjointness and scoped universal/existential predicates.
+- Deterministic aggregation: sum, count and explicitly specified extrema
+  over an authoritative selection, with correct empty-set semantics.
+- Temporal intervals: overlap, containment, expiration, leases, ordered
+  events and explicit endpoint conventions such as half-open intervals.
+  Transaction time, valid time and application clocks are separate domains.
+
+** Composition and effects
+
+- Atomic compound operations: multiple writes with shared guards and one
+  physical incorporation point; exact effect and frame boundaries.
+- Command incorporation: idempotency, duplicate handling, identity
+  compatibility, guarded abort/recovery and commit-unknown reconciliation.
+- Multi-stage workflows: explicit durable intermediate states, per-stage
+  authorization, retries, compensation and progress obligations.
+- Authority-bearing actions: issue, use, transfer and retire capabilities
+  under their actual scope and lifetime. Logical facts about a capability
+  are not the capability and do not authorize its duplication.
+- External effects: durable intent, dispatch, provider receipt, retry and
+  reconciliation. No local proof alone establishes an external provider's
+  behavior or exactly-once delivery.
+- Read-side disclosure and presentation: authorized selection, permitted
+  projections, scoped caches, invalidation interests, and correspondence
+  of actual rendered fragments and client installation.
+
+The aim is orthogonal primitives and a small number of construction families,
+not a public DSL containing every conceivable business verb. Composition
+must remain checked: two individually safe operations do not necessarily
+form a safe workflow or an atomic operation.
+
+* Qualification of a new primitive
+
+A new semantic primitive should earn admission through the same discipline
+as the existing guarded transition family.
+
+1. Specify its domain, totality or partiality, equality, error semantics and
+   resource limits. Reject unsupported inputs explicitly.
+2. Give its typed source representation and its independent semantic
+   meaning. Keep nominal identities and prestate/input/poststate distinct.
+3. Specify its read dependencies, effects and frame, including relational
+   and predicate dependencies where applicable.
+4. Derive sound consequences and preservation obligations from the original
+   source. Bind proof goals and evidence to that exact subject.
+5. Establish source-to-executor and source-to-proof correspondence.
+   Qualify the concrete XTDB lowering, protected prestate, concurrency,
+   outcome and retained history on the supported provider profile.
+6. Provide positive witnesses and adversarial mutations, including missing
+   readers, false guards, wrong source, stale basis, interfering writers,
+   incomplete frames and unsupported effects.
+7. Record supported and unsupported cases and the remaining premises.
+   Integrate into application preflight and the appropriate admission
+   profile only when the relevant obligations are discharged.
+
+For example, an absence or cardinality predicate is not protected merely
+because a query returned the desired count. The physical transaction must
+prevent an interfering insertion from invalidating the predicate between
+preparation and incorporation, or correctly abort and recover. Actual XTDB
+provider semantics and expression limits constrain the available lowering.
+If a required primitive cannot be implemented soundly on the provider,
+reject that construction rather than silently weakening the guarantee.
+
+* Worked mathematical examples
+
+These examples are proposed semantic specifications, not runnable Gesso
+declarations or claims of current admission.
+
+** Inventory reservation
+
+Let stock and reserved be nonnegative integers associated with a specific
+inventory identity. Require:
+
+#+begin_example
+I: 0 <= reserved <= stock
+G: q > 0 and q <= stock - reserved
+A: reserved' = reserved + q
+F: stock' = stock
+#+end_example
+
+From I and G, the resulting reserved quantity is nonnegative and at most
+stock. The proof is elementary arithmetic; the physical challenge is to
+ensure competing reservations protect the same availability dependency.
+Restocking, releasing reservations, shipping and stock corrections are
+additional operations that must preserve the same invariant. A scalar
+counter must also correspond to any detailed reservation records on which
+the intended invariant depends.
+
+** Transfer of a conserved quantity
+
+For distinct accounts A and B in the same currency and a positive exact
+amount q, a simple no-fee transfer requires:
+
+#+begin_example
+G: q > 0 and balance(A) >= q and A != B
+A: balance'(A) = balance(A) - q
+   balance'(B) = balance(B) + q
+I: balances remain nonnegative
+C: balance'(A) + balance'(B) = balance(A) + balance(B)
+#+end_example
+
+Conservation is a transition property (C); it can become a state invariant
+relative to an initial total in a closed system. Deposits, withdrawals and
+fees change the conservation boundary and require explicit accounting.
+The two writes are simultaneous, and no partial incorporation is permitted.
+Currency, precision, rounding and representation bounds are independent
+obligations. A real ledger may additionally require immutable entries,
+reversals, reconciliation and authorization rather than mutable balances
+alone.
+
+** Nonoverlapping bookings
+
+For each resource r, define its active bookings as B(r). For distinct
+bookings b and c, require:
+
+#+begin_example
+I: for every r and distinct b,c in B(r):
+     end(b) <= start(c) or end(c) <= start(b)
+G: start(new) < end(new)
+   and for every b in B(r):
+     end(b) <= start(new) or end(new) <= start(b)
+A: B'(r) = B(r) union {new}
+#+end_example
+
+Half-open intervals allow adjacent bookings. The guard establishes every
+new pair, while old pairs remain valid under the frame. Cancellation,
+rescheduling and recurring reservations require additional constructors or
+compositions. The physical absence predicate must be protected against
+concurrent overlapping inserts, not only updates to existing bookings.
+Time-zone conversion and ambiguous civil times must be resolved before
+the authoritative interval comparison.
+
+** Organizational authorization and disclosure
+
+For a proposed operation on resource r, actor a must satisfy a declared
+eligibility relationship with the authoritative organization owning r.
+Membership status, role, delegation and resource ownership are potentially
+mutable dependencies. A revocation racing with a write must be resolved
+against the protected prestate according to the declared authority policy.
+
+For reads, the property is different: returned information must belong to
+the authorized projection at the specified basis and under the stated
+disclosure policy. A write-side guard cannot by itself prove that a search,
+SSE payload, error, cached fragment or rendered page discloses no
+unauthorized information. If a policy claims noninterference across
+executions, including observable differences, prove that stronger relational
+property separately rather than confusing it with row filtering.
+
+* Application portfolio and its likely reach
+
+| Domain | Representative operations | Principal additional obligations |
+|--------+---------------------------+----------------------------------|
+| Administration and CRM | Assign cases, edit contacts, approve requests | Membership, ownership and lifecycle |
+| HR and procurement | Approve leave, hire, allocate budgets | Policy, quotas, delegation, audit |
+| Project and document management | Assign tasks, publish versions, archive | Dependencies, version/epoch and access |
+| Scheduling and healthcare administration | Book appointments, reschedule, release | Interval exclusion and disclosure |
+| Inventory and equipment rental | Reserve, allocate, return, replenish | Cardinality, quantities and availability |
+| Commerce and marketplaces | Create orders, reserve stock, refund | Conservation, payment/provider contracts |
+| Social and collaborative systems | Post, follow, moderate, message | Relationship uniqueness and read access |
+| Finance and accounting | Transfer, reconcile, post journal entries | Exact arithmetic, conservation, audit |
+| Scientific and algorithmic systems | Submit computation, approve results | Separate computation contracts |
+
+This is a qualitative suitability assessment, not a claim that all these
+applications can currently be certified or that Gesso satisfies the
+regulatory requirements of any industry.
+
+The strongest fit is software whose essential complexity is authoritative
+state, permissions, consistency, coordination and lifecycle. Specialized
+computations may remain outside the proven core, provided they cannot
+bypass it. At the other extreme, a claim about numerical simulation
+accuracy, optimal routing or cryptographic security requires distinct
+domain-specific evidence. A web framework's transaction guarantees are
+not a proof of those computations.
+
+* A controlled boundary for ordinary application code
+
+A marketplace may use ordinary Clojure for product search ranking,
+recommendations, formatting, rendering and image processing. The certified
+core can govern order creation, inventory reservation, seller authority,
+payment-state changes, journal and publication.
+
+This is not a license for arbitrary code to mutate certified state. An
+ordinary algorithm can propose an input; the admitted operation must
+validate it against current authority, the declared rule and its protected
+prestate before committing. Opaque callbacks, direct writes and external
+effects must either be constrained by a qualified interface or remain
+explicitly outside the requested guarantee.
+
+For an opaque transform, a checked pre/post contract may be sufficient if
+the contract covers the relevant effects and the implementation is either
+proved against it or constrained by a trusted enforcement boundary.
+Testing a transform is not a substitute for a universal contract when
+universal correctness is claimed.
+
+The same distinction applies to UI behavior. Search results need not be
+ranked optimally, but a certified disclosure policy must cover the actual
+results. An optimistic presentation is not a durable success. Gesso
+Choreo, Live, HTMX swaps and browser continuity have their own correspondence
+obligations whenever included in the claim.
+
+* Roles of the assurance tools
+
+Typed Clojure is useful for making internal semantic categories, interfaces
+and nominal identities difficult to confuse. It can reject particular
+invalid compositions before execution. It does not, by itself, establish
+business invariant preservation or that an observed database basis is
+authentic.
+
+Ansatz is a candidate for kernel-checked mathematical propositions, including
+arithmetic, induction and more expressive relational properties. Proof
+construction and checking must remain tied to the exact original Gesso
+obligation, with an explicit trusted axiom/import policy and justified
+translation. A checked theorem about a different model is insufficient.
+
+Recife and other model-checking facilities can explore interference,
+concurrency, recovery and temporal properties under their stated model and
+bounds. Exhaustive finite checking is valuable but is not automatically
+an unbounded theorem or a proof of the installed provider.
+
+Gesso's executable semantic core remains the owner of application meaning.
+The tools provide complementary evidence. The admission path must check
+the relevant correspondence and residual premises, without silently
+downgrading a requested guarantee or forcing developers to maintain multiple
+manually synchronized specifications.
+
+* Development strategy: a certification portfolio
+
+** First close the existing vertical slice
+
+Finish the outstanding Claim refinement, provenance and installed-host
+obligations before treating that operation family as an established
+end-to-end reference. Do not interpret this note as an instruction to
+interrupt the current critical path or to start several new pilots at once.
+
+The point of a subsequent portfolio is to test whether the existing
+machinery transfers without reproducing every mechanism for each domain.
+The examples should be small enough that the new semantic gap is apparent.
+
+** Proposed sequence of transfer examples
+
+| Example | Distinguishing obligation | Reuse target |
+|---------+---------------------------+--------------|
+| Lifecycle and publishing | Nominal transitions and version progression | Guard, frame, induction |
+| Inventory reservation | Bounded exact quantity and concurrent allocation | Claim guards plus arithmetic |
+| Transfer ledger | Conservation across atomic multi-entity writes | Compound effect correspondence |
+| Appointment booking | Temporal exclusion and protected absence | Relational predicates and concurrency |
+| Organization administration | Mutable, hierarchical authorization | Trusted input and policy dependencies |
+| Order fulfillment | Multi-stage durable progress and compensation | Command recovery and publication |
+| Private messaging | Authorized information disclosure | Read and presentation correspondence |
+
+These are candidate miniature applications or proving fixtures, not seven
+new production projects or mandatory additions to the canonical R5.1
+completion scope. Existing suitable fixtures should be reused. Order may
+change if the next genuine proof gap is elsewhere.
+
+** What constitutes successful transfer?
+
+Each pilot should declare its original source, invariant and operation
+catalog, then exercise initialization, every interfering operation family,
+source-derived proof generation, actual physical execution, and the
+appropriate negative cases. Record unsupported paths and residual premises
+under the requested profile.
+
+A new example that needs only domain declarations and proof instantiation
+is stronger evidence of generality than one requiring a new hardcoded
+executor or proof translator. When the latter is unavoidable, identify the
+missing general primitive, qualify it separately, and rerun prior examples.
+
+The examples should form a permanent regression corpus. Deliberately
+mutate guards, effect footprints, authorizations, source identities,
+initialization, outcome records and physical lowering to ensure that
+unsafe or unsupported constructions fail at the appropriate boundary.
+
+* Measuring breadth without weakening assurance
+
+Track coverage by semantic constructor, supported type and predicate
+domain, proof obligation, source-to-execution correspondence, and admission
+profile. Count independently qualified families separately from examples
+and conditional diagnostics.
+
+Useful measures include:
+
+- Number of distinct application subjects reusing an unchanged qualified
+  construction and physical lowering.
+- Which invariant classes have sound, source-derived proof support.
+- Which operations need handwritten evidence or still carry assumptions.
+- Whether the complete initialization and operation-by-invariant obligation
+  matrix is covered, including intervening or external writers.
+- Whether adversarial cases expose unsupported effects and missing
+  dependencies rather than being accidentally accepted.
+- Whether the installed application satisfies the precise requested
+  profile, as distinct from an isolated abstract proof.
+
+No percentage of all possible applications can be inferred from these
+measures. They nevertheless give us evidence that the marginal cost of
+certifying new domains is falling.
+
+* Conclusion
+
+Gesso's opportunity is to exploit the structure of real applications:
+typed domain state, guarded operations, explicit authority, atomic durable
+effects, recoverable workflows and declared presentation. A relatively
+small set of well-qualified semantic primitives should cover a considerable
+portion of conventional business software.
+
+The framework should allow ordinary computation wherever the declared
+certification boundary permits it, while refusing unsupported or unproved
+claims at that boundary. Generality is achieved by broadening the common
+semantic vocabulary and proving its composition, not by weakening the
+meaning of certification.
+
+The decisive next evidence is successful transfer: a new domain declaring
+its own rules, obtaining the necessary obligations from Gesso, and reusing
+the previously qualified machinery through actual execution.
+
+* Related specification and implementation notes
+
+- Gessoplan R5.1, Parts IV (authoritative operations), IX (compositional
+  assurance), X (formal correspondence), XI (completion profiles) and
+  XII (delivery checkpoints), in particular
+  [[https://github.com/michaelmrose/gessoplan/blob/main/src/09/09.06-proof-facts-guarded-consequence-and-induction.org][09.06]],
+  [[https://github.com/michaelmrose/gessoplan/blob/main/src/10/10.04-proof-strategy-and-correspondence.org][10.04]] and
+  [[https://github.com/michaelmrose/gessoplan/blob/main/src/11/11.14-compositional-certification-completion.org][11.14]].
+- [[file:gesso-assurance-rule-soundness-boundary.org][Rule soundness and trust boundary]].
+- [[file:gesso-assurance-induction-and-writer-correspondence-checkpoint.org][Induction and writer correspondence checkpoint]].
+- [[file:claim-proof-obligation-ledger.org][Claim proof obligation ledger]].
+
+This document is a design investigation only. No runtime code, proof
+status, application admission or canonical specification has changed.
