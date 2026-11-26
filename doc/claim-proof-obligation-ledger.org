@@ -5819,3 +5819,27 @@ envelope composition, genuine persistent trajectory validation and full
 gates remain outstanding. No authenticated premise provenance, universal
 provider refinement, certificate, production admission expansion or
 CLM-R2 premise retirement.
+
+* v2764 — complete source-relative executor recovery composition
+
+Extract the existing pure executor envelope check and reuse it for each
+of the three selected attempts. Require one source identifier, catalog
+and induction fingerprint pair, and declaration catalogs across the
+trajectory. Derive the journal expectations from the checked command
+specifications and carry the checked publication identities, residual
+operands and abstract input specifications into the shared retained
+provider bracket. Do not expose an envelope-trajectory match unless
+all three envelopes and the combined provider comparison succeed.
+
+Focused JVM regression: 8 tests / 148 assertions, zero failures or
+errors. The new fixture exercises actual source-relative envelope
+derivation and validation, mapped guards, abstract projection and
+journal linkage with stubbed provider observations. Rejects corrupted
+witnesses in each of the three attempts before provider acquisition,
+inconsistent source/catalog/declaration context, extra step fields and
+incomplete observation scope. Existing single-step APIs retained.
+Genuine persistent executor recovery trajectory validation remains
+outstanding. Source identity, catalog content, selectors, inputs and
+outcome interpretation remain supplied premises. No authenticated
+provenance, universal provider refinement, certificate, production
+admission expansion or CLM-R2 retirement. Full gates not rerun.

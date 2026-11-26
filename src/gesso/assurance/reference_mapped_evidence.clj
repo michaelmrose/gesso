@@ -282,6 +282,62 @@
 
 (def executor-retained-profile :selected-mapped-retained-evidence-v4)
 
+(defn- check-executor-envelope
+  "Pure source-relative validation shared by single-step and recovery diagnostics."
+  [original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
+  (try
+    (let [{:keys [intents guard-ops put-ops]}
+          (publication/derive-publication! original targets docs journal spec source-id declarations)
+          residual-ops (residual/derive-assertions! original targets docs journal (:binding spec) residual-declarations)
+          ops (:ops expectation) id (resolution/record-id (:binding spec))
+          publication-end (+ 1 (if (integer? prefix-count) prefix-count 0) (count guard-ops))
+          guard-end (+ publication-end (count residual-ops))
+          put-end (- (count ops) 1 (count put-ops))]
+      (if-not (and (vector? ops) (nil? (meta ops)) (integer? prefix-count) (<= 1 prefix-count 256)
+                   (<= (count residual-ops) 256) (< guard-end put-end)
+                   (= ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" id]
+                      (first ops))
+                   (vector? (peek ops)) (= 3 (count (peek ops)))
+                   (= [:put-docs :gesso_transition_evidence] (subvec (peek ops) 0 2))
+                   (map? (peek (peek ops))))
+        {:status :unsupported :reason :invalid-mapped-executor-envelope}
+        (let [prefix (subvec ops 1 (inc prefix-count))
+              witness (peek (peek ops))
+              expected (derive-record! original targets docs journal prefix spec context)
+              mapped (writes/derive-puts! original targets docs journal spec)
+              actual-residuals (subvec ops publication-end guard-end)
+              ;; Match multiplicities before reordering solely for
+              ;; the standalone canonical operand validator.
+              canonical-residuals (when (= (frequencies residual-ops) (frequencies actual-residuals))
+                                    (let [remaining (volatile! (group-by identity actual-residuals))]
+                                      (mapv (fn [op]
+                                              (let [candidate (first (get @remaining op))]
+                                                (vswap! remaining update op subvec 1)
+                                                candidate)) residual-ops)))
+              fragment {:guard-ops (subvec ops (inc prefix-count) publication-end)
+                        :put-ops (subvec ops put-end (dec (count ops)))}]
+          (cond
+            (some #(#{:gesso_live_outbox :gesso_transition_evidence} (second %)) mapped)
+            {:status :unsupported :reason :reserved-mapped-publication-table}
+            (not (and (some? canonical-residuals)
+                      (= :matched (:status (residual/check-assertions!
+                                            original targets docs journal (:binding spec) residual-declarations canonical-residuals)))))
+            {:status :mismatch :reason :residual-assertion-fragment-mismatch}
+            (not= :matched (:status (publication/check-publication!
+                                    original targets docs journal spec source-id declarations fragment)))
+            {:status :mismatch :reason :publication-fragment-mismatch}
+            (not= expected (apply dissoc witness envelope/binding-keys))
+            {:status :mismatch :reason :transition-evidence-record-mismatch}
+            (not= (writes/put-row-frequencies! mapped)
+                  (writes/put-row-frequencies! (subvec ops guard-end put-end)))
+            {:status :mismatch :reason :selected-retained-write-suffix-mismatch}
+            (not (envelope/bound-transition-envelope? ops))
+            {:status :mismatch :reason :transition-evidence-envelope-binding-mismatch}
+            :else {:status :matched :id id :publication-ids (mapv :xt/id intents)
+                   :residual-ops actual-residuals}))))
+    (catch clojure.lang.ExceptionInfo _
+      {:status :unsupported :reason :invalid-mapped-executor-source-or-envelope})))
+
 (defn- compare-executor*
   "Check the selected executor ordering: evidence guard, mapped prefix,
    canonical publication guards, residual guard multiset, ordinary puts,
@@ -298,58 +354,7 @@
                                                          executor-retained-profile))
         fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
                     :provider-refinement :not-established})
-        checked (try
-                  (let [{:keys [intents guard-ops put-ops]}
-                        (publication/derive-publication! original targets docs journal spec source-id declarations)
-                        residual-ops (residual/derive-assertions! original targets docs journal (:binding spec) residual-declarations)
-                        ops (:ops expectation) id (resolution/record-id (:binding spec))
-                        publication-end (+ 1 (if (integer? prefix-count) prefix-count 0) (count guard-ops))
-                        guard-end (+ publication-end (count residual-ops))
-                        put-end (- (count ops) 1 (count put-ops))]
-                    (if-not (and (vector? ops) (nil? (meta ops)) (integer? prefix-count) (<= 1 prefix-count 256)
-                                 (<= (count residual-ops) 256) (< guard-end put-end)
-                                 (= ["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)" id]
-                                    (first ops))
-                                 (vector? (peek ops)) (= 3 (count (peek ops)))
-                                 (= [:put-docs :gesso_transition_evidence] (subvec (peek ops) 0 2))
-                                 (map? (peek (peek ops))))
-                      {:status :unsupported :reason :invalid-mapped-executor-envelope}
-                      (let [prefix (subvec ops 1 (inc prefix-count))
-                            witness (peek (peek ops))
-                            expected (derive-record! original targets docs journal prefix spec context)
-                            mapped (writes/derive-puts! original targets docs journal spec)
-                            actual-residuals (subvec ops publication-end guard-end)
-                            ;; Match multiplicities before reordering solely for
-                            ;; the standalone canonical operand validator.
-                            canonical-residuals (when (= (frequencies residual-ops) (frequencies actual-residuals))
-                                                  (let [remaining (volatile! (group-by identity actual-residuals))]
-                                                    (mapv (fn [op]
-                                                            (let [candidate (first (get @remaining op))]
-                                                              (vswap! remaining update op subvec 1)
-                                                              candidate)) residual-ops)))
-                            fragment {:guard-ops (subvec ops (inc prefix-count) publication-end)
-                                      :put-ops (subvec ops put-end (dec (count ops)))}]
-                        (cond
-                          (some #(#{:gesso_live_outbox :gesso_transition_evidence} (second %)) mapped)
-                          {:status :unsupported :reason :reserved-mapped-publication-table}
-                          (not (and (some? canonical-residuals)
-                                    (= :matched (:status (residual/check-assertions!
-                                                          original targets docs journal (:binding spec) residual-declarations canonical-residuals)))))
-                          {:status :mismatch :reason :residual-assertion-fragment-mismatch}
-                          (not= :matched (:status (publication/check-publication!
-                                                  original targets docs journal spec source-id declarations fragment)))
-                          {:status :mismatch :reason :publication-fragment-mismatch}
-                          (not= expected (apply dissoc witness envelope/binding-keys))
-                          {:status :mismatch :reason :transition-evidence-record-mismatch}
-                          (not= (writes/put-row-frequencies! mapped)
-                                (writes/put-row-frequencies! (subvec ops guard-end put-end)))
-                          {:status :mismatch :reason :selected-retained-write-suffix-mismatch}
-                          (not (envelope/bound-transition-envelope? ops))
-                          {:status :mismatch :reason :transition-evidence-envelope-binding-mismatch}
-                          :else {:status :matched :id id :publication-ids (mapv :xt/id intents)
-                                 :residual-ops actual-residuals}))))
-                  (catch clojure.lang.ExceptionInfo _
-                    {:status :unsupported :reason :invalid-mapped-executor-source-or-envelope}))]
+        checked (check-executor-envelope original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations)]
     (if (= :matched (:status checked))
       (let [r (tag (if abort?
                      (provider/compare-local-processed-retained-mapped-abort!
@@ -404,3 +409,47 @@
    No authenticated provenance or universal refinement is established."
   [node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
   (compare-executor* node tables original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations :abstract))
+
+(def executor-recovery-profile :selected-mapped-retained-executor-recovery-v1)
+
+(defn compare-local-processed-retained-mapped-executor-recovery!
+  "Derive all three complete envelopes before checking their shared retained
+   provider bracket. The journal records, publication IDs, residual operands
+   and abstract inputs come from the same source-relative checks. The source
+   catalog, selectors, inputs and outcome interpretation remain premises."
+  [node tables steps]
+  (let [roles [:winner :abort :recovery]
+        required #{:original :targets :docs :journal :expectation :prefix-count
+                   :spec :context :source-id :declarations :residual-declarations}
+        tag #(assoc % :executor-recovery-profile executor-recovery-profile)
+        fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
+                    :provider-refinement :not-established})]
+    (if-not (and (vector? steps) (nil? (meta steps)) (= 3 (count steps))
+                 (every? #(and (map? %) (nil? (meta %)) (= required (set (keys %)))) steps)
+                 (apply = (map :source-id steps))
+                 (apply = (map #(select-keys (:context %) [:catalog-fingerprint :induction-fingerprint]) steps))
+                 (apply = (map :declarations steps))
+                 (apply = (map :residual-declarations steps)))
+      (fail :unsupported :invalid-executor-recovery-source)
+      (let [checked (mapv (fn [{:keys [original targets docs journal expectation prefix-count
+                                      spec context source-id declarations residual-declarations]}]
+                            (check-executor-envelope original targets docs journal expectation prefix-count
+                                                     spec context source-id declarations residual-declarations)) steps)]
+        (if-let [failure (first (remove #(= :matched (:status %)) checked))]
+          (fail (:status failure) (:reason failure))
+          (let [expected (zipmap roles (mapv (fn [{:keys [spec]}]
+                                               (resolution/command-record (:binding spec) (:outcome spec) (:now spec))) steps))
+                mapped (mapv (fn [step report role]
+                               (cond-> (assoc (select-keys step [:original :targets :docs :journal :expectation :prefix-count])
+                                              :command-id (:id report))
+                                 (not= :abort role)
+                                 (assoc :publication-ids (:publication-ids report)
+                                        :residual-ops (:residual-ops report)
+                                        :abstract-spec (select-keys (:spec step) [:inputs :outcome-key :outcome-cases]))))
+                             steps checked roles)
+                result (tag (provider/compare-local-processed-retained-mapped-recovery! node tables mapped expected))]
+            (cond-> result
+              (= :matched (:status result))
+              (assoc :executor-envelopes [:matched-source-relative-record
+                                          :matched-uncommitted-record
+                                          :matched-source-relative-record]))))))))
