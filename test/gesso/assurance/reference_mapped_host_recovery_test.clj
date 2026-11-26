@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-source-coverage :as coverage]
+            [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-retained-acquisition :as acquisition]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.choreo.identity :as identity]
@@ -65,7 +66,7 @@
 
 (defn- check-reopened-recovery!
   [assembly handler config tables admit mapped-source outcome-declarations
-   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle]}]
+   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle cut-handle]}]
   (is (= :stopped (:status (lifecycle/status worker))))
   (is (= 503 (:status (ring-handler {:uri "/"}))))
   (is (nil? (correspondence/initialization-observation node admit)))
@@ -95,6 +96,9 @@
               local! #(observed-recovery/compare-local-activated!
                        reopened tables admit mapped-source outcome-declarations steps %1 %2 true)]
           (is (some? new-handle))
+          (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)]
+            (is (= :exact-content (:cut-correspondence (cut/compare-prefix-cut! required reopened new-handle))))
+            (is (nil? (observed-recovery/read-local-recovery-cut! admit (:observation fresh) cut-handle))))
           (is (nil? (acquisition/read-acquisition! reopened retained-handle)))
           (doseq [[obs handle reason] [[observation retained-handle :submission-origin-mismatch]
                                        [observation new-handle :submission-origin-mismatch]
@@ -332,13 +336,25 @@
                       handle (:acquisition (acquisition/capture! node))
                       local! #(observed-recovery/compare-local-activated!
                                node tables admit mapped-source outcome-declarations steps observation % interleaved?)
-                      local (local! handle)
+                      bound (observed-recovery/capture-local-recovery-cut!
+                             node tables admit mapped-source outcome-declarations steps observation handle interleaved?)
+                      cut-handle (:recovery-cut-observation bound)
+                      required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)
+                      local (dissoc bound :recovery-cut-profile :recovery-cut-observation :recovery-cut-binding)
                       bad (local! sample)
                       r ((if interleaved? observed-recovery/compare-activated-worker-interleaved!
                              observed-recovery/compare-activated!) node tables admit mapped-source outcome-declarations steps observation)]
                   (is (= :matched (:status r)) (pr-str r))
                   (is (= sample (acquisition/read-acquisition! node handle)))
                   (is (= :matched (:status local)) (pr-str local))
+                  (is (= :matched-local-recovery-cut (:recovery-cut-binding bound)))
+                  (is (= (:historical-cut (cut/derive-cut! node handle)) required))
+                  (is (some? required))
+                  (is (not (contains? bound :historical-cut)))
+                  (is (nil? (observed-recovery/read-local-recovery-cut! (Object.) observation cut-handle)))
+                  (is (nil? (observed-recovery/read-local-recovery-cut! admit (Object.) cut-handle)))
+                  (is (nil? (observed-recovery/read-local-recovery-cut! admit observation bound)))
+                  (is (nil? (observed-recovery/read-local-recovery-cut! admit observation (observed-recovery/->RecoveryCutObservation))))
                   (is (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding local)))
                   (is (= :not-established (:observation-storage-identity local) (:authorized-historical-lineage local)))
                   (is (= :none (:authority local)))
@@ -389,7 +405,7 @@
                       (reset! restart* {:node node :worker worker :ring-handler @handler*
                                         :token (live-xtdb/current-submission-policy-token node)
                                         :sample sample :rows (selected-rows node tables)
-                                        :observation observation :steps steps :comparison r :retained-handle handle
+                                        :observation observation :steps steps :comparison r :retained-handle handle :cut-handle cut-handle
                                         :initial (correspondence/initialization-observation node admit)
                                         :events @policy-events}))))
                 ;; This test explicitly exercises a quiescent interval between

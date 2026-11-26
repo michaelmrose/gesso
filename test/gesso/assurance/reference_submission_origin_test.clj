@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
+            [gesso.assurance.reference-historical-cut :as cut]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.model-publication :as publication]
             [xtdb.node :as xtn])
@@ -47,6 +48,18 @@
                   (is (= :submission-origin-mismatch (:reason (compare! (Object.)))))
                   (with-redefs [publication/read-framed-submission-observation! (constantly {})]
                     (is (= :local-recovery-boundary-replaced (:reason (compare! handle))))))
+                (let [capture! #(recovery/capture-local-recovery-cut! node #{} admission nil nil [] % nil false)]
+                  (doseq [[obs reason] [[handle :unissued-retained-acquisition]
+                                        [(Object.) :submission-origin-mismatch]]]
+                    (let [r (capture! obs)]
+                      (is (= reason (:reason r)))
+                      (is (not (contains? r :recovery-cut-observation)))
+                      (is (= :none (:authority r)))
+                      (is (= :not-issued (:certificate r)))))
+                  (with-redefs [cut/derive-cut! (constantly {:status :derived :historical-cut {}})]
+                    (is (= :recovery-cut-boundary-replaced (:reason (capture! handle)))))
+                  (with-redefs [recovery/compare-local-activated! (constantly {:status :matched})]
+                    (is (= :recovery-cut-boundary-replaced (:reason (capture! handle))))))
                 (is (false? (publication/framed-submission-origin-matches? admission handle adapter)))
                 (is (some? (publication/read-framed-submission-observation! admission handle)))
                 handle))]

@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-mapped-observed-recovery
   "Compose local issued submission observation and retained recovery correspondence."
-  (:require [gesso.assurance.reference-mapped-evidence :as evidence]
+  (:require [gesso.assurance.reference-historical-cut :as cut]
+            [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.assurance.reference-provider :as provider]
             [gesso.live.outbox.initialization :as initialization]
@@ -188,3 +189,63 @@
                     (= :matched-local-observed-retained-steps (:submission-recovery-linkage r))))
           (fail :unsupported :invalid-local-recovery-comparison)
           :else (merge r base {:local-acquisition-binding :matched-issued-origin-and-retained-sample}))))))
+
+(def recovery-cut-profile :selected-issued-local-recovery-cut-v1)
+(deftype RecoveryCutObservation [])
+(def ^:private recovery-cuts (java.util.WeakHashMap.))
+(def ^:private original-local-comparison compare-local-activated!)
+(def ^:private original-cut-derivation cut/derive-cut!)
+
+(defn- cut-boundaries-current? []
+  (and (local-boundaries-current?)
+       (identical? original-local-comparison compare-local-activated!)
+       (identical? original-cut-derivation cut/derive-cut!)))
+
+(defn capture-local-recovery-cut!
+  "Issue a historical cut only after the exact observation and acquisition
+   match through the independent local recovery comparison. Derive the cut
+   from that same issued sample, not a supplied comparison or declared cut.
+   The handle survives node closure in this process, not process restart.
+   It is not a durable receipt or authenticated lifecycle binding."
+  [node tables admission source outcome-declarations steps observation acquisition interleaved?]
+  (let [base {:recovery-cut-profile recovery-cut-profile
+              :authority :none :certificate :not-issued
+              :observation-storage-identity :not-established
+              :authorized-historical-lineage :not-established}
+        fail #(assoc base :status %1 :reason %2)]
+    (if-not (cut-boundaries-current?)
+      (fail :unsupported :recovery-cut-boundary-replaced)
+      (let [r (original-local-comparison node tables admission source outcome-declarations
+                                         steps observation acquisition interleaved?)]
+        (cond
+          (not (cut-boundaries-current?)) (fail :unsupported :recovery-cut-boundary-replaced)
+          (not= :matched (:status r)) (fail (:status r) (:reason r))
+          (not (and (= local-acquisition-profile (:local-acquisition-profile r))
+                    (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding r))))
+          (fail :unsupported :invalid-local-recovery-comparison)
+          :else
+          (let [derived (original-cut-derivation node acquisition)]
+            (cond
+              (not (cut-boundaries-current?)) (fail :unsupported :recovery-cut-boundary-replaced)
+              (not= :derived (:status derived)) (fail (:status derived) (:reason derived))
+              (not (original-origin-matcher admission observation node))
+              (fail :unsupported :submission-origin-mismatch)
+              :else
+              (let [handle (RecoveryCutObservation.)]
+                (locking recovery-cuts
+                  (.put recovery-cuts handle {:admission admission :observation observation
+                                              :historical-cut (:historical-cut derived)}))
+                (merge r base {:recovery-cut-observation handle
+                               :recovery-cut-binding :matched-local-recovery-cut})))))))))
+
+(defn read-local-recovery-cut!
+  "Read sensitive historical cut material for the exact issued admission
+   and observation. No node or writer capability is returned; no fresh
+   physical comparison or durable identity is implied. Do not publish."
+  [admission observation handle]
+  (when (instance? RecoveryCutObservation handle)
+    (locking recovery-cuts
+      (let [entry (.get recovery-cuts handle)]
+        (when (and entry (identical? admission (:admission entry))
+                   (identical? observation (:observation entry)))
+          (:historical-cut entry))))))

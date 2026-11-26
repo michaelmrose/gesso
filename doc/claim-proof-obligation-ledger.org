@@ -7180,3 +7180,27 @@ extended cuts. Older offline dependency bundle; full gates not run.
 Next: bind the required cut to the original issued submission observation
 and independently qualified local recovery, rather than accepting a cut
 whose provenance is merely declared. Durable lifecycle premises remain open.
+
+* v2800 — bind historical cut to issued local recovery
+
+Issue a process-local recovery-cut observation only after the strict
+activated recovery comparison matches the original submission origin and
+complete issued retained acquisition. Derive the cut from that same
+acquisition, never from a caller-supplied comparison or cut declaration.
+Bind its sensitive contents to the exact admission and submission
+observation in the local registry. Preserve read access after node
+closure, without transferring the original acquisition to another node.
+Reject forged handles, mismatched admission or observation, and replaced
+comparison and derivation functions. The cut remains process-local,
+not a serialized receipt or authenticated lifecycle binding.
+
+Focused JVM: 4 tests / 297 assertions, zero failures or errors across
+historical cut, assembled host recovery and submission origin namespaces.
+Both adjacent and worker-interleaved histories qualify the cut; reopened
+and copied stores match historical content without acquiring the original
+local origin. Older offline dependency bundle; full gates not run.
+
+Next: compose the issued original recovery cut with an independently
+issued target acquisition and exact selected lifecycle premises. Keep
+conditional content correspondence separate from trust acceptance,
+durable identity and CLM-R2 premise discharge.
