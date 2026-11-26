@@ -19,6 +19,7 @@
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.physical-correspondence :as correspondence]
             [gesso.live.outbox.read-frontier :as frontier]
             [gesso.model.certified-plan :as plan]
             [gesso.model.command :as command]
@@ -61,6 +62,44 @@
   (into {} (map (fn [table]
                   [table (set (live-xtdb/q node (str "SELECT *, _system_from FROM " (name table))))])) tables))
 
+(defn- check-reopened-recovery!
+  [assembly handler config tables admit mapped-source outcome-declarations
+   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events]}]
+  (is (= :stopped (:status (lifecycle/status worker))))
+  (is (= 503 (:status (ring-handler {:uri "/"}))))
+  (is (nil? (correspondence/initialization-observation node admit)))
+  (let [started (host/start! assembly handler config)
+        reopened (:xtdb/connectable started)
+        new-worker (get started managed/handle-key)]
+    (try
+      (is (not (identical? node reopened)))
+      (let [new-token (live-xtdb/current-submission-policy-token reopened)]
+        (is (some? new-token))
+        (is (not (identical? token new-token))))
+      (is (= :idle (:status (await-empty-cycle! new-worker))))
+      (is (= events @policy-events))
+      (is (= initial (correspondence/initialization-observation reopened admit)))
+      (is (= sample (coverage/observe-local-processed-retained-replay-inputs! reopened)))
+      (is (= rows (selected-rows reopened tables)))
+      (let [r (observed-recovery/compare-activated-worker-interleaved!
+               reopened tables admit mapped-source outcome-declarations steps observation)
+            fresh (publication/capture-framed-submissions! admit reopened (constantly :read-only))
+            bad (observed-recovery/compare-activated-worker-interleaved!
+                 reopened tables admit mapped-source outcome-declarations steps (:observation fresh))]
+        (is (= :matched (:status r)) (pr-str r))
+        (is (= comparison r))
+        (is (= :not-established (:observation-storage-identity r)))
+        (is (= :not-established (:worker-observation-provenance r)))
+        (is (= :matched-local-policy-window (get-in fresh [:capture :policy-window])))
+        (is (= initial (get-in (publication/read-framed-submission-observation! admit (:observation fresh))
+                               [:activation-root :observation])))
+        (is (not= :matched (:status bad)))
+        (is (not-any? #(contains? bad %) [:activation-root-binding :submission-recovery-linkage :intervening-maintenance])))
+      (is (= sample (coverage/observe-local-processed-retained-replay-inputs! reopened)))
+      (is (= rows (selected-rows reopened tables)))
+      (is (= events @policy-events))
+      (finally (host/stop! started)))))
+
 (defn- check-assembled-recovery! [interleaved?]
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
@@ -84,7 +123,7 @@
         refusal-guards #{[:requests "r1" :status :claimed] [:requests "r1" :revision 1] [:requests "r1" :updated-at "t1"]}
         snapshots (atom {}) recovered (atom 0)
         handler* (atom nil) winner-response (atom nil)
-        worker* (atom nil) gap* (atom nil)
+        worker* (atom nil) gap* (atom nil) restart* (atom nil)
         request! (fn [b allowed?]
                    (@handler* {:request-method :post :uri "/operations/request/claim"
                                :headers {"content-type" "application/x-www-form-urlencoded"
@@ -282,7 +321,13 @@
                       (is (not (contains? adjacent :activation-root-binding)))
                       (is (= sample (coverage/observe-local-processed-retained-replay-inputs! node)))
                       (is (= 2 (:cycles (lifecycle/status worker))))
-                      (is (= :idle (:status (lifecycle/status worker)))))))
+                      (is (= :idle (:status (lifecycle/status worker))))
+                      (reset! restart* {:node node :worker worker :ring-handler @handler*
+                                        :token (live-xtdb/current-submission-policy-token node)
+                                        :sample sample :rows (selected-rows node tables)
+                                        :observation observation :steps steps :comparison r
+                                        :initial (correspondence/initialization-observation node admit)
+                                        :events @policy-events}))))
                 ;; This test explicitly exercises a quiescent interval between
                 ;; real worker cycles, not arbitrary worker-interleaved history.
                 (when-not interleaved?
@@ -332,7 +377,10 @@
                   (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
                   (is (= :not-established (:provider-refinement r)))
                   (is (= sample2 (coverage/observe-local-processed-retained-replay-inputs! node))))))
-              (finally (host/stop! started))))))
+              (finally (host/stop! started)))
+            (when interleaved?
+              (check-reopened-recovery! assembly (fn [_] (g/html-response surface)) host-config
+                                        tables admit mapped-source outcome-declarations policy-events @restart*)))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
 
 (deftest assembled-command-transport-observed-recovery

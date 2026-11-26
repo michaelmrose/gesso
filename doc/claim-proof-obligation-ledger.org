@@ -6733,3 +6733,47 @@ Next: examine durable storage identity and historical observation
 correspondence across actual host restart, keeping the distinction
 between a matched retained trajectory and independently authenticated
 storage provenance explicit.
+
+* v2788 — historical worker-interleaved recovery across assembled host restart
+
+Extend the genuine assembled worker-interleaved regression with actual
+managed shutdown and restart on the same configured persistent XTDB
+store. Preserve the original issued observation, selected candidate
+descriptors, complete nine-transaction sample, selected table rows and
+system versions, initialization observation and comparison result.
+Require the stopped handler to reject requests and its retired policy
+to supply no current initialization observation. Require a distinct
+physical node and new installed policy generation on restart, equal
+historical initialization evidence, an initially empty managed worker
+cycle, and no additional writer policy admissions.
+
+Independently acquire the reopened history and check all selected rows
+and system versions. Repeat the activated worker-interleaved recovery
+comparison with the original historical observation; require the exact
+same positive diagnostic result. A newly captured read-only observation
+under the restarted policy has a matching initialization root but
+cannot stand in for the original observed submissions. Reject it
+without positive root, submission or maintenance evidence. Recheck
+history, rows and policy events before stopping the second host.
+
+Focused persistent JVM interleaved/restart variant: 1 test / 70
+assertions, zero failures or errors, exit 0. Exact tested fixture blob
+verified. No production source changes. The adjacent variant was not
+rerun in this revision; its selected comparison path is preserved.
+
+This is a controlled same-process host restart on the same configured
+store, not independently authenticated durable storage identity, a
+process restart with durable observation issuance, or a crash-recovery
+test. The historical observation handle still depends on the original
+in-memory registry. The matched diagnostic explicitly leaves storage
+identity and worker observation provenance unestablished. Synthetic
+principal/authorization callbacks, selected worker schedule, aborted
+receipt identity, unrestricted writer closure, universal provider
+refinement, certificate and CLM-R2 premise retirement remain outstanding.
+Full project gates were not rerun.
+
+Next: distinguish historical retained-content correspondence from
+durable source identity, including substituted-store counterexamples
+and the required trusted acquisition/identity premises. Do not confer
+authority on a historical observation or infer identity from matching
+manifest, source name, transaction coordinates or copied history alone.
