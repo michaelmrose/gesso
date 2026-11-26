@@ -269,6 +269,38 @@
 
 (def ^:private original-submission-capture capture-tx-api-calls!)
 
+;; An origin is historical evidence, not an adapter handle. Weak values avoid
+;; retaining a closed provider or the captured report solely for diagnostics.
+(deftype PolicyCaptureOrigin [])
+(def ^:private policy-capture-origins (java.util.WeakHashMap.))
+
+(defn- bind-policy-capture-origin [node report]
+  (let [origin (PolicyCaptureOrigin.)
+        bound (assoc report :local-origin origin)]
+    (locking policy-capture-origins
+      (.put policy-capture-origins origin
+            {:node (java.lang.ref.WeakReference. node)
+             :report (java.lang.ref.WeakReference. bound)}))
+    bound))
+
+(defn policy-capture-origin-matches?
+  "Test the exact issued historical capture against a supplied connectable.
+   The original physical object or a currently valid adapter for it matches;
+   a revoked adapter, copied report, or reopened node does not. No node,
+   writer capability, current policy or durable storage identity is returned."
+  [capture connectable]
+  (boolean
+   (when-let [origin (and (map? capture) (:local-origin capture))]
+     (when (instance? PolicyCaptureOrigin origin)
+       (let [{:keys [node report]} (locking policy-capture-origins
+                                    (.get policy-capture-origins origin))]
+         (and report node
+              (identical? capture (.get ^java.lang.ref.WeakReference report))
+              (when-let [original (.get ^java.lang.ref.WeakReference node)]
+                (try
+                  (identical? original (physical-connectable! connectable))
+                  (catch clojure.lang.ExceptionInfo _ false)))))))))
+
 (defn capture-policy-tx-api-calls!
   "Capture one synchronous local policy window. Every observed adapter call
    must use the same physical node, policy generation and owning thread.
@@ -283,9 +315,9 @@
     (let [valid? (atom true)
           scope {:node node :token token :thread (Thread/currentThread) :valid? valid?}
           report (binding [*policy-capture* scope] (original-submission-capture thunk))]
-      (assoc report :policy-window
-             (if (and @valid? (submission-policy-current? node token))
-               :matched-local-policy-window :invalidated-local-policy-window)))))
+      (if (and @valid? (submission-policy-current? node token))
+        (bind-policy-capture-origin node (assoc report :policy-window :matched-local-policy-window))
+        (assoc report :policy-window :invalidated-local-policy-window)))))
 
 (defn same-connectable?
   "Compare live adapter/node identities without exposing the physical node."

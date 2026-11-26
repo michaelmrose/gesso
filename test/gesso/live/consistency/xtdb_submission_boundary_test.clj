@@ -544,16 +544,29 @@
           (let [r (live/capture-policy-tx-api-calls! node #(live/execute-tx! node source-ops))]
             (is (= :matched-local-policy-window (:policy-window r)))
             (is (= :returned (:outcome r)))
-            (is (= 2 (count (:events r)))))
+            (is (= 2 (count (:events r))))
+            (is (live/policy-capture-origin-matches? r node))
+            (is (false? (live/policy-capture-origin-matches? r other)))
+            (is (false? (live/policy-capture-origin-matches? (assoc r :local-origin (live/->PolicyCaptureOrigin)) node))))
+          (let [adapter (live/adapter-connectable! node)
+                r (live/capture-policy-tx-api-calls! adapter #(live/execute-tx! adapter source-ops))]
+            (is (live/policy-capture-origin-matches? r node))
+            (is (live/policy-capture-origin-matches? r adapter)))
           (let [r (live/capture-policy-tx-api-calls! node #(live/execute-tx! other source-ops))]
             (is (= :invalidated-local-policy-window (:policy-window r)))
             (is (= :returned (:outcome r))))
           (let [r (live/capture-policy-tx-api-calls! node #(deref (future (live/execute-tx! node source-ops))))]
             (is (= :invalidated-local-policy-window (:policy-window r)))
             (is (= :returned (:outcome r))))
-          (let [r (live/capture-policy-tx-api-calls! node #(do (release) :completed))]
+          (let [adapter (live/adapter-connectable! node)
+                historical (live/capture-policy-tx-api-calls! adapter #(live/execute-tx! adapter source-ops))
+                r (live/capture-policy-tx-api-calls! node #(do (release) :completed))]
             (is (= :invalidated-local-policy-window (:policy-window r)))
-            (is (= :completed (:result r))))))
+            (is (= :completed (:result r)))
+            (is (not (contains? r :local-origin)))
+            (is (false? (live/policy-capture-origin-matches? r node)))
+            (is (live/policy-capture-origin-matches? historical node))
+            (is (false? (live/policy-capture-origin-matches? historical adapter))))))
       (is (= :invalid-policy-capture-window
              (:reason (try (live/capture-policy-tx-api-calls! node (constantly :unregistered)) nil
                            (catch clojure.lang.ExceptionInfo e (ex-data e))))))

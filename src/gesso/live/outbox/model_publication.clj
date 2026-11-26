@@ -271,6 +271,7 @@
 (deftype FramedSubmissionObservation [])
 (def ^:private ^WeakHashMap framed-observations (WeakHashMap.))
 (def ^:private original-policy-capture xtdb/capture-policy-tx-api-calls!)
+(def ^:private original-origin-matcher xtdb/policy-capture-origin-matches?)
 
 (defn capture-framed-submissions!
   "Observe consumed handoffs during one synchronous installed policy window.
@@ -301,15 +302,30 @@
                    h))]
     {:observation handle :capture capture}))
 
-(defn read-framed-submission-observation!
-  "Read an exact locally issued historical observation for its admission.
-   Does not re-establish a current policy, and does not expose the node."
-  [admission handle]
+(defn- framed-observation-entry [admission handle]
   (when (instance? FramedSubmissionObservation handle)
     (locking framed-observations
       (let [entry (.get framed-observations handle)]
         (when (and entry (identical? admission (:admission entry)))
-          (select-keys entry [:claims :capture :activation-root]))))))
+          entry)))))
+
+(defn read-framed-submission-observation!
+  "Read an exact locally issued historical observation for its admission.
+   Does not re-establish a current policy, and does not expose the node."
+  [admission handle]
+  (when-let [entry (framed-observation-entry admission handle)]
+    (select-keys entry [:claims :capture :activation-root])))
+
+(defn framed-submission-origin-matches?
+  "Check the actual capture in the issued admission's observation against a
+   supplied connectable. Historical origin only: does not grant submission
+   capability, establish current policy, authenticate storage, or admit proof.
+   Never accepts a supplied capture in place of the issued observation."
+  [admission handle connectable]
+  (boolean
+   (when (identical? original-origin-matcher xtdb/policy-capture-origin-matches?)
+     (when-let [entry (framed-observation-entry admission handle)]
+       (original-origin-matcher (:capture entry) connectable)))))
 
 (defn claim-framed-submission!
   "For a trusted installed adapter policy: claim the exact current framed

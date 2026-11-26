@@ -6912,3 +6912,32 @@ remain open. No authority, certificate or CLM-R2 discharge is introduced.
 Next: bind the locally issued original submission window to its actual
 connectable without exposing writer capability, then compose that binding
 with the issued acquisition. Do not infer continuity across restart.
+
+* v2792 — local submission observation origin binding
+
+Issue an opaque origin only for a matched adapter policy window, bound
+by weak references to its exact historical capture and physical node.
+The origin predicate returns only a Boolean; neither the node nor a
+writer capability is exposed. A copied report, forged origin, invalidated
+window, unrelated node or revoked adapter cannot match. The original
+physical object can match historically after policy release; a currently
+valid adapter for it can match without granting additional authority.
+
+Resolve the publication predicate through the private issued observation
+registry and exact admission, not a supplied capture or report. Refuse
+a replaced origin matcher. Preserve the historical read API and all
+existing content comparison semantics. This binds the original local
+submission observation to its connectable, conditional on the trusted
+adapter implementation and provider; it neither authenticates the actual
+provider API nor establishes current policy or durable storage identity.
+
+Focused JVM: 32 tests / 360 assertions, zero failures or errors across
+submission boundary, retained acquisition and a new persistent local
+policy-window regression. The latter uses a real adapter transaction,
+not a complete mapped Claim handoff. Original node matches, reopened
+node does not, historical observation remains readable after release.
+The broader Claim recovery regression timed out; full gates not run.
+
+Next: compose both issued bindings with the exact retained comparison
+without rereading a substitutable sample. Keep durable incarnation,
+authorized historical lineage and CLM-R2 discharge open.
