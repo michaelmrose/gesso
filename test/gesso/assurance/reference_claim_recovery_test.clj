@@ -134,13 +134,30 @@
                        prediction (temporal/replay (mapv #(dissoc % :tx-id) actual))
                        steps (recovery-steps history)
                        trajectory! #(evidence/compare-local-processed-retained-mapped-executor-outcome-recovery! node %1 mapped-source outcome-declarations %2)
-                       trajectory (trajectory! tables steps)]
+                       issued! #(evidence/compare-local-processed-retained-issued-executor-recovery! node tables admit mapped-source outcome-declarations %)
+                       trajectory (issued! steps)]
                    (is (= :observed (:status sample)))
                    (is (= history actual))
                    (is (= :predicted (:status prediction)))
                    (is (= [true true false true] (mapv :committed? (:history prediction))))
                    (is (= (:segments (nth (:history prediction) 1)) (:segments (nth (:history prediction) 2))))
                    (is (= :matched (:status trajectory)) (pr-str trajectory))
+                   (is (= evidence/issued-executor-recovery-profile (:issued-executor-recovery-profile trajectory)))
+                   (is (= :matched-issued-declarations (:issued-admission-binding trajectory)))
+                   (is (= :matched-issued-closed-construction (:closed-decoder-binding trajectory)))
+                   (is (= (:catalog-fingerprint catalog) (:issued-catalog-fingerprint trajectory)))
+                   (is (= (:induction-fingerprint catalog) (:issued-induction-fingerprint trajectory)))
+                   (doseq [bad [(assoc-in steps [0 :context :catalog-fingerprint] "wrong")
+                                (assoc-in steps [1 :context :induction-fingerprint] "wrong")
+                                (assoc-in steps [1 :context :selectors] {:fake/input [:principal]})
+                                (assoc-in steps [0 :spec :effects] {})
+                                (assoc-in steps [1 :declarations] {})
+                                (assoc-in steps [2 :residual-declarations] {})]]
+                     (let [r (issued! bad)]
+                       (is (= :mismatch (:status r)) (pr-str r))
+                       (is (= :issued-executor-recovery-declaration-mismatch (:reason r)))
+                       (is (not-any? #(contains? r %) [:issued-admission-binding :closed-decoder-binding
+                                                      :selected-tx-ids :input-derivations :outcome-derivations]))))
                    (is (= evidence/executor-recovery-profile (:executor-recovery-profile trajectory)))
                    (is (= evidence/executor-input-recovery-profile (:executor-input-recovery-profile trajectory)))
                    (is (= (vec (repeat 3 :matched-source-relative-selectors)) (:input-derivations trajectory)))

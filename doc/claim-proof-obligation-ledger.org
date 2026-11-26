@@ -6096,3 +6096,44 @@ Next: compose the exact issued closed-decoder construction binding with
 the retained recovery trajectory, matching the supplied step contexts
 against the actual issued admission's catalog and induction fingerprints
 and its declared effects and derivations.
+
+* v2773 — issued admission-bound retained recovery
+
+Compose the v2772 registered closed-decoder construction binding with
+the existing outcome- and input-qualified retained executor recovery
+comparison. Require every selected step to match the actual issued
+mapped admission's catalog and induction fingerprints, selected input
+selectors, shared target map, selected document effects and complete
+publication and residual assertion declaration catalogs. Recheck the
+original admission/source and live induction handles through the closed
+decoder comparison. Require the returned decoder binding to name the
+same fingerprints. Pass the unchanged steps to the existing recovery
+diagnostic; expose positive issued-binding fields only when the entire
+comparison succeeds. Preserve previous diagnostic entry points.
+
+The genuine persistent Claim fixture now uses the issued-admission-bound
+comparison before and after database reopening. Six independent
+declaration substitutions (catalog fingerprint, induction fingerprint,
+selectors, document effects, publication catalog and residual catalog)
+are rejected without positive recovery or issuance fields. Existing
+negative cases and single-step diagnostics remain.
+
+Focused persistent JVM integration: 1 test / 354 assertions, zero
+failures or errors, using the supplied offline classpath and project
+JVM access flags. The exact tested source and test blobs are committed.
+The initial standalone reader probe could not resolve an auto-qualified
+alias in the test namespace outside its namespace context; the actual
+namespace load and integration test succeeded.
+
+This qualifies local issuance/declaration linkage, not authenticated
+principal or clock origin, actual submission use of the admission, or
+the installed executor/host correspondence. Publication source-id
+remains a separate supplied premise. The concrete outcome declarations
+and trusted constructor/checker execution remain premises; no universal
+translation or provider refinement, certificate, production admission
+expansion or CLM-R2 premise retirement. Full gates were not rerun.
+
+Next: connect the checked retained candidate to the actual admitted
+submission boundary and transaction receipt, preserving the distinction
+between candidate preparation, provider commitment and authenticated
+command provenance.

@@ -6,13 +6,15 @@
             [gesso.assurance.reference-mapped-writes :as writes]
             [gesso.assurance.reference-mapped-input :as input]
             [gesso.assurance.reference-mapped-outcome :as outcome]
+            [gesso.assurance.reference-mapped-decoder :as decoder]
             [gesso.assurance.reference-mapped-publication :as publication]
             [gesso.assurance.reference-mapped-residual :as residual]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.subject :as subject]
             [gesso.model.certified-plan :as plan]
-            [gesso.model.command-resolution :as resolution]))
+            [gesso.model.command-resolution :as resolution]
+            [gesso.model.inductive-plan :as induction]))
 
 (def profile :selected-mapped-evidence-v2)
 (def ^:private guard-profile :gesso.model.mapped-frame/xtdb-2.2.0-beta1-v5)
@@ -520,3 +522,60 @@
                 (not= executor-input-recovery-profile (:executor-input-recovery-profile result))
                 (fail :unsupported :invalid-executor-input-recovery-comparison)
                 :else (assoc result :outcome-derivations (mapv :outcome-derivation reports))))))))))
+
+(def issued-executor-recovery-profile :selected-issued-mapped-executor-recovery-v1)
+
+(defn- issued-step-matches? [description step]
+  (let [id (get-in step [:spec :alternative])]
+    (and (contains? (:operation-mappings description) id)
+         (= (:context step)
+            (assoc (select-keys description [:catalog-fingerprint :induction-fingerprint])
+                   :selectors (get-in description [:input-derivations id])))
+         (= (:targets step) (:target-map description))
+         (= (get-in step [:spec :effects]) (get-in description [:document-effects id]))
+         (= (:declarations step) (:publication-derivations description))
+         (= (:residual-declarations step) (:residual-assertion-derivations description)))))
+
+(defn compare-local-processed-retained-issued-executor-recovery!
+  "Bind the selected retained recovery to the exact local issued mapped
+   admission and registered closed decoder. Require its checked declaration
+   context for every step. Source-id, authenticated command origin, actual
+   submission use of this admission and installed host refinement remain
+   premises. No new transaction authority or certificate is issued."
+  [node tables admission source outcome-declarations steps]
+  (let [tag #(assoc % :issued-executor-recovery-profile issued-executor-recovery-profile
+                      :source-provenance :not-established :outcome-provenance :not-established)
+        fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
+                    :provider-refinement :not-established})
+        required #{:original :targets :docs :journal :expectation :prefix-count
+                   :spec :context :source-id :declarations :residual-declarations}]
+    (try
+      (if-not (and (vector? steps) (nil? (meta steps)) (= 3 (count steps))
+                   (every? #(and (map? %) (nil? (meta %)) (= required (set (keys %)))) steps))
+        (fail :unsupported :invalid-issued-executor-recovery-source)
+        (let [description (induction/describe-mapped-admission admission)
+              fingerprints (select-keys description [:catalog-fingerprint :induction-fingerprint])]
+          (if-not (and (map? (:publication-derivations description))
+                       (map? (:residual-assertion-derivations description))
+                       (every? #(issued-step-matches? description %) steps))
+            (fail :mismatch :issued-executor-recovery-declaration-mismatch)
+            (let [binding (decoder/compare-issued-closed! admission source outcome-declarations)]
+              (cond
+                (not= :matched (:status binding)) (fail (:status binding) (:reason binding))
+                (not (and (= decoder/closed-profile (:profile binding))
+                          (= :matched-issued-closed-construction (:closed-decoder-binding binding))
+                          (= fingerprints (select-keys binding (keys fingerprints)))))
+                (fail :unsupported :invalid-issued-recovery-decoder-binding)
+                :else
+                (let [result (tag (compare-local-processed-retained-mapped-executor-outcome-recovery!
+                                   node tables source outcome-declarations steps))]
+                  (cond
+                    (not= :matched (:status result)) result
+                    (not= executor-outcome-recovery-profile (:executor-outcome-recovery-profile result))
+                    (fail :unsupported :invalid-issued-recovery-comparison)
+                    :else (assoc result :issued-admission-binding :matched-issued-declarations
+                                        :closed-decoder-binding (:closed-decoder-binding binding)
+                                        :issued-catalog-fingerprint (:catalog-fingerprint fingerprints)
+                                        :issued-induction-fingerprint (:induction-fingerprint fingerprints)))))))))
+      (catch clojure.lang.ExceptionInfo e
+        (fail :unsupported (or (:reason (ex-data e)) :invalid-issued-executor-recovery-source))))))
