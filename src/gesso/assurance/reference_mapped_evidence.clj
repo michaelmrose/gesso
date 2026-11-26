@@ -487,13 +487,11 @@
 
 (def executor-input-recovery-profile :selected-mapped-retained-executor-input-recovery-v1)
 
-(defn compare-local-processed-retained-mapped-executor-input-recovery!
-  "Check the candidate input derivations against one supplied original mapped
-   catalog, then qualify the same steps in the complete recovery bracket.
-   The aborted step uses its prepared candidate state, not its actual stale
-   predecessor. Source issuance and outcome interpretation remain premises."
-  [node tables source steps]
-  (let [tag #(assoc % :executor-input-recovery-profile executor-input-recovery-profile
+(def executor-input-interleaved-recovery-profile :selected-mapped-retained-executor-input-worker-interleaved-recovery-v1)
+
+(defn- compare-executor-input-recovery*
+  [node tables source steps interleaved?]
+  (let [tag #(assoc % :executor-input-recovery-profile (if interleaved? executor-input-interleaved-recovery-profile executor-input-recovery-profile)
                       :source-provenance :not-established :outcome-provenance :not-established)
         fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
                     :provider-refinement :not-established})
@@ -511,21 +509,34 @@
                                 (= :matched-source-relative-selectors (:input-derivation %))
                                 (= :matched (:candidate-command-record %))) reports)
             (fail :unsupported :invalid-executor-input-comparison)
-            (let [result (tag (compare-local-processed-retained-mapped-executor-recovery! node tables steps))]
+            (let [result (tag (compare-executor-recovery* node tables steps interleaved?))]
               (cond
                 (not= :matched (:status result)) result
-                (not= executor-recovery-profile (:executor-recovery-profile result))
+                (not= (if interleaved? executor-interleaved-recovery-profile executor-recovery-profile) (:executor-recovery-profile result))
                 (fail :unsupported :invalid-executor-recovery-comparison)
                 :else (assoc result :input-derivations (mapv :input-derivation reports))))))))))
 
+(defn compare-local-processed-retained-mapped-executor-input-recovery!
+  "Check the candidate input derivations against one supplied original mapped
+   catalog, then qualify the same steps in the complete recovery bracket.
+   The aborted step uses its prepared candidate state, not its actual stale
+   predecessor. Source issuance and outcome interpretation remain premises."
+  [node tables source steps]
+  (compare-executor-input-recovery* node tables source steps false))
+
+(defn compare-local-processed-retained-mapped-executor-input-worker-interleaved-recovery!
+  "Qualify the same issued/source-relative declarations over the complete
+   worker-interleaved retained recovery profile, without filtering history."
+  [node tables source steps]
+  (compare-executor-input-recovery* node tables source steps true))
+
 (def executor-outcome-recovery-profile :selected-mapped-retained-executor-outcome-recovery-v1)
 
-(defn compare-local-processed-retained-mapped-executor-outcome-recovery!
-  "Require source-relative outcome cases and selected alternative linkage for
-   all three candidates, then qualify the same input and recovery trajectory.
-   Concrete outcome declarations and installed decoder issuance remain premises."
-  [node tables source outcome-declarations steps]
-  (let [tag #(assoc % :executor-outcome-recovery-profile executor-outcome-recovery-profile
+(def executor-outcome-interleaved-recovery-profile :selected-mapped-retained-executor-outcome-worker-interleaved-recovery-v1)
+
+(defn- compare-executor-outcome-recovery*
+  [node tables source outcome-declarations steps interleaved?]
+  (let [tag #(assoc % :executor-outcome-recovery-profile (if interleaved? executor-outcome-interleaved-recovery-profile executor-outcome-recovery-profile)
                       :source-provenance :not-established :outcome-provenance :not-established)
         fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
                     :provider-refinement :not-established})
@@ -543,12 +554,25 @@
                                 (= :matched-declared-journal-assignment (:outcome-derivation %))
                                 (= :matched (:candidate-command-record %))) reports)
             (fail :unsupported :invalid-executor-outcome-comparison)
-            (let [result (tag (compare-local-processed-retained-mapped-executor-input-recovery! node tables source steps))]
+            (let [result (tag (compare-executor-input-recovery* node tables source steps interleaved?))]
               (cond
                 (not= :matched (:status result)) result
-                (not= executor-input-recovery-profile (:executor-input-recovery-profile result))
+                (not= (if interleaved? executor-input-interleaved-recovery-profile executor-input-recovery-profile) (:executor-input-recovery-profile result))
                 (fail :unsupported :invalid-executor-input-recovery-comparison)
                 :else (assoc result :outcome-derivations (mapv :outcome-derivation reports))))))))))
+
+(defn compare-local-processed-retained-mapped-executor-outcome-recovery!
+  "Require source-relative outcome cases and selected alternative linkage for
+   all three candidates, then qualify the same input and recovery trajectory.
+   Concrete outcome declarations and installed decoder issuance remain premises."
+  [node tables source outcome-declarations steps]
+  (compare-executor-outcome-recovery* node tables source outcome-declarations steps false))
+
+(defn compare-local-processed-retained-mapped-executor-outcome-worker-interleaved-recovery!
+  "Qualify the same issued/source-relative declarations over the complete
+   worker-interleaved retained recovery profile, without filtering history."
+  [node tables source outcome-declarations steps]
+  (compare-executor-outcome-recovery* node tables source outcome-declarations steps true))
 
 (def issued-executor-recovery-profile :selected-issued-mapped-executor-recovery-v1)
 
@@ -563,14 +587,11 @@
          (= (:declarations step) (:publication-derivations description))
          (= (:residual-declarations step) (:residual-assertion-derivations description)))))
 
-(defn compare-local-processed-retained-issued-executor-recovery!
-  "Bind the selected retained recovery to the exact local issued mapped
-   admission and registered closed decoder. Require its checked declaration
-   context for every step. Source-id, authenticated command origin, actual
-   submission use of this admission and installed host refinement remain
-   premises. No new transaction authority or certificate is issued."
-  [node tables admission source outcome-declarations steps]
-  (let [tag #(assoc % :issued-executor-recovery-profile issued-executor-recovery-profile
+(def issued-executor-interleaved-recovery-profile :selected-issued-mapped-executor-worker-interleaved-recovery-v1)
+
+(defn- compare-issued-executor-recovery*
+  [node tables admission source outcome-declarations steps interleaved?]
+  (let [tag #(assoc % :issued-executor-recovery-profile (if interleaved? issued-executor-interleaved-recovery-profile issued-executor-recovery-profile)
                       :source-provenance :not-established :outcome-provenance :not-established)
         fail #(tag {:status %1 :reason %2 :authority :none :certificate :not-issued
                     :provider-refinement :not-established})
@@ -594,11 +615,10 @@
                           (= fingerprints (select-keys binding (keys fingerprints)))))
                 (fail :unsupported :invalid-issued-recovery-decoder-binding)
                 :else
-                (let [result (tag (compare-local-processed-retained-mapped-executor-outcome-recovery!
-                                   node tables source outcome-declarations steps))]
+                (let [result (tag (compare-executor-outcome-recovery* node tables source outcome-declarations steps interleaved?))]
                   (cond
                     (not= :matched (:status result)) result
-                    (not= executor-outcome-recovery-profile (:executor-outcome-recovery-profile result))
+                    (not= (if interleaved? executor-outcome-interleaved-recovery-profile executor-outcome-recovery-profile) (:executor-outcome-recovery-profile result))
                     (fail :unsupported :invalid-issued-recovery-comparison)
                     :else (assoc result :issued-admission-binding :matched-issued-declarations
                                         :closed-decoder-binding (:closed-decoder-binding binding)
@@ -606,3 +626,18 @@
                                         :issued-induction-fingerprint (:induction-fingerprint fingerprints)))))))))
       (catch clojure.lang.ExceptionInfo e
         (fail :unsupported (or (:reason (ex-data e)) :invalid-issued-executor-recovery-source))))))
+
+(defn compare-local-processed-retained-issued-executor-recovery!
+  "Bind the selected retained recovery to the exact local issued mapped
+   admission and registered closed decoder. Require its checked declaration
+   context for every step. Source-id, authenticated command origin, actual
+   submission use of this admission and installed host refinement remain
+   premises. No new transaction authority or certificate is issued."
+  [node tables admission source outcome-declarations steps]
+  (compare-issued-executor-recovery* node tables admission source outcome-declarations steps false))
+
+(defn compare-local-processed-retained-issued-executor-worker-interleaved-recovery!
+  "Qualify the same issued/source-relative declarations over the complete
+   worker-interleaved retained recovery profile, without filtering history."
+  [node tables admission source outcome-declarations steps]
+  (compare-issued-executor-recovery* node tables admission source outcome-declarations steps true))

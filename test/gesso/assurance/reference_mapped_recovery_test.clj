@@ -5,6 +5,9 @@
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-publication :as publication]
+            [gesso.assurance.reference-mapped-writes :as writes]
+            [gesso.assurance.reference-mapped-decoder :as decoder]
+            [gesso.model.inductive-plan :as induction]
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.model.certified-plan :as plan]
@@ -329,3 +332,106 @@
       (let [r (run! s h scope adjacent?)]
         (is (= reason (:reason r)) (pr-str r))
         (is (not-any? #(contains? r %) [:executor-envelopes :intervening-maintenance :recovery-linkage :selected-tx-ids]))))))
+
+(defn- issued-worker-example []
+  (let [{:keys [steps history tables id]} (complete-worker-example)
+        targets (assoc fixture/targets :example/loser-outcome [:journal-slot "helper-b" :example/claim])
+        alternatives [:example/claim :example/compete :example/refuse]
+        declarations (assoc (:declarations (first steps)) :example/compete (get-in steps [0 :declarations :example/claim]))
+        residuals (zipmap alternatives (repeat nil))
+        selectors {:example/claim {:example/actor [:principal]}
+                   :example/compete {:example/actor [:principal]} :example/refuse {}}
+        concrete (into {} (map (fn [id {:keys [spec]}]
+                                 [id {:arguments (get-in spec [:binding :arguments]) :outcome (:outcome spec)}]) alternatives steps))
+        steps (mapv (fn [i {:keys [original spec docs expectation context source-id] :as step}]
+                      (let [id (nth alternatives i)
+                            original (-> original (assoc-in [:subject :id] id)
+                                         (assoc-in [:state-types :example/loser-outcome] {:type :keyword :nullable? true})
+                                         (update :frame conj :example/loser-outcome))
+                            original (if (zero? i) original
+                                         (-> original (update :writes disj :example/outcome) (update :writes conj :example/loser-outcome)
+                                             (update :frame disj :example/loser-outcome) (update :frame conj :example/outcome)
+                                             (update :replacements #(-> % (assoc :example/loser-outcome (:example/outcome %)) (dissoc :example/outcome)))))
+                            original (if (= i 2) original
+                                         (-> original (assoc :input-types {:example/actor {:type :string}})
+                                             (assoc :reads #{:example/actor :example/owner})
+                                             (assoc-in [:replacements :example/count] [:literal 3])
+                                             (assoc-in [:replacements :example/owner] [:read :example/actor])))
+                            journal (if (= i 2) [recovery/winner] [])
+                            spec (assoc spec :alternative id :inputs (if (= i 2) {} {:example/actor (if (zero? i) "helper-a" "helper-b")}))
+                            context (assoc context :selectors (get selectors id))
+                            prefix (frame/formatted-prestate-assertions! (plan/check-target-mapping! original targets) docs journal)
+                            {:keys [guard-ops put-ops]} (publication/derive-publication! original targets docs journal spec source-id declarations)
+                            witness (evidence/derive-record! original targets docs journal prefix spec context)
+                            ops (envelope/bind-transition-envelope!
+                                 (vec (concat [(first (:ops expectation))] prefix guard-ops
+                                              (writes/derive-puts! original targets docs journal spec) put-ops
+                                              [[:put-docs :gesso_transition_evidence witness]])))]
+                        (assoc step :original original :targets targets :journal journal :spec spec :context context
+                               :declarations declarations :residual-declarations residuals :prefix-count (count prefix)
+                               :expectation (assoc expectation :ops ops)))) (range 3) steps)
+        source {:inductive-source {:catalog {:operations (mapv (fn [id step] {:id id :construction (:original step)}) alternatives steps)}}
+                :target-map targets :input-derivations selectors}
+        source (assoc source :decode-outcome! (decoder/build-closed! source concrete))
+        description (merge (select-keys (:context (first steps)) [:catalog-fingerprint :induction-fingerprint])
+                           {:operation-mappings (zipmap alternatives (repeat {})) :target-map targets :input-derivations selectors
+                            :document-effects (zipmap alternatives (map #(get-in % [:spec :effects]) steps))
+                            :publication-derivations declarations :residual-assertion-derivations residuals})
+        history (reduce (fn [h step] (assoc h (get-in step [:expectation :tx-id]) (:expectation step))) history steps)]
+    {:steps steps :history history :tables tables :id id :source source :concrete concrete :description description}))
+
+(deftest issued-worker-interleaved-recovery-composes-all-source-checks
+  (let [{:keys [steps history tables id source concrete description]} (issued-worker-example)
+        admission (Object.)
+        sample {:status :observed :replay-inputs history}
+        failure-index (:failed-assertion-index (nth (:history (temporal/replay (mapv #(dissoc % :tx-id) history))) 3))
+        comparison {:status :matched :profile provider/profile :acquisition-profile provider/acquisition-profile
+                    :source-binding-profile provider/source-binding-profile :transaction-count 6
+                    :checks {:ledger true :retained-envelopes true :selected-history true}
+                    :authority :none :certificate :not-issued :provider-refinement :not-established}
+        acquired (atom 0) compared (atom [])
+        run! (fn [s src declarations desc adjacent?]
+               (reset! acquired 0) (reset! compared [])
+               (with-redefs-fn {#'induction/describe-mapped-admission (constantly desc)
+                                #'induction/require-current-mapped-admission! (fn [a s]
+                                                                              (if (and (identical? a admission) (identical? (:decode-outcome! s) (:decode-outcome! source)))
+                                                                                desc (throw (ex-info "Wrong registration" {:reason :changed-mapped-admission-registration}))))
+                                #'provider/observe-replay-history! (fn [_] (swap! acquired inc) sample)
+                                #'provider/compare-source-bound-execution! (fn [_ inputs scope] (swap! compared conj [inputs scope]) comparison)
+                                #'xt/q (fn [_ query] (if (= 3 (last query))
+                                                      [{:committed false :error (ex-info "abort" {:xtdb.error/code :xtdb/assert-failed :tx-op-idx failure-index})}]
+                                                      [{:committed true}]))}
+                 #(if adjacent?
+                    (evidence/compare-local-processed-retained-issued-executor-recovery! nil tables admission src declarations s)
+                    (evidence/compare-local-processed-retained-issued-executor-worker-interleaved-recovery! nil tables admission src declarations s))))
+        r (run! steps source concrete description false)]
+    (is (= :matched (:status r)) (pr-str r))
+    (is (= evidence/issued-executor-interleaved-recovery-profile (:issued-executor-recovery-profile r)))
+    (is (= evidence/executor-outcome-interleaved-recovery-profile (:executor-outcome-recovery-profile r)))
+    (is (= evidence/executor-input-interleaved-recovery-profile (:executor-input-recovery-profile r)))
+    (is (= evidence/executor-interleaved-recovery-profile (:executor-recovery-profile r)))
+    (is (= :matched-issued-closed-construction (:closed-decoder-binding r)))
+    (is (= :matched-issued-declarations (:issued-admission-binding r)))
+    (is (= (vec (repeat 3 :matched-source-relative-selectors)) (:input-derivations r)))
+    (is (= (vec (repeat 3 :matched-declared-journal-assignment)) (:outcome-derivations r)))
+    (is (= [1 3 5] (:selected-tx-ids r)))
+    (is (= [2 4] (mapv :tx-id (:intervening-maintenance r))))
+    (is (= 6 (:replayed-transaction-count r)))
+    (is (= (vec (repeat 3 [history tables])) @compared))
+    (is (= 8 @acquired))
+    (is (= :not-established (:source-provenance r) (:outcome-provenance r) (:provider-refinement r)))
+    (is (= :none (:authority r)))
+    (is (= :not-issued (:certificate r)))
+    (doseq [[s src d desc reason]
+            [[(assoc-in steps [1 :spec :inputs :example/actor] "helper-a") source concrete description :selected-input-valuation-mismatch]
+             [(update-in steps [2 :spec :outcome-cases] dissoc (first (keys (get-in steps [2 :spec :outcome-cases])))) source concrete description :selected-outcome-cases-mismatch]
+             [(assoc-in steps [0 :context :catalog-fingerprint] "wrong") source concrete description :issued-executor-recovery-declaration-mismatch]
+             [steps (assoc source :decode-outcome! (fn [_] :claimed)) concrete description :unregistered-closed-decoder]
+             [steps source (dissoc concrete :example/refuse) description :changed-closed-decoder-construction]]]
+      (let [bad (run! s src d desc false)]
+        (is (= reason (:reason bad)) (pr-str bad))
+        (is (zero? @acquired))
+        (is (not-any? #(contains? bad %) [:issued-admission-binding :closed-decoder-binding :input-derivations :outcome-derivations :executor-envelopes :intervening-maintenance]))))
+    (let [bad (run! steps source concrete description true)]
+      (is (= :nonadjacent-recovery-selection (:reason bad)))
+      (is (not (contains? bad :issued-admission-binding))))))

@@ -6597,3 +6597,44 @@ Full project gates were not rerun.
 Next: compose source-relative input and outcome derivation and issued
 admission qualification with the interleaved executor profile; retain
 explicit source, decoder and maintenance provenance limits.
+
+* v2785 — issued input and outcome qualified worker-interleaved recovery
+
+Share the existing input, outcome and issued-admission checks between
+the adjacent and worker-interleaved executor recovery profiles. Preserve
+the adjacent public entry points and profile identities. Add explicit
+interleaved entry points and require the corresponding nested profile
+at each composition boundary. Use the same three candidate descriptors,
+complete concrete outcome declarations, original mapped catalog and
+registered closed decoder throughout. Do not filter retained history
+or supply a separate worker source identity.
+
+Focused JVM regression: 10 tests / 223 assertions, zero failures or
+errors. A new synthetic fixture has three distinct alternatives, a
+common target map with separate principal journal slots, nonempty
+principal-derived acceptance inputs, and the winning journal row in
+the refusal prestate. Construct and register the actual closed decoder
+and derive complete envelopes including publication intents. Check
+the full six-transaction history with lease acquisition and dispatch
+acknowledgment between selected attempts. Reject a substituted input
+valuation, incomplete outcome cases, changed issued fingerprint,
+unregistered decoder and changed concrete declarations before provider
+acquisition. The adjacent profile rejects the interleaved selection.
+Both tested blobs match the committed candidates.
+
+The test stubs the issued admission description and registry recheck,
+retained acquisition, provider execution correspondence and physical
+outcome reads. Actual closed-decoder construction, source-relative
+input and outcome evaluation, envelope derivation, independent replay,
+worker checking and selected mapped projection checks execute normally.
+This is composition evidence, not genuine issued persistent interleaved
+execution. Observation and activated initialization-root composition
+for the interleaved profile remain outstanding. No authenticated
+provenance, universal provider refinement, certificate, production
+admission expansion or CLM-R2 premise retirement. Full project gates
+were not rerun.
+
+Next: compose issued submission observation and activated initialization
+root qualification with the worker-interleaved profile, maintaining
+the full retained sample and explicitly preserving the limits on
+worker observation origin and aborted transaction identity.
