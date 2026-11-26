@@ -100,6 +100,41 @@
       (is (= events @policy-events))
       (finally (host/stop! started)))))
 
+(defn- copy-closed-store! [root copy-root]
+  ;; Copy bytes, not links: the two hosts must not share physical files.
+  (let [source (.toFile root)
+        files (vec (rest (file-seq source)))]
+    (is (not (Files/isSameFile root copy-root)))
+    (is (some #(.isFile %) files))
+    (doseq [f files
+            :let [path (.toPath f)
+                  target (.resolve copy-root (.relativize root path))]]
+      (when (Files/isSymbolicLink path)
+        (throw (ex-info "Unexpected symlink in closed store fixture" {})))
+      (if (.isDirectory f)
+        (Files/createDirectories target (make-array FileAttribute 0))
+        (do (io/make-parents (.toFile target))
+            (io/copy f (.toFile target)))))
+    (is (every? (fn [f]
+                  (not (Files/isSameFile (.toPath f)
+                                         (.resolve copy-root (.relativize root (.toPath f))))))
+                files))))
+
+(defn- check-substituted-store!
+  [root assembly handler config tables admit mapped-source outcome-declarations policy-events original]
+  (let [copy-root (Files/createTempDirectory "gesso-claim-recovery-copy-" (make-array FileAttribute 0))]
+    (try
+      (copy-closed-store! root copy-root)
+      (let [copy-config (assoc config :xtdb-config
+                               {:log [:local {:path (str copy-root "/log")}]
+                                :storage [:local {:path (str copy-root "/storage")}]})]
+        (is (not= (:xtdb-config config) (:xtdb-config copy-config)))
+        ;; The exact historical comparison also succeeds for an independent
+        ;; copy. It cannot identify which physical store supplied the bytes.
+        (check-reopened-recovery! assembly handler copy-config tables admit mapped-source
+                                  outcome-declarations policy-events original))
+      (finally (doseq [f (reverse (file-seq (.toFile copy-root)))] (io/delete-file f true))))))
+
 (defn- check-assembled-recovery! [interleaved?]
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
@@ -380,6 +415,8 @@
               (finally (host/stop! started)))
             (when interleaved?
               (check-reopened-recovery! assembly (fn [_] (g/html-response surface)) host-config
+                                        tables admit mapped-source outcome-declarations policy-events @restart*)
+              (check-substituted-store! root assembly (fn [_] (g/html-response surface)) host-config
                                         tables admit mapped-source outcome-declarations policy-events @restart*)))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
 

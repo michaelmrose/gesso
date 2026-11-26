@@ -6777,3 +6777,54 @@ durable source identity, including substituted-store counterexamples
 and the required trusted acquisition/identity premises. Do not confer
 authority on a historical observation or infer identity from matching
 manifest, source name, transaction coordinates or copied history alone.
+
+* v2789 — copied-store counterexample to durable storage identity
+
+Extend the actual assembled worker-interleaved recovery and same-store
+restart regression with a third assembled host opened on a separate
+physical copy of the closed local log and storage directories. Copy
+bytes, not links; reject symbolic links and check that the source and
+destination roots and all copied filesystem entries are distinct.
+Configure the third host with the separate log and storage paths.
+Reuse the full v2788 historical comparison, including independent
+retained acquisition, exact selected rows and system versions, original
+activation root, original locally issued submission observation and
+the complete nine-transaction activated worker-interleaved diagnostic.
+Require identical positive correspondence and continued explicit
+:observation-storage-identity :not-established. Check a distinct
+policy generation from the original, no new startup or maintenance
+admissions and rejection of a fresh read-only observation substitution.
+Stop all hosts and remove the fixture directories.
+
+Focused persistent JVM: 1 test / 96 assertions, zero failures or errors,
+exit 0. The exact tested fixture blob is verified. No production
+source changes.
+
+This is an actual counterexample to inferring physical store identity
+from the matching contents of an independently acquired retained
+history, even with the original process-local submission observation,
+manifest, source name, transaction coordinates and selected rows.
+It is not a counterexample to the content-correspondence diagnostic,
+which deliberately disclaims durable identity. A digest or a stored
+UUID alone would likewise survive an exact copy. A local configured
+path can locate a store but is not itself an authenticated durable
+identity or proof of continuity. Any stronger identity claim needs
+a declared identity semantics and a trusted acquisition/identity
+binding independent of the copyable content (or an explicit
+operational premise about authorized lineage). Authorized restore,
+replication and physical identity must not be conflated.
+
+The fixture uses a closed-store copy in the same JVM and controlled
+filesystem environment, not an adversarial filesystem, tamper-proof
+identity service, crash recovery, or cross-process durable issuance.
+Worker observation provenance, authenticated command and clock
+provenance, aborted receipt identity, unrestricted writer closure,
+universal provider refinement, certificate and CLM-R2 premise
+retirement remain unestablished. The adjacent variant and full
+project gates were not rerun.
+
+Next: define the durable source/lineage identity obligation and its
+trusted acquisition boundary separately from retained-content matching.
+Distinguish explicit operational continuity assumptions from any
+locally checkable identity evidence, without treating copies, hashes
+or self-asserted identifiers as authenticated source identity.
