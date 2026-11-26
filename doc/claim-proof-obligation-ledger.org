@@ -6436,3 +6436,40 @@ Next: qualify actual worker maintenance following the observed recovery,
 including its retained acquisition and completion envelopes and the
 preservation of the mapped domain/journal trajectory. Generalize retained
 selection only with explicit, independently checked maintenance semantics.
+
+* v2781 — actual worker maintenance after assembled recovery
+
+Extend the v2780 assembled host recovery regression through the real
+managed worker's next scheduled cycle. Preserve the initial five retained
+transactions and capture the exact two pending intent identities. Check
+the expanded nine-transaction history and independently predict its
+commitment sequence (eight commits and one stale competing abort).
+Use the existing historical coverage checker to reconstruct and verify
+the four worker envelopes from pinned before/after observations. Require
+one lease acquisition and one dispatch acknowledgment for each original
+intent, with exact suffix transaction identity correspondence and
+verified infrastructure classification. Require the original intent
+identities to survive in terminal dispatch-accepted rows. Compare all
+selected non-outbox rows, including their system versions, before and
+after maintenance. Re-run the activation-bound observed recovery
+comparison against the expanded retained history, and require a stable
+retained sample across these checks. No filtering of maintenance
+transactions or substitution of worker callbacks.
+
+Focused JVM persistent assembled host regression: 1 test / 54 assertions,
+zero failures or errors. The exact tested fixture blob is verified. No
+production source changes. The test waits for the actual worker's second
+cycle using the existing 60-second polling interval and requires that
+exact cycle to complete with two processed and dispatch-accepted items.
+This qualifies a bounded maintenance suffix, not arbitrary interleavings
+between selected mapped operations. The existing comparison requires the
+selected recovery attempts to remain adjacent. Worker/source receipt
+authentication, durable storage identity, browser receipt, authenticated
+principal provenance, unrestricted writer closure, universal provider
+refinement, certificates and CLM-R2 premise retirement remain outstanding.
+Full project gates were not rerun.
+
+Next: specify and test a restricted worker-interleaved selection relation
+that independently qualifies all intervening maintenance steps and
+preserves mapped-state and journal linkage without dropping transactions
+from the full retained replay.

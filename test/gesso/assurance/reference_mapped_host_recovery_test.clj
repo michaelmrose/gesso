@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-source-coverage :as coverage]
+            [gesso.assurance.reference-temporal :as temporal]
             [gesso.choreo.identity :as identity]
             [gesso.core :as g]
             [gesso.live.application-preflight.fixture :as fixture]
@@ -14,6 +15,7 @@
             [gesso.live.outbox.claim-race-fixture :refer [mapping]]
             [gesso.live.outbox.claim-semantic-fixture :as claim]
             [gesso.live.outbox.host :as host]
+            [gesso.live.outbox.history-coverage :as history-coverage]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.model-publication :as publication]
@@ -44,6 +46,20 @@
           (or (= :failed (:status s)) (> (System/nanoTime) deadline))
           (throw (ex-info "Initial worker cycle did not settle" {:status (:status s) :cycles (:cycles s)}))
           :else (do (Thread/sleep 10) (recur)))))))
+
+(defn- await-maintenance-cycle! [worker]
+  (let [deadline (+ (System/nanoTime) 90000000000)]
+    (loop []
+      (let [s (lifecycle/status worker)]
+        (cond
+          (and (= :idle (:status s)) (<= 2 (:cycles s))) s
+          (or (= :failed (:status s)) (> (System/nanoTime) deadline))
+          (throw (ex-info "Worker maintenance cycle did not settle" {:status (:status s) :cycles (:cycles s)}))
+          :else (do (Thread/sleep 50) (recur)))))))
+
+(defn- selected-rows [node tables]
+  (into {} (map (fn [table]
+                  [table (set (live-xtdb/q node (str "SELECT *, _system_from FROM " (name table))))])) tables))
 
 (deftest assembled-command-transport-observed-recovery
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))
@@ -223,6 +239,50 @@
                 ;; This test explicitly exercises a quiescent interval between
                 ;; real worker cycles, not arbitrary worker-interleaved history.
                 (is (= 1 (:cycles (lifecycle/status worker))))
-                (is (= :idle (:status (lifecycle/status worker)))))
+                (is (= :idle (:status (lifecycle/status worker))))
+                (let [protected (disj tables :gesso_live_outbox)
+                      prior (selected-rows node protected)
+                      pending (live-xtdb/q node "SELECT * FROM gesso_live_outbox")
+                      ids (set (map :xt/id pending))
+                      _ (is (= 2 (count pending) (count ids)))
+                      _ (is (every? #(= :pending (:gesso.live.outbox/status %)) pending))
+                      completed (await-maintenance-cycle! worker)
+                      sample2 (coverage/observe-local-processed-retained-replay-inputs! node)
+                      full (:replay-inputs sample2)
+                      audit (history-coverage/audit! node admit 16)
+                      maintenance (vec (drop 3 (:steps audit)))
+                      prediction (temporal/replay (mapv #(dissoc % :tx-id) full))
+                      r (observed-recovery/compare-activated! node tables admit mapped-source outcome-declarations
+                                                            (recovery-steps history) observation)
+                      terminal (live-xtdb/q node "SELECT * FROM gesso_live_outbox")]
+                  (is (= 2 (:cycles completed)))
+                  (is (= 2 (:total-processed completed) (:total-dispatch-accepted completed)))
+                  (is (= :observed (:status sample2)))
+                  (is (= 9 (count full)))
+                  (is (= history (vec (take 5 full))))
+                  (is (= :predicted (:status prediction)))
+                  (is (= [true true true false true true true true true]
+                         (mapv :committed? (:history prediction))))
+                  (is (= :observed-interval-checked (:status audit)) (pr-str (select-keys audit [:status :steps])))
+                  (is (= [:verified-mapped-transition :aborted-stutter :verified-mapped-transition]
+                         (mapv :classification (take 3 (:steps audit)))))
+                  (is (= 4 (count maintenance)))
+                  (is (= (mapv :tx-id (drop 5 full)) (mapv :tx-id maintenance)))
+                  (is (every? #(and (= :verified-infrastructure-transition (:classification %))
+                                    (= :matched (:worker-envelope %)) (true? (:committed? %))) maintenance))
+                  (is (= [:lease-acquisition :dispatch-acknowledgment :lease-acquisition :dispatch-acknowledgment]
+                         (mapv :maintenance maintenance)))
+                  (is (= ids (set (map :intent-id maintenance))))
+                  (is (every? #(apply = (map :intent-id %)) (partition 2 maintenance)))
+                  (is (= prior (selected-rows node protected)))
+                  (is (= ids (set (map :xt/id terminal))))
+                  (is (every? #(= :dispatch-accepted (:gesso.live.outbox/status %)) terminal))
+                  (is (= [:manifest :initializer :mapped-operation :mapped-operation :mapped-operation
+                          :worker :worker :worker :worker] @policy-events))
+                  (is (= :matched (:status r)) (pr-str r))
+                  (is (= :matched-local-activated-retained-root (:activation-root-binding r)))
+                  (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
+                  (is (= :not-established (:provider-refinement r)))
+                  (is (= sample2 (coverage/observe-local-processed-retained-replay-inputs! node)))))
               (finally (host/stop! started))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
