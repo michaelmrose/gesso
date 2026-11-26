@@ -5796,3 +5796,26 @@ composition with the v2761 abstract and mapped-abort diagnostics and
 genuine persistent integration are not yet qualified. No universal
 refinement, authenticated provenance, certificate, production admission
 expansion or CLM-R2 retirement. Full gates not rerun.
+
+* v2763 — shared retained-provider recovery bracket
+
+Compose the v2762 journal trajectory linkage with selected mapped
+commitment/abstract transition and mapped-prefix abort diagnostics.
+Require all mapped observation tables for all three steps. Capture an
+outer retained sample, require each synchronous nested comparison to
+observe that exact sample, and reobserve it at completion. The scoped
+sample binding is an additional equality constraint, never a substitute
+for actual observation. Reject partial or inconsistent qualification;
+return combined commitment and abstract-transition results only after
+all three steps and linkage match.
+
+Focused JVM regression: 7 tests / 121 assertions, zero failures or
+errors. Exercises actual mapped prefix checking, independent replay,
+abstract projection and journal linkage with stubbed provider observations.
+Rejects changed samples within or between nested brackets, incomplete
+scope, incorrect abstract inputs, contradictory abort index and command
+identity mismatch. Existing single-step APIs preserved. Full executor
+envelope composition, genuine persistent trajectory validation and full
+gates remain outstanding. No authenticated premise provenance, universal
+provider refinement, certificate, production admission expansion or
+CLM-R2 premise retirement.

@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.reference-mapped-poststate :as poststate]
+            [gesso.assurance.reference-recovery-trajectory :as trajectory]
             [gesso.model.certified-plan :as plan]
             [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.choreo.identity :as identity]
@@ -412,6 +413,10 @@
       {:status :unavailable :reason :invalid-processed-retained-replay-binding}
       :else sample)))
 
+;; Only binds an additional equality constraint during synchronous composition.
+;; It cannot substitute a supplied sample for a real provider observation.
+(def ^:dynamic ^:private *required-retained-sample* nil)
+
 (defn- compare-retained-replay*
   [node tables expectation prestate-check]
   (let [tag #(assoc % :retained-replay-execution-profile retained-replay-execution-profile)
@@ -419,8 +424,11 @@
                (tag (acquisition-result (if (#{:unsupported :unavailable :mismatch} status) status :unavailable)
                                         (if (keyword? reason) reason :retained-replay-comparison-failed))))
         before (observe-replay-history! node)]
-    (if-not (= :observed (:status before))
-      (fail (:status before) (:reason before))
+    (cond
+      (not= :observed (:status before)) (fail (:status before) (:reason before))
+      (and *required-retained-sample* (not= *required-retained-sample* before))
+      (fail :unavailable :source-log-changed-during-recovery-comparison)
+      :else
       (let [inputs (:replay-inputs before)
             comparison (compare-source-bound-execution! node inputs tables)
             selected-failure (when (and prestate-check (= :matched (:status comparison))
@@ -567,11 +575,14 @@
         (catch clojure.lang.ExceptionInfo _
           {:status :unsupported :reason :unsupported-retained-prestate})))))
 
-(defn- abstract-projection-failure [inputs expectation original targets tables spec]
-  (let [required (try
+(defn- mapped-observation-tables [original targets]
+  (try
                    (into #{} (map (fn [[kind table]] (if (= :journal-slot kind) :gesso_commands table)))
                          (vals (:target-map (plan/check-target-mapping! original targets))))
-                   (catch clojure.lang.ExceptionInfo _ nil))]
+                   (catch clojure.lang.ExceptionInfo _ nil)))
+
+(defn- abstract-projection-failure [inputs expectation original targets tables spec]
+  (let [required (mapped-observation-tables original targets)]
     (if-not (and (set? tables) (some? required) (every? tables required))
       (acquisition-result :unsupported :incomplete-abstract-projection-scope)
       (let [r (poststate/compare-selected! inputs expectation original targets spec)]
@@ -784,6 +795,74 @@
                  :mapped-prefix-failure-index @index :assertion-error :matched
                  :durable-effects :none-at-selected-abort)
           report)))))
+
+(def mapped-recovery-profile :selected-mapped-retained-recovery-v1)
+
+(defn compare-local-processed-retained-mapped-recovery!
+  "Bind three adjacent selected attempts to one observed retained sample.
+   Check both committed abstract projections, the stale mapped-prefix abort,
+   and exact journal linkage. Each nested comparison must observe that same
+   sample, not merely a separately stable history. Supplied mapped expectations
+   are premises; this does not derive the complete executor envelopes."
+  [node tables steps expected]
+  (let [tag #(assoc % :mapped-recovery-profile mapped-recovery-profile)
+        fail #(tag (acquisition-result %1 %2))
+        roles [:winner :abort :recovery]
+        common #{:original :targets :docs :journal :expectation :prefix-count :command-id}
+        commit-keys (into common [:publication-ids :residual-ops :abstract-spec])
+        valid? (and (vector? steps) (nil? (meta steps)) (= 3 (count steps))
+                    (map? expected) (nil? (meta expected)) (= (set roles) (set (keys expected)))
+                    (every? (fn [[step required role]]
+                              (and (map? step) (nil? (meta step)) (= required (set (keys step)))
+                                   (= (:command-id step) (:xt/id (get expected role)))
+                                   (or (= :abort role) (map? (:abstract-spec step)))))
+                            (map vector steps [commit-keys common commit-keys] roles)))]
+    (cond
+      (not valid?) (fail :unsupported :invalid-mapped-recovery-source)
+      (not (and (set? tables) (every? tables [:gesso_commands :gesso_transition_evidence :gesso_live_outbox])
+                (every? (fn [{:keys [original targets]}]
+                          (let [required (mapped-observation-tables original targets)]
+                            (and (some? required) (every? tables required)))) steps)))
+      (fail :unsupported :incomplete-mapped-recovery-scope)
+      :else
+      (let [before (observe-replay-history! node)]
+        (if-not (= :observed (:status before))
+          (fail (:status before) (:reason before))
+          (let [selected (mapv :expectation steps)
+                linkage (trajectory/compare-selected! (:replay-inputs before) selected expected)
+                check-step (fn [{:keys [original targets docs journal expectation prefix-count command-id
+                                        publication-ids residual-ops abstract-spec]} role]
+                             (if (= :abort role)
+                               (compare-local-processed-retained-mapped-abort!
+                                node tables original targets docs journal expectation prefix-count command-id)
+                               (compare-local-processed-retained-mapped-publication-absence!
+                                node tables original targets docs journal expectation prefix-count command-id
+                                publication-ids residual-ops :publication-first true abstract-spec)))
+                reports (when (= :matched (:status linkage))
+                          (binding [*required-retained-sample* before]
+                            (loop [remaining (map vector steps roles) results []]
+                              (if-let [[step role] (first remaining)]
+                                (let [r (check-step step role) rs (conj results r)]
+                                  (if (= :matched (:status r)) (recur (next remaining) rs) rs))
+                                results))))
+                after (observe-replay-history! node)
+                failure (first (remove #(= :matched (:status %)) reports))]
+            (cond
+              (not= :observed (:status after)) (fail (:status after) (:reason after))
+              (not= before after) (fail :unavailable :source-log-changed-during-recovery-comparison)
+              (not= :matched (:status linkage)) (fail (:status linkage) (:reason linkage))
+              failure (fail (:status failure) (:reason failure))
+              (not (and (= 3 (count reports))
+                        (= [:committed :aborted :committed] (mapv :selected-transaction-commitment reports))
+                        (= [:matched-retained-projection nil :matched-retained-projection] (mapv :abstract-transition reports))
+                        (= :none-at-selected-abort (:durable-effects (second reports)))
+                        (= :matched-retained-journal-trajectory (:recovery-linkage linkage))))
+              (fail :unsupported :invalid-mapped-recovery-comparison)
+              :else (tag (assoc base :status :matched
+                                :recovery-linkage :matched-retained-journal-trajectory
+                                :selected-tx-ids (:selected-tx-ids linkage)
+                                :selected-commitments [:committed :aborted :committed]
+                                :abstract-transitions [:matched-retained-projection :not-committed :matched-retained-projection])))))))))
 
 (def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v3)
 
