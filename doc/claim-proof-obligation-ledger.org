@@ -4992,3 +4992,27 @@ predicates, oversized descriptors and missing observation tables.
 This is bounded physical execution correspondence, not manifest policy
 certification, production admission or CLM-R2 premise retirement. Full
 project and independent formal gates not rerun.
+
+* v2730 — test atomic partitioning of wide journal predicates
+
+Exercise a test-only partition of the existing generated occupied journal
+value conjunction into assertions with at most twelve original predicates
+per assertion, retaining exact predicate/operand order, the initial unique
+slot assertion and document field count. Execute all guards in one XTDB
+transaction without intervening writes. A 32-element mixed scalar vector
+fixture, comparable in width to the earlier compilation failure, executes
+in partitioned form. Slot uniqueness is essential: without it, separate
+assertions could match different rows. This is not a general SQL splitting
+algorithm or a universal provider equivalence result.
+
+Focused JVM: 1 test / 47 assertions, zero failures or errors. The fixture
+checks exact predicate preservation, missing and duplicate slot rejection,
+float/decimal and keyword/string distinctions, changed middle and final
+vector elements, shorter/longer vectors, nested map and binding/outcome
+changes, tentative writes and rollback, and successful marker publication.
+The oversized original predicate is constructed but not submitted again.
+Production lowering, independent lowering correspondence and retained
+replay grammar remain unchanged; the experiment does not establish a safe
+universal compilation bound or performance characteristics. No production
+admission, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates not rerun.
