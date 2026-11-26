@@ -1,0 +1,671 @@
+#+TITLE: Gesso — Multi-Node Live Routing and Single-Node Forward Compatibility
+#+SUBTITLE: Deferred Valkey implementation plan and present design constraints
+#+DATE: 2026-11-25
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Status and intent
+
+This is a non-normative engineering note accompanying Gessoplan R5.1.
+It records a promising future multi-node implementation of Gesso Live and
+identifies the architectural decisions we should preserve while completing
+single-node Gesso. It is not an instruction to implement multi-node support
+now, add Valkey dependencies, expand current admission profiles, or interrupt
+the current authoritative-operation refinement work.
+
+The implementation observations use the v2756 source snapshot
+(=03e5e689e3cf=). Revision v2757 added the related
+[[file:gesso-provable-operation-portfolio.org][provable operation portfolio]] design note. Neither document establishes
+a new proof result or changes canonical R5.1.
+
+The proposal originates in the November 25, 2026 design
+/Hierarchical SSE Invalidation & Multi-Node Routing Architecture/ and the
+subsequent discussion of its relationship to Gesso. In particular, the
+proposal uses prefix-expanded Valkey Pub/Sub subscriptions instead of
+standalone firehose routers and probabilistic vacuum filters. The
+discussion establishes a key design principle: missed broker notifications
+are fundamentally another instance of an observer failing to acquire fresh
+authoritative state, rather than a failure to perform a business mutation.
+
+The plan is conditional on qualification of the eventual provider,
+transport and installed deployment. Its performance goals are hypotheses,
+not measured capacities.
+
+* The design principle: one semantic system, two deployment topologies
+
+Single-node and multi-node Gesso should implement the same application
+semantics. Distribution changes how an admitted operation is hosted, how
+a relevant observation becomes invalidated, and how an observer acquires
+a sufficient authoritative basis. It must not change the meaning of the
+operation, the authorization decision, the business invariant, or the
+client's authoritative installation rule.
+
+The following distinctions are central:
+
+- A committed authoritative operation changes durable state.
+- A publication intent records an obligation to notify about the change,
+  where the admitted operation requires publication.
+- An invalidation is a notification that an observation may be stale,
+  together with any applicable progression requirement.
+- Transport acceptance is evidence of acceptance at a particular boundary;
+  it is not evidence that all recipients obtained the notification.
+- Acquisition obtains an authoritative observation at a sufficient basis.
+- Installation accepts that observation into the intended client owner,
+  subject to identity, progression, continuity and presentation policies.
+
+An invalidation must not itself incorporate the business operation or
+contain an indispensable incremental state mutation. If it did, dropping
+the message would create a fundamentally different recovery problem.
+
+The same declaration of an operation, invariant, publication scope and
+client policy should work whether the serving application consists of one
+process or many. Deployment profiles may differ in their qualified
+assumptions and resource limits, but not silently change that declaration.
+
+* Missed notifications and observer recovery
+
+** One semantic failure class
+
+Consider a client whose installed authoritative observation is at basis B0.
+The database subsequently incorporates relevant changes up to basis B1.
+
+The client may fail to observe the changes because:
+
+- It is offline, closes its SSE stream, or never establishes an interest.
+- Its serving node loses the Valkey subscription connection.
+- The originating process fails before attempting notification.
+- A subscriber, local dispatch queue or SSE stream drops an invalidation.
+- The client receives an invalidation but its acquisition request fails.
+- The query returns an insufficient basis or installation is rejected.
+
+These are different operational failures but share a semantic consequence:
+the observer has not acquired and installed an adequate authoritative
+observation. They do not by themselves invalidate a correctly committed
+business transition.
+
+Recovery need not reproduce every missed message. If a qualified
+authoritative frontier F covers B1 and any still-pending requirements,
+then reacquisition at or beyond F can replace all those missed refresh
+requirements. This is safe because a refresh notification is not a
+business effect to be executed once for every message.
+
+For advisory presentation, attaining freshness may mean making the
+authoritative update available under the declared policy, not forcibly
+replacing a view that the user is entitled to retain. Distinguish the
+installed observation, visible presentation, and known pending update.
+
+** The remaining difference: knowledge of failure
+
+A browser may notice its own disconnection. It may not know that the
+serving web node lost its upstream notification source while the SSE
+connection stayed open. Likewise, a publisher failure may occur without
+any subscriber disconnect.
+
+The system must therefore represent notification continuity as uncertain
+when a transport epoch changes or a gap is suspected. When continuity
+cannot be established, conservatively reacquire. Reconnection, detected
+queue overflow, lost subscription acknowledgment and uncertain worker
+outcome are all reasons to initiate the applicable reconciliation.
+
+Some losses are silent. Periodic reconciliation or another qualified
+gap-detection mechanism is required if the requested freshness property
+covers such failures. An ephemeral broker cannot establish absence of
+loss merely by continuing to accept commands. A heartbeat demonstrating
+connection health does not demonstrate that every prior message arrived.
+
+** Safety and liveness are different
+
+The primary safety obligation is that every admitted committed operation
+preserves the declared business invariants. Observation lag does not
+authorize an otherwise forbidden command; authoritative eligibility must
+be re-established at the protected execution boundary.
+
+For the live observation path, safety includes not installing a response
+for the wrong subject, owner, or authorization context, and not regressing
+an authoritative basis without an explicitly permitted semantic transition.
+
+A useful liveness target for an automatically refreshing observation is:
+
+#+begin_example
+If a relevant change commits at basis B, and an interested observer
+continues or resumes participating, then under the qualified availability,
+fairness and recovery assumptions the observer eventually installs an
+authorized observation whose basis satisfies B.
+#+end_example
+
+This does not assert bounded delay during a partition, exactly-once SSE
+delivery, or visibility of every intermediate state. Where the application
+declares advisory refresh, eventual availability of the update and
+installation following a permitted refresh are distinct properties.
+
+State explicitly the necessary assumptions about observer participation,
+stable interests, available authority, fair dispatch/recovery, and successful
+permitted installation. Continuous mutation must not cause indefinite
+starvation of an already pending refresh obligation.
+
+* Eventual implementation architecture
+
+** Topology
+
+Each web node hosts the qualified application, Live dispatch and local
+interest index, HTTP and SSE connections, and access to the same logical
+XTDB authority. Kafka and object storage are proposed backing components
+for the future XTDB deployment. The exact XTDB indexing and replication
+topology is a provider qualification question, not a Gesso semantic premise.
+
+Valkey provides ephemeral macro-routing between application nodes. It
+does not own business state, authorization, authoritative progression,
+or the durable publication record. HAProxy may route requests by tenant
+or store to improve locality. A qualified deployment must remain correct
+when requests do not follow that affinity.
+
+#+begin_example
+                 authoritative operation
+                           |
+          atomic durable state + publication intent
+                           |
+                  recoverable outbox worker
+                           |
+              +------------+-------------+
+              |                          |
+       optional local fast path    Valkey Pub/Sub
+              |                          |
+              +------------+-------------+
+                           |
+                interested web nodes
+                           |
+               local indexed SSE fanout
+                           |
+              progression-aware acquisition
+                           |
+                authorized installation
+#+end_example
+
+The durable recovery path is the authoritative database and the applicable
+publication/reconciliation machinery, not a requirement to durably retain
+every broker notification.
+
+** Semantic invalidation before physical routing
+
+A writer declares a primary change. Application invalidation expansion
+determines the affected scopes. The routing adapter distributes those
+already determined invalidations.
+
+For example, a change to a request can affect a store queue, request detail,
+helper assignment list, and organizational view. These relationships
+need not form a single tree. Several independently rooted scopes can be
+affected by one operation.
+
+Do not confuse a hierarchical route with a business dependency. A
+subscription to a parent path does not automatically match a child
+invalidation under downward-prefix semantics. If a board depends on the
+child, the semantic expansion must include a scope covering the board.
+
+In the current implementation,
+[[file:../src/gesso/live/invalidation.clj][gesso.live.invalidation]]
+already separates change expansion from database reads, SSE and the source.
+It carries the primary progression requirement through expansion and
+does not allow application rules to invent or replace that requirement.
+Preserve this separation.
+
+In particular, do not make publication of an affected scope conditional
+on whether a local process currently knows of a subscriber. Live interest
+tables are delivery optimizations. A relevant remote observer may exist,
+or an acquisition may be in progress. The operation's declared publication
+obligation must not depend on the originating JVM's view of demand.
+
+** Prefix-expanded Valkey subscriptions
+
+The proposed hierarchy is downward, segment-aware invalidation. Let p
+be an invalidated path and q an interest path. They match precisely when
+p is an ancestor of q, including equality.
+
+#+begin_example
+matches(p, q) iff p belongs to prefixes(q)
+
+Interest:     [:store 419 :queue :item 7]
+Subscription: all nonempty semantic ancestor paths
+Invalidation: [:store 419 :queue]
+Result:       matches the interest
+#+end_example
+
+The representation is illustrative, not an existing Gesso API. It is
+important that paths have typed, unambiguous segment boundaries.
+
+For every locally registered interest, derive its ancestor channel set.
+Maintain desired per-channel reference counts. A web node needs a broker
+subscription only if at least one local interest contributes that channel.
+Publish each invalidation to its own encoded path. Valkey exact-channel
+matching selects the web nodes with matching interests, and the receiving
+nodes perform exact local fanout.
+
+For this hierarchy the transformation is exact, not probabilistic. It
+avoids pattern subscriptions and avoids synchronization of full routing
+tables between all web nodes. It does not imply constant-time delivery:
+broker publication work grows with receiving subscriber connections, and
+local fanout grows with the relevant subtree and matching consumers.
+
+Existing exact topic/id matching remains a valid semantic routing mode.
+Do not prematurely replace the current topic/id representation with
+arbitrary dotted strings. A future hierarchy requires a qualified scope
+representation and an injective, deployment-namespaced channel encoding.
+Consider type distinctions, escaping, segment boundaries, maximum depth,
+channel length, and unsupported scopes. A string prefix such as store_41
+must not accidentally match store_419.
+
+The initial distributed adapter can even route exact topic/id interests
+before hierarchical support is introduced. Hierarchical routing is an
+independent optimization and expressive extension, not a prerequisite
+for the basic multi-node consistency protocol.
+
+** Local interest index
+
+[[file:../src/gesso/live/source.clj][gesso.live.source]] presently uses an
+in-process indexed source with exact topic/id routing and bounded consumer
+resources. A future hierarchical implementation could use a root-sharded
+persistent trie, with each reader traversing an immutable snapshot.
+Independent roots reduce unnecessary update contention.
+
+A concurrent sorted range index is another candidate, but raw character
+prefix scans do not implement segment semantics. Weakly consistent
+iteration may miss concurrent registrations. Idempotency permits extra
+notifications, not undetected omission of relevant observers; acquisition
+and recovery must cover registration races.
+
+Maintain desired, broker-confirmed and pending subscription state
+separately. A stale unsubscribe must not defeat a newer registration.
+Serialize or reconcile commands against the latest desired state and
+connection epoch. Avoid inventing a global lock or global routing table
+as a correctness dependency.
+
+At a later scale, Valkey sharded Pub/Sub can partition channel routing
+without restoring the dedicated modulo-router subsystem. The initial
+implementation should favor simplicity; choose and qualify the JVM client,
+subscription acknowledgments, reconnect semantics, and cluster behavior
+at implementation time.
+
+* Acquisition, progression and reconciliation
+
+** Acquisition is a semantic barrier, not a TCP event
+
+A subscription is not safely acquired simply because an SSE socket is
+open or a broker subscribe command has been enqueued.
+
+An illustrative future acquisition protocol is:
+
+1. Install the local interest in an acquiring generation so incoming
+   matching notifications can be accumulated.
+2. Derive its required broker channels and establish their subscription
+   state for the current transport epoch.
+3. Confirm subscription establishment.
+4. Obtain an authoritative frontier covering the required prior history.
+5. Acquire and qualify the observation at or beyond that frontier.
+6. Compose and reconcile requirements received while acquisition was
+   in progress, preserving any unsatisfied requirement.
+7. Activate the interest without losing a notification racing with the
+   transition to active state.
+
+A committed change before the acquisition frontier must be covered by
+the read. A subsequent relevant change must be observed or recovered by
+the qualified reconciliation path. The handover from acquisition to
+normal dispatch must have no unaccounted gap.
+
+The frontier must come from a qualified source covering the shared
+authority. The latest transaction already indexed by a lagging local
+replica is not necessarily sufficient. A request may be served by a
+different node than the one hosting SSE.
+
+On reconnect, establish a new transport epoch, restore desired interests
+and repeat the applicable acquisition/reconciliation barrier. It is
+permissible to keep browsers' SSE sockets open while marking their
+upstream notification continuity uncertain and issuing a resync.
+Do not conflate upstream reconnection with a business-state transition.
+
+** Preserve the existing progression vocabulary
+
+[[file:../src/gesso/live/progression.cljc][gesso.live.progression]]
+intentionally treats bases as opaque values. Generic composition retains
+the set of distinct requirements, rather than inferring ordering from
+arrival order, timestamps or an arbitrary token representation. Reduction
+requires authority-specific progression evidence.
+
+This is already a good foundation for multiple publishers and out-of-order
+delivery. In particular, an older notification must not overwrite a
+stronger pending requirement, and a stale response must not satisfy it.
+
+The eventual broker envelope should carry the existing semantic
+progression requirement using a qualified versioned encoding, rather than
+make an XTDB-specific await token the generic Live API. The protocol
+would also need deployment/routing-domain identity, publication identity,
+scope and the applicable transport version. These fields are proposed,
+not present wire requirements.
+
+[[file:../src/gesso/live/consistency/xtdb.clj][gesso.live.consistency.xtdb]]
+owns provider-specific basis representation and comparison, including
+database compatibility, strongest-required-basis, query options and
+request-frontier binding. Retain the distinction between a transaction
+catch-up requirement, a selected snapshot and the actual observed basis.
+Waiting for an index position alone is not evidence that an arbitrary
+query or rendered response used the required snapshot.
+
+XTDB await tokens are a plausible implementation mechanism for
+cross-node read-after-write. Validate the exact API and semantics for the
+provider version and installed topology, including timeout, unavailable
+authority and cross-node token compatibility. The current dependency is
+XTDB 2.2.0-beta1. Do not assume documentation for a different version
+establishes compatibility.
+
+If a required basis is incompatible, untrusted, or cannot be satisfied,
+the adapter must report an appropriate failure or pending outcome rather
+than render a falsely qualified observation. Client-supplied progression
+data does not itself authenticate an authority or authorize access.
+
+** Recovery granularity and cost
+
+The initial recovery implementation can conservatively invalidate all
+affected local interests after subscription restoration, at a qualified
+frontier. This is not an instruction to reconstruct every missed
+invalidation. A full resync is a safe fallback when the loss interval
+cannot be identified, subject to appropriate bounded scheduling.
+
+Later, use durable publication/history coverage or authoritative scope
+frontiers to narrow reconciliation. Do not assume a presently implemented
+outbox history scheduler is already a distributed replay protocol.
+History retention, cursor advancement, completeness, lease ownership,
+and behavior when a cursor predates retained history need qualification.
+
+A transport gap can be handled at the web-node level; there is no need
+for a database row per client per notification. Browser acquisition
+recovery remains necessary even with reliable broker delivery.
+
+* Durable publication and dispatch acknowledgment
+
+** Keep the committed intent
+
+The fact that missed notifications are recoverable does not mean the
+normal notification path should be allowed to lose committed intents
+routinely. A durable outbox closes the ordinary commit-to-publish crash
+window without requiring distributed atomic commit with Valkey.
+
+In the current implementation, publication intent is part of the
+authoritative operation's mapped durable effects where declared.
+[[file:../src/gesso/live/outbox/model_publication.clj][Model publication]],
+[[file:../src/gesso/live/outbox/acquisition.clj][lease acquisition]],
+[[file:../src/gesso/live/outbox/delivery.clj][delivery]],
+[[file:../src/gesso/live/outbox/acknowledgment.clj][acknowledgment]] and
+[[file:../src/gesso/live/outbox/reconciliation.clj][reconciliation]]
+provide a substantial single-node foundation.
+
+The delivery adapter uses a successful XTDB lease-acquisition receipt
+as a conservative progression basis, checks the currently leased intent
+and source identity, and requires local dispatch acceptance before
+recording the guarded acknowledgment. The acknowledgment checks the
+lease fence and receipt shape. Its own contract explicitly does not
+establish adapter authenticity, SSE transmission or browser use.
+
+In a future distributed deployment, a worker can discover pending intents
+and reclaim an expired lease under a qualified shared database protocol.
+If it publishes and crashes before acknowledging, the publication may be
+repeated. The notification path must tolerate that duplication; the
+business operation must not be repeated as a side effect of dispatch.
+
+** Keep acknowledgment scoped to the adapter
+
+The existing delivery receipt's =:gesso.live/synchronous-source=
+classification describes a local acceptance boundary. It is legitimate
+for its currently qualified scope. It must not silently become evidence
+that a distributed notification was accepted.
+
+A future distributed publication adapter must have its own explicit
+acceptance contract, appropriate trusted provenance and lease-fenced
+acknowledgment. Broker command acceptance is a plausible boundary: it
+means the adapter successfully submitted the refresh publication to the
+qualified broker, not that every intended node or browser received it.
+
+A zero-subscriber result is not intrinsically a publication failure;
+there may be no active interested node. It is not proof of absence of
+interested observers either. Acquisition and recovery must handle that
+distinction.
+
+If a deployment elects both direct local dispatch and broker dispatch,
+define which acceptance(s) discharge the publication intent. A local
+fast-path receipt must not prematurely retire a required broker
+publication. Partial failure across expanded scopes must be retryable
+without creating additional business mutations or losing progression.
+Initially routing the publishing node through its own broker
+subscription may be simpler than optimizing the local fast path.
+
+Origin-node identity is useful for diagnostics, not sufficient evidence
+that local dispatch succeeded. Do not suppress an echo merely because
+the origin is local unless the corresponding local obligation is already
+satisfied or safely reconciled. Use explicit dispatch identity and
+generation-aware state where deduplication is needed.
+
+** Resolve source identity explicitly when distributing
+
+The current outbox row and delivery path bind a source identifier,
+including an explicit expected-source check. This is an important
+qualification boundary, not an obstacle to remove.
+
+In the multi-node profile, determine how a stable logical publication
+domain relates to ephemeral local source instances, worker identities,
+deployment identity and authority. A durable intent must remain
+discoverable and deliverable by another admitted host after the
+originating process fails, without allowing one deployment to dispatch
+another deployment's publication.
+
+Review durable source identifiers, worker discovery/lease filtering,
+publication manifests, acknowledgment provenance and installed-host
+admission together. A process-local capability or object identity is
+not a portable credential. Do not rewrite the single-node checks to
+pretend they are globally valid; derive and qualify the distributed
+binding when the new profile is implemented.
+
+* Relevance to the work currently in progress
+
+** The authoritative operation proof should transfer
+
+Claim exclusivity must hold whether two commands are submitted from the
+same JVM or different web nodes. The proof must rely on the actual
+protected authoritative prestate, atomic transaction semantics, command
+identity and admitted effect footprint, not on JVM-local serialization.
+
+The present work on independent retained physical execution, successful
+commitment qualification, stale abort and guarded recovery is directly
+relevant. It helps establish that the physical provider implements the
+declared abstract transition under interference.
+
+At v2756, the selected genuine executor results are bounded
+correspondence evidence. Abstract committed transition correspondence,
+composed recovery trajectories, source-derived authenticated provenance,
+installed-host correspondence and CLM-R2 discharge remain outstanding.
+See [[file:claim-proof-obligation-ledger.org][the Claim proof obligation ledger]].
+Continue closing these obligations before starting the new deployment.
+
+A future distributed proof should reuse the application-level induction
+argument with a different qualified host/provider composition. It
+must establish that all admitted hosts use the same declared semantics,
+that every relevant physical writer is covered, and that actual
+executions refine the shared authoritative transition relation.
+
+Do not infer deployment-wide writer coverage from one process being
+correctly installed. Mixed-version hosts, migrations, maintenance
+writers, direct database access and worker processes can invalidate
+that premise. Rolling deployment compatibility is a future explicit
+qualification requirement, not a guarantee of the current profile.
+
+** Present code and forward-compatibility decisions
+
+| Area | Keep now | Qualify later |
+|------+----------+---------------|
+| Operation declarations and induction | Topology-independent guards, invariants, frames | All admitted host executions |
+| Physical transaction refinement | Actual authoritative protected prestate and effects | Cross-host provider correspondence |
+| Durable command identity | Stable authoritative incorporation and recovery | Retries arriving at another host |
+| Invalidation expansion | Source-derived affected scope and progression | Hierarchical scope encoding and routing |
+| Local Live source | Indexed matching and bounded consumer behavior | Broker adapter and local hierarchy |
+| Outbox | Atomic intent, leases, fenced acknowledgment | Logical source domain and multi-host recovery |
+| Progression | Opaque bases, compose without regression | Portable trusted basis and frontier across nodes |
+| Acquisition | Qualified observation and owner installation | Upstream subscription epochs and gap recovery |
+| Local caches and singleflight | Local optimization with authorization and basis checks | Cross-host equivalence and cache scope |
+| Trust and evidence | Exact process-local authority boundaries | Deployment-wide installation and portable provenance |
+
+Local locks, source objects, coalescers, caches, worker schedulers and
+singleflight registries are perfectly legitimate when their promised
+property is local. There is no benefit in replacing all of them with
+distributed coordination now. The important distinction is whether
+their locality is an optimization or an essential premise of the
+business invariant or a claimed deployment-wide guarantee.
+
+** Concrete rules for present development
+
+- Do not embed Valkey, HAProxy, node affinity or a broker channel syntax
+  in application business declarations.
+- Do not make local observation or interest registration a prerequisite
+  for deriving durable publication obligations.
+- Preserve durable identities and actual transaction basis binding.
+  Do not rely on message arrival order or origin process identity.
+- Keep local dispatch acceptance, acquisition and installation separately
+  named and qualified.
+- Do not introduce JVM-local locks as substitutes for authoritative
+  guards protecting shared business state.
+- Keep provider-specific ordering and query consistency in the qualified
+  authority adapter, not the generic transport.
+- Keep permission checks and owner-generation checks on all relevant
+  acquisition paths. Routing is not an authorization boundary.
+- Keep process-local trust explicit. Avoid treating serialized data as
+  evidence that an object-identity or trusted-executor premise holds.
+- Preserve resource bounds, explicit failure, and recovery obligations.
+  An overload path must not silently claim a refresh was installed.
+- Do not broaden a current single-node admission claim merely to make
+  an interface look future-proof. Add abstractions only where the
+  present work actually benefits or an existing contract needs protection.
+
+The existing architecture is largely aligned with these rules. The
+identified source identity and adapter acknowledgment issues require
+future extension, not immediate replacement. No current proof
+obligation is retired by this design note.
+
+* Performance and locality
+
+HumanHelp's localized store workload is particularly suitable for
+affinity-based routing. HAProxy may route a store's HTTP and SSE
+connections to the same host to improve local dispatch, working-set
+locality and safe fragment reuse. Affinity is not required for correctness.
+A store may span several hosts, an admin may observe other stores,
+and an acquisition may be served anywhere in the admitted deployment.
+
+The proposed 20,000–50,000 SSE connections per node is a benchmark target.
+The current local source defaults to 4,096 active consumers and bounds
+pending puts per consumer. A consumer is not necessarily a browser socket.
+Capacity requires empirical qualification of the entire stack: connection
+and direct memory, TLS, proxy limits, scheduling, JVM GC, render cost,
+XTDB reads, reconnect storms and authorization-sensitive cache hit rates.
+
+The Valkey lookup selects interested web-node subscriber connections,
+not all individual browser connections. This reduces inter-node fanout,
+but broad invalidations necessarily incur real work. Local trie traversal
+must enumerate the matching subtree and recipients. Do not make
+unmeasured nanosecond latency or fixed capacity claims.
+
+Use the existing leading/trailing coalescing, progression composition,
+bounded pending work and fragment singleflight as appropriate. Add
+bounded delivery scheduling, jitter and fair prioritization when
+qualified measurements demonstrate a need. Jitter alone cannot cure a
+sustained workload exceeding read capacity. Immediate actor settlement
+and background observer refresh are separate latency paths.
+
+Avoid needlessly broad root invalidations and high-cardinality channel
+churn. A global configuration change may legitimately affect all hosts;
+do not hide that necessary cost. Cache reuse must preserve authorization,
+presentation parameters, authoritative basis and owner semantics.
+
+Adding web nodes does not automatically shard the shared XTDB write
+authority or increase its indexing throughput linearly. Database
+partitioning would change the authoritative consistency and invariant
+boundaries and is a separate design decision. Start with a shared logical
+database and qualify its actual replication topology.
+
+* Deferred implementation and acceptance sequence
+
+This is a suggested future order, not a schedule or a change to the
+present single-node critical path.
+
+1. Establish the multi-node semantic contract, shared logical authority,
+   deployment identities and qualified XTDB topology. Demonstrate
+   equivalent operation behavior across two admitted hosts.
+2. Implement a narrow exact-channel Valkey adapter using the existing
+   scope and progression vocabulary. Use one broker initially, with
+   explicit ephemeral semantics and qualified subscription establishment.
+3. Integrate recoverable durable publication through that adapter,
+   qualifying source/domain identity, lease handoff, receipts and partial
+   dispatch failure. Do not add distributed per-client acknowledgments.
+4. Implement transport-epoch acquisition and resync, authoritative
+   frontier coverage and recovery of silent gaps. Demonstrate behavior
+   when the SSE-serving host differs from the acquisition host.
+5. Add segment-aware hierarchical scopes and prefix-expanded channel
+   routing with desired/confirmed subscription reconciliation. Check
+   semantic expansion independently of routing.
+6. Qualify two-host and multi-host operation, recovery and observer
+   behavior under faults and adversarial schedules. Bind the evidence to
+   the installed deployment profile.
+7. Benchmark representative local, overlapping and broad workloads.
+   Introduce affinity, local fast path, channel sharding, more elaborate
+   local indexes, or targeted history reconciliation only as justified.
+
+Valkey persistence is not needed merely to maintain Pub/Sub subscriptions.
+Valkey Streams, standalone routers and Rust SSE offload remain possible
+optimizations or alternate delivery mechanisms if measured workloads
+or a stronger requested recovery profile require them. They are not
+the starting point. The semantic contract should not depend on them.
+
+** Future regression and fault-injection matrix
+
+| Scenario | Required outcome |
+|----------+------------------|
+| Two hosts submit competing Claim operations | Shared invariant preserved; correct distinct outcomes |
+| Commit then publisher crash | Durable intent recoverable; no duplicate incorporation |
+| Broker publish then worker crash before ack | Safe repeated publication under fenced recovery |
+| Publisher accepts but subscriber misses message | Observer reacquires through qualified recovery |
+| Broker disconnect while SSE remains open | Continuity marked uncertain; resync after restoration |
+| First interest registers during a commit | No unaccounted gap across acquisition barrier |
+| Last unsubscribe races with new interest | Desired subscription eventually confirmed; gap recovered |
+| GET lands on a lagging different host | Wait for adequate basis or explicit failure |
+| Notifications and responses arrive out of order | Pending requirement not weakened; installation not regressed |
+| Ancestor invalidation and unrelated string prefix | Exact semantic segment matching |
+| Child change affects an ancestor board | Expansion includes board; no inferred dependency shortcut |
+| Multi-scope publication partly fails | Required effects recoverable; no false terminal acknowledgment |
+| Origin echo and local fast-path failure | No unconditional suppression of needed refresh |
+| Slow consumer or reconnect storm | Bounded resources, fair recovery, no false freshness claim |
+| Authorization revoked during reacquisition | No unauthorized new observation or installation |
+| Mixed deployment or incompatible basis | Reject or explicitly qualify compatibility, never silently accept |
+
+Model checking can explore registration, dispatch, reconnection and
+recovery schedules; mathematical correspondence can establish the
+prefix transformation and progression composition properties.
+Integration tests must exercise real Valkey and the qualified shared
+XTDB deployment, not merely an in-process mock of their behavior.
+The acceptance record must distinguish finite experiments, conditional
+proofs, provider assumptions and fully established claims.
+
+* Conclusion
+
+The proposed prefix-expanded Valkey design is a promising simplification
+of multi-node routing. Its strongest feature is that routing becomes
+a relatively small transport concern, while the existing Gesso semantic
+model continues to own authoritative operations, publication, acquisition
+and progression.
+
+The decisive observation is that failure to deliver an invalidation is
+not fundamentally different from a client failing to come online and
+read. Both leave an observer without an adequate authoritative
+observation. The recovery obligations are real, but they do not demand
+replay of every notification or a durable acknowledgment for every
+browser.
+
+We should complete single-node Gesso, preserve the boundaries described
+above, and avoid topology-dependent business correctness assumptions.
+When multi-node development begins, the goal is to qualify another
+deployment of the same semantic system, not to invent another system.
+
+No runtime implementation, dependency, proof status, admission profile
+or canonical specification is changed by this note.
