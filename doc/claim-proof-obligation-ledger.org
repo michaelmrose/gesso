@@ -5184,3 +5184,30 @@ within a qualified finite history, not authenticated acquisition provenance,
 source-derived suffix semantics, universal physical refinement or successful
 commitment. No certificate or CLM-R2 premise retirement. Full project and
 independent formal gates not rerun.
+
+* v2738 — derive mapped put-only suffix from original typed assignments
+
+Derive complete replacement rows forward from original guarded assignments,
+closed prepared rows and supplied inputs, supplemental document values and
+command-record source. Independently check the typed relation and reproject
+all derived rows; preserve every existing unmapped field except declared
+supplemental effects. Compare exact table/row multiplicities against the
+entire put-only suffix, then compose with the same-transaction prefix and
+historical prestate diagnostic. Physical order and grouping remain bound
+by the retained transaction expectation. One absent journal slot and
+ordinary default-valid-time puts only; no residual guards or auxiliary
+publication/evidence writes are qualified by this profile.
+
+JVM: 2 tests / 99 assertions, zero failures or errors across the new
+forward-write and existing mapped retained prestate fixtures. The new
+fixture supplies a manually constructed three-write transaction, tests
+literal and input-derived replacements, nullable document creation,
+unmapped field preservation, missing/duplicate/extra/altered writes,
+invalid declarations, temporal put rejection and retained identity/order
+binding. The input values, supplemental values, journal outcome selector,
+command binding, time and outcome are supplied, not authenticated or
+independently derived from an installed application. Global command-ID
+absence outside mapped slots, complete production envelope correspondence,
+selected commitment and universal provider refinement remain open. No
+production admission expansion, certificate or CLM-R2 premise retirement.
+Full project and independent formal gates not rerun.
