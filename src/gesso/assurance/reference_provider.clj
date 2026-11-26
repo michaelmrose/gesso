@@ -826,8 +826,11 @@
       (fail :unsupported :incomplete-mapped-recovery-scope)
       :else
       (let [before (observe-replay-history! node)]
-        (if-not (= :observed (:status before))
-          (fail (:status before) (:reason before))
+        (cond
+          (not= :observed (:status before)) (fail (:status before) (:reason before))
+          (and *required-retained-sample* (not= *required-retained-sample* before))
+          (fail :unavailable :source-log-changed-during-recovery-comparison)
+          :else
           (let [selected (mapv :expectation steps)
                 linkage (trajectory/compare-selected! (:replay-inputs before) selected expected)
                 check-step (fn [{:keys [original targets docs journal expectation prefix-count command-id
@@ -863,6 +866,31 @@
                                 :selected-tx-ids (:selected-tx-ids linkage)
                                 :selected-commitments [:committed :aborted :committed]
                                 :abstract-transitions [:matched-retained-projection :not-committed :matched-retained-projection])))))))))
+
+(defn compare-with-retained-root!
+  "Constrain a synchronous recovery comparison to an exact two-transaction
+   initialization prefix and its immediate successor. Acquire independently;
+   the nested recovery must match this sample. The callback is trusted
+   diagnostic code, not an authority or substitute acquisition."
+  [node manifest initializer first-selected-id compare!]
+  (let [fail #(acquisition-result %1 %2)
+        before (observe-replay-history! node)
+        [m i first-step] (:replay-inputs before)]
+    (cond
+      (not= :observed (:status before)) (fail (:status before) (:reason before))
+      (and *required-retained-sample* (not= *required-retained-sample* before))
+      (fail :unavailable :source-log-changed-during-recovery-comparison)
+      (not (and (= manifest (select-keys m [:tx-id :ops]))
+                (= initializer i) (= first-selected-id (:tx-id first-step))))
+      (fail :mismatch :selected-activation-root-mismatch)
+      :else
+      (let [result (binding [*required-retained-sample* before] (compare!))
+            after (observe-replay-history! node)]
+        (cond
+          (not= :observed (:status after)) (fail (:status after) (:reason after))
+          (not= before after) (fail :unavailable :source-log-changed-during-recovery-comparison)
+          (not= :matched (:status result)) (fail (:status result) (:reason result))
+          :else result)))))
 
 (def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v3)
 

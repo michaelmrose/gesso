@@ -145,11 +145,23 @@
                        trajectory! #(evidence/compare-local-processed-retained-mapped-executor-outcome-recovery! node %1 mapped-source outcome-declarations %2)
                        issued! #(evidence/compare-local-processed-retained-issued-executor-recovery! node tables admit mapped-source outcome-declarations %)
                        combined! #(observed-recovery/compare-selected! node %1 admit mapped-source outcome-declarations %2 %3)
-                       trajectory (combined! tables steps @observation-handle)
+                       activated! #(observed-recovery/compare-activated! node %1 admit mapped-source outcome-declarations %2 %3)
+                       trajectory (activated! tables steps @observation-handle)
                        submission! #(submission/compare-selected! admit steps %1 %2)
                        observed (submission! @claims @captured)
                        issued-observation (submission/compare-observed! admit steps @observation-handle)]
                    (is (= :matched (:status trajectory)) (pr-str trajectory))
+                   (is (= observed-recovery/activated-profile (:activated-recovery-profile trajectory)))
+                   (is (= :matched-local-activated-retained-root (:activation-root-binding trajectory)))
+                   (is (= (:tx-id (first history)) (:manifest-tx-id trajectory)))
+                   (is (= (:tx-id (second history)) (:initialization-tx-id trajectory)))
+                   (doseq [[r reason] [[(activated! tables steps @captured) :unissued-framed-submission-observation]
+                                       [(activated! (disj tables :gesso_initializations) steps @observation-handle) :incomplete-activation-root-scope]
+                                       [(activated! tables (assoc-in steps [0 :source-id] "wrong") @observation-handle) :selected-activation-source-mismatch]
+                                       [(activated! tables (assoc-in steps [0 :expectation :tx-id] -1) @observation-handle) :selected-activation-root-mismatch]]]
+                     (is (#{:unsupported :mismatch} (:status r)) (pr-str r))
+                     (is (= reason (:reason r)) (pr-str r))
+                     (is (not-any? #(contains? r %) [:activation-root-binding :submission-recovery-linkage :issued-admission-binding])))
                    (is (= observed-recovery/profile (:observed-recovery-profile trajectory)))
                    (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage trajectory)))
                    (is (= :matched-local-issued-policy-window (:observation-origin trajectory)))
@@ -376,6 +388,12 @@
                                                                      {:spec nil :model-plan {:guards [(command/guard :requests after (assoc version :compare-keys [:revision :updated-at :status]))]}
                                                                       :outcome refused :now "t2"})))]
                         (try
+                          (let [{:keys [observation capture]} (publication/capture-framed-submissions! admit node (constantly :not-activated))
+                                r (observed-recovery/compare-activated! node tables admit mapped-source outcome-declarations [] observation)]
+                            (is (some? observation))
+                            (is (= :not-activated (:result capture)))
+                            (is (= :missing-selected-activation-root (:reason r)))
+                            (is (not (contains? r :activation-root-binding))))
                           (manifest/require-compatible! node source-id descriptor)
                           (writer-policy/activate-policy! writer)
                           (let [initial (correspondence/initialization-observation node admit)]

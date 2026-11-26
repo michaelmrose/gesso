@@ -121,7 +121,8 @@
             observation (merge initial (manifest/require-initialization-root! connectable source-id establishment initial))]
         (when-not (xtdb/submission-policy-current? connectable token)
           (reject! :uninstalled-mapped-writer-policy))
-        (correspondence/record-activation! connectable policy token (:admission config) observation)
+        (correspondence/record-activation! connectable policy token (:admission config) observation
+                                          {:initializer (:initializer config) :descriptor descriptor})
         (reset! phase {:registration token}))
       nil
       (catch Throwable e

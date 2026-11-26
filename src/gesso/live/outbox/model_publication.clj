@@ -283,16 +283,21 @@
                  (identical? original-policy-capture xtdb/capture-policy-tx-api-calls!)
                  (xtdb/current-submission-policy-token connectable))
     (reject! :invalid-framed-observation-window {}))
-  (let [claims (atom []) valid? (atom true)
+  (let [token (xtdb/current-submission-policy-token connectable)
+        root (correspondence/activation-root connectable admission token)
+        claims (atom []) valid? (atom true)
         scope {:admission admission :connectable connectable :claims claims :valid? valid?}
         capture (try
                   (.set framed-observation scope)
                   (original-policy-capture connectable thunk)
                   (finally (.remove framed-observation)))
-        handle (when (and @valid? (= :matched-local-policy-window (:policy-window capture)))
+        handle (when (and @valid? (= :matched-local-policy-window (:policy-window capture))
+                          (try (identical? token (xtdb/current-submission-policy-token connectable))
+                               (catch Exception _ false)))
                  (let [h (FramedSubmissionObservation.)]
                    (locking framed-observations
-                     (.put framed-observations h {:admission admission :claims @claims :capture capture}))
+                     (.put framed-observations h {:admission admission :claims @claims :capture capture
+                                                  :activation-root root}))
                    h))]
     {:observation handle :capture capture}))
 
@@ -304,7 +309,7 @@
     (locking framed-observations
       (let [entry (.get framed-observations handle)]
         (when (and entry (identical? admission (:admission entry)))
-          (select-keys entry [:claims :capture]))))))
+          (select-keys entry [:claims :capture :activation-root]))))))
 
 (defn claim-framed-submission!
   "For a trusted installed adapter policy: claim the exact current framed

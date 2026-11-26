@@ -6303,3 +6303,51 @@ Next: bind the observation to the actual activated writer-policy generation
 and its initialization root as part of the combined diagnostic, rather
 than relying on separate test assertions about which policy was installed;
 then qualify the assembled host lifecycle and command provenance.
+
+* v2778 — activated writer generation and retained initialization root
+
+Retain the exact initializer and descriptor inputs with the trusted host's
+local activation registration. Capture that historical root in the issued
+framed observation only for the matching admission and policy generation;
+require the original generation at capture completion. Preserve the
+ordinary activation report and less restrictive observation comparator.
+
+Introduce an activated recovery diagnostic which requires the registered
+activation's checked projection, manifest and initialization envelope
+observations, source identity and explicit root tables. Recheck the issued
+initialization constructor and its fingerprints and reconstruct the exact
+manifest and guarded initializer operation vectors. Require the manifest
+identity and operations, initializer identity, time and operations, and
+the immediate first selected successor in one retained sample. This
+profile deliberately requires the manifest and initializer to be the
+first two transactions, followed immediately by the selected recovery.
+The nested recovery must acquire that same sample; the outer root
+comparison also reacquires it before returning a positive result.
+Neither a supplied marker nor a successful separate root report is enough.
+
+Focused JVM qualification of exact candidate blobs: pure mapped recovery
+namespace 3 tests / 71 assertions, persistent Claim recovery 1 test /
+501 assertions, both zero failures or errors. Reject changed root
+operations, initializer time, successor and nested or closing samples.
+The persistent fixture rejects capture made before activation, raw
+capture in place of an issued handle, incomplete root scope, changed
+source and changed first selected transaction. Complete activation-bound
+correspondence succeeds before and after reopening the persistent
+database. The earlier intermediate persistent run was stopped to include
+the additional preactivation regression; only the final run is claimed.
+
+This is a narrow historical root comparison conditional on trusted
+local activation/capture/checker execution and retained acquisition.
+Root inputs are internal process-local diagnostic data, not public
+attestations, and must not be logged. The existing observation handle
+does not establish durable storage identity, aborted receipt identity,
+external authentication, or coverage of unrestricted writers. The
+fixture exercises actual writer/startup components directly with its
+own manifest descriptor, not the assembled host lifecycle. No
+reactivation after reopening, universal provider refinement, production
+admission expansion, certificate or CLM-R2 premise retirement. Full
+project gates were not rerun.
+
+Next: qualify the assembled host lifecycle and its compiled publication
+descriptor, using the actual host-owned adapter and activation path;
+keep authenticated command and durable storage provenance separate.

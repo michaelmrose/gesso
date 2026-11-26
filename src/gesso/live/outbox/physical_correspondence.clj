@@ -12,12 +12,12 @@
 (defn record-activation!
   "Trusted host owner records the successful pinned initial observation for
    its exact installed policy and issued admission. Not an activation gate."
-  [node policy token admission observation]
+  [node policy token admission observation root]
   (when-not (and token (identical? token (xtdb/submission-policy-token node policy)))
     (throw (ex-info "Physical observation has no installed policy."
                     {:reason :uninstalled-correspondence-policy})))
   (locking activations
-    (.put activations token {:admission admission :observation observation}))
+    (.put activations token {:admission admission :observation observation :root root}))
   nil)
 
 (defn initialization-observation
@@ -28,6 +28,15 @@
     (let [entry (locking activations (.get activations token))]
       (when (identical? admission (:admission entry))
         (:observation entry)))))
+
+(defn activation-root
+  "Capture the local activation's historical root inputs for an exact live
+   generation. Internal diagnostic data, not authority or a public report."
+  [connectable admission token]
+  (when (and token (identical? token (xtdb/current-submission-policy-token connectable)))
+    (let [entry (locking activations (.get activations token))]
+      (when (identical? admission (:admission entry))
+        {:observation (:observation entry) :root (:root entry)}))))
 
 (def ^:private residual-obligations
   #{:complete-intervening-history-coverage

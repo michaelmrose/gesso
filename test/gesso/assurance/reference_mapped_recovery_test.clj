@@ -148,3 +148,31 @@
     (let [r (run! steps (disj tables :gesso_assignments))]
       (is (= :incomplete-mapped-recovery-scope (:reason r)))
       (is (not (contains? r :executor-envelopes))))))
+
+(deftest activation-root-bracket-constrains-nested-recovery
+  (let [{:keys [steps history sample tables]} (example)
+        manifest (select-keys (first history) [:tx-id :ops])
+        initializer (second history)
+        successor (:tx-id (nth history 2))
+        changed (assoc sample :changed true)
+        calls (atom 0)
+        run! (fn [samples m i successor-id compare!]
+               (let [remaining (atom samples)]
+                 (with-redefs-fn {#'provider/observe-replay-history! (fn [_] (let [s (first @remaining)] (swap! remaining next) s))}
+                   #(provider/compare-with-retained-root! nil m i successor-id compare!))))
+        matched! (fn [] (swap! calls inc) {:status :matched :example-positive true})]
+    (is (= {:status :matched :example-positive true}
+           (run! [sample sample] manifest initializer successor matched!)))
+    (doseq [[m i id] [[(assoc manifest :ops []) initializer successor]
+                      [manifest (assoc initializer :ops []) successor]
+                      [manifest (assoc initializer :system-time nil) successor]
+                      [manifest initializer -1]]]
+      (is (= :selected-activation-root-mismatch (:reason (run! [sample] m i id matched!)))))
+    (is (= 1 @calls))
+    (let [r (run! [sample changed] manifest initializer successor matched!)]
+      (is (= :source-log-changed-during-recovery-comparison (:reason r)))
+      (is (not (contains? r :example-positive))))
+    (let [r (run! [sample changed sample] manifest initializer successor
+                  #(provider/compare-local-processed-retained-mapped-recovery! nil tables steps recovery/expected))]
+      (is (= :source-log-changed-during-recovery-comparison (:reason r)))
+      (is (not (contains? r :recovery-linkage))))))
