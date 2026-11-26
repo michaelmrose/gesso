@@ -79,6 +79,12 @@
           [[{:xtdb-config nil} :invalid-xtdb-config]
            [{:xtdb-submission-policy! nil} :invalid-xtdb-submission-policy]
            [{:history-audit {}} :history-audit-requires-mapped-writer]
+           [{:storage-trust {}} :invalid-storage-trust]
+           [{:storage-trust {:deployment-id :fixture/deployment :acceptance :trust-open-premises
+                            :policy {:comparison-id :fixture/recovery :relation :same-store-incarnation
+                                     :identity-policy :fixture/custody :origin-boundary :fixture/origin
+                                     :acquisition-boundary :fixture/acquisition :identity-boundary :fixture/controller}}}
+            :storage-trust-requires-mapped-writer]
            [{:mapped-writer-policy nil} :invalid-mapped-writer-policy]
            [{:mapped-writer-policy {} :xtdb-submission-policy! identity}
             :conflicting-xtdb-submission-policies]
@@ -109,6 +115,8 @@
            worker (get started managed/handle-key)]
        (try
          (is (nil? (host/history-status started)))
+         (is (= :unissued-storage-trust-host
+                (:reason (problem #(host/adopt-storage-trust! started nil)))))
          (is (= :not-selected (:status (host/assurance-status started))))
          (is (= :history-audit-not-selected (:reason (problem #(host/audit-history! started)))))
          (is (some? node))

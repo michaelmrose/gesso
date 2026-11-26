@@ -7292,3 +7292,37 @@ Next: connect the explicit trust declaration to the actual configured
 single-node deployment boundary, preserving its scope, provenance
 limitations and exact open obligations. Do not confuse declared acceptance
 with authenticated lifecycle evidence or CLM-R2 discharge.
+
+* v2804 — adopt storage trust at the configured local host
+
+Add an opt-in :storage-trust host configuration requiring the mapped
+writer profile, a named deployment, explicit trust-open-premises selection
+and one exact comparison policy. Register the exact returned owner system
+under a private weak-key token only after checked startup. Bind prepared
+comparisons to their actual target node, original admission and publication
+source. Derive the accepted premises from the issued scope and startup
+configuration, not a caller-supplied declaration. Refuse unconfigured or
+reconstructed hosts, unissued comparisons, different policies and replaced
+boundary functions. Serialize adoption with the existing host stop lock
+and retire adoption when shutdown begins, including a blocked shutdown.
+
+Configured local adoption records which trusted host selected the open
+premises. It does not authenticate the external deployment principal,
+establish lifecycle custody, prove the selected relation, grant writer
+authority or discharge any premise. The internal result remains sensitive.
+The existing standalone declaration API remains available with its weaker
+provenance status.
+
+Focused JVM: 3 tests / 314 assertions, zero failures or errors. Two ordinary
+host regressions exercise configuration refusal and the unconfigured host;
+the adjacent assembled recovery regression exercises exact and extended
+histories, the selected lineage policy, rejection of the unselected
+incarnation policy, reconstructed owner, unissued report, replaced matcher
+and retirement after native shutdown. Older offline dependency bundle;
+full project gates not run.
+
+Next: exercise cross-host target refusal after reopening and copying, and
+verify configured adoption for the selected same-incarnation policy and
+the native shutdown boundary. Then connect the explicit assumptions to
+the relevant composed Claim assurance judgment without treating trust as
+proof. Authenticated command/worker provenance remains open.

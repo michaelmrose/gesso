@@ -189,7 +189,10 @@
                                   outcome-declarations policy-events original))
       (finally (doseq [f (reverse (file-seq (.toFile copy-root)))] (io/delete-file f true))))))
 
-(defn- check-conditional-extension! [node admit observation cut-handle earlier target]
+(defn- trust-problem [f]
+  (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+
+(defn- check-conditional-extension! [started node admit observation cut-handle earlier target]
   (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)
         extended (:historical-cut (cut/derive-cut! node target))
         prepare! (fn [relation acquisition]
@@ -240,6 +243,18 @@
                              (with-redefs [storage/describe-deployment-acceptance (constantly trusted)]
                                (is (= :conditional-recovery-boundary-replaced
                                       (:reason (observed-recovery/declare-conditional-recovery-trust! handle declaration)))))
+                             (if (= :authorized-historical-lineage relation)
+                               (let [adopted (host/adopt-storage-trust! started handle)]
+                                 (is (= (assoc trusted :deployment-adoption :configured-local-host) adopted))
+                                 (is (= :unissued-storage-trust-host
+                                        (trust-problem #(host/adopt-storage-trust! (into {} started) handle))))
+                                 (is (= :storage-trust-target-mismatch
+                                        (trust-problem #(host/adopt-storage-trust! started prepared))))
+                                 (with-redefs [observed-recovery/conditional-recovery-target-matches? (constantly true)]
+                                   (is (= :storage-trust-boundary-replaced
+                                          (trust-problem #(host/adopt-storage-trust! started handle))))))
+                               (is (= :storage-trust-policy-mismatch
+                                      (trust-problem #(host/adopt-storage-trust! started handle)))))
                              [[relation kind] {:handle handle :premises premises :declaration declaration}])))]
     (is (= 5 (count (:transaction-ids required))))
     (is (= 9 (count (:transaction-ids extended))))
@@ -255,7 +270,8 @@
           (is (= :unsupported (:status result)))
           (is (= (if (= relation other-relation) :subject-mismatch :incorrect-premise-set) (:reason result)))
           (is (not (contains? result :historical-assurance)))
-          (is (not (contains? result :trusted-assumptions))))))))
+          (is (not (contains? result :trusted-assumptions))))))
+    (get-in selections [[:authorized-historical-lineage :prefix-content] :handle])))
 
 (defn- check-assembled-recovery! [interleaved?]
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))
@@ -393,6 +409,10 @@
                                  (when (#{"helper-1" "helper-2"} h) (identity/principal h))))
         host-config {:xtdb-config config :source-id source-id :rules-context {} :live-options {}
                      :worker-options {:worker-id "assembled-recovery" :poll-ms 60000}
+                     :storage-trust {:deployment-id :fixture/deployment :acceptance :trust-open-premises
+                                     :policy {:comparison-id :fixture/recovery :relation :authorized-historical-lineage
+                                              :identity-policy :fixture/custody :origin-boundary :fixture/origin
+                                              :acquisition-boundary :fixture/acquisition :identity-boundary :fixture/controller}}
                      :assembled-operations {:authorize-request? #(and (= "yes" (get-in % [:headers "fixture-gate"])) (some? (principal-fn %)))}
                      :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                                    :require-derived-model? true :operation-model-entities {:request/claim #{:requests :request_assignments}})
@@ -565,8 +585,12 @@
                   (let [{:keys [retained-handle cut-handle]} @restart*
                         target (:acquisition (acquisition/capture! node))]
                     (is (= sample2 (acquisition/read-acquisition! node target)))
-                    (check-conditional-extension! node admit observation cut-handle retained-handle target)))))
+                    (swap! restart* assoc :trust-handle
+                           (check-conditional-extension! started node admit observation cut-handle retained-handle target))))))
               (finally (host/stop! started)))
+            (when-not interleaved?
+              (is (= :storage-trust-host-retired
+                     (trust-problem #(host/adopt-storage-trust! started (:trust-handle @restart*))))))
             (when interleaved?
               (check-reopened-recovery! assembly (fn [_] (g/html-response surface)) host-config
                                         tables admit mapped-source outcome-declarations policy-events @restart*)

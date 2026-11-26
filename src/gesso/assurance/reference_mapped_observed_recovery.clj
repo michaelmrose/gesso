@@ -312,7 +312,9 @@
                 (locking conditional-recoveries
                   (.put conditional-recoveries handle
                         {:scope scope :cut-correspondence (:cut-correspondence r)
-                         :original-cut original-cut :target target}))
+                         :original-cut original-cut :target target
+                         :target-node (java.lang.ref.WeakReference. node)
+                         :admission admission}))
                 (assoc (conditional-report :prepared) :conditional-recovery handle))))
           (catch clojure.lang.ExceptionInfo e
             (fail :unsupported (or (:reason (ex-data e)) :invalid-lifecycle-policy))))))))
@@ -375,3 +377,14 @@
           (catch clojure.lang.ExceptionInfo e
             (fail (or (:reason (ex-data e)) :invalid-deployment-acceptance))))
         (fail :unissued-conditional-recovery)))))
+
+(defn conditional-recovery-target-matches?
+  "Match the exact prepared target, original admission and publication source.
+   This historical local predicate exposes no provider or writer authority."
+  [handle node admission source-id]
+  (boolean
+   (when-let [entry (conditional-entry handle)]
+     (and (some? node) (some? admission)
+          (identical? node (.get ^java.lang.ref.WeakReference (:target-node entry)))
+          (identical? admission (:admission entry))
+          (= source-id (get-in entry [:scope :publication-source-id]))))))

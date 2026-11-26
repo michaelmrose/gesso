@@ -19,6 +19,8 @@
   (:require [clojure.string :as str]
             [com.biffweb.core :as biff]
             [gesso.assurance.operational-report :as operational-report]
+            [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
+            [gesso.assurance.reference-storage-identity :as storage]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.affordance :as affordance]
             [gesso.live.core :as live]
@@ -59,9 +61,41 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :xtdb-submission-policy! :mapped-writer-policy :history-audit :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication})
+    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication :storage-trust})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
+
+(def ^:private storage-policy-keys
+  #{:comparison-id :relation :identity-policy :origin-boundary
+    :acquisition-boundary :identity-boundary})
+
+(defn- validate-storage-trust! [config]
+  (when (contains? config :storage-trust)
+    (let [{:keys [deployment-id acceptance policy] :as trust} (:storage-trust config)]
+      (when-not (and (map? trust) (not (record? trust)) (nil? (meta trust))
+                     (= #{:deployment-id :acceptance :policy} (set (keys trust)))
+                     (qualified-keyword? deployment-id)
+                     (= :trust-open-premises acceptance)
+                     (map? policy) (not (record? policy)) (nil? (meta policy))
+                     (= storage-policy-keys (set (keys policy)))
+                     (contains? storage/relations (:relation policy))
+                     (every? qualified-keyword? (vals (dissoc policy :relation))))
+        (reject! :invalid-storage-trust {}))
+      (when-not (:mapped-writer-policy config)
+        (reject! :storage-trust-requires-mapped-writer {})))))
+
+(def ^:private storage-trust-hosts (java.util.WeakHashMap.))
+(def ^:private original-target-match observed-recovery/conditional-recovery-target-matches?)
+(def ^:private original-scope-reader observed-recovery/read-conditional-recovery-scope!)
+(def ^:private original-trust-description observed-recovery/declare-conditional-recovery-trust!)
+(def ^:private original-storage-obligations storage/describe-obligations)
+
+(defn- register-storage-trust! [system token lock active trust]
+  (locking storage-trust-hosts
+    (.put storage-trust-hosts token
+          {:system (java.lang.ref.WeakReference. system)
+           :lock lock :active active :trust trust}))
+  system)
 
 (defn- validate-config! [config]
   (when-not (map? config)
@@ -94,6 +128,7 @@
     (when-not (:mapped-writer-policy config)
       (reject! :history-audit-requires-mapped-writer {}))
     (history-controller/validate-options! (:history-audit config)))
+  (validate-storage-trust! config)
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -334,6 +369,9 @@
    to the exact owned node, with durable one-time startup initialization and restricted
    framework-owned maintenance admission. The two selections are exclusive.
    Both cover adapter submit/execute calls, not direct or external XTDB writes.
+   Optional :storage-trust selects one exact recovery policy and deployment
+   name, explicitly trusting its open premises. Adoption is owner-only on
+   the exact running host, not authentication of external lifecycle events.
    Optional :history-audit requires the mapped profile and trusted owner
    :load!, :save!, :key, :deployment-id and :max-steps options. Restore and
    persist a first bounded chunk before request admission. Further chunks
@@ -445,8 +483,11 @@
                    (module-ids network?))
           native-stop (:biff.core/stop-system started)
           stop-lock (Object.)
+          trust-token (Object.)
+          trust-active (atom true)
           stop-owned! (fn []
                         (locking stop-lock
+                          (reset! trust-active false)
                           ((:close-and-await! admission))
                           (retire-recovery! @recovery* timeout-ms)
                           (retire-route! @route* timeout-ms)
@@ -467,13 +508,17 @@
           (reset! recovery* (recovery/start-scheduled!
                              @route* (get config :sse-recovery {}))))
         ((:open! admission) started)
-        (cond-> (assoc started :biff.core/stop-system stop-owned!)
+        (let [system (cond-> (assoc started :biff.core/stop-system stop-owned!)
           @route* (assoc sse-status-key
                          (select-keys @route* [:active-count :occupied-count
                                               :pending-authorization-count
                                               :disconnected-count :closed? :drained?]))
           @recovery* (assoc recovery-status-key
-                            (select-keys @recovery* [:status :stats :drained?])))
+                            (select-keys @recovery* [:status :stats :drained?]))
+                       (:storage-trust config) (assoc ::storage-trust-token trust-token))]
+          (if-let [trust (:storage-trust config)]
+            (register-storage-trust! system trust-token stop-lock trust-active trust)
+            system))
         (catch Throwable startup-error
           ;; No traffic has been handed to the caller. Keep the original
           ;; error when cleanup also fails; retain the native owner for retry.
@@ -525,3 +570,39 @@
   (when-not (and (map? system) (some? (get system managed/handle-key)))
     (reject! :invalid-running-system {}))
   (biff/stop system))
+
+(defn adopt-storage-trust!
+  "Adopt the startup-selected trust declaration for an issued comparison on
+   the exact running owner system. No request context, caller declaration,
+   or reconstructed system is accepted. This establishes local configured
+   adoption only, not authenticated lifecycle evidence or proof discharge.
+   Returns sensitive internal assurance material, not a public receipt."
+  [system comparison]
+  (let [entry (locking storage-trust-hosts
+                (.get storage-trust-hosts (::storage-trust-token system)))]
+    (when-not (and entry (identical? system (.get ^java.lang.ref.WeakReference (:system entry))))
+      (reject! :unissued-storage-trust-host {}))
+    (locking (:lock entry)
+      (when-not @(:active entry)
+        (reject! :storage-trust-host-retired {}))
+      (when-not (and (identical? original-target-match observed-recovery/conditional-recovery-target-matches?)
+                     (identical? original-scope-reader observed-recovery/read-conditional-recovery-scope!)
+                     (identical? original-trust-description observed-recovery/declare-conditional-recovery-trust!)
+                     (identical? original-storage-obligations storage/describe-obligations))
+        (reject! :storage-trust-boundary-replaced {}))
+      (let [{:keys [deployment-id acceptance policy]} (:trust entry)
+            scope (original-scope-reader comparison)]
+        (when-not (original-target-match comparison (:xtdb/connectable system)
+                                         (::mapped-admission system)
+                                         (get-in system [config-key :source-id]))
+          (reject! :storage-trust-target-mismatch {}))
+        (when-not (= policy (select-keys scope storage-policy-keys))
+          (reject! :storage-trust-policy-mismatch {}))
+        (let [premises (mapv :assumption (:obligations (original-storage-obligations scope)))
+              result (original-trust-description comparison
+                                                 {:deployment-id deployment-id
+                                                  :identity-policy (:identity-policy policy)
+                                                  :acceptance acceptance :premises premises})]
+          (if (= :conditional (:status result))
+            (assoc result :deployment-adoption :configured-local-host)
+            result))))))
