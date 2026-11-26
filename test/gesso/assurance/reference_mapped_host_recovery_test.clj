@@ -61,7 +61,7 @@
   (into {} (map (fn [table]
                   [table (set (live-xtdb/q node (str "SELECT *, _system_from FROM " (name table))))])) tables))
 
-(deftest assembled-command-transport-observed-recovery
+(defn- check-assembled-recovery! [interleaved?]
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
         source-id "assembled-recovery"
@@ -84,6 +84,7 @@
         refusal-guards #{[:requests "r1" :status :claimed] [:requests "r1" :revision 1] [:requests "r1" :updated-at "t1"]}
         snapshots (atom {}) recovered (atom 0)
         handler* (atom nil) winner-response (atom nil)
+        worker* (atom nil) gap* (atom nil)
         request! (fn [b allowed?]
                    (@handler* {:request-method :post :uri "/operations/request/claim"
                                :headers {"content-type" "application/x-www-form-urlencoded"
@@ -166,14 +167,23 @@
                                     :source-id source-id :declarations (:publication-derivations catalog)
                                     :residual-declarations (:residual-assertion-derivations catalog)}))
                                [[2 winner :accept (accepted "helper-1") "t1"]
-                                [3 loser :accept (accepted "helper-2") "t1"]
-                                [4 loser :refuse refused "t2"]]))
+                                [(if interleaved? 7 3) loser :accept (accepted "helper-2") "t1"]
+                                [(if interleaved? 8 4) loser :refuse refused "t2"]]))
         executor (publication/build-executor
                   (assoc opts :abort-contract refusal-contract
                          :construct! (fn [invocation]
                                        (let [candidate (construct invocation)]
                                          (when (= "helper-2" (actor invocation))
-                                           (reset! winner-response (request! winner true)))
+                                           (reset! winner-response (request! winner true))
+                                           (when interleaved?
+                                             (let [ctx (:ctx invocation)
+                                                   protected (disj tables :gesso_live_outbox)
+                                                   prior (selected-rows (:xtdb/connectable ctx) protected)
+                                                   pending (live-xtdb/q-from ctx "SELECT * FROM gesso_live_outbox")
+                                                   done (await-maintenance-cycle! @worker*)]
+                                               (reset! gap* {:before prior
+                                                             :after (selected-rows (:xtdb/connectable ctx) protected)
+                                                             :pending pending :done done}))))
                                          candidate))
                          :construct-after-abort! (fn [invocation]
                                                    (swap! recovered inc)
@@ -202,6 +212,7 @@
                 worker (get started managed/handle-key)]
             (try
               (reset! handler* (:biff.ring/handler started))
+              (reset! worker* worker)
               (is (= :idle (:status (await-empty-cycle! worker))))
               (is (= 403 (:status (request! loser false))))
               (is (empty? @snapshots))
@@ -219,15 +230,18 @@
                 (is (= :request/claimed (:outcome winning)))
                 (is (= :request/not-claimable (:outcome losing)))
                 (is (= 1 @recovered))
-                (is (= [:manifest :initializer :mapped-operation :mapped-operation :mapped-operation] @policy-events))
+                (is (= (if interleaved?
+                         [:manifest :initializer :mapped-operation :worker :worker :worker :worker :mapped-operation :mapped-operation]
+                         [:manifest :initializer :mapped-operation :mapped-operation :mapped-operation]) @policy-events))
                 (is (= [after] (live-xtdb/q node "SELECT * FROM requests")))
                 (is (= [(assignment "helper-1")] (live-xtdb/q node "SELECT * FROM request_assignments")))
                 (is (= #{(resolution/command-record winner (accepted "helper-1") "t1") (resolution/command-record loser refused "t2")}
                        (set (live-xtdb/q node "SELECT * FROM gesso_commands"))))
                 (is (= :observed (:status sample)))
-                (is (= 5 (count history)))
+                (is (= (if interleaved? 9 5) (count history)))
                 (let [steps (recovery-steps history)
-                      r (observed-recovery/compare-activated! node tables admit mapped-source outcome-declarations steps observation)]
+                      r ((if interleaved? observed-recovery/compare-activated-worker-interleaved!
+                             observed-recovery/compare-activated!) node tables admit mapped-source outcome-declarations steps observation)]
                   (is (= :matched (:status r)) (pr-str r))
                   (is (= :matched-local-activated-retained-root (:activation-root-binding r)))
                   (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
@@ -235,12 +249,46 @@
                   (is (= :not-established (:submission-provenance r)))
                   (is (= :not-established (:aborted-receipt-identity r)))
                   (is (= :none (:authority r)))
-                  (is (= :not-issued (:certificate r))))
+                  (is (= :not-issued (:certificate r)))
+                  (when interleaved?
+                    (let [{:keys [before after pending done]} @gap*
+                          ids (set (map :xt/id pending))
+                          maintenance (:intervening-maintenance r)
+                          audit (history-coverage/audit! node admit 16)
+                          prediction (temporal/replay (mapv #(dissoc % :tx-id) history))
+                          terminal (live-xtdb/q node "SELECT * FROM gesso_live_outbox")
+                          adjacent (observed-recovery/compare-activated! node tables admit mapped-source outcome-declarations steps observation)]
+                      (is (= observed-recovery/activated-interleaved-profile (:activated-recovery-profile r)))
+                      (is (= 9 (:replayed-transaction-count r)))
+                      (is (= (mapv :tx-id (map #(nth history %) [2 7 8])) (:selected-tx-ids r)))
+                      (is (= (mapv :tx-id (subvec history 3 7)) (mapv :tx-id maintenance)))
+                      (is (= [:lease-acquisition :dispatch-acknowledgment :lease-acquisition :dispatch-acknowledgment]
+                             (mapv :maintenance maintenance)))
+                      (is (= 2 (count pending) (count ids)))
+                      (is (every? #(= :pending (:gesso.live.outbox/status %)) pending))
+                      (is (= ids (set (map :intent-id maintenance)) (set (map :xt/id terminal))))
+                      (is (every? #(apply = (map :intent-id %)) (partition 2 maintenance)))
+                      (is (every? #(= :dispatch-accepted (:gesso.live.outbox/status %)) terminal))
+                      (is (= before after))
+                      (is (= 2 (:cycles done) (:total-processed done) (:total-dispatch-accepted done)))
+                      (is (= :predicted (:status prediction)))
+                      (is (= [true true true true true true true false true] (mapv :committed? (:history prediction))))
+                      (is (= :observed-interval-checked (:status audit)))
+                      (is (= [:verified-mapped-transition :verified-infrastructure-transition :verified-infrastructure-transition
+                              :verified-infrastructure-transition :verified-infrastructure-transition :aborted-stutter :verified-mapped-transition]
+                             (mapv :classification (:steps audit))))
+                      (is (= :not-established (:worker-observation-provenance r)))
+                      (is (= :nonadjacent-recovery-selection (:reason adjacent)))
+                      (is (not (contains? adjacent :activation-root-binding)))
+                      (is (= sample (coverage/observe-local-processed-retained-replay-inputs! node)))
+                      (is (= 2 (:cycles (lifecycle/status worker))))
+                      (is (= :idle (:status (lifecycle/status worker)))))))
                 ;; This test explicitly exercises a quiescent interval between
                 ;; real worker cycles, not arbitrary worker-interleaved history.
-                (is (= 1 (:cycles (lifecycle/status worker))))
-                (is (= :idle (:status (lifecycle/status worker))))
-                (let [protected (disj tables :gesso_live_outbox)
+                (when-not interleaved?
+                  (is (= 1 (:cycles (lifecycle/status worker))))
+                  (is (= :idle (:status (lifecycle/status worker))))
+                  (let [protected (disj tables :gesso_live_outbox)
                       prior (selected-rows node protected)
                       pending (live-xtdb/q node "SELECT * FROM gesso_live_outbox")
                       ids (set (map :xt/id pending))
@@ -283,6 +331,12 @@
                   (is (= :matched-local-activated-retained-root (:activation-root-binding r)))
                   (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
                   (is (= :not-established (:provider-refinement r)))
-                  (is (= sample2 (coverage/observe-local-processed-retained-replay-inputs! node)))))
+                  (is (= sample2 (coverage/observe-local-processed-retained-replay-inputs! node))))))
               (finally (host/stop! started))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest assembled-command-transport-observed-recovery
+  (check-assembled-recovery! false))
+
+(deftest assembled-command-transport-worker-interleaved-recovery
+  (check-assembled-recovery! true))

@@ -6683,3 +6683,53 @@ Next: qualify genuine assembled worker-interleaved Claim recovery
 with the actual managed worker and the new activated observation
 profile, without filtering retained transactions or substituting
 provider or worker callbacks.
+
+* v2787 — genuine assembled worker-interleaved Claim recovery
+
+Retain the maintenance-suffix regression and share its assembled host
+fixture with a second, explicit interleaved variant. Prepare the losing
+candidate before executing the nested winning POST through the installed
+handler. Hold that original candidate while the actual managed worker
+runs its next scheduled cycle and processes both winning publication
+intents. Read protected non-outbox rows including system versions before
+and after worker processing, using the host-owned adapter. Then submit
+the stale candidate and execute guarded refusal through the existing
+executor. Neither provider, worker nor settlement projection callbacks
+are replaced.
+
+Require the exact nine-transaction retained history: manifest,
+initializer, winning mapped commit, two lease acquisition and dispatch
+acknowledgment pairs, stale mapped abort, and guarded refusal commit.
+Match original intent identities and terminal rows, exact policy
+classifications, both actual settlement markers and final domain/journal
+state. Use the v2786 activated worker-interleaved comparator with the
+genuine issued mapped observation and complete acquired history.
+Independently replay and audit the full history and require matching
+selected identities, worker identities, unchanged protected rows and
+stable closing sample. The adjacent comparator rejects the same
+nonadjacent selection without positive root evidence. Worker origin is
+not attributed to the synchronous mapped observation.
+
+Focused persistent JVM qualification on the exact candidate: interleaved
+variant 1 test / 48 assertions and original adjacent/suffix variant
+1 test / 54 assertions, both zero failures or errors. Total 2 tests /
+102 assertions. The initial fixture failed to read because of one extra
+closing delimiter, corrected before the successful runs. Tested fixture
+blob verified identical. No production source changes.
+
+The interleaving is deterministic and timing-bounded: both real worker
+acquisition/acknowledgment pairs occur before the stale submission, using
+the normal 60-second worker polling interval. This is not exhaustive
+arbitrary concurrency qualification. Synthetic principal and authorization
+callbacks and direct Ring invocation remain; neither network/browser
+correspondence nor authenticated command provenance is established.
+This fixture does not reopen the database or authenticate storage
+identity, worker observation origin, or aborted receipt identity.
+Unrestricted writer closure, universal provider refinement, certificate
+and CLM-R2 premise retirement remain outstanding. Full project gates
+were not rerun.
+
+Next: examine durable storage identity and historical observation
+correspondence across actual host restart, keeping the distinction
+between a matched retained trajectory and independently authenticated
+storage provenance explicit.
