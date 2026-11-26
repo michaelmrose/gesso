@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-source-coverage :as coverage]
+            [gesso.assurance.reference-retained-acquisition :as acquisition]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.choreo.identity :as identity]
             [gesso.core :as g]
@@ -317,6 +318,17 @@
                       r ((if interleaved? observed-recovery/compare-activated-worker-interleaved!
                              observed-recovery/compare-activated!) node tables admit mapped-source outcome-declarations steps observation)]
                   (is (= :matched (:status r)) (pr-str r))
+                  (when-not interleaved?
+                    (let [handle (:acquisition (acquisition/capture! node))
+                          local! #(observed-recovery/compare-local-activated!
+                                   node tables admit mapped-source outcome-declarations steps observation % false)
+                          local (local! handle)
+                          bad (local! sample)]
+                      (is (= :matched (:status local)) (pr-str local))
+                      (is (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding local)))
+                      (is (= :not-established (:observation-storage-identity local) (:authorized-historical-lineage local)))
+                      (is (= :unissued-retained-acquisition (:reason bad)))
+                      (is (not (contains? bad :local-acquisition-binding)))))
                   (is (= :matched-local-activated-retained-root (:activation-root-binding r)))
                   (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
                   (is (= [:committed :aborted :committed] (:selected-commitments r)))

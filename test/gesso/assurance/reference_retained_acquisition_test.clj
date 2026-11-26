@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-retained-acquisition :as acquisition]
+            [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
             [xtdb.api :as xt]
             [xtdb.db-catalog :as db]
@@ -66,3 +67,38 @@
       (is (not (contains? r :acquisition)))
       (is (= :none (:authority r)))
       (is (= :not-issued (:certificate r))))))
+
+(deftest issued-comparison-requires-the-entire-stable-sample
+  (let [root (Files/createTempDirectory "gesso-acquisition-comparison-" (make-array FileAttribute 0))
+        config {:log [:local {:path (str root "/log")}]
+                :storage [:local {:path (str root "/storage")}]}
+        time (Instant/parse "2026-01-01T00:00:00Z")]
+    (try
+      (with-open [node (xtn/start-node config)]
+        (let [submit! (fn [id t]
+                        (let [tx-id (:tx-id (xt/submit-tx node [[:put-docs :probe {:xt/id id :value 1}]] {:system-time t}))]
+                          (.awaitSourceBlocking (db/primary-db node) tx-id (Duration/ofSeconds 30))))
+              _ (submit! "a" time)
+              handle (:acquisition (acquisition/capture! node))
+              sample (acquisition/read-acquisition! node handle)
+              calls (atom 0)
+              compare! #(do (swap! calls inc) (provider/compare-local-processed-retained-replay-execution! node #{:probe}))
+              run! #(provider/compare-with-issued-retained-acquisition! node % compare!)]
+          (is (= :matched (:status (run! handle))))
+          (is (= 1 @calls))
+          (is (= :unissued-retained-acquisition (:reason (run! sample))))
+          (is (= :unissued-retained-acquisition (:reason (run! (RetainedAcquisition.)))))
+          (with-redefs [acquisition/read-acquisition! (constantly sample)]
+            (is (= :retained-acquisition-reader-replaced (:reason (run! handle)))))
+          (with-redefs [coverage/observe-local-processed-retained-replay-inputs! (constantly sample)]
+            (is (= :retained-acquisition-reader-replaced (:reason (run! handle)))))
+          (is (= 1 @calls))
+          (let [r (provider/compare-with-issued-retained-acquisition!
+                   node handle #(do (submit! "b" (.plusSeconds time 1)) {:status :matched}))]
+            (is (= :unavailable (:status r)))
+            (is (= :issued-retained-sample-changed (:reason r))))
+          (is (= :issued-retained-sample-changed (:reason (run! handle))))
+          (is (= 1 @calls))
+          (is (= :matched (:status (run! (:acquisition (acquisition/capture! node))))))
+          (is (= 2 @calls))))
+      (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

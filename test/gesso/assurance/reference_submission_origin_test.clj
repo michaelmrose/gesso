@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-submission-origin-test
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
+            [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.model-publication :as publication]
             [xtdb.node :as xtn])
@@ -41,6 +42,11 @@
                                observation)
                              (finally (release)))]
                 (is (publication/framed-submission-origin-matches? admission handle node))
+                (let [compare! #(recovery/compare-local-activated! node #{} admission nil nil [] % nil false)]
+                  (is (= :unissued-retained-acquisition (:reason (compare! handle))))
+                  (is (= :submission-origin-mismatch (:reason (compare! (Object.)))))
+                  (with-redefs [publication/read-framed-submission-observation! (constantly {})]
+                    (is (= :local-recovery-boundary-replaced (:reason (compare! handle))))))
                 (is (false? (publication/framed-submission-origin-matches? admission handle adapter)))
                 (is (some? (publication/read-framed-submission-observation! admission handle)))
                 handle))]

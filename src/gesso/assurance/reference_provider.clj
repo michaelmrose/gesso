@@ -9,6 +9,7 @@
             [gesso.choreo.identity :as identity]
             [gesso.model.command-resolution :as resolution]
             [gesso.assurance.reference-source-coverage :as coverage]
+            [gesso.assurance.reference-retained-acquisition :as acquisition]
             [gesso.assurance.reference-operation-correspondence :as operation]
             [gesso.assurance.reference-replay-input :as replay-input]
             [gesso.assurance.xtdb-envelope :as envelope]
@@ -416,6 +417,41 @@
 ;; Only binds an additional equality constraint during synchronous composition.
 ;; It cannot substitute a supplied sample for a real provider observation.
 (def ^:dynamic ^:private *required-retained-sample* nil)
+
+(def ^:private original-replay-observer observe-replay-history!)
+(def ^:private original-acquisition-reader acquisition/read-acquisition!)
+(def ^:private original-retained-reader coverage/observe-local-processed-retained-replay-inputs!)
+
+(defn- acquisition-readers-current? []
+  (and (identical? original-replay-observer observe-replay-history!)
+       (identical? original-acquisition-reader acquisition/read-acquisition!)
+       (identical? original-retained-reader coverage/observe-local-processed-retained-replay-inputs!)))
+
+(defn compare-with-issued-retained-acquisition!
+  "Constrain trusted synchronous diagnostic code to the complete locally
+   issued sample, not a caller-supplied map. Still acquire fresh observations;
+   nested recovery/root checks must match the entire issued sample. This is
+   content equality under a local origin binding, not durable store identity.
+   The callback is trusted code; this helper issues no positive assurance tag."
+  [node handle compare!]
+  (let [fail #(acquisition-result %1 %2)]
+    (if-not (acquisition-readers-current?)
+      (fail :unsupported :retained-acquisition-reader-replaced)
+      (if-let [sample (original-acquisition-reader node handle)]
+        (if-not (and (valid-replay-history? sample)
+                     (or (nil? *required-retained-sample*) (= sample *required-retained-sample*)))
+          (fail :unsupported :invalid-issued-retained-sample)
+          (let [before (original-replay-observer node)]
+            (if-not (= sample before)
+              (fail :unavailable :issued-retained-sample-changed)
+              (let [result (binding [*required-retained-sample* sample] (compare!))
+                    after (original-replay-observer node)]
+                (cond
+                  (not (acquisition-readers-current?)) (fail :unsupported :retained-acquisition-reader-replaced)
+                  (not= sample after) (fail :unavailable :issued-retained-sample-changed)
+                  (not= :matched (:status result)) (fail (:status result) (:reason result))
+                  :else result)))))
+        (fail :unsupported :unissued-retained-acquisition)))))
 
 (defn- compare-retained-replay*
   [node tables expectation prestate-check]

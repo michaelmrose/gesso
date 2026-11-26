@@ -6941,3 +6941,27 @@ The broader Claim recovery regression timed out; full gates not run.
 Next: compose both issued bindings with the exact retained comparison
 without rereading a substitutable sample. Keep durable incarnation,
 authorized historical lineage and CLM-R2 discharge open.
+
+* v2793 — compose local origin and exact issued acquisition
+
+Constrain the activated recovery comparison by the complete locally issued
+retained sample. Require the original submission observation to match the
+same node before and after comparison. Independently reobserve the sample
+and constrain the nested root and retained comparisons to its entire
+contents; reject stale samples, raw maps, forged handles and replaced
+boundary readers. Do not substitute issued contents for physical reads.
+Keep the older historical-content diagnostic available across reopen.
+The composition relies on trusted synchronous implementation seams and
+reports no authenticated writer, durable incarnation, lineage or proof.
+
+Focused JVM: 11 tests / 257 assertions, zero failures or errors; final
+observation-reader guard regression rerun: 1 test / 21 assertions, zero
+failures or errors (overlapping namespace). A persistent retained replay
+comparison matches its issued sample, rejects a history advance during or
+before comparison and accepts a new acquisition. The added assembled-host
+regression reached XTDB startup but exceeded the 120-second command limit;
+its positive end-to-end path is not yet qualified. Full gates not run.
+
+Next: qualify the composed path in genuine assembled host recovery,
+including both adjacent and worker-interleaved histories and rejection of
+reopened or copied sources. Keep durable lineage and CLM-R2 premises open.

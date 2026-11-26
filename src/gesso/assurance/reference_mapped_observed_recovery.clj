@@ -142,3 +142,49 @@
    The root must still immediately precede the first selected submission."
   [node tables admission source outcome-declarations steps handle]
   (compare-activated* node tables admission source outcome-declarations steps handle true))
+
+(def local-acquisition-profile :selected-local-origin-retained-recovery-v1)
+
+(def ^:private original-origin-matcher publication/framed-submission-origin-matches?)
+(def ^:private original-observation-reader publication/read-framed-submission-observation!)
+(def ^:private original-acquisition-comparison provider/compare-with-issued-retained-acquisition!)
+(def ^:private original-activated-comparison compare-activated*)
+
+(defn- local-boundaries-current? []
+  (and (identical? original-origin-matcher publication/framed-submission-origin-matches?)
+       (identical? original-observation-reader publication/read-framed-submission-observation!)
+       (identical? original-acquisition-comparison provider/compare-with-issued-retained-acquisition!)
+       (identical? original-activated-comparison compare-activated*)))
+
+(defn compare-local-activated!
+  "Require the exact issued original observation and retained acquisition
+   to originate at the supplied node. Compare the activated recovery against
+   the entire issued sample while independently reobserving its contents.
+   Preserve the historical content-only APIs for reopened stores. Local
+   matching does not authenticate writer provenance or establish continuity."
+  [node tables admission source outcome-declarations steps observation acquisition interleaved?]
+  (let [base {:local-acquisition-profile local-acquisition-profile
+              :authority :none :certificate :not-issued
+              :observation-storage-identity :not-established
+              :authorized-historical-lineage :not-established}
+        fail #(assoc base :status %1 :reason %2)]
+    (cond
+      (not (boolean? interleaved?)) (fail :unsupported :invalid-local-recovery-mode)
+      (not (local-boundaries-current?))
+      (fail :unsupported :local-recovery-boundary-replaced)
+      (not (original-origin-matcher admission observation node))
+      (fail :unsupported :submission-origin-mismatch)
+      :else
+      (let [r (original-acquisition-comparison
+               node acquisition
+               #(original-activated-comparison node tables admission source outcome-declarations steps observation interleaved?))]
+        (cond
+          (not (local-boundaries-current?)) (fail :unsupported :local-recovery-boundary-replaced)
+          (not= :matched (:status r)) (fail (:status r) (:reason r))
+          (not (original-origin-matcher admission observation node))
+          (fail :unsupported :submission-origin-mismatch)
+          (not (and (= (if interleaved? activated-interleaved-profile activated-profile) (:activated-recovery-profile r))
+                    (= :matched-local-activated-retained-root (:activation-root-binding r))
+                    (= :matched-local-observed-retained-steps (:submission-recovery-linkage r))))
+          (fail :unsupported :invalid-local-recovery-comparison)
+          :else (merge r base {:local-acquisition-binding :matched-issued-origin-and-retained-sample}))))))
