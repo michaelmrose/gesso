@@ -189,6 +189,51 @@
                                   outcome-declarations policy-events original))
       (finally (doseq [f (reverse (file-seq (.toFile copy-root)))] (io/delete-file f true))))))
 
+(defn- check-conditional-extension! [node admit observation cut-handle earlier target]
+  (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)
+        extended (:historical-cut (cut/derive-cut! node target))
+        prepare! (fn [relation acquisition]
+                   (observed-recovery/prepare-conditional-recovery!
+                    admit observation cut-handle node acquisition
+                    {:comparison-id :fixture/recovery :relation relation
+                     :identity-policy :fixture/custody :origin-boundary :fixture/origin
+                     :acquisition-boundary :fixture/acquisition :identity-boundary :fixture/controller}))
+        selections (into {}
+                         (for [relation storage/relations
+                               [kind acquisition] [[:exact-content earlier] [:prefix-content target]]
+                               :let [prepared (prepare! relation acquisition)
+                                     handle (:conditional-recovery prepared)
+                                     scope (observed-recovery/read-conditional-recovery-scope! handle)
+                                     premises (mapv :assumption (:obligations (storage/describe-obligations scope)))
+                                     selected (observed-recovery/select-conditional-recovery-premises! handle premises)]]
+                           (do
+                             (is (= :prepared (:status prepared)))
+                             (is (= required (:historical-cut scope)))
+                             (is (= relation (:relation selected)))
+                             (is (= kind (:cut-correspondence selected)))
+                             (is (= :conditional (:status selected)))
+                             (is (= :conditional-on-open-premises (:historical-assurance selected)))
+                             (is (= :not-performed (:premise-acceptance selected)))
+                             (is (= :complete-for-declared-premises (:dependency-closure selected)))
+                             (is (every? #(= :open (:discharge-state %)) (:obligations selected)))
+                             (is (= :none (:authority selected)))
+                             (is (= :not-issued (:certificate selected)))
+                             (is (= :not-established (:observation-storage-identity selected)
+                                    (:authorized-historical-lineage selected)))
+                             [[relation kind] {:handle handle :premises premises}])))]
+    (is (= 5 (count (:transaction-ids required))))
+    (is (= 9 (count (:transaction-ids extended))))
+    (is (= (:transaction-ids required) (subvec (:transaction-ids extended) 0 5)))
+    (is (not= (:payload-fingerprint required) (:payload-fingerprint extended)))
+    (is (= :prefix-content (:cut-correspondence (cut/compare-prefix-cut! required node target))))
+    (doseq [[[relation kind] {:keys [handle]}] selections
+            [[other-relation other-kind] other] selections
+            :when (not= [relation kind] [other-relation other-kind])]
+      (let [r (observed-recovery/select-conditional-recovery-premises! handle (:premises other))]
+        (is (= :unsupported (:status r)))
+        (is (= (if (= relation other-relation) :subject-mismatch :incorrect-premise-set) (:reason r)))
+        (is (not (contains? r :historical-assurance)))))))
+
 (defn- check-assembled-recovery! [interleaved?]
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
@@ -404,6 +449,8 @@
                   (is (= :not-established (:aborted-receipt-identity r)))
                   (is (= :none (:authority r)))
                   (is (= :not-issued (:certificate r)))
+                  (when-not interleaved?
+                    (reset! restart* {:retained-handle handle :cut-handle cut-handle}))
                   (when interleaved?
                     (let [{:keys [before after pending done]} @gap*
                           ids (set (map :xt/id pending))
@@ -491,7 +538,11 @@
                   (is (= :matched-local-activated-retained-root (:activation-root-binding r)))
                   (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
                   (is (= :not-established (:provider-refinement r)))
-                  (is (= sample2 (coverage/observe-local-processed-retained-replay-inputs! node))))))
+                  (is (= sample2 (coverage/observe-local-processed-retained-replay-inputs! node)))
+                  (let [{:keys [retained-handle cut-handle]} @restart*
+                        target (:acquisition (acquisition/capture! node))]
+                    (is (= sample2 (acquisition/read-acquisition! node target)))
+                    (check-conditional-extension! node admit observation cut-handle retained-handle target)))))
               (finally (host/stop! started)))
             (when interleaved?
               (check-reopened-recovery! assembly (fn [_] (g/html-response surface)) host-config
