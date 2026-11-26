@@ -549,21 +549,35 @@
                  (into (conj kinds kind field) (journal-chunk-kinds! kind groups)))
           (recur (inc i) (conj kinds kind)))))))
 
+(defn- checked-operation-tables [op kind]
+  (case (if (map? kind) (:kind kind) kind)
+    (:assert-true :assert-false) #{}
+    :put #{(second op)}
+    (:assert-read :assert-row-count :assert-field-count :assert-mapped) #{(:table kind)}
+    (:assert-journal-slot :assert-journal-value :assert-journal-chunk) #{:gesso_commands}
+    (:assert-publication-absence :assert-source-absence) #{:gesso_live_outbox}
+    nil))
+
 (defn operation-tables
   "Return the table dependency set of one structurally admitted operation.
-   Empty means state-independent; nil means unsupported. Use the same
-   checked single-operation grammar as execution. Incomplete wide journal
-   chunks require sequence context and are not qualified by this API."
+   Empty means state-independent; nil means unsupported. Incomplete wide
+   journal chunks require sequence context and are not qualified here."
   [op]
   (try
-    (let [kind (check-op! op)]
-      (case (if (map? kind) (:kind kind) kind)
-        (:assert-true :assert-false) #{}
-        :put #{(second op)}
-        (:assert-read :assert-row-count :assert-field-count :assert-mapped) #{(:table kind)}
-        (:assert-journal-slot :assert-journal-value) #{:gesso_commands}
-        (:assert-publication-absence :assert-source-absence) #{:gesso_live_outbox}
-        nil))
+    (checked-operation-tables op (check-op! op))
+    (catch clojure.lang.ExceptionInfo e
+      (if (::unsupported (ex-data e)) nil (throw e)))))
+
+(defn operation-sequence-tables
+  "Validate the complete current-state operation sequence, including wide
+   journal groups, and derive every attempted table dependency. No execution
+   or observed state is used. Nil means unsupported."
+  [ops]
+  (try
+    (when (and (vector? ops) (nil? (meta ops)) (<= 1 (count ops) 4096))
+      (reduce (fn [tables deps]
+                (if (set? deps) (into tables deps) (reduced nil)))
+              #{} (map checked-operation-tables ops (check-ops! ops))))
     (catch clojure.lang.ExceptionInfo e
       (if (::unsupported (ex-data e)) nil (throw e)))))
 

@@ -5065,3 +5065,25 @@ sequence-aware grammar is not yet integrated into temporal replay or the
 retained byte decoder; single-operation scope inference remains unchanged.
 No production admission expansion, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates not rerun.
+
+* v2733 — replay partitioned journal guards bitemporally
+
+Validate consecutive ordinary assertion runs with the independent
+sequence-aware grammar and derive all attempted table dependencies before
+execution. Interpret each run against the tentative valid-time projection
+at its transaction system time. Puts and worker clock/version guards are
+barriers; translate local failure positions back to physical transaction
+indices and discard all tentative segments on abort. Advance the strict
+bitemporal transaction profile to v12. Keep the equal-time and clocked
+state-dependent exclusions and the single-operation grammar unchanged.
+
+Focused JVM: 1 test / 108 assertions, zero failures or errors. Nine real
+XTDB transactions exercise future validity, expiry, tentative updates,
+rollback, clock barriers and later successful journal writes; historical
+point queries and coalesced all-time rectangles agree. Reject incomplete
+or interrupted chunks even after an earlier false guard. Regression JVM:
+52 tests / 5804 assertions, zero failures or errors across temporal,
+current-state transaction and worker reference tests. The retained-byte
+projection of wide guards remains unqualified. No production admission
+expansion, certificate or CLM-R2 premise retirement. Full project and
+independent formal gates not rerun.

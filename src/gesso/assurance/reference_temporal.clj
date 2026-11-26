@@ -6,7 +6,7 @@
             [gesso.assurance.reference-clock :as clock])
   (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-bitemporal-transaction-v11)
+(def profile :selected-bitemporal-transaction-v12)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
@@ -106,8 +106,7 @@
     (do (cond
           (contains? clock-guards (first op)) (check-clock-guard! system-time op)
           (contains? version-guards (first op)) (check-version-guard! system-time op)
-          :else (when-not (= :predicted (:status (current/execute {} [op])))
-                  (reject! :unsupported-temporal-assertion)))
+          :else nil)
         op)
     (let [[kind raw-opts & docs] op
           opts (if (keyword? raw-opts) {:into raw-opts} raw-opts)]
@@ -130,6 +129,35 @@
             (into [:put-docs {:into table :valid-from from :valid-to to}]
                   (map #(get-in decoded [:state table (:xt/id %)]) docs))))))))
 
+(defn- current-assertion? [op]
+  (and (string? (first op))
+       (not (contains? clock-guards (first op)))
+       (not (contains? version-guards (first op)))))
+
+(defn- operation-groups [ops]
+  ;; Consecutive ordinary assertions share the same tentative read basis.
+  ;; Puts and temporal-only guards are barriers, never moved or combined.
+  (into [] (mapcat (fn [run]
+                     (if (current-assertion? (first run))
+                       [(vec run)] (mapv vector run))))
+        (partition-by current-assertion? ops)))
+
+(defn- group-tables! [group]
+  (let [op (first group)
+        deps (cond
+               (current-assertion? op) (current/operation-sequence-tables group)
+               (= :put-docs (first op)) #{(:into (second op))}
+               (contains? clock-guards (first op)) #{}
+               (contains? version-guards (first op)) #{:gesso_live_outbox})]
+    (when-not (set? deps) (reject! :unsupported-temporal-assertion))
+    deps))
+
+(defn- normalize-transaction! [{:keys [system-time ops] :as tx}]
+  (let [normalized (mapv #(normalize-op! system-time %) ops)
+        groups (operation-groups normalized)
+        tables (reduce into #{} (map group-tables! groups))]
+    (assoc tx :ops normalized :groups groups :tables tables)))
+
 (defn required-observation-tables
   "Derive all attempted read/write table dependencies from a qualified
    temporal transaction sequence (not from reached reads or resulting
@@ -142,15 +170,7 @@
                (every? #(and (map? %) (nil? (meta %)) (instant? (:system-time %))
                              (vector? (:ops %)) (nil? (meta (:ops %)))
                              (<= 1 (count (:ops %)) 256)) transactions))
-      (reduce (fn [tables [system-time op]]
-                (let [normalized (normalize-op! system-time op)
-                      deps (cond
-                             (= :put-docs (first normalized)) #{(:into (second normalized))}
-                             (contains? clock-guards (first normalized)) #{}
-                             (contains? version-guards (first normalized)) #{:gesso_live_outbox}
-                             :else (current/operation-tables normalized))]
-                  (if (set? deps) (into tables deps) (reduced nil))))
-              #{} (for [{:keys [system-time ops]} transactions op ops] [system-time op])))
+      (reduce into #{} (map (comp :tables normalize-transaction!) transactions)))
     (catch clojure.lang.ExceptionInfo e
       (if (::unsupported (ex-data e)) nil (throw e)))))
 
@@ -205,25 +225,33 @@
                                                    [id doc]))) rows)]
                      (when (seq visible) [table visible])))) segments))
 
-(defn- execute-transaction! [prior system-time ops]
+(defn- execute-transaction! [prior system-time groups]
   ;; Assertions without explicit temporal clauses read tentative documents
-  ;; at the supplied transaction time, not all active intervals.
-  (loop [working prior i 0]
-    (if (= i (count ops))
+  ;; at the supplied transaction time, not all active intervals. Execute
+  ;; each ordinary assertion run at that unchanged basis and translate its
+  ;; local failure index back to the original physical transaction index.
+  (loop [working prior i 0 remaining (seq groups)]
+    (if-not remaining
       {:state working :committed? true}
-      (let [op (nth ops i)]
+      (let [group (first remaining)
+            op (first group)
+            advance (+ i (count group))]
         (if (= :put-docs (first op))
-          (recur (apply-put working system-time op) (inc i))
-          (let [matches? (cond
-                           (contains? clock-guards (first op)) (clock-matches? system-time op)
-                           (contains? version-guards (first op)) (version-matches! working system-time op)
-                           :else (let [result (current/execute (project-visible (:segments working) system-time) [op])]
-                             (when-not (= :predicted (:status result))
-                               (reject! :unsupported-temporal-assertion-domain))
-                             (:committed? result)))]
-            (if matches?
-              (recur working (inc i))
-              {:state prior :committed? false :failed-assertion-index i})))))))
+          (recur (apply-put working system-time op) advance (next remaining))
+          (let [failed (cond
+                         (contains? clock-guards (first op))
+                         (when-not (clock-matches? system-time op) i)
+                         (contains? version-guards (first op))
+                         (when-not (version-matches! working system-time op) i)
+                         :else
+                         (let [result (current/execute (project-visible (:segments working) system-time) group)]
+                           (when-not (= :predicted (:status result))
+                             (reject! :unsupported-temporal-assertion-domain))
+                           (when-not (:committed? result)
+                             (+ i (:failed-assertion-index result)))))]
+            (if (nil? failed)
+              (recur working advance (next remaining))
+              {:state prior :committed? false :failed-assertion-index failed})))))))
 
 (def equal-time-profile :selected-bitemporal-equal-time-transaction-v1)
 
@@ -265,8 +293,8 @@
    system time and omitted ends unbounded. Abort retains the prior snapshot.
    Selected assertions read tentative documents at the transaction system
    time (no current-time override), including selected worker clock, row-version and lease-expiry guards.
-   Validate all operation shapes before
-   replay. Rectangles retain the issuing system time and exclusive supersession
+   Validate all operation shapes, including consecutive wide journal groups,
+   before replay. Rectangles retain the issuing system time and exclusive supersession
    time. No provider observations or authority are admitted."
   [inputs mode]
   (let [clocked? (= :clocked mode)
@@ -288,20 +316,18 @@
                                (or (before? prior system-time) (and equal-time? (= prior system-time)))))
                          (vector? ops) (nil? (meta ops)) (<= 1 (count ops) 256))
             (reject! :unsupported-temporal-transaction)))
-        (let [normalized (mapv (fn [{:keys [system-time ops] :as tx}]
-                                 (assoc tx :ops (mapv #(normalize-op! system-time %) ops)))
-                               transactions)]
+        (let [normalized (mapv normalize-transaction! transactions)]
           (when (and equal-time?
                      (some (fn [op] (and (string? (first op))
                                          (not (#{"ASSERT TRUE" "ASSERT FALSE" "ASSERT ? = ?"} (first op)))))
                            (mapcat :ops normalized)))
             (reject! :unsupported-equal-time-assertion))
           (let [{:keys [history segments closed]}
-                (reduce (fn [{:keys [history] :as prior} {:keys [system-time ops clock-decision] :as tx}]
+                (reduce (fn [{:keys [history] :as prior} {:keys [system-time groups clock-decision] :as tx}]
                           (let [clock-rejected? (= :reject-before-execution clock-decision)
                                 {:keys [state committed? failed-assertion-index]}
                                 (if clock-rejected? {:state prior :committed? false}
-                                    (execute-transaction! prior system-time ops))]
+                                    (execute-transaction! prior system-time groups))]
                             (assoc state :history
                                    (conj history (cond-> {:system-time system-time
                                                           :committed? committed?
