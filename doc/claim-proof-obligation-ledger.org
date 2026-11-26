@@ -5873,3 +5873,30 @@ retirement. Full project gates were not rerun.
 Next: qualify source-derived input and outcome provenance, beginning
 with exact linkage between the original alternative declaration,
 trusted command binding, input derivation and retained command outcome.
+
+* v2766 — source-relative selected mapped input derivation
+
+Introduce a standalone diagnostic for the selected candidate's abstract
+input provenance. Select the exact original construction from the supplied
+mapped admission catalog, check the complete input-selector declarations
+and selected context, and require the original target map. Extract the
+single candidate command record from the selected operation vector and
+require exact equality with the specified binding, outcome and clock
+record. Independently evaluate closed principal, argument and state
+selectors over that binding and the projected prepared rows (using the
+existing source-relative forward projection). Require exact typed input
+valuation equality rather than merely fingerprinting the selectors.
+
+Focused pure JVM regression: 3 tests / 26 assertions, zero failures or
+errors. Exercises all three selector forms, input-free alternatives,
+missing arguments, malformed selectors, duplicate alternative identity,
+mismatched original construction or target map, substituted selector
+context, incorrect input values and changed or ambiguous candidate
+records. The diagnostic is deliberately standalone: it does not qualify
+actual retained acquisition, installed catalog issuance, authentication,
+clock provenance, or the supplied outcome interpretation. It does not
+assert candidate commitment or complete executor-envelope correspondence.
+Composition with the shared retained trajectory and genuine persistent
+qualification are subsequent work. No production admission expansion,
+certificate, universal provider refinement or CLM-R2 premise retirement.
+Full gates were not rerun.
