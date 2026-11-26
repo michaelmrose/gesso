@@ -4,11 +4,19 @@
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-storage-identity :as storage]))
 
+(def ^:private cut
+  {:payload-binding-profile storage/cut-profile
+   :record-offsets [0 51 101 201]
+   :transaction-ids [0 101 201]
+   :processed-message-id 201
+   :payload-fingerprint (apply str (repeat 64 "a"))})
+
 (def ^:private scope
   {:comparison-id :fixture/selected-recovery
    :publication-source-id "claim"
    :origin-observation-ref "original-observation"
    :retained-acquisition-ref "reopened-history"
+   :historical-cut cut
    :relation :same-store-incarnation
    :identity-policy :fixture/identity-policy-v1
    :origin-boundary :fixture/original-adapter
@@ -29,6 +37,8 @@
             :reference-storage/same-incarnation]
            (mapv #(get-in % [:assumption :id]) (:obligations r))))
     (is (= 3 (count (distinct (fingerprints r)))))
+    (is (every? #(= cut (get-in % [:assumption :subject :interface :historical-cut]))
+                (:obligations r)))
     (is (= 1 (count (distinct (map :subject-fingerprint (:obligations r))))))
     (is (= #{} (get-in origin [:assumption :dependencies]) (get-in acquisition [:assumption :dependencies])))
     (is (= #{:reference-storage/origin-binding :reference-storage/acquisition-binding}
@@ -86,3 +96,52 @@
   (doseq [[k v] [[:publication-source-id " "] [:origin-observation-ref nil]
                  [:retained-acquisition-ref (Object.)] [:retained-acquisition-ref (apply str (repeat 1025 "x"))]]]
     (is (= :invalid-observation-reference (reason #(describe (assoc scope k v)))))))
+
+(deftest historical-cut-is-part-of-every-premise
+  (let [r (describe scope)
+        alternatives [(assoc cut :payload-fingerprint (apply str (repeat 64 "b")))
+                      (assoc cut :transaction-ids [0 201])
+                      (assoc cut :record-offsets [0 52 101 201])
+                      (assoc cut :record-offsets [0 51 101 201 301]
+                                 :transaction-ids [0 101 201 301]
+                                 :processed-message-id 301)]]
+    (doseq [changed-cut alternatives]
+      (let [changed (describe (assoc scope :historical-cut changed-cut))]
+        (is (every? true? (map not= (fingerprints r) (fingerprints changed))))
+        (doseq [[a b] (map vector (:obligations r) (:obligations changed))]
+          (is (= :subject-mismatch
+                 (reason #(assumption/match-premise! (:assumption a) (:assumption b)))))
+          (is (= :open (:discharge-state b))))
+        (is (= :none (:authority changed)))
+        (is (= :not-issued (:certificate changed)))))))
+
+(deftest rejects-invalid-or-unqualified-cut-declarations
+  (is (= :invalid-obligation-scope (reason #(describe (dissoc scope :historical-cut)))))
+  (doseq [bad [nil (dissoc cut :payload-fingerprint)
+               (assoc cut :authenticated? true)
+               (with-meta cut {:trusted true})
+               (assoc cut :payload-binding-profile :fixture/unknown)
+               (assoc cut :record-offsets [51 101 201])
+               (assoc cut :record-offsets [0 101 51 201])
+               (assoc cut :record-offsets [0 51 101 101 201])
+               (assoc cut :record-offsets (range 1025))
+               (assoc cut :record-offsets (vec (range 1025)))
+               (assoc cut :record-offsets [0 51 101 201 (inc (bigint Long/MAX_VALUE))])
+               (assoc cut :record-offsets (with-meta [0 51 101 201] {:trusted true}))
+               (assoc cut :transaction-ids [0 201 101])
+               (assoc cut :transaction-ids [0 101 101 201])
+               (assoc cut :transaction-ids [0 102 201])
+               (assoc cut :record-offsets (vec (range 257))
+                          :transaction-ids (vec (range 257)) :processed-message-id 256)
+               (assoc cut :processed-message-id 101)
+               (assoc cut :processed-message-id 202)
+               (assoc cut :processed-message-id 201.0)
+               (assoc cut :payload-fingerprint "sha256:copy")
+               (assoc cut :payload-fingerprint (apply str (repeat 64 "A")))]]
+    (is (= :invalid-historical-cut (reason #(describe (assoc scope :historical-cut bad))))))
+  (let [empty-cut (assoc cut :record-offsets [] :transaction-ids [] :processed-message-id -1)
+        r (describe (assoc scope :historical-cut empty-cut))]
+    (is (= :none (:authority r)))
+    (is (every? #(= :open (:discharge-state %)) (:obligations r)))
+    (is (= :invalid-historical-cut
+           (reason #(describe (assoc scope :historical-cut (assoc empty-cut :processed-message-id 0))))))))

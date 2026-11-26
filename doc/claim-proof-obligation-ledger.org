@@ -7087,3 +7087,30 @@ silently extended to it.
 Documentation-only decision. No runtime change, new trust grant, identity
 establishment, authenticated writer provenance, certificate or CLM-R2
 premise discharge. No tests run for this revision.
+
+* v2796 — version the required historical cut
+
+Version the storage identity obligation scope to v2. Require an explicit
+selected local payload-binding format, ordered record offsets, ordered
+transaction identities, processed frontier and framed payload digest.
+Validate bounded vectors, strictly increasing nonnegative offsets, origin
+at offset zero for nonempty history, ordered transaction membership and
+frontier equality with the final record (or -1 for empty history). The
+entire declaration participates in all three premise identities. Refuse
+v1 scopes that omit the cut rather than silently migrating their premises.
+
+The required cut describes a prefix; the target acquisition may extend
+it. No prefix extraction, actual sample binding, transaction outcome
+verification, lifecycle authority or premise selection is introduced.
+The digest and resulting declarations are sensitive internal comparison
+material, not public receipts, and shape validation is not evidence.
+
+Focused JVM: 28 tests / 806 assertions, zero failures or errors across
+storage identity and assumption namespaces. Tests vary the digest,
+transaction membership, record offsets and processed frontier, reject
+malformed declarations and preserve the open premise status. Older
+offline dependency bundle; full gates not run.
+
+Next: compose the exact selected open premises with their dependency
+closure, without accepting or discharging them or promoting a caller
+supplied historical comparison into evidence.

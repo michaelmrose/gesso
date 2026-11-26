@@ -3,7 +3,7 @@
   (:require [clojure.string :as str]
             [gesso.assurance.assumption :as assumption]))
 
-(def profile :selected-retained-storage-identity-obligations-v1)
+(def profile :selected-retained-storage-identity-obligations-v2)
 
 (def relations
   "Historical relations only. Neither grants current writer authority."
@@ -12,7 +12,38 @@
 (def ^:private required-keys
   #{:comparison-id :publication-source-id :origin-observation-ref
     :retained-acquisition-ref :relation :identity-policy
-    :origin-boundary :acquisition-boundary :identity-boundary})
+    :origin-boundary :acquisition-boundary :identity-boundary :historical-cut})
+
+(def cut-profile
+  "Selected local framed payload binding format, not an identity credential."
+  :xtdb-2.2.0-beta1/selected-local-payload-binding-v1)
+
+(def ^:private cut-keys
+  #{:payload-binding-profile :record-offsets :transaction-ids
+    :processed-message-id :payload-fingerprint})
+
+(defn- offset? [x]
+  (and (integer? x) (<= 0 x Long/MAX_VALUE)))
+
+(defn- ordered-offsets? [xs maximum]
+  (and (vector? xs) (nil? (meta xs)) (<= (count xs) maximum)
+       (every? offset? xs)
+       (every? (fn [[a b]] (< a b)) (partition 2 1 xs))))
+
+(defn- historical-cut? [cut]
+  (and (map? cut) (not (record? cut)) (nil? (meta cut))
+       (= cut-keys (set (keys cut)))
+       (= cut-profile (:payload-binding-profile cut))
+       (let [{:keys [record-offsets transaction-ids processed-message-id
+                     payload-fingerprint]} cut]
+         (and (ordered-offsets? record-offsets 1024)
+              (ordered-offsets? transaction-ids 256)
+              (or (empty? record-offsets) (= 0 (first record-offsets)))
+              (= transaction-ids (filterv (set transaction-ids) record-offsets))
+              (integer? processed-message-id)
+              (= processed-message-id (or (peek record-offsets) -1))
+              (string? payload-fingerprint)
+              (boolean (re-matches #"[0-9a-f]{64}" payload-fingerprint))))))
 
 (defn- named? [x]
   (and (keyword? x) (some? (namespace x))))
@@ -37,6 +68,15 @@
    incarnation nor authorizes promotion or writes. An incarnation denotes
    one operationally identified store, not a fixed set of filesystem inodes.
 
+   The required historical cut declares the ordered complete prefix (including
+   maintenance records and all transaction identities, not just commits), its
+   fully processed frontier and the selected framed payload digest. A target
+   acquisition may extend that prefix; its actual binding and prefix
+   preservation must be checked separately. The digest is sensitive internal
+   comparison material; do not publish this scope or its premise descriptions
+   as public reports or receipts. Shape checks do not establish content,
+   completeness, transaction outcomes or the truth of any lifecycle premise.
+
    No provider call, observation lookup, lineage validation or discharge is
    performed. A copied description is equally unadmitted. Do not use this
    result as a positive field of the retained-content diagnostic."
@@ -53,6 +93,8 @@
     (reject! :invalid-observation-reference))
   (when-not (contains? relations (:relation scope))
     (reject! :unsupported-storage-identity-relation))
+  (when-not (historical-cut? (:historical-cut scope))
+    (reject! :invalid-historical-cut))
   (let [subject {:kind :runtime :id (:comparison-id scope)
                  :interface (assoc scope :profile profile)}
         assumption-scope {:kind :runtime :id (:comparison-id scope)}
