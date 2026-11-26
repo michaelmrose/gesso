@@ -6884,3 +6884,31 @@ same-incarnation checks separately from cross-restart continuity
 or externally authorized historical lineage. Do not claim the
 latter without an appropriate independent trust boundary. No
 CLM-R2 premise retired.
+
+* v2791 — locally issued retained acquisition
+
+Introduce a narrow acquisition boundary for the selected complete retained
+replay sample. Invoke the original source-coverage reader directly, bracket
+it by identical embedded database and source-log objects and issue an opaque
+weak-key registry handle only for a qualified observation. Reading the exact
+sample requires the original node object and issued handle; neither a copied
+report nor a fabricated handle admits evidence. Reject replaced readers and
+unsupported sources without issuing a handle. The sample is historical,
+not a promise of current state. No caller-supplied sample is accepted.
+
+Focused persistent JVM: 2 tests / 29 assertions, zero failures or errors.
+A genuine local transaction sample is recovered by identity. Reopen the same
+store and verify identical retained content does not authorize reading the
+old acquisition through the new node. Reject a forged handle, substituted
+reader and unsupported in-memory source. The older offline dependency bundle
+was used; full project gates were not run.
+
+This establishes only the local retained-acquisition half of the proposed
+binding, conditional on the trusted implementation and provider seams.
+Original submission observation binding, composition with the exact retained
+comparison, durable incarnation continuity and authorized historical lineage
+remain open. No authority, certificate or CLM-R2 discharge is introduced.
+
+Next: bind the locally issued original submission window to its actual
+connectable without exposing writer capability, then compose that binding
+with the issued acquisition. Do not infer continuity across restart.
