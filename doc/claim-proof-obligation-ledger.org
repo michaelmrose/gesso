@@ -5264,3 +5264,23 @@ envelope authenticity, successful selected commitment or universal
 refinement. Full production mapped envelope composition remains open. No
 production admission expansion, certificate or CLM-R2 premise retirement.
 Full project and independent formal gates not rerun.
+
+* v2741 — independently derive source-relative transition evidence
+
+Expose the forward typed derivation's before, inputs, after and complete
+puts without changing the existing put-only API. Independently encode the
+v4 valuation and tagged guard prefix, recheck exact source-relative SQL
+lowering and compute witness, poststate and input-selector digests through
+the shared semantic-subject encoder. Compare the entire unbound record;
+no candidate record or provider poststate enters the derivation. Catalog
+and induction fingerprints and selector declarations are supplied premises,
+not verified installed admission identity or derived input provenance.
+
+JVM: 3 tests / 117 assertions, zero failures or errors across the new
+witness fixture and existing mapped-write tests. Compare against the
+production v4 record encoder with fixture premises, reject missing and
+changed fields, noncanonical integer text, reordered valuations, invalid
+source and prefix, and unexpected envelope fields. Full retained envelope
+binding, evidence-ID absence at the historical predecessor and selected
+commitment remain open. No production admission expansion, certificate or
+CLM-R2 premise retirement. Full project and independent formal gates not rerun.

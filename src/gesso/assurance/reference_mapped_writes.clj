@@ -33,7 +33,7 @@
                                    (when-not (contains? row k) (reject! :missing-mapped-field))
                                    (get row k))))]))) coords))
 
-(defn derive-puts!
+(defn derive-transition!
   "Derive expected complete rows from the original construction, closed
    prepared rows, supplied inputs/effects and explicit command record source.
    Only one inserted journal slot and default-valid-time document puts are
@@ -78,7 +78,12 @@
                    (sort-by (comp pr-str key) rows))]
     (when-not (and (= after projected) (set? (current/operation-sequence-tables puts)))
       (reject! :unsupported-derived-writes))
-    puts))
+    {:before before :inputs inputs :after after :puts puts}))
+
+(defn derive-puts!
+  "Return only the complete put expectation from the checked derivation."
+  [original targets docs journal spec]
+  (:puts (derive-transition! original targets docs journal spec)))
 
 (defn- rows-of! [puts]
   (when-not (and (vector? puts) (seq puts)
