@@ -5773,3 +5773,26 @@ Full project gates were not rerun.
 Next: compose acceptance, stale abort and refusal into one checked recovery
 trajectory, including explicit linkage of command identity, history and
 successive authoritative states.
+
+* v2762 — independent retained recovery linkage
+
+Introduce a bounded standalone reference diagnostic linking an adjacent
+winning commit, competing abort and recovery commit in one supplied
+retained history. Require strictly increasing transaction identifiers,
+matching candidate command records, distinct competing principals and
+command identities, identical losing binding across abort and recovery,
+and a changed recovery outcome. Independently replay the history through
+the selected recovery step. Require commit/abort/commit ordering, unchanged
+replayed segments across the abort, and the exact expected journal
+progression at the selected observation instants, preserving the winner.
+
+Focused pure JVM regression: 2 tests / 22 assertions, zero failures or
+errors. Covers reordered or duplicate selection, changed binding or
+outcome, unexpectedly committed candidate, extra journal puts and
+preexisting winner. The diagnostic currently admits a narrow adjacent
+trajectory with one plain command record put per selected step. Supplied
+history and expected records remain premises. Stable provider-bracket
+composition with the v2761 abstract and mapped-abort diagnostics and
+genuine persistent integration are not yet qualified. No universal
+refinement, authenticated provenance, certificate, production admission
+expansion or CLM-R2 retirement. Full gates not rerun.
