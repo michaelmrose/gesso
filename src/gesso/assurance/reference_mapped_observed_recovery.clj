@@ -347,3 +347,31 @@
           (catch clojure.lang.ExceptionInfo e
             (fail (or (:reason (ex-data e)) :invalid-premise-selection))))
         (fail :unissued-conditional-recovery)))))
+
+(def ^:private original-deployment-acceptance storage/describe-deployment-acceptance)
+
+(defn- acceptance-boundaries-current? []
+  (and (conditional-boundaries-current?)
+       (identical? original-deployment-acceptance storage/describe-deployment-acceptance)))
+
+(defn declare-conditional-recovery-trust!
+  "Compose an explicit deployment trust declaration with an issued historical
+   comparison, rederiving the exact selected premises from its registry.
+   This is an unauthenticated declaration, not an assertion that a controller
+   has actually authorized the lifecycle. Open premises remain open. The
+   result is sensitive internal material, not a public receipt or credential."
+  [handle declaration]
+  (let [fail #(assoc (conditional-report :unsupported) :reason %)]
+    (if-not (acceptance-boundaries-current?)
+      (fail :conditional-recovery-boundary-replaced)
+      (if-let [{:keys [scope cut-correspondence]} (conditional-entry handle)]
+        (try
+          (let [r (original-deployment-acceptance scope declaration)]
+            (if-not (acceptance-boundaries-current?)
+              (fail :conditional-recovery-boundary-replaced)
+              (merge r (conditional-report :conditional)
+                     {:cut-correspondence cut-correspondence
+                      :historical-assurance :conditional-on-declared-trust})))
+          (catch clojure.lang.ExceptionInfo e
+            (fail (or (:reason (ex-data e)) :invalid-deployment-acceptance))))
+        (fail :unissued-conditional-recovery)))))

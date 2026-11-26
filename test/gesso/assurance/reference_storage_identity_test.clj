@@ -196,3 +196,41 @@
                       (assoc relation :certificate "signed")
                       (assumption/describe-assumption relation)]]
       (is (some? (reason #(select! [origin acquisition modified])))))))
+
+(deftest explicit-deployment-trust-preserves-open-premises
+  (doseq [relation storage/relations]
+    (let [s (assoc scope :relation relation)
+          ps (premises s)
+          declaration {:deployment-id :fixture/deployment
+                       :identity-policy (:identity-policy s)
+                       :acceptance :trust-open-premises :premises ps}
+          select! #(storage/describe-deployment-acceptance s %)
+          r (select! declaration)]
+      (is (= storage/acceptance-profile (:acceptance-profile r)))
+      (is (= :explicit-declaration-only (:premise-acceptance r)))
+      (is (= {:deployment-id :fixture/deployment
+              :identity-policy (:identity-policy s)
+              :authentication :not-established} (:deployment-acceptance r)))
+      (is (= (set (fingerprints (describe s))) (:trusted-assumptions r)))
+      (is (= (:obligations (describe s)) (:obligations r)))
+      (is (= :complete-for-declared-premises (:dependency-closure r)))
+      (is (= r (select! (update declaration :premises #(vec (reverse %))))))
+      (is (= :none (:authority r)))
+      (is (= :not-issued (:certificate r)))
+      (is (= :not-established (:observation-storage-identity r) (:authorized-historical-lineage r)))
+      (doseq [bad [nil true ps (dissoc declaration :acceptance)
+                   (assoc declaration :acceptance true)
+                   (assoc declaration :deployment-id :unqualified)
+                   (assoc declaration :authenticated? true)
+                   (assoc declaration :certificate "signed")
+                   (with-meta declaration {:accepted true})]]
+        (is (= :invalid-deployment-acceptance (reason #(select! bad)))))
+      (is (= :acceptance-policy-mismatch
+             (reason #(select! (assoc declaration :identity-policy :fixture/other)))))
+      (is (= :incorrect-premise-set
+             (reason #(select! (assoc declaration :premises (pop ps))))))
+      (is (= :subject-mismatch
+             (reason #(select! (assoc declaration :premises
+                                      (premises (assoc s :retained-acquisition-ref "different-target")))))))
+      (is (= :premise-mismatch
+             (reason #(select! (update-in declaration [:premises 2] assoc :dependencies #{}))))))))

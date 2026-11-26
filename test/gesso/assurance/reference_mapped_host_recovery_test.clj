@@ -205,7 +205,11 @@
                                      handle (:conditional-recovery prepared)
                                      scope (observed-recovery/read-conditional-recovery-scope! handle)
                                      premises (mapv :assumption (:obligations (storage/describe-obligations scope)))
-                                     selected (observed-recovery/select-conditional-recovery-premises! handle premises)]]
+                                     selected (observed-recovery/select-conditional-recovery-premises! handle premises)
+                                     declaration {:deployment-id :fixture/deployment
+                                                  :identity-policy (:identity-policy scope)
+                                                  :acceptance :trust-open-premises :premises premises}
+                                     trusted (observed-recovery/declare-conditional-recovery-trust! handle declaration)]]
                            (do
                              (is (= :prepared (:status prepared)))
                              (is (= required (:historical-cut scope)))
@@ -220,7 +224,23 @@
                              (is (= :not-issued (:certificate selected)))
                              (is (= :not-established (:observation-storage-identity selected)
                                     (:authorized-historical-lineage selected)))
-                             [[relation kind] {:handle handle :premises premises}])))]
+                             (is (= :conditional (:status trusted)))
+                             (is (= :conditional-on-declared-trust (:historical-assurance trusted)))
+                             (is (= :explicit-declaration-only (:premise-acceptance trusted)))
+                             (is (= :not-established (get-in trusted [:deployment-acceptance :authentication])))
+                             (is (= (:obligations selected) (:obligations trusted)))
+                             (is (= (set (map :premise-fingerprint (:obligations selected))) (:trusted-assumptions trusted)))
+                             (is (= kind (:cut-correspondence trusted)))
+                             (is (= :none (:authority trusted)))
+                             (is (= :not-issued (:certificate trusted)))
+                             (is (= :not-established (:observation-storage-identity trusted)
+                                    (:authorized-historical-lineage trusted)))
+                             (is (= :unissued-conditional-recovery
+                                    (:reason (observed-recovery/declare-conditional-recovery-trust! prepared declaration))))
+                             (with-redefs [storage/describe-deployment-acceptance (constantly trusted)]
+                               (is (= :conditional-recovery-boundary-replaced
+                                      (:reason (observed-recovery/declare-conditional-recovery-trust! handle declaration)))))
+                             [[relation kind] {:handle handle :premises premises :declaration declaration}])))]
     (is (= 5 (count (:transaction-ids required))))
     (is (= 9 (count (:transaction-ids extended))))
     (is (= (:transaction-ids required) (subvec (:transaction-ids extended) 0 5)))
@@ -229,10 +249,13 @@
     (doseq [[[relation kind] {:keys [handle]}] selections
             [[other-relation other-kind] other] selections
             :when (not= [relation kind] [other-relation other-kind])]
-      (let [r (observed-recovery/select-conditional-recovery-premises! handle (:premises other))]
-        (is (= :unsupported (:status r)))
-        (is (= (if (= relation other-relation) :subject-mismatch :incorrect-premise-set) (:reason r)))
-        (is (not (contains? r :historical-assurance)))))))
+      (let [r (observed-recovery/select-conditional-recovery-premises! handle (:premises other))
+            trusted (observed-recovery/declare-conditional-recovery-trust! handle (:declaration other))]
+        (doseq [result [r trusted]]
+          (is (= :unsupported (:status result)))
+          (is (= (if (= relation other-relation) :subject-mismatch :incorrect-premise-set) (:reason result)))
+          (is (not (contains? result :historical-assurance)))
+          (is (not (contains? result :trusted-assumptions))))))))
 
 (defn- check-assembled-recovery! [interleaved?]
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))

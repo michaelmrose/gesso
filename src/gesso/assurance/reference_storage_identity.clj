@@ -170,3 +170,31 @@
                :selection :exact-structural-only
                :dependency-closure :complete-for-declared-premises
                :premise-acceptance :not-performed)))))
+
+(def acceptance-profile :declared-deployment-storage-trust-v1)
+
+(defn describe-deployment-acceptance
+  "Describe an explicit deployment declaration of trust in the exact open
+   premises. The deployment name is a declaration, not an authenticated
+   principal. The caller must obtain this declaration at its trusted
+   deployment boundary; this function cannot establish that provenance.
+   Preserve the canonical open obligations and their dependency closure.
+   No checking, admission, discharge, identity or writer authority follows."
+  [scope declaration]
+  (when-not (and (map? declaration) (not (record? declaration))
+                 (nil? (meta declaration))
+                 (= #{:deployment-id :identity-policy :acceptance :premises}
+                    (set (keys declaration)))
+                 (named? (:deployment-id declaration))
+                 (= :trust-open-premises (:acceptance declaration)))
+    (reject-selection! :invalid-deployment-acceptance))
+  (when-not (= (:identity-policy scope) (:identity-policy declaration))
+    (reject-selection! :acceptance-policy-mismatch))
+  (let [selected (describe-selected-premises scope (:premises declaration))]
+    (assoc selected
+           :acceptance-profile acceptance-profile
+           :premise-acceptance :explicit-declaration-only
+           :deployment-acceptance {:deployment-id (:deployment-id declaration)
+                                   :identity-policy (:identity-policy declaration)
+                                   :authentication :not-established}
+           :trusted-assumptions (set (map :premise-fingerprint (:obligations selected))))))

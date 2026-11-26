@@ -7259,3 +7259,36 @@ Next: connect exact selected open premises to explicit deployment
 acceptance using the existing assumption vocabulary, preserving the
 distinction between a trusted premise, authenticated evidence, and proof
 discharge.
+
+* v2803 — compose explicitly declared deployment trust
+
+Require an explicit named deployment declaration to trust the open
+premises of the exact issued historical comparison. Reuse the structural
+assumption checker and canonical dependency-closed storage premises;
+require the selected identity policy and every premise exactly once.
+Propagate the full premise fingerprints and canonical open obligations
+into the conditional result. Reject missing, changed or transferred
+declarations, purported authentication or certificate flags, unissued
+comparison reports and replaced acceptance boundaries.
+
+Distinguish structural selection, explicitly declared operational trust,
+authenticated evidence and admitted proof. The deployment name is not an
+authenticated principal. The caller remains responsible for obtaining the
+declaration at its trusted deployment boundary. This revision does not
+establish actual deployment adoption or lifecycle authorization. Checking,
+admission and discharge remain unperformed, with no writer authority,
+durable storage identity, authorized lineage or certificate. The report
+contains sensitive internal material and is not a credential.
+
+Focused JVM: storage identity and assumption namespaces, 31 tests / 919
+assertions; adjacent assembled host recovery, 1 test / 269 assertions.
+Combined 32 tests / 1188 assertions, zero failures or errors. The genuine
+five- and nine-transaction histories exercise both relations and reject
+cross-comparison trust declarations. An initial direct runner quoting
+error was corrected; the declared JVM flags and real worker polling
+interval were preserved. Older offline dependencies; full gates not run.
+
+Next: connect the explicit trust declaration to the actual configured
+single-node deployment boundary, preserving its scope, provenance
+limitations and exact open obligations. Do not confuse declared acceptance
+with authenticated lifecycle evidence or CLM-R2 discharge.
