@@ -8,7 +8,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v19)
+(def profile :selected-retained-replay-input-v20)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -50,7 +50,7 @@
 (defn- project-mapped-absence [query args]
   ;; Exact production nullable-document absence, not general unquoted SQL.
   (when (and (string? query) (= 2 (count args)) (= 0 (first args))
-             (re-matches #"ASSERT \$1 = \(SELECT COUNT\(\*\) FROM gesso_[a-z0-9_]+ WHERE _id = \$2\)" query))
+             (re-matches #"ASSERT \$1 = \(SELECT COUNT\(\*\) FROM (?:gesso_[a-z0-9_]+|requests|request_assignments|memberships) WHERE _id = \$2\)" query))
     (let [op (into [(str/replace query #"\$[12]" "?")] args)]
       (when (seq (current/operation-tables op)) op))))
 
@@ -69,9 +69,9 @@
   ;; Recognize only the selected top-level struct cardinality guard.
   (when (and (string? query)
              (or (and (= 2 (count args))
-                      (re-matches #"ASSERT \$1 = \(SELECT LENGTH\(NEST_ONE \(SELECT \* FROM (?:\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+) WHERE _id = \$2\)\)\)" query))
+                      (re-matches #"ASSERT \$1 = \(SELECT LENGTH\(NEST_ONE \(SELECT \* FROM (?:\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+|requests|request_assignments|memberships) WHERE _id = \$2\)\)\)" query))
                  (and (= 1 (count args))
-                      (re-matches #"ASSERT [1-9][0-9]{0,4} = \(SELECT LENGTH\(NEST_ONE \(SELECT \* FROM (?:\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+) WHERE _id = \$1\)\)\)" query))))
+                      (re-matches #"ASSERT [1-9][0-9]{0,4} = \(SELECT LENGTH\(NEST_ONE \(SELECT \* FROM (?:\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+|requests|request_assignments|memberships) WHERE _id = \$1\)\)\)" query))))
     (let [op (into [(str/replace query #"\$[12]" "?")] args)]
       (when (seq (current/operation-tables op)) op))))
 
@@ -143,7 +143,7 @@
   ;; repeated and noncanonical parameters, preserving quoted dollar names.
   ;; A single-field residual has three operands; mapped triples need more.
   (when (and (string? query) (<= 3 (count args) 769)
-             (str/starts-with? query "ASSERT $1 = (SELECT COUNT(*) FROM gesso_"))
+             (re-find #"^ASSERT \$1 = \(SELECT COUNT\(\*\) FROM (?:gesso_[a-z0-9_]+|requests|request_assignments|memberships) WHERE " query))
     (let [sql (str/replace query #"\$[0-9]+" "?")
           n (volatile! 0)
           round-trip (str/replace sql #"\?" (fn [_] (str "$" (vswap! n inc))))

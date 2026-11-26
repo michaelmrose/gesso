@@ -5,7 +5,7 @@
   (:require [clojure.string :as str])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-current-state-transaction-v17)
+(def profile :selected-current-state-transaction-v18)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -160,14 +160,15 @@
       false)))
 
 ;; Selected physical count guards: either quoted simple identifiers or
-;; unquoted Gesso-prefixed tables, avoiding SQL reserved-word ambiguity.
+;; unquoted Gesso-prefixed tables and the three selected Claim tables,
+;; avoiding SQL reserved-word ambiguity.
 ;; Literal counts occur in infrastructure guards; bound counts are used
 ;; by the model transaction formatter. No arbitrary WHERE predicates.
 (def ^:private count-pattern
-  #"ASSERT (\?|0|[1-9][0-9]{0,4}) = \(SELECT COUNT\(\*\) FROM (\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+)( WHERE _id = \?)?\)")
+  #"ASSERT (\?|0|[1-9][0-9]{0,4}) = \(SELECT COUNT\(\*\) FROM (\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+|requests|request_assignments|memberships)( WHERE _id = \?)?\)")
 
 (def ^:private field-count-pattern
-  #"ASSERT (\?|[1-9][0-9]{0,4}) = \(SELECT LENGTH\(NEST_ONE \(SELECT \* FROM (\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+) WHERE _id = \?\)\)\)")
+  #"ASSERT (\?|[1-9][0-9]{0,4}) = \(SELECT LENGTH\(NEST_ONE \(SELECT \* FROM (\"[a-z][a-z0-9_]*\"|gesso_[a-z0-9_]+|requests|request_assignments|memberships) WHERE _id = \?\)\)\)")
 
 (defn- count-assertion! [op kind [_ count-token table id-clause]]
   (let [bound? (= "?" count-token)
@@ -228,7 +229,7 @@
 ;; Exact selected mapped scalar guard; each field contributes three
 ;; comparisons, with identical bound operands. Do not model STR generally.
 (def ^:private mapped-pattern
-  #"ASSERT \? = \(SELECT COUNT\(\*\) FROM (gesso_[a-z0-9_]+) WHERE (.+)\)")
+  #"ASSERT \? = \(SELECT COUNT\(\*\) FROM (gesso_[a-z0-9_]+|requests|request_assignments|memberships) WHERE (.+)\)")
 
 (def ^:private mapped-column-pattern
   #"\((_id|[a-z][a-z0-9]*(?:_[a-z0-9]+)*|\"(?:[a-z][a-z0-9]*\$)+[a-z][a-z0-9]*(?:_[a-z0-9]+)*\") = \?\)")
@@ -296,7 +297,7 @@
 ;; a selected set of unquoted columns (no general reserved-word parser)
 ;; and canonical quoted qualified columns. No coercion is inferred.
 (def ^:private residual-pattern
-  #"ASSERT \? = \(SELECT COUNT\(\*\) FROM (gesso_[a-z0-9_]+) WHERE \(_id = \?\) AND (.+)\)")
+  #"ASSERT \? = \(SELECT COUNT\(\*\) FROM (gesso_[a-z0-9_]+|requests|request_assignments|memberships) WHERE \(_id = \?\) AND (.+)\)")
 
 (def ^:private residual-column-pattern
   #"\((amount|revision|updated_at|enabled|status|active|owner|\"[a-z][a-z0-9]*\$[a-z][a-z0-9]*(?:_[a-z0-9]+)*\") = \?\)")

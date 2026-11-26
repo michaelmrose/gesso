@@ -384,7 +384,7 @@
                :retained-execution-profile retained-execution-profile)
         (dissoc r :source-coverage)))))
 
-(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v21)
+(def retained-replay-execution-profile :selected-processed-retained-replay-execution-v22)
 
 (defn- valid-replay-history? [sample]
   (let [inputs (:replay-inputs sample)]
@@ -455,6 +455,23 @@
    No raw samples, atomic acquisition, authentication or refinement claim."
   [node tables]
   (compare-retained-replay* node tables nil nil))
+
+(defn compare-local-processed-retained-transaction!
+  "Bind a caller-captured exact selected transaction to the same stable
+   retained history used for independent physical execution comparison.
+   Capture provenance, source-derived semantics and selected commitment
+   remain separate obligations."
+  [node tables expectation]
+  (if (and (source-expectations? [expectation])
+           (instance? Instant (:system-time expectation))
+           (vector? (:ops expectation)) (nil? (meta (:ops expectation)))
+           (<= 1 (count (:ops expectation)) 256))
+    (let [r (compare-retained-replay* node tables expectation nil)]
+      (if (= :matched (:status r))
+        (assoc r :selected-transaction-binding :matched
+                 :selected-transaction-commitment :not-asserted)
+        r))
+    (acquisition-result :unsupported :unsupported-source-expectation)))
 
 (def mapped-retained-execution-profile :selected-mapped-retained-execution-v1)
 

@@ -5494,3 +5494,36 @@ transactions and production encoders; installed executor correspondence,
 input provenance, selected commitment and universal refinement remain
 open. No production admission expansion, certificate or CLM-R2 premise
 retirement. Full project and independent formal gates not rerun.
+
+* v2750 — bind an issued Claim executor submission to retained replay
+
+Exercise the existing two-helper Claim catalog, genuine issued mapped
+admission, production publication executor, preparation acquisition and
+registered synchronous adapter policy against persistent XTDB. Capture
+the exact submitted operations and public receipt without changing the
+transaction; require exact selected transaction identity, time and
+operation correspondence within the same stable independently replayed
+history. Add a generic non-authoritative selected transaction diagnostic.
+Qualify only the three unquoted Claim table names (requests,
+request_assignments, memberships) in the existing independent count,
+field-count, mapped and residual grammars and retained projection.
+Advance strict current-state, bitemporal and retained replay profiles.
+
+JVM: 28 tests / 2736 assertions, zero failures or errors across the new
+issued Claim fixture and existing reference transaction and replay input
+tests. The new fixture checks exact capture, bound envelope, production
+commit-basis readback, the nine-assertion source-derived mapped prefix,
+independently reconstructed prepared prestate and command/evidence
+identity absence, changed captured operations, incomplete scope, and
+persistent reopening. The initial run failed one fixture assertion
+because membership row order was assumed; corrected to compare sets.
+Actual executor emission is not a manually assembled physical vector.
+The harness wires publication preparation callbacks directly and bypasses
+browser projection, host installation/initialization, worker and HTTP
+paths; capture is a trusted test premise. The actual command operation
+and abstract alternative differ, as does guard ordering relative to
+the selected earlier source-relative envelope profile. Independent
+derivation of the actual remaining suffix, installed input/declaration
+provenance, selected commitment and universal refinement remain open.
+No production admission expansion, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates not rerun.

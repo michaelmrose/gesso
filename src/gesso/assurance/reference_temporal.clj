@@ -6,7 +6,7 @@
             [gesso.assurance.reference-clock :as clock])
   (:import (java.time Instant ZonedDateTime)))
 
-(def profile :selected-bitemporal-transaction-v15)
+(def profile :selected-bitemporal-transaction-v16)
 
 (defn- instant? [x]
   (and (instance? Instant x) (zero? (mod (.getNano ^Instant x) 1000))))
