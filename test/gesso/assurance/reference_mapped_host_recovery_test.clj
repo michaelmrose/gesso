@@ -65,16 +65,24 @@
   (into {} (map (fn [table]
                   [table (set (live-xtdb/q node (str "SELECT *, _system_from FROM " (name table))))])) tables))
 
+(defn- trust-problem [f]
+  (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+
 (defn- check-reopened-recovery!
   [assembly handler config tables admit mapped-source outcome-declarations
-   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle cut-handle]}]
+   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle cut-handle foreign-comparisons]}]
   (is (= :stopped (:status (lifecycle/status worker))))
   (is (= 503 (:status (ring-handler {:uri "/"}))))
   (is (nil? (correspondence/initialization-observation node admit)))
   (let [started (host/start! assembly handler config)
         reopened (:xtdb/connectable started)
-        new-worker (get started managed/handle-key)]
+        new-worker (get started managed/handle-key)
+        adopted-handle (volatile! nil)]
     (try
+      ;; Identical history and policy do not transfer a target capability.
+      (doseq [foreign foreign-comparisons]
+        (is (= :storage-trust-target-mismatch
+               (trust-problem #(host/adopt-storage-trust! started foreign)))))
       (is (not (identical? node reopened)))
       (let [new-token (live-xtdb/current-submission-policy-token reopened)]
         (is (some? new-token))
@@ -100,9 +108,7 @@
           (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)]
             (is (= :exact-content (:cut-correspondence (cut/compare-prefix-cut! required reopened new-handle))))
             (is (nil? (observed-recovery/read-local-recovery-cut! admit (:observation fresh) cut-handle)))
-            (let [policy {:comparison-id :fixture/recovery :relation :authorized-historical-lineage
-                          :identity-policy :fixture/custody :origin-boundary :fixture/origin
-                          :acquisition-boundary :fixture/acquisition :identity-boundary :fixture/controller}
+            (let [policy (get-in config [:storage-trust :policy])
                   prepare! #(observed-recovery/prepare-conditional-recovery!
                              admit observation cut-handle reopened %1 %2)
                   prepared (prepare! new-handle policy)
@@ -111,8 +117,24 @@
                   premises (mapv :assumption (:obligations (storage/describe-obligations scope)))
                   select! #(observed-recovery/select-conditional-recovery-premises! %1 %2)
                   selected (select! handle premises)
-                  other (:conditional-recovery (prepare! new-handle policy))]
+                  other (:conditional-recovery (prepare! new-handle policy))
+                  trusted (observed-recovery/declare-conditional-recovery-trust!
+                           handle {:deployment-id (get-in config [:storage-trust :deployment-id])
+                                   :identity-policy (:identity-policy policy)
+                                   :acceptance :trust-open-premises :premises premises})
+                  adopted (host/adopt-storage-trust! started handle)]
+              (vreset! adopted-handle handle)
               (is (= :prepared (:status prepared)))
+              (is (= :conditional (:status adopted)))
+              (is (= (:relation policy) (:relation adopted)))
+              (is (= :conditional-on-declared-trust (:historical-assurance adopted)))
+              (is (= (assoc trusted :deployment-adoption :configured-local-host) adopted))
+              (is (= (:obligations selected) (:obligations adopted)))
+              (is (every? #(= :open (:discharge-state %)) (:obligations adopted)))
+              (is (= :not-established (:observation-storage-identity adopted)
+                     (:authorized-historical-lineage adopted)))
+              (is (= :none (:authority adopted)))
+              (is (= :not-issued (:certificate adopted)))
               (is (= required (:historical-cut scope)))
               (is (= (:source-id (first steps)) (:publication-source-id scope)))
               (is (= :conditional (:status selected)))
@@ -152,7 +174,11 @@
       (is (= sample (coverage/observe-local-processed-retained-replay-inputs! reopened)))
       (is (= rows (selected-rows reopened tables)))
       (is (= events @policy-events))
-      (finally (host/stop! started)))))
+      (finally (host/stop! started)))
+    (is (some? @adopted-handle))
+    (is (= :storage-trust-host-retired
+           (trust-problem #(host/adopt-storage-trust! started @adopted-handle))))
+    @adopted-handle))
 
 (defn- copy-closed-store! [root copy-root]
   ;; Copy bytes, not links: the two hosts must not share physical files.
@@ -188,9 +214,6 @@
         (check-reopened-recovery! assembly handler copy-config tables admit mapped-source
                                   outcome-declarations policy-events original))
       (finally (doseq [f (reverse (file-seq (.toFile copy-root)))] (io/delete-file f true))))))
-
-(defn- trust-problem [f]
-  (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
 
 (defn- check-conditional-extension! [started node admit observation cut-handle earlier target]
   (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)
@@ -527,12 +550,23 @@
                       (is (= sample (coverage/observe-local-processed-retained-replay-inputs! node)))
                       (is (= 2 (:cycles (lifecycle/status worker))))
                       (is (= :idle (:status (lifecycle/status worker))))
-                      (reset! restart* {:node node :worker worker :ring-handler @handler*
+                      (let [policy (get-in host-config [:storage-trust :policy])
+                            foreign (mapv (fn [relation]
+                                            (let [prepared (observed-recovery/prepare-conditional-recovery!
+                                                            admit observation cut-handle node handle
+                                                            (assoc policy :relation relation))]
+                                              (is (= :prepared (:status prepared)))
+                                              (:conditional-recovery prepared)))
+                                          [:authorized-historical-lineage :same-store-incarnation])]
+                        (is (= :configured-local-host
+                               (:deployment-adoption (host/adopt-storage-trust! started (first foreign)))))
+                        (reset! restart* {:foreign-comparisons foreign
+                                         :node node :worker worker :ring-handler @handler*
                                         :token (live-xtdb/current-submission-policy-token node)
                                         :sample sample :rows (selected-rows node tables)
                                         :observation observation :steps steps :comparison r :retained-handle handle :cut-handle cut-handle
                                         :initial (correspondence/initialization-observation node admit)
-                                        :events @policy-events}))))
+                                        :events @policy-events})))))
                 ;; This test explicitly exercises a quiescent interval between
                 ;; real worker cycles, not arbitrary worker-interleaved history.
                 (when-not interleaved?
@@ -592,10 +626,18 @@
               (is (= :storage-trust-host-retired
                      (trust-problem #(host/adopt-storage-trust! started (:trust-handle @restart*))))))
             (when interleaved?
-              (check-reopened-recovery! assembly (fn [_] (g/html-response surface)) host-config
-                                        tables admit mapped-source outcome-declarations policy-events @restart*)
-              (check-substituted-store! root assembly (fn [_] (g/html-response surface)) host-config
-                                        tables admit mapped-source outcome-declarations policy-events @restart*)))))
+              (doseq [foreign (:foreign-comparisons @restart*)]
+                (is (= :storage-trust-host-retired
+                       (trust-problem #(host/adopt-storage-trust! started foreign)))))
+              (let [reopen-config (assoc-in host-config [:storage-trust :policy :relation]
+                                            :same-store-incarnation)
+                    reopened-handle (check-reopened-recovery!
+                                     assembly (fn [_] (g/html-response surface)) reopen-config
+                                     tables admit mapped-source outcome-declarations policy-events @restart*)]
+                ;; The copy selects lineage, never same-incarnation trust.
+                (check-substituted-store! root assembly (fn [_] (g/html-response surface)) host-config
+                                          tables admit mapped-source outcome-declarations policy-events
+                                          (update @restart* :foreign-comparisons conj reopened-handle)))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
 
 (deftest assembled-command-transport-observed-recovery

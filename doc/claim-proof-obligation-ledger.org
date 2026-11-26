@@ -7326,3 +7326,28 @@ verify configured adoption for the selected same-incarnation policy and
 the native shutdown boundary. Then connect the explicit assumptions to
 the relevant composed Claim assurance judgment without treating trust as
 proof. Authenticated command/worker provenance remains open.
+
+* v2805 — qualify storage trust across host generations
+
+Extend the genuine worker-interleaved persistent Claim recovery fixture
+without changing production code or worker polling. Issue comparisons for
+both lifecycle policies on the original host. Reject those handles at a
+reopened host and an independently copied store, even when the configured
+policy matches and retained content is identical. Adopt a fresh comparison
+at the reopened original store under the same-incarnation policy and at
+the independent copy under the lineage policy. The latter is a conditional
+trust selection, not evidence of authorized lineage. Reject the reopened
+host's handle at the copied host and reject adoption on retired owners.
+Verify exact declared-trust correspondence, unchanged open obligations,
+no writer authority, no established storage identity or lineage, and no
+certificate. The existing retained history and row comparisons remain.
+
+Focused JVM: 1 test / 209 assertions, zero failures or errors, with real
+persistent XTDB, actual assembled hosts and the older offline dependency
+bundle. The adjacent regression and full project gates were not rerun.
+No lifecycle premise or CLM-R2 obligation is discharged.
+
+Next: connect configured conditional storage trust to the composed Claim
+assurance judgment, preserving the exact open premise fingerprints and
+separating configured acceptance from authenticated evidence and proof.
+Authenticated command and worker provenance remain open.
