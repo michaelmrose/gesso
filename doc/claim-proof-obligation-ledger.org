@@ -6393,3 +6393,46 @@ project gates were not rerun.
 Next: integrate the actual mapped executor and assembled command
 transport with the activated host observation, and explicitly handle
 worker activity in the retained recovery qualification.
+
+* v2780 — assembled mapped command transport recovery
+
+Exercise the complete selected Claim recovery through the actual assembled
+host, strict compiled model publication wiring, registered mapped
+executor, canonical HTMX POST transport and host-owned opaque adapter.
+Use a deterministic synchronous nested request: the losing operation
+prepares its acceptance candidate, invokes the winning POST through the
+same installed handler, then submits the stale candidate and constructs
+the guarded refusal after the physical assertion failure. Decode the
+actual returned settlement markers and check both command identities and
+outcomes. A denied request does not reach preparation. No replacement
+projection or transaction receipt callback is used.
+
+Capture the three consumed handoffs and adapter calls through the issued
+framed observation and compare the entire activated initialization and
+recovery history with the existing combined diagnostic. Check the final
+request, assignment and two command journal records and the exact policy
+classifications. Keep the actual managed worker enabled. Wait for its
+initial empty cycle and perform the comparison between cycles using the
+supported 60-second polling interval; assert the worker is still idle
+with exactly one completed cycle. Do not filter maintenance transactions
+or relax the existing exact history bracket.
+
+Focused persistent JVM: 1 test / 28 assertions, zero failures or errors.
+The exact tested fixture blob is verified. No production source changes.
+
+The fixture uses a controlled same-thread interleaving, direct invocation
+of the installed Ring POST handler, and trusted synthetic header-based
+principal and authorization callbacks. It does not establish real network,
+browser, session or authenticated principal correspondence. The selected
+worker-quiescent interval is timing-bounded; unusually slow execution can
+invalidate it, and arbitrary worker-interleaved history is not qualified.
+The existing v2779 restart regression is separate; this new fixture does
+not reopen its database. Durable storage identity, aborted receipt
+identity, unrestricted writer closure, universal provider refinement,
+certificate and CLM-R2 premise retirement remain unestablished.
+Full project gates were not rerun.
+
+Next: qualify actual worker maintenance following the observed recovery,
+including its retained acquisition and completion envelopes and the
+preservation of the mapped domain/journal trajectory. Generalize retained
+selection only with explicit, independently checked maintenance semantics.
