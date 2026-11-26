@@ -5384,3 +5384,30 @@ retained residual decoding and execution, whole-envelope composition and
 installed declaration provenance remain open. No production admission
 expansion, certificate or CLM-R2 premise retirement. Full project and
 independent formal gates not rerun.
+
+* v2746 — interpret selected ordinary residual equality assertions
+
+Admit a distinct count-one residual grammar for Gesso-prefixed tables,
+string row IDs, selected unquoted columns and canonical quoted qualified
+fields. Evaluate homogeneous closed integer, boolean, string, keyword
+and UUID operands without borrowing the stronger mapped triple equality
+semantics. Missing rows/fields fail the assertion; reached comparisons
+with unlike or unsupported domains fail closed without a predicted
+outcome. Validate every reached comparison without assuming SQL
+short-circuit order; reject malformed counts, duplicate columns and
+unqualified spellings before execution. Include attempted table scope
+and preserve physical failure indices and tentative-write rollback.
+Advance current-state and strict bitemporal profiles; leave equal-time,
+clocked and retained-byte profiles unchanged.
+
+JVM: 14 tests / 1728 assertions, zero failures or errors across the new
+ordinary residual fixture and existing reference transaction regression.
+The new fixture contributes 97 assertions, including actual XTDB
+homogeneous equality, changed and missing fields, qualified names,
+rollback, malformed assertions, unsupported cross-domain comparisons,
+and strict temporal reference execution. The SQL fixture is manually
+constructed in the selected production shape; no general SQL coercion,
+universal SQL equivalence, retained residual decoding or whole-envelope
+composition is established. No production admission expansion, certificate
+or CLM-R2 premise retirement. Full project and independent formal gates
+not rerun.

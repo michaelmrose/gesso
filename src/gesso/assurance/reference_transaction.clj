@@ -5,7 +5,7 @@
   (:require [clojure.string :as str])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-current-state-transaction-v15)
+(def profile :selected-current-state-transaction-v16)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -278,6 +278,47 @@
                                :else (reject! :unsupported-reference-mapped-domain)))))
                        checks)))))
 
+;; Ordinary residual equality is not the mapped triple comparison. Keep
+;; a selected set of unquoted columns (no general reserved-word parser)
+;; and canonical quoted qualified columns. No coercion is inferred.
+(def ^:private residual-pattern
+  #"ASSERT \? = \(SELECT COUNT\(\*\) FROM (gesso_[a-z0-9_]+) WHERE \(_id = \?\) AND (.+)\)")
+
+(def ^:private residual-column-pattern
+  #"\((amount|revision|updated_at|enabled|status|active|owner|\"[a-z][a-z0-9]*\$[a-z][a-z0-9]*(?:_[a-z0-9]+)*\") = \?\)")
+
+(defn- residual-assertion! [op [_ table predicate]]
+  (let [[_ expected id & operands] op
+        clauses (str/split predicate #" AND " -1)]
+    (when-not (and (instance? Long expected) (= 1 expected)
+                   (id? id) (= :string (equality-domain id))
+                   (<= 1 (count clauses) 256) (= (count clauses) (count operands)))
+      (reject! :unsupported-reference-residual-assertion))
+    (let [checks (mapv (fn [clause value]
+                         (let [[_ col] (re-matches residual-column-pattern clause)]
+                           (when-not (and col (equality-domain value))
+                             (reject! :unsupported-reference-residual-assertion))
+                           (let [field (-> col (str/replace "\"" "")
+                                           (str/replace "$" "/") (str/replace "_" "-") keyword)]
+                             (when-not (value-key? field)
+                               (reject! :unsupported-reference-residual-assertion))
+                             [field value]))) clauses operands)]
+      (when-not (= (count checks) (count (distinct (map first checks))))
+        (reject! :unsupported-reference-residual-assertion))
+      {:kind :assert-residual :table (keyword table) :id id :checks checks})))
+
+(defn- residual-matches! [working {:keys [table id checks]}]
+  (let [row (string-id-row! (get working table) id)]
+    (and row
+         (every? true?
+                 (mapv (fn [[field expected]]
+                         (if-not (contains? row field)
+                           false
+                           (let [actual (get row field)]
+                             (when-not (= (equality-domain expected) (equality-domain actual))
+                               (reject! :unsupported-reference-residual-domain))
+                             (= expected actual)))) checks)))))
+
 ;; Exact slot selectors emitted by command resolution and mapped framing.
 ;; The slot is keyed by nested principal/operation, not command row identity.
 (def ^:private journal-slot-pattern
@@ -502,6 +543,10 @@
     (count-assertion! op :assert-row-count (re-matches count-pattern (first op)))
     (and (string? (first op)) (re-matches field-count-pattern (first op)))
     (count-assertion! op :assert-field-count (re-matches field-count-pattern (first op)))
+    (and (string? (first op)) (re-matches residual-pattern (first op))
+         (every? #(re-matches residual-column-pattern %)
+                 (str/split (nth (re-matches residual-pattern (first op)) 2) #" AND " -1)))
+    (residual-assertion! op (re-matches residual-pattern (first op)))
     (and (string? (first op)) (re-matches mapped-pattern (first op)))
     (mapped-assertion! op (re-matches mapped-pattern (first op)))
     (and (string? (first op)) (re-matches journal-slot-pattern (first op)))
@@ -573,7 +618,7 @@
   (case (if (map? kind) (:kind kind) kind)
     (:assert-true :assert-false) #{}
     :put #{(second op)}
-    (:assert-read :assert-row-count :assert-field-count :assert-mapped) #{(:table kind)}
+    (:assert-read :assert-row-count :assert-field-count :assert-mapped :assert-residual) #{(:table kind)}
     (:assert-journal-slot :assert-journal-value :assert-journal-chunk) #{:gesso_commands}
     (:assert-publication-absence :assert-source-absence) #{:gesso_live_outbox}
     nil))
@@ -632,6 +677,10 @@
                                (recur working (inc i))
                                (assoc report :status :predicted :committed? false
                                       :state state :failed-assertion-index i))
+                :assert-residual (if (residual-matches! working kind)
+                                   (recur working (inc i))
+                                   (assoc report :status :predicted :committed? false
+                                          :state state :failed-assertion-index i))
                 :assert-mapped (if (mapped-matches! working kind)
                                  (recur working (inc i))
                                  (assoc report :status :predicted :committed? false
