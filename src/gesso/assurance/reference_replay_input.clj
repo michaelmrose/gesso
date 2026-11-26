@@ -8,7 +8,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v14)
+(def profile :selected-retained-replay-input-v15)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -46,6 +46,13 @@
                  (and (= 1 (count args))
                       (re-matches #"ASSERT (?:0|[1-9][0-9]{0,4}) = \(SELECT COUNT\(\*\) FROM \"[a-z][a-z0-9_]*\" WHERE _id = \$1\)" query))))
     (into [(str/replace query #"\$[12]" "?")] args)))
+
+(defn- project-mapped-absence [query args]
+  ;; Exact production nullable-document absence, not general unquoted SQL.
+  (when (and (string? query) (= 2 (count args)) (= 0 (first args))
+             (re-matches #"ASSERT \$1 = \(SELECT COUNT\(\*\) FROM gesso_[a-z0-9_]+ WHERE _id = \$2\)" query))
+    (let [op (into [(str/replace query #"\$[12]" "?")] args)]
+      (when (seq (current/operation-tables op)) op))))
 
 (defn- project-field-count-assertion [query args]
   ;; Recognize only the selected top-level struct cardinality guard.
@@ -139,6 +146,7 @@
              (and (#{"ASSERT TRUE" "ASSERT FALSE"} query) (empty? args)) [query]
              (and (= "ASSERT $1 = $2" query) (= 2 (count args))) (into ["ASSERT ? = ?"] args)
              (not clocked?) (or (project-state-assertion query args)
+                                (project-mapped-absence query args)
                                 (project-mapped-assertion query args)
                                 (project-field-count-assertion query args)
                                 (project-publication-absence query args)

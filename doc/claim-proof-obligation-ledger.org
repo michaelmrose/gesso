@@ -5159,3 +5159,28 @@ faithful row acquisition, suffix lowering, authenticated submission
 provenance or universal refinement. No production admission expansion,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates not rerun.
+
+* v2737 — bind mapped prepared rows to retained predecessor state
+
+Add a separate non-authoritative mapped-retained prestate diagnostic. After
+exact source-relative guard lowering and stable retained execution matching,
+replay the predecessor transactions and project their state at the selected
+transaction's valid instant. Compare complete selected document rows and
+journal slots, including required absence, without borrowing the selected
+transaction's own writes or subsequent transactions. Malformed journal
+records fail closed. Retain the earlier prefix-only diagnostic and do not
+assert selected transaction commitment. Qualify the exact bound zero-count
+unquoted Gesso-prefixed nullable-document absence guard in retained replay;
+other new unquoted count forms remain unqualified. Advance retained input,
+processed acquisition and direct execution profiles.
+
+Focused JVM: 1 test / 53 assertions, zero failures or errors. Persistent
+XTDB history covers empty predecessor, future and expired valid intervals,
+unrelated rows, selected writes, correct prestate on an aborted transaction,
+and stale unmapped fields. Regression JVM: 14 tests / 1117 assertions,
+zero failures or errors in mapped retained execution and retained input.
+This matches the prepared state at the selected transaction's read instant
+within a qualified finite history, not authenticated acquisition provenance,
+source-derived suffix semantics, universal physical refinement or successful
+commitment. No certificate or CLM-R2 premise retirement. Full project and
+independent formal gates not rerun.
