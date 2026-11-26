@@ -4973,3 +4973,22 @@ SQL, malformed numbering, wrong types, precision and zone, and incomplete
 observation scope. The broader five-namespace regression run timed out
 without a completed summary; no failures were reported before timeout.
 No production admission, certificate or CLM-R2 premise retirement.
+
+* v2729 — replay complete publication-manifest establishment
+
+Project the exact retained numbered string-ID manifest absence guard
+alongside existing outbox UUID and source-string absence guards. Reuse
+independent current-state count semantics and require both manifest and
+outbox observation scopes. Advance strict replay input, acquisition and
+execution profiles; leave clocked/equal-time replay unchanged.
+
+Focused JVM: 6 tests / 227 assertions, zero failures or errors across
+manifest, publication, worker replay and production manifest tests. The
+new persistent fixture contributes 63 assertions, including the real
+startup writer with deterministic submission time, seven transactions,
+duplicate and existing-source rejection, tentative-put rollback and
+reopening. Reject wrong identity domains, malformed parameters, changed
+predicates, oversized descriptors and missing observation tables.
+This is bounded physical execution correspondence, not manifest policy
+certification, production admission or CLM-R2 premise retirement. Full
+project and independent formal gates not rerun.

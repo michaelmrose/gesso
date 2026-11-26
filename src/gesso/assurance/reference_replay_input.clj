@@ -8,7 +8,7 @@
             [gesso.assurance.reference-transaction :as current])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-retained-replay-input-v12)
+(def profile :selected-retained-replay-input-v13)
 (def ^:private base {:profile profile :authority :none :certificate :not-issued})
 
 (defn- project-put [table documents]
@@ -57,14 +57,19 @@
     (let [op (into [(str/replace query #"\$[12]" "?")] args)]
       (when (seq (current/operation-tables op)) op))))
 
+(def ^:private publication-absence-tables
+  {"ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = $1)" :gesso_live_outbox
+   "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = $1)" :gesso_live_outbox
+   "ASSERT 0 = (SELECT COUNT(*) FROM gesso_publication_manifests WHERE _id = $1)" :gesso_publication_manifests})
+
 (defn- project-publication-absence [query args]
-  ;; Only the two exact outbox guards; dollar-bearing column names are
-  ;; identifiers, not placeholders. Reuse the independent operand grammar.
-  (when (and (= 1 (count args))
-             (#{"ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = $1)"
-                "ASSERT 0 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE gesso$live$outbox$source_id = $1)"} query))
-    (let [op (into [(str/replace query "$1" "?")] args)]
-      (when (= #{:gesso_live_outbox} (current/operation-tables op)) op))))
+  ;; Exact writer guards only; dollar-bearing column names are identifiers,
+  ;; not placeholders. The independent grammar distinguishes UUID outbox
+  ;; identities from string manifest identities and source identifiers.
+  (when-let [table (get publication-absence-tables query)]
+    (when (= 1 (count args))
+      (let [op (into [(str/replace query "$1" "?")] args)]
+        (when (= #{table} (current/operation-tables op)) op)))))
 
 (def ^:private worker-assertion-arities
   {"ASSERT 1 = (SELECT COUNT(*) FROM gesso_live_outbox WHERE _id = $1 AND _system_from = $2)" 2
@@ -189,7 +194,7 @@
 (defn decode-replay-input
   "Project selected retained operations with explicit time precedence.
    Includes exact quoted-table row-read, row-count, mapped scalar and
-   document field-count, publication identity/source absence, journal slot,
+   document field-count, publication identity/source and manifest absence, journal slot,
    selected recursive journal value and worker clock/version assertions;
    the history must qualify
    for strictly increasing temporal replay.
