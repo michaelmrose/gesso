@@ -5,7 +5,7 @@
   (:require [clojure.string :as str])
   (:import (java.time Instant ZoneId ZonedDateTime)))
 
-(def profile :selected-current-state-transaction-v13)
+(def profile :selected-current-state-transaction-v14)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported reference transaction." {::unsupported true :reason reason})))
@@ -419,6 +419,54 @@
                                                     :else (reject! :unsupported-reference-journal-leaf-domain))))
                                               checks))) matching))))))
 
+(defn- chunk-atoms [checks]
+  ;; Recover the physical predicate count and order from the validated
+  ;; complete recursive grammar, not from the production partitioner.
+  (vec (mapcat (fn [[kind path expected :as check]]
+                 (case kind
+                   :scalar (repeat 3 check)
+                   :map-count (if (zero? expected) [check [:map-shape path]] [check])
+                   :vector (cons check
+                                 (mapcat (fn [[i v]]
+                                           (repeat 3 [:element path [i v]]))
+                                         (map-indexed vector expected)))))
+               checks)))
+
+(defn- chunk-scalar-matches! [actual expected]
+  ;; An isolated physical predicate is not the whole comparison triple.
+  ;; In particular, ordinary SQL equality may coerce distinct domains.
+  (cond
+    (nil? actual) false
+    (and (leaf? actual) (= (equality-domain actual) (equality-domain expected)))
+    (= actual expected)
+    :else (reject! :unsupported-reference-journal-chunk-domain)))
+
+(defn- chunk-atom-matches! [row [kind path expected]]
+  (let [actual (journal-path! row path)]
+    (if (nil? actual)
+      false
+      (case kind
+        :scalar (chunk-scalar-matches! actual expected)
+        :map-count (if (map? actual) (= expected (count actual))
+                       (reject! :unsupported-reference-journal-chunk-domain))
+        :map-shape (if (map? actual) true
+                       (reject! :unsupported-reference-journal-chunk-domain))
+        :vector (if (vector? actual)
+                  (let [matches (mapv chunk-scalar-matches! actual expected)]
+                    (and (= (count actual) (count expected)) (every? true? matches)))
+                  (reject! :unsupported-reference-journal-chunk-domain))
+        :element (if (vector? actual)
+                   (let [[i v] expected] (chunk-scalar-matches! (get actual i) v))
+                   (reject! :unsupported-reference-journal-chunk-domain))))))
+
+(defn- journal-chunk-matches! [working {:keys [principal operation atoms]}]
+  (= 1 (count (filter true?
+                      (mapv (fn [row]
+                              (and (journal-slot-matches? {:gesso_commands {(:xt/id row) row}}
+                                                          {:principal principal :operation operation :expected 1})
+                                   (every? true? (mapv #(chunk-atom-matches! row %) atoms))))
+                            (vals (get working :gesso_commands)))))))
+
 (defn- check-op! [op]
   (when-not (and (vector? op) (nil? (meta op)) (seq op))
     (reject! :unsupported-reference-operation))
@@ -449,10 +497,63 @@
       :put)
     :else (reject! :unsupported-reference-operation)))
 
+(defn- chunk-candidate? [slot op]
+  (and (vector? op) (nil? (meta op)) (string? (first op))
+       (re-matches journal-value-pattern (first op))
+       (= [(:principal slot) (:operation slot)] (vec (take 2 (rest op))))))
+
+(defn- journal-chunk-kinds! [slot groups]
+  (when-not (and (<= 9 (count groups) 683)
+                 (every? #(<= 4 (count %) 15) groups))
+    (reject! :unsupported-reference-journal-chunk-shape))
+  (let [parts (mapv (fn [op]
+                     (let [[_ predicate] (re-matches journal-value-pattern (first op))
+                           clauses (str/split predicate #" AND " -1)
+                           args (subvec op 3)]
+                       (when-not (= (count clauses) (count args))
+                         (reject! :unsupported-reference-journal-chunk-shape))
+                       [clauses args])) groups)
+        sizes (mapv (comp count first) parts)
+        clauses (vec (mapcat first parts))
+        args (vec (mapcat second parts))]
+    (when-not (and (every? #{12} (pop sizes)) (<= 1 (peek sizes) 12)
+                   (<= 97 (count clauses) 8192))
+      (reject! :unsupported-reference-journal-chunk-shape))
+    (let [atoms (chunk-atoms (journal-checks! clauses args))]
+      (when-not (= (count atoms) (count clauses))
+        (reject! :unsupported-reference-journal-chunk-shape))
+      (mapv (fn [group] {:kind :assert-journal-chunk
+                         :principal (:principal slot) :operation (:operation slot)
+                         :atoms (vec group)})
+            (partition-all 12 atoms)))))
+
+(defn- check-ops! [ops]
+  ;; Only qualify chunks as a consecutive sequence after the existing
+  ;; unique-slot and journal field-count guards. Do not admit isolated
+  ;; incomplete triples or imply that a chunk proves full record equality.
+  (loop [i 0 kinds []]
+    (if (= i (count ops))
+      kinds
+      (let [kind (check-op! (nth ops i))
+            next-op (get ops (inc i))
+            field (when (and (= :assert-journal-slot (:kind kind)) (= 1 (:expected kind))
+                             (vector? next-op) (string? (first next-op))
+                             (re-matches field-count-pattern (first next-op)))
+                    (check-op! next-op))
+            groups (when (= :gesso_commands (:table field))
+                     (vec (take-while #(chunk-candidate? kind %) (drop (+ i 2) ops))))]
+        (if (and (> (count groups) 1)
+                 (> (reduce + (map #(- (count %) 3) groups)) 96)
+                 (= 15 (count (first groups))))
+          (recur (+ i 2 (count groups))
+                 (into (conj kinds kind field) (journal-chunk-kinds! kind groups)))
+          (recur (inc i) (conj kinds kind)))))))
+
 (defn operation-tables
   "Return the table dependency set of one structurally admitted operation.
    Empty means state-independent; nil means unsupported. Use the same
-   checked grammar as execution, including infrastructure assertions."
+   checked single-operation grammar as execution. Incomplete wide journal
+   chunks require sequence context and are not qualified by this API."
   [op]
   (try
     (let [kind (check-op! op)]
@@ -475,7 +576,9 @@
    produced by preceding operations. The full vector is structurally validated
    before evaluation, including operations after a false guard; reached reads
    also check the stored operand domain.
-   Unsupported input returns no predicted state or outcome. No arbitrary
+   Wide journal chunks are checked as a complete contiguous grammar, then
+   evaluated individually in the homogeneous operand domain. Unsupported
+   input returns no predicted state or outcome. No arbitrary
    SQL, temporal bounds, callbacks, or observed outcomes are accepted."
   [state ops]
   (let [report {:profile profile :authority :none :certificate :not-issued}]
@@ -483,7 +586,7 @@
       (check-state! state)
       (when-not (and (vector? ops) (nil? (meta ops)) (<= 1 (count ops) 4096))
         (reject! :unsupported-reference-operation-sequence))
-      (let [kinds (mapv check-op! ops)]
+      (let [kinds (check-ops! ops)]
         (loop [working state i 0]
           (if (= i (count ops))
             (assoc report :status :predicted :committed? true :state working)
@@ -506,6 +609,11 @@
                          :state state :failed-assertion-index i))
                 :assert-journal-value
                 (if (journal-value-matches! working kind)
+                  (recur working (inc i))
+                  (assoc report :status :predicted :committed? false
+                         :state state :failed-assertion-index i))
+                :assert-journal-chunk
+                (if (journal-chunk-matches! working kind)
                   (recur working (inc i))
                   (assoc report :status :predicted :committed? false
                          :state state :failed-assertion-index i))

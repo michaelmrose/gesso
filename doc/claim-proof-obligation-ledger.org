@@ -5040,3 +5040,28 @@ that extension must preserve individual assertion failure indices and
 reject unsupported forms. No broadened certification, production admission
 scope or CLM-R2 premise retirement. Full project and independent formal
 gates not rerun.
+
+* v2732 — interpret partitioned journal assertions independently
+
+Qualify consecutive canonical wide journal predicate groups following
+unique-slot and journal field-count assertions. Validate the concatenated
+recursive syntax before execution, independently expand logical checks
+into physical predicate positions, and evaluate each group at its original
+operation index. Preserve the tentative read basis, abort and rollback.
+The qualified group domain is conservative: corresponding scalar operands
+must have the same closed domain, and ambiguous cross-type or composite
+comparisons fail closed. A partial group is not evidence of whole-record
+equality or exact lowering. Retain the narrow single-operation grammar and
+bound group count, argument width and total predicates. Advance the
+current-state transaction profile to v14.
+
+JVM: 14 tests / 1699 assertions, zero failures or errors across independent
+partitioned journal and existing current-state reference transaction tests.
+The new fixture contributes 68 assertions, including a production-generated
+32-element mixed scalar vector, repeated narrow assertions, malformed or
+unqualified groups, missing and duplicate slots, five changed rows, actual
+provider assertion-index probes and tentative-write rollback. The new
+sequence-aware grammar is not yet integrated into temporal replay or the
+retained byte decoder; single-operation scope inference remains unchanged.
+No production admission expansion, certificate or CLM-R2 premise
+retirement. Full project and independent formal gates not rerun.
