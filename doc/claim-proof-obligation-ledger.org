@@ -5614,3 +5614,37 @@ installation, selected commitment correspondence and universal
 refinement remain open. Test-only revision; no production profile or
 admission expansion, certificate or CLM-R2 premise retirement.
 Full project and independent formal gates not rerun.
+
+* v2754 — qualify stale competing Claim abort and guarded recovery
+
+Exercise actual overlapping executor invocations by deterministic nested
+interleaving: prepare helper 2's acceptance at the open frontier,
+complete helper 1's winning submission, then return the already prepared
+losing acceptance to the production executor. Its genuine XTDB assertion
+abort invokes the registered one-shot guarded-abort constructor, acquiring
+a fresh refusal preparation under the same losing command identity.
+Capture exact attempted operations at the adapter boundary, including
+the failed call, and bind the successful public receipts and all three
+operation vectors to one persistent retained history.
+
+The independent replay predicts seed/accept/abort/refuse commitment
+sequence true/true/false/true and unchanged segments across the abort.
+The stale attempt has exact source-relative prefix and complete fragment
+checks up to the historical prestate comparison, which correctly returns
+selected-retained-prestate-mismatch; generic exact retained physical
+execution still matches, with an independently predicted failure index
+inside the mapped prefix. Both successful envelopes match the existing
+v4 diagnostic. Verify the winning request, assignment, both final
+journal outcomes, two evidence IDs and absence of loser publication.
+Repeat independent comparisons after persistent reopening.
+
+Focused JVM: 1 test / 48 assertions, zero failures or errors.
+Combined with reference-installed-claim-test: 3 tests / 155 assertions,
+zero failures or errors. Test-only revision. Deterministic overlapping
+invocations are not a multithreaded stress test; failed attempt identity
+is located by its exact vector and position between the two successful
+receipts. The harness supplies contracts, outcome cases and publication
+callbacks and bypasses full host/browser wiring. No new abort-specific
+authoritative diagnostic, selected commitment qualification, certificate,
+production admission expansion or CLM-R2 premise retirement.
+Full project and independent formal gates not rerun.
