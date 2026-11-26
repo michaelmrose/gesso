@@ -131,6 +131,9 @@
                                       node scope source claim/target-map document-rows journal tx prefix-count spec context source-id
                                       (:publication-derivations catalog) (:residual-assertion-derivations catalog)))
                            committed (commit! tx tables)
+                           abstract (evidence/compare-local-processed-retained-mapped-executor-abstract!
+                                     node tables source claim/target-map document-rows journal tx prefix-count spec context source-id
+                                     (:publication-derivations catalog) (:residual-assertion-derivations catalog))
                            physical (provider/compare-local-processed-retained-committed-transaction! node tables tx)]
                        (if (= idx 2)
                          (do (is (= :mismatch (:status report)) (pr-str report))
@@ -141,6 +144,9 @@
                              (is (= :mismatch (:status committed)))
                              (is (= :selected-retained-prestate-mismatch (:reason committed)))
                              (is (not (contains? committed :selected-transaction-commitment)))
+                             (is (= :mismatch (:status abstract)) (pr-str abstract))
+                             (is (= :selected-retained-prestate-mismatch (:reason abstract)))
+                             (is (not (contains? abstract :abstract-transition)))
                              (is (= :mismatch (:status physical)))
                              (is (= :selected-retained-commitment-not-predicted (:reason physical)))
                              (is (not (contains? physical :selected-transaction-commitment)))
@@ -179,6 +185,15 @@
                              (is (= :selected-mapped-retained-executor-commit-v1 (:mapped-retained-evidence-profile committed)))
                              (is (= :committed (:selected-transaction-commitment committed)))
                              (is (= :matched (:selected-commitment-outcome committed)))
+                             (is (= :matched (:status abstract)) (pr-str abstract))
+                             (is (= :selected-mapped-retained-executor-abstract-v1 (:mapped-retained-evidence-profile abstract)))
+                             (is (= :committed (:selected-transaction-commitment abstract)))
+                             (is (= :selected-retained-abstract-transition-v1 (:selected-abstract-transition-profile abstract)))
+                             (is (= :matched-retained-projection (:abstract-transition abstract)))
+                             (is (= :matched-retained-predecessor (:prepared-prestate abstract)))
+                             (is (= :none (:authority abstract)))
+                             (is (= :not-issued (:certificate abstract)))
+                             (is (= :not-established (:provider-refinement abstract)))
                              (is (= :matched-source-relative-record (:transition-evidence committed)))
                              (is (= :matched-retained-predecessor (:prepared-prestate committed)))
                              (is (= :none (:authority committed)))

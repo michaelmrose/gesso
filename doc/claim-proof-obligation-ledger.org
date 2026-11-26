@@ -5749,3 +5749,27 @@ inputs, contradictory commitment and legacy entry-point behavior. Genuine
 persistent Claim executor qualification and full project gates have not
 been rerun. No authenticated premise provenance, universal refinement,
 production admission expansion or CLM-R2 premise retirement.
+
+* v2761 — genuine persistent Claim abstract transition comparison
+
+Extend the existing competing Claim acceptance/abort/refusal fixture to
+exercise the composed v2760 executor abstract diagnostic against actual
+retained XTDB history, before and after persistent database reopening.
+Both successful transactions must match the declared abstract relation
+and the selected commitment within the same stable retained-history
+bracket. The stale competing attempt must not acquire a positive abstract
+transition result, including when a subsequent refusal has committed.
+
+Focused JVM persistent integration: 1 test / 242 assertions, zero failures
+or errors, using the project JVM flags and supplied offline dependencies.
+The genuine production executor runs through the installed fixture's
+submission policy, with the existing test interception of presentation and
+transaction receipts. This qualifies the selected abstract transitions
+relative to supplied mapped source, inputs and outcome interpretation;
+it does not authenticate those premises or establish general provider
+refinement. No production admission expansion or CLM-R2 premise retirement.
+Full project gates were not rerun.
+
+Next: compose acceptance, stale abort and refusal into one checked recovery
+trajectory, including explicit linkage of command identity, history and
+successive authoritative states.
