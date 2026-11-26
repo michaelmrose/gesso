@@ -5113,3 +5113,26 @@ and worker fixtures. This is physical interpretation of the retained
 assertions, not proof that they exhaust the source-required predicates.
 No universal compilation bound, certification expansion or CLM-R2
 premise retirement. Full project and independent formal gates not rerun.
+
+* v2735 — qualify selected partition resource boundaries
+
+Add bounded resource regression fixtures without altering production
+lowering, interpreter profiles or physical limits. Check the exact
+96/97-predicate transition, group widths, nested paths, 128/256-element
+vectors, rejection of a 257-element vector and excessive document depth,
+and the independent distinction between current-state and temporal
+operation-count ceilings (256 temporal operations admitted, 257 rejected).
+The persistent fixture compares exact retained operations and execution
+for three transactions, including a 256-element vector with 819 predicates
+in 69 value assertions (72 operations including put and two prior guards).
+
+Focused JVM: 2 tests / 61 assertions, zero failures or errors. Additional
+exploratory XTDB probes committed two 96-predicate unpartitioned shapes,
+97-predicate and larger partitioned shapes, including a four-level nested
+case and 128/256-element vectors. A 257-element vector also committed in
+XTDB but the independent current-state interpreter rejected it. These
+observations distinguish provider capability from qualified evidence
+scope; they do not establish universal compilation safety, worst-case
+resource consumption or throughput. No production admission expansion,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates not rerun.
