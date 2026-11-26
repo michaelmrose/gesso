@@ -6351,3 +6351,45 @@ project gates were not rerun.
 Next: qualify the assembled host lifecycle and its compiled publication
 descriptor, using the actual host-owned adapter and activation path;
 keep authenticated command and durable storage provenance separate.
+
+* v2779 — assembled host startup, restart and adapter lifetime
+
+Add a persistent integration regression using the actual host/start! and
+host/stop! lifecycle with a current ApplicationAssembly, the compiled
+publication graph and the issued Claim mapped admission. Verify that
+the host-owned manifest matches its compiled publication descriptor and
+that its guarded initialization root is captured in the local issued
+observation. Exercise the installed canonical Ring handler through its
+owned adapter, including replacement of a supplied foreign connectable
+and removal of an injected publication preparation value. Reject an
+unframed domain write through the adapter and preserve the initial state.
+
+Stop the host through its real lifecycle, check worker and Live shutdown,
+request admission fencing and adapter revocation, and start the same
+assembled host again on the persistent store. Require a new policy
+generation but identical retained initialization history and root evidence,
+with no repeated manifest or seed submission. The earlier historical
+observation remains readable without restoring its writer capability.
+
+Focused JVM: 1 test / 51 assertions, zero failures or errors. Exact
+tested fixture blob verified. No production source changes.
+
+This is a bounded assembled startup/read/shutdown/restart regression,
+not the complete competing-command recovery through the assembled host.
+The operation declaration uses the fixture's test-only executor, and
+the canonical Ring handler is called directly, without assembled POST
+transport or a network listener. The worker is real and configured with
+a 60-second poll interval; no publication intent is created. The
+observation window captures a read-only request, not three consumed
+handoffs. A synthetic recorded browser artifact remains part of the
+existing assembly fixture. The complete recovery through the installed
+host must account for worker maintenance transactions without silently
+disabling the worker or weakening retained history checks. Storage
+authentication, authenticated principal provenance, aborted receipt
+identity, unrestricted writer closure, universal provider refinement,
+certificate and CLM-R2 premise retirement remain unestablished. Full
+project gates were not rerun.
+
+Next: integrate the actual mapped executor and assembled command
+transport with the activated host observation, and explicitly handle
+worker activity in the retained recovery qualification.
