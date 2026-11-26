@@ -5709,3 +5709,23 @@ provenance, full installed host correspondence and composed recovery
 trajectory correspondence remain open. No production admission
 expansion, certificate or CLM-R2 premise retirement. Full project
 and independent formal gates not rerun.
+
+* v2759 — selected retained abstract transition projection
+
+Introduce an independent bounded replay projection diagnostic for the
+selected committed step. Reconstruct prestate at the predecessor system
+snapshot and selected valid instant, and poststate at the selected system
+and valid instant. Decode mapped required and nullable documents and
+journal slots, then check the original typed guarded transition including
+assignments and frame using the supplied inputs. Neither the expected
+write suffix nor stored transition witness supplies the observed poststate.
+Reject ambiguous slots, missing required fields, mismatched selection and
+aborted attempts; a later retry cannot qualify an earlier abort.
+
+Focused pure JVM regression: 2 tests / 29 assertions, zero failures or
+errors. The attempted persistent Claim integration test exceeded the
+execution limit without a result. Consequently the new diagnostic remains
+standalone over supplied replay history; stable provider bracket and genuine
+executor composition are deferred to the next revision. No authenticated
+input/outcome provenance, provider refinement, certificate, production
+admission expansion or CLM-R2 premise retirement. Full gates not rerun.
