@@ -6828,3 +6828,59 @@ trusted acquisition boundary separately from retained-content matching.
 Distinguish explicit operational continuity assumptions from any
 locally checkable identity evidence, without treating copies, hashes
 or self-asserted identifiers as authenticated source identity.
+
+* v2790 — explicit durable source and historical lineage obligations
+
+Add a narrow descriptive constructor using the existing unadmitted
+assumption vocabulary, with three separate named obligations scoped
+to one comparison, its publication source, original observation
+reference, retained acquisition reference, relation, versioned identity
+policy name and named trusted boundaries. The two acquisition premises
+require actual binding of the original execution observation and the
+complete independently acquired retained sample to their respective
+storage incarnations. The third premise depends on both and requires
+the selected identity relation at the observed cut.
+
+Distinguish two relations:
+- Same store incarnation: continuity of one operationally identified
+  store across lifecycle events, not equality of paths, stored names,
+  content hashes or individual filesystem inodes.
+- Authorized historical lineage: policy-authorized descent preserving
+  the required historical prefix, including legitimate restoration
+  and replica acquisition. It need not preserve the physical incarnation.
+  It does not establish an exclusive canonical writer, promotion
+  authorization, absence of forks or permission for future writes.
+
+For an actual identity claim, a trusted original-source observation
+and a trusted complete acquisition must bind the exact original and
+target incarnations and cuts to the comparison. The identity authority
+must independently justify the specified relation under its named
+policy. Operational continuity may instead remain an explicit trusted
+environment assumption, propagated into any conditional result. A
+copied history, stored UUID, equal digest or self-asserted identity
+cannot prove either relation by itself. An authorized restore may
+satisfy lineage but not incarnation continuity. Matching historical
+content must not establish identity or current authority.
+
+The new API describes obligations only: references and boundary
+names are declarations, not issued identities, trusted observation
+handles or proof terms. It has no provider access, evidence admission,
+lineage checker or discharge path. Both identity claims remain
+:not-established, all premises :open, authority :none and certificate
+:not-issued. Existing recovery diagnostics and runtime admission
+are unchanged.
+
+Focused JVM: 26 tests / 744 assertions, zero failures or errors,
+including the new three-test namespace and existing assumption
+regressions. Verify distinct structural identities across all scope
+fields, relation changes, copied declaration matching without
+discharge, rejection of purported evidence and unsupported relation
+names, and exact dependency closure. Both tested code/test blobs
+verified. Full project gates and persistent integration not rerun.
+
+Next: establish the smallest trusted local acquisition binding to
+the actual captured origin and exact retained sample; qualify live
+same-incarnation checks separately from cross-restart continuity
+or externally authorized historical lineage. Do not claim the
+latter without an appropriate independent trust boundary. No
+CLM-R2 premise retired.
