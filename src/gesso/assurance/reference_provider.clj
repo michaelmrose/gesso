@@ -2,6 +2,7 @@
   "Bounded comparison of independently expected execution and supplied observations."
   (:require [clojure.string :as str]
             [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.proof.mapped-prestate-lowering :as lowering]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-operation-correspondence :as operation]
             [gesso.assurance.reference-replay-input :as replay-input]
@@ -407,13 +408,8 @@
       {:status :unavailable :reason :invalid-processed-retained-replay-binding}
       :else sample)))
 
-(defn compare-local-processed-retained-replay-execution!
-  "Derive all selected replay transactions from qualified retained bytes,
-   predict independently, and compare provider ledger, envelopes and selected
-   all-time rectangles. Require identical qualified samples before and after.
-   The caller selects tables, not transactions; empty replay is unsupported.
-   No raw samples, atomic acquisition, authentication or refinement claim."
-  [node tables]
+(defn- compare-retained-replay*
+  [node tables expectation]
   (let [tag #(assoc % :retained-replay-execution-profile retained-replay-execution-profile)
         fail (fn [status reason]
                (tag (acquisition-result (if (#{:unsupported :unavailable :mismatch} status) status :unavailable)
@@ -427,6 +423,8 @@
         (cond
           (not= :observed (:status after)) (fail (:status after) (:reason after))
           (not= before after) (fail :unavailable :source-log-changed-during-comparison)
+          (and expectation (not= expectation (some #(when (= (:tx-id expectation) (:tx-id %)) %) inputs)))
+          (fail :mismatch :selected-retained-transaction-mismatch)
           (not= :matched (:status comparison)) (fail (:status comparison) (:reason comparison))
           (not (and (= profile (:profile comparison)) (= acquisition-profile (:acquisition-profile comparison))
                     (= source-binding-profile (:source-binding-profile comparison))
@@ -444,6 +442,53 @@
                       :outcome-correspondence :matched :replay-input-profile replay-input/profile
                       :operation-profile operation/profile
                       :processed-retained-replay-inputs-profile coverage/processed-retained-replay-inputs-profile)))))))
+
+(defn compare-local-processed-retained-replay-execution!
+  "Derive all selected replay transactions from qualified retained bytes,
+   predict independently, and compare provider ledger, envelopes and selected
+   all-time rectangles. Require identical qualified samples before and after.
+   The caller selects tables, not transactions; empty replay is unsupported.
+   No raw samples, atomic acquisition, authentication or refinement claim."
+  [node tables]
+  (compare-retained-replay* node tables nil))
+
+(def mapped-retained-execution-profile :selected-mapped-retained-execution-v1)
+
+(defn compare-local-processed-retained-mapped-execution!
+  "Recheck the source-relative exact prefix of a caller-supplied complete
+   transaction expectation, then bind that expectation to one retained
+   transaction in the SAME stable, independently replayed history. Prefix
+   begins at operation zero; no intervening operations are skipped. The
+   caller supplies the original construction, prepared rows and independent
+   transaction identity/time/operations. A match can describe an aborted
+   transaction. No acquisition faithfulness, suffix lowering, successful
+   guard execution, authenticated provenance or refinement is established.
+   Return only diagnostic status and profile metadata, not sensitive inputs."
+  [node tables original target-map docs journal expectation prefix-count]
+  (let [tag #(assoc % :mapped-retained-execution-profile mapped-retained-execution-profile)
+        invalid #(tag (acquisition-result :unsupported :invalid-mapped-retained-prefix))
+        checked (when (and (source-expectations? [expectation])
+                           (instance? Instant (:system-time expectation))
+                           (vector? (:ops expectation)) (nil? (meta (:ops expectation)))
+                           (integer? prefix-count) (<= 1 prefix-count (count (:ops expectation)) 256))
+                  (try
+                    (lowering/check-prefix! original target-map docs journal
+                                            (subvec (:ops expectation) 0 prefix-count))
+                    (catch clojure.lang.ExceptionInfo _ nil)))]
+    (if-not (and (= :checked-exact-prefix (:status checked))
+                 (= :gesso.assurance.proof.mapped-prestate-lowering/mapped-prestate-lowering (:type checked))
+                 (= 5 (:version checked)) (= prefix-count (:assertion-count checked))
+                 (= :source-relative-syntactic-prefix (:scope checked))
+                 (= :not-established (:sql-refinement checked))
+                 (= :none (:authority checked)) (= :not-issued (:certificate checked)))
+      (invalid)
+      (let [report (tag (compare-retained-replay* node tables expectation))]
+        (if (= :matched (:status report))
+          (assoc report :source-lowering :checked-exact-prefix
+                 :selected-transaction-binding :matched
+                 :selected-transaction-commitment :not-asserted
+                 :mapped-prestate-lowering-version 5)
+          report)))))
 
 (def retained-clocked-execution-profile :selected-processed-retained-clocked-execution-v2)
 

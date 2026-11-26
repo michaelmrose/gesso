@@ -5136,3 +5136,26 @@ scope; they do not establish universal compilation safety, worst-case
 resource consumption or throughput. No production admission expansion,
 certificate or CLM-R2 premise retirement. Full project and independent
 formal gates not rerun.
+
+* v2736 — bind source-relative lowering to retained execution
+
+Recheck a nonempty exact mapped prestate prefix against the original
+construction, target mapping and supplied prepared rows. Bind the entire
+caller-supplied transaction identity, system time and operation vector to
+one transaction in the same stable independently replayed retained history,
+not a separate report or a prefix found at an arbitrary offset. Require
+existing complete attempted observation scope and matched execution. Keep
+the existing direct replay interface and profile unchanged; issue a new
+non-authoritative mapped-retained diagnostic only on joint success.
+
+Focused JVM: 1 test / 83 assertions, zero failures or errors. Persistent
+XTDB fixture checks both committed and aborted partitioned-prefix
+transactions, reopening, mismatched identity, time, suffix and prepared
+rows, invalid prefix lengths, shifted prefix, changed retained sample
+and incomplete scope. Regression JVM: 3 tests / 127 assertions, zero
+failures or errors across retained partitioned replay and resource tests.
+A matched diagnostic does not establish selected transaction commitment,
+faithful row acquisition, suffix lowering, authenticated submission
+provenance or universal refinement. No production admission expansion,
+certificate or CLM-R2 premise retirement. Full project and independent
+formal gates not rerun.
