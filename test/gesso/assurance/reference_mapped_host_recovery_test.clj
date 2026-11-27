@@ -200,6 +200,41 @@
           (is (= :not-established (:worker-authentication worker) (:dispatch-authentication worker))))
       (do (is (empty? (:obligations worker)))
           (is (= :not-applicable (:worker-authentication worker) (:dispatch-authentication worker))))))
+  (let [physical (:physical-refinement-premises result)
+        interface (:scope physical)
+        obligations (:obligations physical)
+        ids (mapv #(get-in % [:assumption :id]) obligations)
+        fingerprints (:open-premise-fingerprints physical)]
+    (is (= observed-recovery/physical-refinement-profile (:profile physical)))
+    (is (= :selected-historical-cut-only (:scope-kind interface)))
+    (is (= (:judgment-subject result) (:judgment-subject interface)))
+    (is (= (:historical-cut scope) (:historical-cut interface)))
+    (is (= (:publication-source-id scope) (:publication-source-id interface)))
+    (is (= (get-in result [:command-authentication-premises :scope :command-observation-ref])
+           (:recovery-cut-ref interface)))
+    (is (= (select-keys original [:manifest-tx-id :initialization-tx-id :selected-tx-ids :selected-commitments])
+           (select-keys interface [:manifest-tx-id :initialization-tx-id :selected-tx-ids :selected-commitments])))
+    (is (= [(second (:selected-tx-ids original))] (:selected-aborted-tx-ids interface)))
+    (is (= (mapv #(update % :intent-id str) (:intervening-maintenance original))
+           (:selected-maintenance interface)))
+    (is (= (cond-> [:reference-physical/source-log :reference-physical/ledger-outcome
+                   :reference-physical/snapshot-continuity :reference-physical/guarded-atomic-write
+                   :reference-physical/submission-attribution :reference-physical/abort-atomicity
+                   :reference-physical/aborted-attempt-attribution]
+             (seq (:intervening-maintenance original)) (conj :reference-physical/worker-clock)
+             true (conj :reference-physical/writer-coverage)) ids))
+    (is (= (set (butlast ids)) (get-in (peek obligations) [:assumption :dependencies])))
+    (is (= fingerprints (set (map :premise-fingerprint obligations))))
+    (is (every? #(= interface (get-in % [:assumption :subject :interface])) obligations))
+    (is (every? #(= :open (:discharge-state %)) obligations))
+    (is (not-any? (:trusted-assumptions result) fingerprints))
+    (is (not-any? (get-in result [:command-authentication-premises :open-premise-fingerprints]) fingerprints))
+    (is (not-any? (get-in result [:worker-authentication-premises :open-premise-fingerprints]) fingerprints))
+    (is (= :not-performed (:premise-acceptance physical)))
+    (is (= :not-established (:provider-refinement physical) (:complete-writer-coverage physical)
+           (:universal-refinement physical)))
+    (is (= :none (:authority physical)))
+    (is (= :not-issued (:certificate physical))))
   (is (= (set (map :premise-fingerprint (:obligations result)))
          (:open-premise-fingerprints result) (:trusted-assumptions result)))
   (is (every? #(= :open (:discharge-state %)) (:obligations result)))
@@ -423,7 +458,7 @@
                                  (is (not-any? #(contains? failure %)
                                                [:judgment-subject :judgment-profile :trusted-assumptions :original-recovery
                                                 :abstract-induction :abstract-induction-binding :command-authentication-premises
-                                                :worker-authentication-premises]))))
+                                                :worker-authentication-premises :physical-refinement-premises]))))
                              (is (not (contains? trusted :deployment-adoption)))
                              (is (not (contains? selected :judgment-profile)))
                              (is (= :explicit-declaration-only (:premise-acceptance trusted)))
@@ -446,7 +481,8 @@
                                (let [failure (observed-recovery/declare-conditional-recovery-trust! handle declaration)]
                                  (is (= :conditional-recovery-boundary-replaced (:reason failure)))
                                  (is (not (contains? failure :command-authentication-premises)))
-                                 (is (not (contains? failure :worker-authentication-premises)))))
+                                 (is (not (contains? failure :worker-authentication-premises)))
+                                 (is (not (contains? failure :physical-refinement-premises)))))
                              (with-redefs [storage/describe-deployment-acceptance (constantly trusted)]
                                (is (= :conditional-recovery-boundary-replaced
                                       (:reason (observed-recovery/declare-conditional-recovery-trust! handle declaration)))))
@@ -1080,3 +1116,46 @@
       (is (empty? (:obligations adjacent)))
       (is (= :not-applicable (:worker-authentication adjacent) (:dispatch-authentication adjacent)))
       (is (empty? (:open-premise-fingerprints adjacent))))))
+
+(deftest physical-refinement-premises-bind-selected-history
+  (let [describe #'observed-recovery/physical-refinement-premises
+        selected [{:tx-id 3 :intent-id (random-uuid) :maintenance :lease-acquisition}]
+        entry {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
+               :command-observation-ref "original-cut"
+               :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
+               :original-recovery {:manifest-tx-id 0 :initialization-tx-id 1
+                                   :selected-tx-ids [2 4 5] :selected-commitments [:committed :aborted :committed]
+                                   :intervening-maintenance selected
+                                   :provider-refinement :not-established
+                                   :aborted-receipt-identity :not-established}}
+        r (describe entry)
+        fingerprints (:open-premise-fingerprints r)
+        obligations (:obligations r)
+        ids (mapv #(get-in % [:assumption :id]) obligations)]
+    (is (= 9 (count fingerprints)))
+    (is (= r (describe (assoc-in entry [:scope :retained-acquisition-ref] "other-target"))))
+    (is (= (set (butlast ids)) (get-in (peek obligations) [:assumption :dependencies])))
+    (is (= #{:reference-physical/submission-attribution :reference-physical/abort-atomicity}
+           (get-in (first (filter #(= :reference-physical/aborted-attempt-attribution
+                                     (get-in % [:assumption :id])) obligations)) [:assumption :dependencies])))
+    (is (= :not-established (:provider-refinement r) (:complete-writer-coverage r) (:universal-refinement r)))
+    (is (every? #(= :open (:discharge-state %)) obligations))
+    (doseq [changed [(assoc entry :command-observation-ref "other-cut")
+                     (assoc-in entry [:scope :publication-source-id] "other-source")
+                     (assoc-in entry [:scope :historical-cut :payload-fingerprint] "other-content")
+                     (assoc-in entry [:judgment-subject :catalog-id] :fixture/other)
+                     (assoc-in entry [:original-recovery :manifest-tx-id] 1)
+                     (assoc-in entry [:original-recovery :selected-tx-ids] [2 4 6])
+                     (assoc-in entry [:original-recovery :selected-commitments] [:committed :committed :committed])
+                     (assoc-in entry [:original-recovery :intervening-maintenance 0 :intent-id] (random-uuid))
+                     (assoc-in entry [:original-recovery :worker-observation-provenance] :matched-local-issued-host-capture)]]
+      (let [other (describe changed)]
+        (is (not-any? fingerprints (:open-premise-fingerprints other)))
+        (is (= :not-performed (:premise-acceptance other)))
+        (is (= :not-established (:universal-refinement other)))))
+    (let [adjacent (describe (update entry :original-recovery dissoc :intervening-maintenance))
+          no-abort (describe (assoc-in entry [:original-recovery :selected-commitments] [:committed :committed :committed]))]
+      (is (= 8 (count (:obligations adjacent))))
+      (is (= 7 (count (:obligations no-abort))))
+      (is (empty? (get-in no-abort [:scope :selected-aborted-tx-ids])))
+      (is (= :not-established (:complete-writer-coverage adjacent) (:complete-writer-coverage no-abort))))))

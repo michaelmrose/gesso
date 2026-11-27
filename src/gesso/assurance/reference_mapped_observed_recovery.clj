@@ -591,13 +591,94 @@
      :dispatch-authentication (if (seq acknowledged) :not-established :not-applicable)
      :authority :none :certificate :not-issued}))
 
+(def physical-refinement-profile :selected-physical-refinement-premises-v1)
+
+(defn- physical-refinement-premises
+  "Describe the open physical obligations of this original selected cut.
+   Local comparisons are not authenticated provider semantics, complete
+   writer coverage or a universal refinement theorem. The scope is the
+   original cut, never an extended target or future application execution."
+  [{:keys [scope original-recovery judgment-subject command-observation-ref]}]
+  (let [id :reference-physical/selected-history
+        source-id :reference-physical/source-log
+        outcome-id :reference-physical/ledger-outcome
+        snapshot-id :reference-physical/snapshot-continuity
+        write-id :reference-physical/guarded-atomic-write
+        abort-id :reference-physical/abort-atomicity
+        submission-id :reference-physical/submission-attribution
+        receipt-id :reference-physical/aborted-attempt-attribution
+        clock-id :reference-physical/worker-clock
+        closure-id :reference-physical/writer-coverage
+        selected (mapv maintenance-identity (:intervening-maintenance original-recovery))
+        aborted (->> (map vector (:selected-tx-ids original-recovery)
+                          (:selected-commitments original-recovery))
+                     (keep (fn [[tx commitment]] (when (= :aborted commitment) tx))) vec)
+        interface {:profile physical-refinement-profile
+                   :scope-kind :selected-historical-cut-only
+                   :publication-source-id (:publication-source-id scope)
+                   :historical-cut (:historical-cut scope)
+                   :recovery-cut-ref command-observation-ref
+                   :judgment-subject judgment-subject
+                   :manifest-tx-id (:manifest-tx-id original-recovery)
+                   :initialization-tx-id (:initialization-tx-id original-recovery)
+                   :selected-tx-ids (:selected-tx-ids original-recovery)
+                   :selected-commitments (:selected-commitments original-recovery)
+                   :selected-aborted-tx-ids aborted
+                   :selected-maintenance selected
+                   :observations (select-keys original-recovery
+                                              [:activated-recovery-profile :local-acquisition-binding
+                                               :activation-root-binding :submission-recovery-linkage
+                                               :recovery-linkage :provider-refinement :source-provenance
+                                               :outcome-provenance :submission-provenance
+                                               :aborted-receipt-identity :command-origin-correspondence
+                                               :worker-observation-provenance])}
+        describe (fn [premise propositions boundary dependencies]
+                   (original-assumption-description
+                    {:id premise :subject {:kind :runtime :id id :interface interface}
+                     :scope {:kind :runtime :id id} :proposition propositions
+                     :parameters {} :semantic-context {:profile physical-refinement-profile}
+                     :dependencies dependencies :origin :implementation-correspondence
+                     :implementation-boundary boundary}))
+        obligations (cond->
+                     [(describe source-id [:reference-physical/source-log-decoder-and-retention-refinement]
+                                :gesso.assurance.reference-source-coverage/retained-replay-inputs #{})
+                      (describe outcome-id [:reference-physical/provider-ledger-identity-and-outcome-refinement]
+                                :gesso.assurance.reference-provider/retained-outcomes #{source-id})
+                      (describe snapshot-id [:reference-physical/provider-pinned-snapshot-and-valid-time-continuity]
+                                :gesso.assurance.reference-provider/retained-replay #{outcome-id})
+                      (describe write-id [:reference-physical/provider-ordered-atomic-guarded-write-refinement]
+                                :gesso.assurance.xtdb-envelope/checked-envelope #{snapshot-id})
+                      (describe submission-id [:reference-physical/selected-submission-attribution]
+                                :gesso.assurance.reference-mapped-submission/observed-submissions #{source-id outcome-id})]
+                      (seq aborted)
+                      (conj (describe abort-id [:reference-physical/provider-abort-atomicity-refinement]
+                                      :gesso.assurance.reference-provider/aborted-stutter #{snapshot-id})
+                            (describe receipt-id [:reference-physical/selected-aborted-attempt-attribution]
+                                      :gesso.assurance.reference-mapped-submission/aborted-attempt #{submission-id abort-id}))
+                      (seq selected)
+                      (conj (describe clock-id [:reference-physical/provider-worker-clock-and-deadline-refinement]
+                                      :gesso.assurance.reference-mapped-worker-envelope/provider-worker-ops #{write-id})))
+        closure-dependencies (set (map #(get-in % [:assumption :id]) obligations))
+        obligations (conj obligations
+                          (describe closure-id [:reference-physical/selected-cut-authoritative-writer-coverage]
+                                    :gesso.live.outbox.writer-policy/installed-writer-boundary closure-dependencies))]
+    {:profile physical-refinement-profile
+     :scope interface
+     :obligations obligations
+     :open-premise-fingerprints (set (map :premise-fingerprint obligations))
+     :premise-acceptance :not-performed
+     :provider-refinement :not-established
+     :complete-writer-coverage :not-established
+     :universal-refinement :not-established
+     :authority :none :certificate :not-issued}))
+
 (defn- acceptance-boundaries-current? []
   (and (cut-boundaries-current?)
        (conditional-boundaries-current?)
        (identical? original-deployment-acceptance storage/describe-deployment-acceptance)
        (identical? original-assumption-description assumption/describe-assumption)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v5)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v6)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
@@ -611,7 +692,8 @@
           (let [r (original-deployment-acceptance scope declaration)
                 fresh (checked-abstract-induction admission)
                 command-premises (command-authentication-premises entry)
-                worker-premises (worker-authentication-premises entry)]
+                worker-premises (worker-authentication-premises entry)
+                physical-premises (physical-refinement-premises entry)]
             (cond
               (not (and (acceptance-boundaries-current?)
                         (or (nil? (:worker-correspondence original-recovery))
@@ -629,6 +711,7 @@
                       :original-recovery original-recovery
                       :command-authentication-premises command-premises
                       :worker-authentication-premises worker-premises
+                      :physical-refinement-premises physical-premises
                       :cut-correspondence cut-correspondence
                       :historical-assurance :conditional-on-declared-trust
                       :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))
@@ -645,8 +728,9 @@
    activated trajectory with its issued historical comparison and exact
    declared trust. Recheck the original issued abstract induction and
    retain its entire report, including all open obligations. Describe the
-   original command, worker and source-acceptance premises separately:
-   storage trust neither accepts nor discharges them. Host adoption is recorded by the host
+   original command, worker, source-acceptance and selected physical
+   refinement premises separately: storage trust neither accepts nor
+   discharges them. Host adoption is recorded by the host
    boundary, not by this declaration. Open premises remain open. No
    Claim invariant theorem or universal refinement is established.
    The four-argument form additionally requires the exact original issued

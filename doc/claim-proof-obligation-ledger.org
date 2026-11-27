@@ -7892,3 +7892,45 @@ Next: audit and compose the outstanding physical refinement and writer
 coverage obligations for the exact selected historical subject, keeping
 the original abstract, command, worker and storage obligations distinct
 from any universal CLM-R2 assertion.
+
+* v2821 — describe selected physical refinement and writer coverage premises
+
+The v6 conditional historical judgment describes the outstanding
+physical premises of the original issued cut: source log decoder and
+retention fidelity, ledger identity and outcomes, pinned snapshots and
+valid-time continuity, ordered atomic guarded writes, selected
+submission attribution, and authoritative writer coverage. Separately
+describe abort atomicity and aborted attempt attribution when the
+selected commitments include an abort, and provider worker clock and
+deadline semantics when selected maintenance intervenes. The dependency
+sets are structural declarations, not checked derivations.
+
+Bind these descriptions to the original cut reference, historical
+payload fingerprint and coordinates, publication source, manifest and
+initialization transaction identities, ordered selected semantic subject,
+transaction identities and commitments, aborted identities, selected
+maintenance and the recorded observation classifications. A changed
+original subject changes the premise fingerprints. Selecting a different
+target acquisition does not change the original premise scope.
+
+Keep the physical premise set separate from storage trust, abstract
+induction, command and worker authentication. The writer coverage
+premise concerns the exact selected historical cut; it does not assert
+universal closure of every production writer. All applicable physical
+premises remain open, unadmitted and unaccepted. No universal provider
+refinement, authoritative writer closure, invariant theorem or
+CLM-R2 discharge follows from the new descriptions.
+
+Focused JVM: 6 tests / 1622 assertions, zero failures or errors, in the
+assembled-host recovery namespace, including both genuine persistent
+XTDB recovery fixtures, reopened and copied storage, extended history,
+command/worker authentication premise regressions, the provider-specific
+deadline projection and the new physical premise fingerprint regression.
+Existing offline dependency bundle and original worker polling retained.
+Full project gates not run. No production transaction behavior changed.
+
+Next: compose a complete original-cut obligation inventory and explicit
+dependency/acceptance classification without accepting or discharging
+unselected premises. Audit the gap between the selected physical
+correspondence and universal CLM-R2 refinement before proposing a
+conditional invariant conclusion.
