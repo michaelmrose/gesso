@@ -118,8 +118,35 @@
                                  declaration {:scope (:scope isolated) :acceptance :trust-open-premises
                                               :premises (mapv :assumption (:obligations isolated))}
                                  accepted (isolation/declare! node admission isolation-handle declaration)
-                                 configured (host/adopt-writer-isolation! started source declarations)
-                                 provider (host/adopt-provider-trust! started source declarations)]
+                                 combined (host/adopt-implementation-trust! started source declarations)
+                                 configured (:writer-isolation combined)
+                                 provider (:provider-trust combined)
+                                 binding (:original-clm-r2-binding combined)
+                                 description (induction/describe-mapped-admission admission)
+                                 join! (fn [i p] (#'host/compose-implementation-trust! description (:activation-root combined) i p))]
+                             (is (= :conditional-configured-implementation-argument (:status combined)))
+                             (is (= (:remaining-conditions binding) (:remaining-conditions combined)))
+                             (is (= 39 (count (:remaining-conditions combined))))
+                             (is (= (:original-open-obligations description) (:original-open-obligation-ids-by-operation binding)))
+                             (is (= {:writer-isolation (:trusted-assumptions configured) :provider-trust (:trusted-assumptions provider)}
+                                    (:trusted-assumptions-by-contract combined)))
+                             (is (= :not-established (:universal-refinement combined) (:continuous-mediation combined)))
+                             (is (= :not-performed (:proof-discharge combined)))
+                             (is (= :open (:original-obligation-status combined)))
+                             (is (= :related-not-entailing (:condition-link-semantics combined)))
+                             (is (= :unissued-combined-trust-host
+                                    (reason #(host/adopt-implementation-trust! (assoc started :forged true) source declarations))))
+                             (is (= :unissued-combined-trust-host
+                                    (reason #(host/adopt-implementation-trust! ctx source declarations))))
+                             (with-redefs [host/adopt-provider-trust! (constantly provider)]
+                               (is (= :combined-trust-boundary-replaced
+                                      (reason #(host/adopt-implementation-trust! started source declarations)))))
+                             (doseq [[i p] [[(assoc-in configured [:scope :catalog-fingerprint] "foreign") provider]
+                                            [(assoc-in configured [:scope :activation-root :source-id] "foreign") provider]
+                                            [(update configured :trusted-assumptions disj (first (:trusted-assumptions configured))) provider]
+                                            [configured (assoc-in provider [:scope :remaining-conditions] #{})]
+                                            [configured (assoc-in provider [:origin-report :contract :original-inventory :original-binding :original-open-obligation-ids-by-operation] {})]]]
+                               (is (= :combined-trust-subject-or-premise-mismatch (reason #(join! i p)))))
                              (is (= :conditional-declared-provider-trust (:status provider)) (pr-str (dissoc provider :origin-report)))
                              (is (= :configured-local-host (:deployment-adoption provider)))
                              (is (= :open-owned-generation-at-adoption (:lifecycle-evidence provider)))
@@ -222,6 +249,8 @@
                                  (is (identical? token (xtdb/current-submission-policy-token node)))
                                  (is (= {:phase :fenced :in-flight 1} (xtdb/owned-submission-policy-state node token)))
                                  (is (= :installed-owned-policy-not-open (:reason (classify! node admission))))
+                                 (is (= :combined-trust-host-retired
+                                        (reason #(host/adopt-implementation-trust! started source declarations))))
                                  (is (= :provider-trust-host-retired
                                         (reason #(host/adopt-provider-trust! started source declarations))))
                                  (is (= :writer-isolation-host-retired

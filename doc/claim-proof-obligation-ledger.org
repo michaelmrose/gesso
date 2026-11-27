@@ -9898,3 +9898,48 @@ exact owner boundary. Preserve distinct premise scopes, original open
 obligations and the remaining implementation and universal coverage
 conditions; do not infer continuous mediation or universal refinement
 from the declarations alone.
+
+* v2868 — compose configured implementation trust
+
+Add adopt-implementation-trust! at the exact mapped owner boundary.
+Require both startup-selected trust registrations for the identical
+returned host, sharing its retirement lock and active flag. Reject
+copied hosts, request contexts, unconfigured or retired owners.
+Pin both adoption functions and the activation-root boundary, and
+check the current open owned generation and actual activation before
+and after the composition. Rederive both declarations while holding
+the common retirement lock rather than accepting caller reports.
+
+Reuse the original CLM-R2 binding freshly rederived through provider
+adoption. Require the same catalog and induction fingerprints, original
+open operation-obligation register and actual activation root. Match
+all five isolation and eight provider premise IDs, their accepted
+fingerprints, open states and original condition links. Preserve
+separate declaration scopes, the original binding and all 39 remaining
+general conditions. Relevance links do not establish implication or
+discharge. No storage-lineage trust or selected historical evidence
+is an input to the combined general argument.
+
+Three-namespace regression: 27 tests / 491 assertions, zero failures
+or errors, including the persistent mapped-host lifecycle, writer
+classification and complete generic host-test namespace. Exercise
+combined adoption and restart, both exact premise sets, preservation
+of the original register and conditions, rejection of foreign subject,
+changed activation root, missing trusted premise, altered condition
+inventory and original register, copied owner, request context,
+unconfigured host, substituted adoption boundary and retired owner.
+Update the reviewed host source fingerprint. All four candidate
+source/test Git blobs match the local tested files. Full project gates
+and worker-interleaved historical recovery not rerun.
+
+The result remains a conditional diagnostic, not an authority or
+certificate. Continuous mediation, provider correspondence, universal
+writer coverage and universal refinement remain unestablished.
+Both historical judgments remain unchanged; no original premise
+is discharged.
+
+Next: examine the remaining Gesso-side general conditions, beginning
+with the exact admitted source-envelope refinement and the gap between
+checked symbolic lowering and actual execution. Distinguish assumptions
+related to the two explicit trust contracts from obligations that
+require independent implementation correspondence.

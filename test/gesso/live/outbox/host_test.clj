@@ -149,6 +149,8 @@
                 (:reason (problem #(host/adopt-writer-isolation! started nil nil)))))
          (is (= :unissued-provider-trust-host
                 (:reason (problem #(host/adopt-provider-trust! started nil nil)))))
+         (is (= :unissued-combined-trust-host
+                (:reason (problem #(host/adopt-implementation-trust! started nil nil)))))
          (is (= :not-selected (:status (host/assurance-status started))))
          (is (= :history-audit-not-selected (:reason (problem #(host/audit-history! started)))))
          (is (some? node))

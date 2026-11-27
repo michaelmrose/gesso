@@ -811,3 +811,100 @@
             (assoc result :deployment-adoption :configured-local-host
                    :lifecycle-evidence :open-owned-generation-at-adoption)
             result))))))
+
+(def ^:private original-isolation-adopt adopt-writer-isolation!)
+(def ^:private original-provider-adopt adopt-provider-trust!)
+(def ^:private original-combined-root writer-policy/activated-policy-root)
+
+(defn- combined-boundaries! []
+  (provider-adoption-boundaries!)
+  (when-not (and (identical? original-isolation-adopt adopt-writer-isolation!)
+                 (identical? original-provider-adopt adopt-provider-trust!)
+                 (identical? original-combined-root writer-policy/activated-policy-root))
+    (reject! :combined-trust-boundary-replaced {})))
+
+(defn- compose-implementation-trust! [description root isolation provider]
+  ;; Internal diagnostic join only; the public entry point rederives both
+  ;; declarations under the exact owner's shared retirement lock.
+  (let [contract (get-in provider [:origin-report :contract])
+        inventory (:original-inventory contract)
+        binding (:original-binding inventory)
+        subject (select-keys description [:catalog-fingerprint :induction-fingerprint])
+        conditions (:remaining-conditions binding)
+        i-fps (set (map :premise-fingerprint (:obligations isolation)))
+        p-fps (set (map :premise-fingerprint (vals (:premises provider))))
+        i-conditions (:related-condition-ids isolation)]
+    (when-not (and (= :conditional-declared-writer-isolation (:status isolation))
+                   (= :conditional-declared-provider-trust (:status provider))
+                   (= :configured-local-host (:deployment-adoption isolation) (:deployment-adoption provider))
+                   (= :explicit-declaration-only (:premise-acceptance isolation) (:premise-acceptance provider))
+                   (= :not-performed (:proof-discharge isolation) (:proof-discharge provider) (:proof-discharge binding))
+                   (= :not-established (:writer-coverage isolation) (:writer-coverage provider)
+                      (:continuous-mediation isolation) (:provider-correspondence provider)
+                      (:loaded-provider-identity provider) (:universal-refinement binding))
+                   (= :open-provider-contract (:status contract))
+                   (= :complete-open-condition-review (:status inventory))
+                   (= :conditional-original-clm-r2-binding (:status binding))
+                   (= :open (:original-obligation-status binding))
+                   (= :not-performed (:premise-acceptance binding))
+                   (= subject (select-keys (:scope isolation) (keys subject))
+                      (select-keys (:scope contract) (keys subject)) (select-keys binding (keys subject)))
+                   (= (:scope contract) (get-in provider [:scope :contract-scope]))
+                   (= root (get-in isolation [:scope :activation-root]))
+                   (= (:original-open-obligations description) (:original-open-obligation-ids-by-operation binding))
+                   (= conditions (:remaining-conditions inventory) (:remaining-conditions contract)
+                      (get-in provider [:scope :remaining-conditions]))
+                   (= i-conditions (get-in inventory [:groups :writer-mediation :conditions]))
+                   (= (:linked-conditions contract) (set (keys (:condition-links contract))))
+                   (= (:condition-links contract) (get-in provider [:scope :condition-links]))
+                   (= isolation-premise-ids (set (map #(get-in % [:assumption :id]) (:obligations isolation))))
+                   (= provider-premise-ids (set (keys (:premises provider))))
+                   (= (:premises contract) (:premises provider))
+                   (= 5 (count i-fps)) (= 8 (count p-fps))
+                   (= i-fps (:trusted-assumptions isolation)) (= p-fps (:trusted-assumptions provider))
+                   (every? #(= :open (:discharge-state %)) (concat (:obligations isolation) (vals (:premises provider)))))
+      (reject! :combined-trust-subject-or-premise-mismatch {}))
+    {:status :conditional-configured-implementation-argument
+     :profile :configured-clm-r2-implementation-argument-v1
+     :subject subject :activation-root root
+     :writer-isolation isolation :provider-trust provider :original-clm-r2-binding binding
+     :trusted-assumptions-by-contract {:writer-isolation i-fps :provider-trust p-fps}
+     :condition-links-by-contract {:writer-isolation i-conditions :provider-trust (:condition-links contract)}
+     :remaining-conditions conditions :condition-link-semantics :related-not-entailing
+     :original-obligation-status :open :premise-acceptance :explicit-declarations-only
+     :continuous-mediation :not-established :provider-correspondence :not-established
+     :writer-coverage :not-established :universal-refinement :not-established
+     :proof-discharge :not-performed :authority :none :certificate :not-issued}))
+
+(defn adopt-implementation-trust!
+  "Compose fresh configured isolation and provider declarations at the exact
+   mapped owner. Reuse the original CLM-R2 binding rederived by provider
+   adoption. No supplied reports, storage-lineage trust or selected-history
+   evidence enter this argument. All original conditions remain open."
+  [system source declarations]
+  (let [i (locking writer-isolation-hosts (.get writer-isolation-hosts (::writer-isolation-token system)))
+        p (locking provider-trust-hosts (.get provider-trust-hosts (::provider-trust-token system)))]
+    (when-not (and i p (identical? system (.get ^java.lang.ref.WeakReference (:system i)))
+                   (identical? system (.get ^java.lang.ref.WeakReference (:system p)))
+                   (identical? (:lock i) (:lock p)) (identical? (:active i) (:active p)))
+      (reject! :unissued-combined-trust-host {}))
+    (locking (:lock i)
+      (when-not @(:active i) (reject! :combined-trust-host-retired {}))
+      (combined-boundaries!)
+      (require-open-provider-generation! system)
+      (let [node (:xtdb/connectable system) admission (::mapped-admission system)
+            token (::mapped-policy-token system)
+            activation (original-combined-root node admission token)
+            root (some-> activation :observation
+                         (select-keys [:source-id :manifest-tx-id :initialization-tx-id :system-time :initialization-fingerprint])
+                         (update :system-time str))]
+        (when-not activation (reject! :combined-trust-missing-activation {}))
+        (let [description (original-isolation-admission admission source)
+              isolation (original-isolation-adopt system source declarations)
+              provider (original-provider-adopt system source declarations)
+              result (compose-implementation-trust! description root isolation provider)]
+          (combined-boundaries!)
+          (require-open-provider-generation! system)
+          (when-not (= activation (original-combined-root node admission token))
+            (reject! :combined-trust-activation-changed {}))
+          result)))))
