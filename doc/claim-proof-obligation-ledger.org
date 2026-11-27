@@ -8216,3 +8216,39 @@ Next: independently qualify the partition substitution relation and
 its preservation of original expression semantics. Establish the
 conditions required to lift representative agreement, before binding
 such a result to the original judgment or discharging any premise.
+
+* v2829 — check literal partition substitution instances
+
+Rebuild the representative domains from the original typed rule. For
+each original binding, derive its comparison signature independently:
+integer order relative to each cutpoint, literal equality for strings
+and keywords, explicit Boolean identity, and a separate nullable nil
+class. Require exactly one matching representative in each domain.
+Validate the exact original and substituted reader bindings using the
+production rule evaluator and independent typed-presence evaluator.
+Independently evaluate a complete Boolean truth tree over both binding
+maps, including atoms in branches that would be skipped at runtime.
+Require equality of the trees and agreement with both executable
+evaluators before and after substitution. Equal root results alone are
+insufficient.
+
+Exercise arbitrary-size integers and machine boundaries, unnamed
+Claim statuses, helpers and journal values, nil versus nonnil,
+nullable Boolean values, a collision with the generated other-string,
+invalid binding footprints, substituted boundaries, and a deliberately
+wrong representative masked by a short-circuit branch. Both original
+Claim invariants and Init are included. The diagnostic requires
+original source and rebuilds the partition rather than trusting a
+caller-supplied report.
+
+Focused JVM: initial substitution tests passed 3 tests / 83 assertions.
+Final combined substitution, partition, typed-atom oracle and typed-
+proposition bridge suites passed 79 tests / 3513 assertions, zero
+failures or errors. Historical judgment unchanged; host recovery and
+full project gates not rerun. No premise discharged.
+
+Next: formalize the abstract atom-preservation and Boolean congruence
+argument, reusing the existing propositional kernel where possible.
+Separate an abstract theorem from the remaining executable evaluator
+refinement obligations; checking concrete substitutions is not a
+universal proof of either.
