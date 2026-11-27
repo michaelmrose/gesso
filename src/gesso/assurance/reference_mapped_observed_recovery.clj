@@ -8,6 +8,7 @@
             [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-recovery-inventory :as inventory]
+            [gesso.assurance.reference-recovery-expression :as expression]
             [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.live.outbox.initialization :as initialization]
@@ -714,6 +715,7 @@
 
 (def ^:private original-inventory inventory/describe-inventory)
 (def ^:private original-transfer-binding inventory/describe-transfer-binding)
+(def ^:private original-expression-binding expression/bind-premise)
 
 (defn- acceptance-boundaries-current? []
   (and (cut-boundaries-current?)
@@ -721,9 +723,10 @@
        (identical? original-deployment-acceptance storage/describe-deployment-acceptance)
        (identical? original-assumption-description assumption/describe-assumption)
        (identical? original-inventory inventory/describe-inventory)
-       (identical? original-transfer-binding inventory/describe-transfer-binding)))
+       (identical? original-transfer-binding inventory/describe-transfer-binding)
+       (identical? original-expression-binding expression/bind-premise)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v9)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v10)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
@@ -749,7 +752,9 @@
               :else
               (let [composed (original-inventory fresh r command-premises worker-premises physical-premises)
                     transfer (original-transfer-binding (:selected-invariant-evidence entry)
-                                                        physical-premises composed fresh)]
+                                                        physical-premises composed fresh)
+                    expression-support (original-expression-binding (:selected-invariant-evidence entry)
+                                                                    transfer composed fresh)]
                 (merge r (conditional-report :conditional)
                      {:judgment-profile judgment-profile
                       :judgment-scope scope
@@ -763,6 +768,7 @@
                       :physical-refinement-premises physical-premises
                       :obligation-inventory composed
                       :physical-invariant-transfer transfer
+                      :invariant-expression-refinement expression-support
                       :cut-correspondence cut-correspondence
                       :historical-assurance :conditional-on-declared-trust
                       :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))

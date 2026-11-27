@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-recovery-invariant-test
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-recovery-invariant :as invariant]
+            [gesso.assurance.reference-recovery-expression :as expression]
             [gesso.assurance.reference-mapped-poststate :as poststate]
             [gesso.assurance.rule-eval :as production]
             [xtdb.api :as xt]
@@ -203,6 +204,23 @@
              (:checked-points evidence)))
       (is (= :not-established (:universal-evaluator-correspondence evidence)))
       (is (= :not-performed (:proof-discharge evidence))))
+    (let [catalog (:catalog-expression-refinement checked)
+          support (:invariant-expression-refinement result)
+          fp (:premise-fingerprint support)]
+      (is (= expression/profile (:profile catalog)))
+      (is (= :conditional-catalog-refinement (:status catalog)) (pr-str catalog))
+      (is (= 819 (:cases-checked catalog)))
+      (is (= expression/binding-profile (:profile support)))
+      (is (= :conditional-premise-support (:status support)) (pr-str support))
+      (is (= (:catalog-fingerprint checked) (:catalog-fingerprint support)))
+      (is (= (:recovery-cut-ref checked) (:recovery-cut-ref support)))
+      (is (= (:invariant-ids checked) (:invariant-ids support)))
+      (is (= (:conditions catalog) (:remaining-conditions support)))
+      (is (= fp (get-in result [:physical-invariant-transfer :condition-premise-fingerprints
+                                :faithful-invariant-expression-semantics])))
+      (is (contains? (get-in result [:obligation-inventory :unaccepted-premise-fingerprints]) fp))
+      (is (= :open (:premise-state support)))
+      (is (= :not-performed (:proof-discharge support) (:premise-acceptance support))))
     (is (= invariant/profile (:profile checked)))
     (is (= :checked (:status checked)) (pr-str checked))
     (is (= :declared-invariants-hold-on-selected-replay-projections (:conclusion checked)))

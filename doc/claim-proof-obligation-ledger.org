@@ -8501,3 +8501,43 @@ the exact original Claim catalog and its subject-bound invariant-expression
 semantics premise. Retain all primitive and loaded-code conditions
 as explicit open assumptions; do not substitute finite source evidence
 for an unconditional discharge.
+
+* v2836 — bind expression refinement to the original historical judgment
+
+During original issued-cut capture, recheck the exact operation-set
+fingerprint and derive the conditional literal evaluator refinement
+for the original Init and every declared invariant, using their
+original typed reader footprints. Require matching catalog identity,
+source artifacts and remaining semantic conditions. Retain the
+catalog expression report within the selected invariant evidence;
+an unsupported expression does not establish catalog refinement.
+
+The v10 historical judgment binds that retained report to the exact
+open invariant-expression-semantics premise in the original transfer
+binding and composed obligation inventory. Require matching original
+cut, catalog, induction report and invariant identities, checked
+finite expression correspondence, and an open unaccepted physical
+premise with the expected identity and dependency structure. Preserve
+all source-refinement conditions, including primitive semantics,
+admission and source-to-loaded-code correspondence. Later recovery
+does not substitute new catalog evidence. The result is conditional
+premise support, not acceptance, discharge, or a universal evaluator
+theorem. Pin the new catalog checker and binding boundaries.
+
+Focused JVM: expression, invariant and inventory suites passed
+8 tests / 238 assertions, zero failures or errors. Combined with the
+assembled-host recovery suite: 13 tests / 2923 assertions, zero
+failures or errors. Both persistent adjacent and worker-interleaved
+fixtures passed with original worker polling; reopened and copied
+store checks included. Exercise the original Claim catalog's 819
+representative valuations, original-cut binding, foreign catalog and
+induction identities, missing transfer evidence, and false acceptance
+or discharge. All five code blobs verified against tested files.
+Full project gates not run. No proof premise discharged.
+
+Next: qualify the authoritative projection premise by independently
+checking the original mapped state projection against the exact
+declared physical coordinates and closed journal/outcome decoding.
+Keep source-level expression support separate from projection and
+provider snapshot semantics; prioritize substantive correspondence
+over additional descriptive layers.

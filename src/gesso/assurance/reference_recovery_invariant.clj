@@ -6,6 +6,7 @@
             [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.assurance.reference-mapped-poststate :as poststate]
             [gesso.assurance.reference-retained-acquisition :as acquisition]
+            [gesso.assurance.reference-recovery-expression :as expression]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.rule-eval :as production]
             [gesso.assurance.transition :as construction]
@@ -28,6 +29,8 @@
 (def ^:private original-observation publication/read-framed-submission-observation!)
 (def ^:private original-initialization induction/check-mapped-initialization!)
 (def ^:private original-query xt/q)
+(def ^:private original-expression-catalog expression/check-catalog!)
+(def ^:private original-expression-boundaries expression/boundaries-current?)
 
 (defn boundaries-current? []
   (and (identical? original-project poststate/project-visible!)
@@ -42,7 +45,10 @@
        (identical? original-reader acquisition/read-acquisition!)
        (identical? original-observation publication/read-framed-submission-observation!)
        (identical? original-initialization induction/check-mapped-initialization!)
-       (identical? original-query xt/q)))
+       (identical? original-query xt/q)
+       (identical? original-expression-catalog expression/check-catalog!)
+       (identical? original-expression-boundaries expression/boundaries-current?)
+       (original-expression-boundaries)))
 
 (defn- report [status reason]
   (cond-> {:profile profile :status status
@@ -328,13 +334,16 @@
                 r (audit-replay! catalog (:target-map source) cases (:state checked)
                                  (:replay-inputs sample) comparison steps)
                 physical (when (= :checked (:status r))
-                           (audit-physical! node (:target-map source) cases (:replay-inputs sample) r))]
+                           (audit-physical! node (:target-map source) cases (:replay-inputs sample) r))
+                catalog-refinement (when (= :checked (:status r))
+                                     (original-expression-catalog catalog (:catalog-fingerprint checked)))]
             (cond
               (not (boundaries-current?)) (report :unsupported :invariant-boundary-replaced)
               (not= :checked (:status r)) r
               :else (assoc r :retained-payload-fingerprint (:payload-fingerprint sample)
                            :catalog-fingerprint (:catalog-fingerprint checked)
                            :physical-readbacks physical
+                           :catalog-expression-refinement catalog-refinement
                            :conditional-physical-invariant
                            (derive-physical-invariants r physical (:replay-inputs sample)))))))
       (catch clojure.lang.ExceptionInfo e
