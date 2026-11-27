@@ -13,6 +13,7 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.assurance.observed-correspondence :as correspondence]
+            [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.proof.guarded-substitution :as guarded]
             [gesso.assurance.proof.unified-preservation :as unified]
             [gesso.assurance.proof.finite-model-oracle :as oracle]))
@@ -386,7 +387,7 @@
         frame! (fn [a ctx ops]
                  (a :prepare! accept binding snapshot {})
                  ;; Same function used before either executor's physical try.
-                 (#'publication/frame-resolved-plan! ctx {:ops ops :record record} a))
+                 (#'publication/frame-resolved-plan! {:ctx ctx} {:ops ops :record record} a nil))
         reason (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
         marker #(get-in % [:frame-handoff :checked :candidate :publication-expectation])]
     ;; The registry callback is private to the issuer; the legacy admission
@@ -400,7 +401,28 @@
       (is (false? @called))
       (is (admission :pending? accept "c1")))
     (admission :discard! accept "c1")
-    (is (= :matched (marker (frame! admission ctx ops))))
+    (let [framed (frame! admission ctx ops)
+          unbound (get-in framed [:frame-handoff :unbound-ops])
+          bound (:ops framed)
+          check! (fn [candidate] (#'publication/check-final-envelope! unbound candidate))]
+      (is (= :matched (marker framed)))
+      (is (= bound (get-in framed [:frame-handoff :submission :tx-ops])))
+      (is (true? (check! bound)))
+      (is (= unbound (update-in bound [(dec (count bound)) 2] #(apply dissoc % envelope/binding-keys))))
+      ;; A freshly bound digest does not establish equality to the admitted
+      ;; prefix, write suffix or original transition witness.
+      (doseq [changed [(assoc-in unbound [0 1] "other")
+                       (subvec unbound 1)
+                       (assoc-in unbound [(dec (count unbound)) 2 :guard-prefix-fingerprint] "foreign")
+                       (mapv (fn [op] (if (= :requests (second op)) (assoc-in op [2 :revision] 9) op)) unbound)]]
+        (let [rebound (envelope/bind-transition-envelope! changed)]
+          (is (envelope/bound-transition-envelope? rebound))
+          (is (= :mapped-final-envelope-mismatch (reason #(check! rebound))))))
+      (is (= :mapped-final-envelope-mismatch (reason #(check! (assoc-in bound [(dec (count bound)) 2 :envelope-fingerprint] "foreign")))))
+      (with-redefs [envelope/bind-transition-envelope! (constantly bound)]
+        (is (= :mapped-envelope-boundary-replaced (reason #(frame! admission ctx ops)))))
+      (with-redefs [envelope/bound-transition-envelope? (constantly true)]
+        (is (= :mapped-envelope-boundary-replaced (reason #(frame! admission ctx ops))))))
     (is (not (admission :pending? accept "c1")))
     (doseq [bad [(pop ops)
                  (update-in ops [(dec (count ops)) 2] assoc :gesso.live.outbox/purpose :example/wrong)

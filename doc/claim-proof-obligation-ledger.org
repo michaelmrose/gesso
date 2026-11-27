@@ -9943,3 +9943,43 @@ with the exact admitted source-envelope refinement and the gap between
 checked symbolic lowering and actual execution. Distinguish assumptions
 related to the two explicit trust contracts from obligations that
 require independent implementation correspondence.
+
+* v2869 — preserve the admitted transaction envelope
+
+Require the final bound transaction vector to preserve the exact
+unbound vector assembled from the admitted operations and the
+framework-owned transition evidence. Only the final evidence document
+may acquire the two envelope-binding fields. Check vector shape,
+complete ordered equality after removing exactly those fields, and
+the independently recomputed binding. Capture and pin the envelope
+binder and verifier. Check at frame construction and again upon
+consumption of the one-use framed submission handoff, retaining the
+original unbound vector in that private scope. A self-consistent
+digest of a modified vector is insufficient.
+
+Extend the production-frame fixture to reject freshly rebound changes
+to the guard prefix, vector length, mapped writes and witness fields,
+as well as a changed digest or replaced binder/verifier. Correct the
+fixture's outdated three-argument private frame invocation to the
+current four-argument invocation. Update the reviewed publication
+source fingerprint used by the replay argument.
+
+The corrected production-frame test passed: 1 test / 58 assertions.
+The final read-only replay argument namespace passed: 3 tests /
+59 assertions. Both have zero failures or errors. The initially
+launched broader regression used the outdated fixture invocation
+and recorded an arity error; do not count that run as passing.
+The full corrected fixture namespace, actual mapped-host submission
+and historical recovery suites, and full project gates were not
+validated in this revision. The three final source/test blobs match
+the local tested files.
+
+This strengthens structural preservation at the checked-to-submitted
+envelope boundary. It is not a provider semantics theorem, universal
+writer coverage or proof of all actual execution paths. No original
+proof premise discharged; historical judgments remain unchanged.
+
+Next: exercise the final envelope check at actual one-use handoff
+consumption, including changed envelope bindings and rejection before
+physical execution. Then continue the exact source-to-admitted-envelope
+correspondence argument, retaining provider and projection assumptions.

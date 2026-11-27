@@ -265,6 +265,29 @@
               tx-op (conj tx-op))
        :intents intents :record record}))))
 
+(def ^:private original-bind-envelope envelope/bind-transition-envelope!)
+(def ^:private original-bound-envelope? envelope/bound-transition-envelope?)
+
+(defn- check-final-envelope! [unbound bound]
+  ;; Equality with the admitted vector, not merely a self-consistent digest.
+  ;; Only the final witness may acquire the two envelope-binding fields.
+  (when-not (and (identical? original-bind-envelope envelope/bind-transition-envelope!)
+                 (identical? original-bound-envelope? envelope/bound-transition-envelope?))
+    (reject! :mapped-envelope-boundary-replaced {}))
+  (when-not (and (vector? unbound) (seq unbound)
+                 (vector? bound) (= (count unbound) (count bound))
+                 (vector? (peek unbound)) (= 3 (count (peek unbound)))
+                 (= [:put-docs :gesso_transition_evidence] (subvec (peek unbound) 0 2))
+                 (map? (peek (peek unbound)))
+                 (not-any? #(contains? (peek (peek unbound)) %) envelope/binding-keys)
+                 (vector? (peek bound)) (= 3 (count (peek bound)))
+                 (map? (peek (peek bound)))
+                 (= unbound (update-in bound [(dec (count bound)) 2]
+                                        #(apply dissoc % envelope/binding-keys)))
+                 (original-bound-envelope? bound))
+    (reject! :mapped-final-envelope-mismatch {}))
+  true)
+
 (def ^:private ^ThreadLocal framed-submission (ThreadLocal.))
 
 (def ^:private ^ThreadLocal framed-observation (ThreadLocal.))
@@ -351,6 +374,7 @@
                (xtdb/same-connectable? connectable (:connectable scope))
                (= submission (:submission scope))
                (compare-and-set! (:available? scope) true false))
+      (check-final-envelope! (:unbound-ops scope) (:tx-ops submission))
       (when-let [{observed-admission :admission observed-node :connectable
                   :keys [claims valid?]} (.get framed-observation)]
         (try
@@ -602,17 +626,18 @@
             evidence (inductive/mapped-transition-evidence! admission checked)
             ;; The closed footprint excludes this framework-owned record.
             ;; Add it only after admission; bind the final vector to the handoff.
-            ops (envelope/bind-transition-envelope!
-                 (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)"
-                         (:xt/id evidence)]]
-                       (conj (:tx-ops actual) [:put-docs :gesso_transition_evidence evidence])))
+            unbound (into [["ASSERT 0 = (SELECT COUNT(*) FROM gesso_transition_evidence WHERE _id = ?)"
+                            (:xt/id evidence)]]
+                          (conj (:tx-ops actual) [:put-docs :gesso_transition_evidence evidence]))
+            ops (original-bind-envelope unbound)
+            _ (check-final-envelope! unbound ops)
             evidence (peek (peek ops))
             submission (assoc actual :tx-ops ops)]
         (when-not (= (:xt/id evidence) (:xt/id (:record plan)))
           (reject! :mapped-transition-evidence-command-mismatch {}))
         (assoc plan :ops ops
                :frame-handoff {:admission admission :submission submission
-                               :checked checked :evidence evidence
+                               :checked checked :evidence evidence :unbound-ops unbound
                                :origin-invocation invocation :origin-executor executor
                                :command-binding (:gesso.command/binding (:record plan))})))
     plan)))
