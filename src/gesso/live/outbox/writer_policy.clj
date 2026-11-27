@@ -129,7 +129,7 @@
           (reject! :uninstalled-mapped-writer-policy))
         (correspondence/record-activation! connectable policy token (:admission config) observation
                                           {:initializer (:initializer config) :descriptor descriptor})
-        (reset! phase {:registration token}))
+        (reset! phase {:registration token :activation observation}))
       nil
       (catch Throwable e
         (reset! phase :failed)
@@ -219,3 +219,28 @@
         (.put policies policy {:connectable connectable :config config
                                :source-id source-id :descriptor (:descriptor infrastructure) :phase phase}))
       policy)))
+
+
+(defn activated-policy-root
+  "Read the actual mapped policy's current generation and captured root.
+   Neither a registered arbitrary predicate nor an independently recorded
+   activation can substitute for the completed mapped-policy phase.
+   Trusted in-process diagnostics only; not a grant or a writer inventory."
+  [connectable admission token]
+  (when (and token (xtdb/submission-policy-current? connectable token))
+    (let [entry (locking policies
+                  (some (fn [[policy {:keys [config phase] :as entry}]]
+                          (when (and (identical? admission (:admission config))
+                                     (identical? token (:registration @phase))
+                                     (identical? token (xtdb/submission-policy-token connectable policy)))
+                            entry)) policies))]
+      (when entry
+        (let [{:keys [config descriptor source-id phase]} entry
+              snapshot @phase
+              root (correspondence/activation-root connectable admission token)]
+          (when (and (identical? token (:registration snapshot))
+                     (= (:activation snapshot) (:observation root))
+                     (= source-id (get-in root [:observation :source-id]))
+                     (= {:initializer (:initializer config) :descriptor descriptor} (:root root))
+                     (xtdb/submission-policy-current? connectable token))
+            root))))))

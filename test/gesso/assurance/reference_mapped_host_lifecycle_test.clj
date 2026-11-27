@@ -2,6 +2,9 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-source-coverage :as coverage]
+            [gesso.assurance.reference-installed-writer-classification :as installed]
+            [gesso.assurance.reference-mapped-outcome :as outcome]
+            [gesso.live.outbox.writer-policy :as policy]
             [gesso.core :as g]
             [gesso.live.application-preflight.fixture :as fixture]
             [gesso.live.consistency.xtdb :as xtdb]
@@ -25,6 +28,10 @@
         source-id "assembled-mapped-root"
         source (claim/physical-mapped-admission-source (claim/bound-inductive-source!))
         admission (induction/build-inductive-mapped-admission! source)
+        declarations (claim/outcome-declarations)
+        fingerprint (:catalog-fingerprint (induction/describe-mapped-admission admission))
+        cases (:cases (outcome/derive-cases! source declarations))
+        classify! (fn [node a] (installed/derive! node a source declarations fingerprint cases))
         request-row {:xt/id "r1" :status :open :revision 0 :created-at "t0" :updated-at "t0"
                      :request/location-id "l1"}
         member (fn [helper] {:xt/id helper :active true :revision 0 :created-at "t0" :updated-at "t0"})
@@ -64,7 +71,19 @@
                                  ctx (peek @contexts)
                                  adapter (:xtdb/connectable ctx)
                                  observed (publication/read-framed-submission-observation! admission observation)
-                                 history (coverage/observe-local-processed-retained-replay-inputs! node)]
+                                 history (coverage/observe-local-processed-retained-replay-inputs! node)
+                                 qualified (classify! node admission)]
+                             (is (= :conditional-current-installed-writer-classification (:status qualified)) (pr-str qualified))
+                             (is (= :complete (:declared-alternative-coverage qualified)))
+                             (is (= 8 (count (:alternative-identities qualified))))
+                             (is (= :not-established (:writer-coverage qualified) (:universal-refinement qualified)))
+                             (is (= :not-performed (:proof-discharge qualified)))
+                             (is (= (select-keys initial [:source-id :manifest-tx-id :initialization-tx-id :system-time :initialization-fingerprint])
+                                    (:activation-root qualified)))
+                             (is (= :missing-current-mapped-activation (:reason (classify! node (induction/build-inductive-mapped-admission! source)))))
+                             (is (= :not-established (:status (installed/derive! node admission source declarations "foreign" cases))))
+                             (with-redefs [policy/activated-policy-root (constantly nil)]
+                               (is (= :installed-classification-boundary-replaced (:reason (classify! node admission)))))
                              (is (= 200 (get-in capture [:result :status])))
                              (is (= :matched-local-policy-window (:policy-window capture)))
                              (is (some? token))
@@ -97,6 +116,7 @@
             (is (= 503 (:status ((:handler first-run) {:uri "/"}))))
             (is (= :invalid-adapter-connectable (reason #(xtdb/q (:adapter first-run) "SELECT 1"))))
             (is (nil? (correspondence/initialization-observation (:node first-run) admission)))
+            (is (= :not-established (:status (classify! (:node first-run) admission))))
             (let [second-run (run!)]
               (is (= [:manifest :initializer] @policy-events))
               (is (not (identical? (:token first-run) (:token second-run))))
@@ -107,3 +127,19 @@
                              [:activation-root :observation])))
               (is (= :invalid-adapter-connectable (reason #(xtdb/q (:adapter second-run) "SELECT 1"))))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+
+(deftest arbitrary-registered-policy-cannot-supply-mapped-activation
+  (let [node (Object.)
+        admission (Object.)
+        admit? (constantly true)
+        release (xtdb/register-submission-policy! node admit?)
+        token (xtdb/submission-policy-token node admit?)]
+    (try
+      (correspondence/record-activation! node admit? token admission
+                                         {:source-id "forged"} {:initializer [] :descriptor "forged"})
+      (is (some? (correspondence/activation-root node admission token)))
+      (is (nil? (policy/activated-policy-root node admission token)))
+      (is (= :missing-current-mapped-activation
+             (:reason (installed/derive! node admission {} {} "foreign" {}))))
+      (finally (release)))))

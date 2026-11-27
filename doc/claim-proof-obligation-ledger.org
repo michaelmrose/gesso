@@ -9149,3 +9149,39 @@ Next: connect the reviewed policy branch classification to genuine issued
 admission and installed-policy/activation evidence, including initialization,
 maintenance and temporal cut boundaries. Keep completeness over external
 and bypass writers an explicit condition until separately justified.
+
+* v2850 — bind classification to the current mapped policy generation
+
+Retain the actual activation observation in the completed mapped-policy
+phase. A new read-only diagnostic requires the exact registered predicate,
+current opaque generation and identical admission, then compares the
+captured initialization observation and policy-owned root configuration.
+A separately recorded activation under an arbitrary predicate is not a
+mapped-policy activation. Recheck the generation before returning.
+Update the reviewed writer-policy source pin for this diagnostic change.
+
+Recheck the original issued admission and its live induction handles,
+registered closed decoder, catalog, each mapping and transition identity,
+protected table footprint and supported auxiliary table set. Reconstruct
+the initialization fingerprint from the original seed and admission;
+require the captured matching manifest and initialization envelopes and
+ordered transaction identities at the initialization cut. Check that the
+same activation and generation remain current after classification.
+This binds the declared partition to one selected live policy generation,
+not a historical survey of every writer or a durable authority credential.
+Retain every prior classification condition; external/raw writers,
+complete post-initialization coverage, actual provider effects, loaded
+code and continued mediation remain open.
+
+Eight-namespace assurance regression: 49 tests / 7568 assertions.
+Real persistent mapped-host lifecycle: 2 tests / 73 assertions. Both
+passed without failures or errors. Check initial startup and reopening,
+new generation with the retained root, retired generation refusal,
+foreign admission/fingerprint and substituted diagnostic rejection, and
+an arbitrary registered predicate with a fabricated activation record.
+Full gates and worker-interleaved recovery not rerun. Historical v12
+unchanged; no premise accepted or discharged.
+
+Next: bind the installed classification to actual admitted operation and
+maintenance outcomes and retained post-initialization temporal coverage.
+Do not infer writer completeness from a live activation alone.
