@@ -9076,3 +9076,40 @@ and full project gates not rerun. No premise accepted or discharged.
 Next: derive the read-only replay relation and its physical read-only
 correspondence for the four remaining declared Claim alternatives. Do not
 confuse read-only observation with the qualification of physical writers.
+
+* v2848 — derive conditional read-only replay refinement
+
+Re-derive the checked catalog and v2847 committed argument. Require each
+remaining alternative to have a single non-nil journal-slot equality
+guard, empty replacements, empty input domain and the complete frame.
+Match the exact original journal-writing alternative by principal,
+operation and recorded abstract value; bind its concrete outcome case
+and both transition/mapping identities. Require exactly one replay per
+writing alternative in this closed fragment. At a qualified single read
+cut, the projected journal value entails the guard and the complete
+frame gives the abstract identity transition. Specialize both endpoints
+to that same cut. This is the replay's own effect, not equality of
+arbitrary endpoints of a concurrently changing database.
+
+Check supplied closed mapped images, exact canonical command binding,
+recorded concrete outcome, permitted disclosure, replay result and empty
+attributed submission list. Compare the canonical pure reconciliation
+result and independent abstract transition interpretation. Reject changed
+rows (even nonprojected fields), wrong identity or outcome, duplicate
+slots, malformed typed state, wrong alternative, and duplicate origin
+coverage. Reviewed reconciliation and mapped publication source hashes
+are pinned; loaded-code, authentication, disclosure, authoritative and
+historical readbacks, single-cut projection, no attributed hidden writes,
+and writer coverage remain assumptions. Supplied witnesses do not
+authenticate an execution or establish absence of hidden effects.
+
+Focused replay suite: 3 tests / 59 assertions. Seven-namespace assurance
+regression: 47 tests / 7533 assertions, no failures or errors. The wider
+run including command-resolution physical tests had four errors from
+missing native-buffer JVM access flags; corrected run timed out during
+that suite. No successful physical rerun claimed. Historical v12 unchanged;
+full project gates not run; no premise accepted or discharged.
+
+Next: compose journal-writing and replay catalog coverage with complete
+admitted-writer classification. Replay is not a physical writer; keep
+abort, maintenance, initialization and temporal coverage distinct.
