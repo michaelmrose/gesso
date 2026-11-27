@@ -7,6 +7,8 @@
             [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
             [gesso.model.inductive-plan :as induction]
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
+            [gesso.assurance.reference-mapped-worker-envelope :as worker]
+            [gesso.assurance.reference-retained-acquisition :as acquisition]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.reference-transition-refinement :as refinement]
@@ -20,6 +22,10 @@
 (def ^:private boundaries
   {#'issued/compare-recovery! issued/compare-recovery!
    #'recovery/compare-selected! recovery/compare-selected!
+   #'recovery/compare-worker-interleaved! recovery/compare-worker-interleaved!
+   #'worker/compare-issued-selection! worker/compare-issued-selection!
+   #'worker/boundaries-current? worker/boundaries-current?
+   #'acquisition/read-acquisition! acquisition/read-acquisition!
    #'coverage/observe-local-processed-retained-replay-inputs! coverage/observe-local-processed-retained-replay-inputs!
    #'temporal/replay temporal/replay
    #'temporal/visible-at temporal/visible-at
@@ -41,7 +47,8 @@
   (when-not condition (throw (ex-info "Unqualified physical envelope recovery" {:reason reason}))))
 
 (defn- boundaries! []
-  (require! (every? (fn [[v f]] (identical? @v f)) boundaries)
+  (require! (and (every? (fn [[v f]] (identical? @v f)) boundaries)
+                 (worker/boundaries-current?))
             :physical-envelope-boundary-replaced))
 
 (defn- rows! [rows]
@@ -171,12 +178,54 @@
      :proof-discharge :not-performed
      :universal-refinement :not-established}))
 
-(defn compare-recovery!
+(defn- checked-maintenance! [node opts replay mapped-tables inputs positions retained worker-scope sample steps]
+  (when worker-scope
+    (let [{:keys [system retained-acquisition worker-capture]} worker-scope
+          gap (subvec inputs (inc (first positions)) (second positions))
+          selected (:intervening-maintenance retained)
+          result (worker/compare-issued-selection! system retained-acquisition
+                                                    (:source-id (first steps)) selected worker-capture)]
+      (require! (and (identical? node (:xtdb/connectable system))
+                     (= sample (acquisition/read-acquisition! node retained-acquisition))
+                     (seq gap) (= (mapv :tx-id gap) (mapv :tx-id selected))
+                     (= worker/profile (:profile result)) (= :matched (:status result))
+                     (= :matched-local-issued-host-capture (:worker-observation-provenance result))
+                     (= :matched-issued-worker-retained-transactions (:maintenance-correspondence result))
+                     (= (:payload-fingerprint sample) (:retained-payload-fingerprint result))
+                     (= selected (mapv #(select-keys % [:tx-id :intent-id :maintenance]) (:selected-maintenance result))))
+                :physical-envelope-worker-selection-mismatch)
+      (let [scope (conj mapped-tables :gesso_live_outbox)
+            reports (mapv (fn [prior tx observed]
+                            (let [valid (:system-time tx)
+                                  pre (read-point! node opts replay scope (:system-time prior) valid)
+                                  post (read-point! node opts replay scope valid valid)
+                                  intent (:intent-id observed)
+                                  old (get pre :gesso_live_outbox)
+                                  new (get post :gesso_live_outbox)
+                                  ledger (xt/q node ["SELECT _id, committed, system_time FROM xt.txs WHERE _id = ?" (:tx-id tx)] opts)
+                                  row (first ledger)]
+                              (require! (and (= 1 (count ledger)) (= (:tx-id tx) (:xt/id row) (:tx-id observed))
+                                             (true? (:committed row)) (true? (:committed? observed))
+                                             (instance? ZonedDateTime (:system-time row))
+                                             (= valid (.toInstant ^ZonedDateTime (:system-time row)) (:system-time observed))
+                                             (= (dissoc pre :gesso_live_outbox) (dissoc post :gesso_live_outbox))
+                                             (contains? old intent) (contains? new intent)
+                                             (= (dissoc old intent) (dissoc new intent))
+                                             (not= (get old intent) (get new intent)))
+                                        :physical-envelope-worker-effect-mismatch)
+                              (assoc (select-keys observed [:tx-id :intent-id :maintenance])
+                                     :effect :matched-mapped-stutter-and-single-outbox-replacement)))
+                          (subvec inputs (first positions) (dec (second positions))) gap (:selected-maintenance result))]
+        {:worker-observation-provenance (:worker-observation-provenance result)
+         :retained-payload-fingerprint (:retained-payload-fingerprint result)
+         :steps reports}))))
+
+(defn- compare-recovery*
   "Selected local three-attempt recovery only. Match issued envelopes and
    retained history, then pin historical reads of mapped documents and journal.
    Match stale preparation to an earlier image without claiming acquisition
    provenance. No receipt for the throw, proof discharge or cross-restart authority."
-  [node tables admission source declarations steps handle]
+  [node tables admission source declarations steps handle worker-scope]
   (try
     (boundaries!)
     (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
@@ -189,13 +238,20 @@
       (require! (and (= :observed (:status sample)) (vector? inputs)
                      (= (:transaction-ids sample) (mapv :tx-id inputs))
                      (= 3 (count positions)) (every? pos-int? positions)
-                     (= positions (vec (range (first positions) (+ 3 (first positions)))))
+                     (if worker-scope
+                       (and (< (inc (first positions)) (second positions))
+                            (= (inc (second positions)) (peek positions))
+                            (contains? tables :gesso_live_outbox)
+                            (not (contains? mapped-tables :gesso_live_outbox))
+                            (= sample (acquisition/read-acquisition! node (:retained-acquisition worker-scope))))
+                       (= positions (vec (range (first positions) (+ 3 (first positions))))))
                      (= (mapv :expectation steps) (mapv #(nth inputs %) positions))
                      (set? tables) (every? tables mapped-tables)
                      (every? #(and (simple-keyword? %) (re-matches #"[a-z][a-z0-9_]*" (name %))) mapped-tables))
                 :unqualified-physical-envelope-history)
       (let [local (issued/compare-recovery! node admission source declarations steps handle)
-            retained (recovery/compare-selected! node tables admission source declarations steps handle)
+            retained ((if worker-scope recovery/compare-worker-interleaved! recovery/compare-selected!)
+                      node tables admission source declarations steps handle)
             replay (temporal/replay (mapv #(dissoc % :tx-id) inputs))
             selected (mapv #(nth inputs %) positions)
             priors (mapv #(nth inputs (dec %)) positions)
@@ -236,7 +292,8 @@
           (require! (and (= (:post winner) (:pre abort)) (= (:pre abort) (:post abort))
                          (= (:post abort) (:pre refusal)) (not= (:pre winner) (:pre abort)))
                     :physical-envelope-recovery-continuity-mismatch)
-          (let [projected (checked-projections! source local steps selected images)
+          (let [maintenance (checked-maintenance! node opts replay mapped-tables inputs positions retained worker-scope sample steps)
+                projected (checked-projections! source local steps selected images)
                 general (general-correspondence! admission source declarations local projected)]
             (require! (= token (token! (xt/q node "SHOW SNAPSHOT_TOKEN" opts))) :physical-envelope-token-mismatch)
           (require! (= sample (coverage/observe-local-processed-retained-replay-inputs! node))
@@ -255,7 +312,10 @@
                  :projection-correspondence :matched-both-coordinate-decoders
                  :refusal-effect :matched-journal-only-mapped-effect
                  :general-argument general
-                 :remaining-conditions (into (set/union (:remaining-conditions local) (:conditions projected) (:general-conditions general))
+                 :maintenance-correspondence (or maintenance :not-applicable)
+                 :remaining-conditions (into (set/union (:remaining-conditions local) (:conditions projected) (:general-conditions general)
+                                                        (when worker-scope #{:faithful-worker-and-dispatch-origin
+                                                                             :faithful-worker-provider-envelope}))
                                              #{:faithful-pinned-provider-readbacks
                                                :faithful-retained-source-log-decoding-and-retention
                                                :faithful-provider-ledger-identity-and-outcome
@@ -266,3 +326,18 @@
     (catch clojure.lang.ExceptionInfo e
       (assoc base :status :not-established :reason (or (:reason (ex-data e)) :unqualified-physical-envelope)))
     (catch Exception _ (assoc base :status :not-established :reason :physical-envelope-readback-failed))))
+
+
+(defn compare-recovery!
+  "Compare the original adjacent three-attempt window."
+  [node tables admission source declarations steps handle]
+  (compare-recovery* node tables admission source declarations steps handle nil))
+
+(defn compare-worker-interleaved!
+  "Compare a selected gap of issued worker maintenance between the winning
+   and aborted commands. Require the exact host capture and retained sample;
+   the recovered refusal must still immediately follow the abort. Not worker
+   authentication, historical mediation or general temporal coverage."
+  [system tables admission source declarations steps handle retained-acquisition worker-capture]
+  (compare-recovery* (:xtdb/connectable system) tables admission source declarations steps handle
+                     {:system system :retained-acquisition retained-acquisition :worker-capture worker-capture}))

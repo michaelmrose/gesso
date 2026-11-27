@@ -10227,3 +10227,31 @@ Next: qualify intervening worker maintenance in the selected physical
 envelope argument, using independently checked issued worker outcomes
 and retained maintenance transitions rather than assuming adjacent
 command transactions or treating intervening writes as invisible.
+
+* v2877 — qualify worker-interleaved physical recovery envelopes
+
+Extend the selected physical-envelope argument with a separate entry
+point for maintenance between the winning and aborted commands. The
+recovered refusal must still immediately follow the abort. Require
+exact equality with the issued retained acquisition and exact coverage
+of the gap by the independently checked issued host worker capture.
+Match each committed maintenance ledger row and pinned before/after
+mapped and outbox rows against independent retained replay. Require
+mapped stutter and replacement of precisely the selected existing
+outbox row at each selected maintenance boundary. Preserve the original
+three command projections and all 39 general CLM-R2 conditions; add
+explicit worker-origin and provider-envelope premises. This is selected
+physical correspondence, not worker authentication, continuous writer
+mediation or general temporal coverage. No authority or proof discharge.
+
+Focused installed-host JVM regression: 1 test / 1324 assertions, zero
+failures or errors (exit 0), in assembled-command-transport-worker-
+interleaved-recovery. Exercise four actual maintenance commits, their
+issued outcome capture and pinned physical effects, rejection of copied
+capture, unissued acquisition and substituted worker checker, and the
+existing retained-storage checks. The adjacent variant and full project
+gates were not rerun. No production submission behavior changed.
+
+Next: integrate the worker-interleaved envelope diagnostic with the
+configured owner trust-adoption and exact activated retained root
+comparison, preserving both the adjacent and interleaved scopes.

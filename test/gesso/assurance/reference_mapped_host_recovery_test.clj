@@ -13,6 +13,7 @@
             [gesso.assurance.reference-recovery-invariant-test :as invariant-test]
             [gesso.assurance.reference-mapped-worker-submission :as worker-submission]
             [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
+            [gesso.assurance.reference-physical-envelope-argument :as physical-envelope]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-storage-identity :as storage]
@@ -1032,6 +1033,22 @@
                                (mapv :class (:post-initialization-steps qualified))))
                         (is (= :not-established (:writer-coverage qualified) (:universal-refinement qualified) (:temporal-coverage qualified)))
                         (is (= :not-performed (:proof-discharge qualified)))
+                        (let [compare! #(physical-envelope/compare-worker-interleaved!
+                                         started tables admit mapped-source outcome-declarations steps observation %1 %2)
+                              result (compare! handle worker-capture)
+                              maintenance-result (:maintenance-correspondence result)]
+                          (is (= :conditional-physical-source-envelope-recovery (:status result)) (pr-str (select-keys result [:status :reason])))
+                          (is (= :matched-local-issued-host-capture (:worker-observation-provenance maintenance-result)))
+                          (is (= maintenance (mapv #(select-keys % [:tx-id :intent-id :maintenance]) (:steps maintenance-result))))
+                          (is (every? #(= :matched-mapped-stutter-and-single-outbox-replacement (:effect %)) (:steps maintenance-result)))
+                          (is (= 39 (count (get-in result [:general-argument :general-conditions]))))
+                          (is (= :not-performed (:proof-discharge result)))
+                          (doseq [bad [(compare! sample worker-capture)
+                                       (compare! handle (into {} worker-capture))
+                                       (with-redefs [worker-envelope/compare-issued-selection! (constantly {})]
+                                         (compare! handle worker-capture))]]
+                            (is (= :not-established (:status bad)))
+                            (is (not (contains? bad :maintenance-correspondence)))))
                         (is (= :matched (:status worker-bound)) (pr-str worker-bound))
                         (is (= :matched-local-issued-host-capture (:worker-observation-provenance worker-bound)))
                         (is (= maintenance (mapv #(select-keys % [:tx-id :intent-id :maintenance])
