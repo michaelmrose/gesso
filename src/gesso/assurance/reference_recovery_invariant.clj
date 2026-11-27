@@ -9,7 +9,9 @@
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.transition :as construction]
             [gesso.live.outbox.model-publication :as publication]
-            [gesso.model.inductive-plan :as induction]))
+            [gesso.model.inductive-plan :as induction]
+            [xtdb.api :as xt])
+  (:import [java.time Instant]))
 
 (def profile :selected-retained-invariant-boundaries-v1)
 (def ^:private original-project poststate/project-visible!)
@@ -23,6 +25,7 @@
 (def ^:private original-reader acquisition/read-acquisition!)
 (def ^:private original-observation publication/read-framed-submission-observation!)
 (def ^:private original-initialization induction/check-mapped-initialization!)
+(def ^:private original-query xt/q)
 
 (defn boundaries-current? []
   (and (identical? original-project poststate/project-visible!)
@@ -35,7 +38,8 @@
        (identical? original-cases outcome/derive-cases!)
        (identical? original-reader acquisition/read-acquisition!)
        (identical? original-observation publication/read-framed-submission-observation!)
-       (identical? original-initialization induction/check-mapped-initialization!)))
+       (identical? original-initialization induction/check-mapped-initialization!)
+       (identical? original-query xt/q)))
 
 (defn- report [status reason]
   (cond-> {:profile profile :status status
@@ -142,6 +146,67 @@
                                                    (= :committed-abstract-transition relation)
                                                    (assoc :alternative-id operation-id)))))))))))))))
 
+(def physical-profile :selected-pinned-invariant-readbacks-v1)
+
+(defn- read-physical-visible! [node basis tables system valid]
+  (into {} (map (fn [table]
+                  (let [rows (original-query
+                              node [(str "SELECT * FROM \"public\".\"" (name table)
+                                         "\" FOR VALID_TIME AS OF ? FOR SYSTEM_TIME AS OF ? LIMIT 65537")
+                                    valid system] basis)]
+                    (when-not (and (sequential? rows) (<= (count rows) 65536)
+                                   (every? #(and (map? %) (some? (:xt/id %))) rows)
+                                   (= (count rows) (count (set (map :xt/id rows)))))
+                      (throw (ex-info "Invalid historical physical rows" {:reason :invalid-physical-invariant-rows})))
+                    [table (into {} (map (juxt :xt/id identity)) rows)]))) tables))
+
+(defn- audit-physical! [node coordinates cases inputs checked]
+  (let [base {:profile physical-profile :scope :original-selected-invariant-coordinates-only
+              :provider-refinement :not-established :physical-invariant-theorem :not-established
+              :universal-refinement :not-established :proof-discharge :not-performed
+              :authority :none :certificate :not-issued}
+        fail #(assoc base :status %1 :reason %2)]
+    (try
+      (let [ids (mapv :tx-id (:checked-boundaries checked))
+            selected (vec (take-while #(<= (:tx-id %) (peek ids)) inputs))
+            replay (original-replay (mapv #(dissoc % :tx-id) selected))
+            tables (set (map (fn [[kind table]] (if (= :journal-slot kind) :gesso_commands table))
+                             (vals coordinates)))
+            tokens (original-query node "SHOW SNAPSHOT_TOKEN")
+            token (when (and (sequential? tokens) (= 1 (count tokens))
+                             (= #{:snapshot-token} (set (keys (first tokens)))))
+                    (:snapshot-token (first tokens)))]
+        (if-not (and (= :checked (:status checked)) (seq ids)
+                     (= ids (mapv :tx-id (rest selected)))
+                     (= :predicted (:status replay)) (seq tables)
+                     (every? #(and (simple-keyword? %) (re-matches #"[a-z][a-z0-9_]*" (name %))) tables)
+                     (string? token) (seq token))
+          (fail :unsupported :unqualified-physical-invariant-readback)
+          (let [basis {:snapshot-token token :current-time (Instant/now)}
+                initial (second selected)
+                points (into [{:tx-id (:tx-id initial) :side :initial
+                               :system-time (:system-time initial) :valid-time (:system-time initial)}]
+                             (mapcat (fn [[prior tx]]
+                                       [{:tx-id (:tx-id tx) :side :prestate
+                                         :system-time (:system-time prior) :valid-time (:system-time tx)}
+                                        {:tx-id (:tx-id tx) :side :poststate
+                                         :system-time (:system-time tx) :valid-time (:system-time tx)}])
+                                     (partition 2 1 (rest selected))))
+                project #(original-project coordinates % {:outcome-cases cases})]
+            (if (every? (fn [{:keys [system-time valid-time]}]
+                          (= (project (original-visible replay system-time valid-time))
+                             (project (read-physical-visible! node basis tables system-time valid-time))))
+                        points)
+              (assoc base :status :matched :correspondence :matched-selected-physical-projections
+                     :checked-coordinates points :invariant-ids (:invariant-ids checked))
+              (fail :mismatch :physical-invariant-projection-mismatch)))))
+      (catch InterruptedException e
+        (.interrupt (Thread/currentThread))
+        (throw e))
+      (catch clojure.lang.ExceptionInfo e
+        (fail :unsupported (or (:reason (ex-data e)) :unsupported-physical-invariant-projection)))
+      (catch Exception _ (fail :unavailable :physical-invariant-readback-failed)))))
+
 (defn audit-issued-selection!
   "Check finite projected states from the exact issued sample, not caller
    supplied valuations. The caller must have independently matched the
@@ -167,11 +232,14 @@
           (let [checked (original-initialization admission initializer)
                 cases (:cases (original-cases source declarations))
                 r (audit-replay! catalog (:target-map source) cases (:state checked)
-                                 (:replay-inputs sample) comparison steps)]
+                                 (:replay-inputs sample) comparison steps)
+                physical (when (= :checked (:status r))
+                           (audit-physical! node (:target-map source) cases (:replay-inputs sample) r))]
             (cond
               (not (boundaries-current?)) (report :unsupported :invariant-boundary-replaced)
               (not= :checked (:status r)) r
               :else (assoc r :retained-payload-fingerprint (:payload-fingerprint sample)
-                           :catalog-fingerprint (:catalog-fingerprint checked))))))
+                           :catalog-fingerprint (:catalog-fingerprint checked)
+                           :physical-readbacks physical)))))
       (catch clojure.lang.ExceptionInfo e
         (report :unsupported (or (:reason (ex-data e)) :unsupported-invariant-projection))))))

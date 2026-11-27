@@ -8037,3 +8037,46 @@ exact selected invariant coordinates and compose their correspondence
 with the finite invariant result. Preserve the outstanding provider,
 projection and writer coverage assumptions; do not promote it into
 a universal physical invariant theorem.
+
+* v2824 — match selected physical invariant readbacks
+
+After the issued selected replay invariant audit succeeds, independently
+query XTDB on the same original acquisition node. Use one snapshot token
+and explicit system-time and valid-time parameters for every mapped table
+at every checked coordinate. Include the initial projection, then both
+prestate and poststate for each selected command or intervening maintenance
+transaction. Use the preceding system instant and current transaction valid
+instant for prestate; use the transaction instant on both axes for poststate.
+Exclude any later retained suffix. Reject oversized or ambiguous row
+observations and unsupported table identities. Project physical rows using
+the original checked coordinate and outcome mapping and compare every
+projected valuation with its retained replay counterpart.
+
+Retain the separately profiled physical-readbacks result inside the
+original selected-invariant-evidence report and its issued-cut binding.
+Only all-coordinate agreement yields a matched result. Mismatch or
+unavailable readback does not create a positive physical conclusion or
+invalidate the separately checked finite replay result. Pin the XTDB query
+seam alongside the existing audit boundaries. No raw rows or snapshot
+token are retained in the report. The existing v8 judgment and original
+obligation inventory remain intact.
+
+Focused JVM: combined assembled-host recovery and selected invariant
+namespaces passed 8 tests / 2382 assertions, zero failures or errors.
+The standalone invariant namespace passed 2 tests / 32 assertions
+(included in the combined run). Exercise actual pinned XTDB reads,
+exact pre/post coordinates, aborted and maintenance boundaries, suffix
+exclusion, mismatching replay projection and query substitution rejection.
+Both genuine persistent adjacent and worker-interleaved recovery fixtures
+passed. Original worker polling and existing offline dependency bundle
+retained. Full project gates not run.
+
+The result is selected physical projection agreement, conditional on the
+provider and projection semantics. It is not an authenticated snapshot
+attestation, transaction causality theorem, complete writer closure, or
+universal physical refinement. No proof premise is discharged.
+
+Next: derive the selected conditional physical invariant conclusion from
+both checked finite replay invariants and exact physical projection
+agreement. Preserve the original assumptions and reject unmatched or
+unqualified readbacks; distinguish this finite conclusion from CLM-R2.

@@ -1,8 +1,11 @@
 (ns gesso.assurance.reference-recovery-invariant-test
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-recovery-invariant :as invariant]
-            [gesso.assurance.reference-mapped-poststate :as poststate])
-  (:import [java.time Instant]))
+            [gesso.assurance.reference-mapped-poststate :as poststate]
+            [xtdb.api :as xt]
+            [xtdb.node :as xtn]
+            [xtdb.db-catalog :as db])
+  (:import [java.time Instant Duration]))
 
 (def ^:private types {:fixture/value {:type :integer}})
 (def ^:private coordinates {:fixture/value [:document :fixture_rows "row" :value]})
@@ -72,12 +75,47 @@
       (is (= :invariant-boundary-replaced
              (:reason (invariant/audit-issued-selection! nil nil nil nil nil nil nil nil)))))))
 
+(deftest independently-read-selected-physical-coordinates
+  (let [checked (#'invariant/audit-replay! catalog coordinates {} {:fixture/value 0}
+                                             inputs comparison steps)]
+    (with-open [node (xtn/start-node {})]
+      (doseq [tx inputs]
+        (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+          (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 15))))
+      (let [run #( #'invariant/audit-physical! node coordinates {} % checked)
+            matched (run inputs)
+            points (:checked-coordinates matched)]
+        (is (= :matched (:status matched)) (pr-str matched))
+        (is (= [[1 :initial] [2 :prestate] [2 :poststate] [3 :prestate] [3 :poststate]
+                [4 :prestate] [4 :poststate] [5 :prestate] [5 :poststate]]
+               (mapv (juxt :tx-id :side) points)))
+        (is (= (t 1) (:system-time (second points))))
+        (is (= (t 2) (:valid-time (second points))))
+        (is (= matched (run (pop inputs))))
+        (let [mismatch (run (assoc-in inputs [5 :ops] [(put-value 3)]))]
+          (is (= :mismatch (:status mismatch)) (pr-str mismatch))
+          (is (not (contains? mismatch :checked-coordinates)))))))
+  (with-redefs [xt/q (constantly [])]
+    (is (not (invariant/boundaries-current?)))
+    (is (= :invariant-boundary-replaced
+           (:reason (invariant/audit-issued-selection! nil nil nil nil nil nil nil nil))))))
+
 (defn check-judgment! [result scope original]
   (let [checked (:selected-invariant-evidence result)
         ids (:selected-tx-ids original)
         initial (:initialization-tx-id original)
         maintenance (mapv :tx-id (:intervening-maintenance original))
         boundaries (:checked-boundaries checked)]
+    (let [physical (:physical-readbacks checked)
+          points (:checked-coordinates physical)]
+      (is (= invariant/physical-profile (:profile physical)))
+      (is (= :matched (:status physical)) (pr-str physical))
+      (is (= :matched-selected-physical-projections (:correspondence physical)))
+      (is (= (:invariant-ids checked) (:invariant-ids physical)))
+      (is (= (inc (* 2 (dec (count boundaries)))) (count points)))
+      (is (= (mapv :tx-id boundaries) (mapv :tx-id (remove #(= :prestate (:side %)) points))))
+      (is (= :not-established (:physical-invariant-theorem physical) (:universal-refinement physical)))
+      (is (= :not-performed (:proof-discharge physical))))
     (is (= invariant/profile (:profile checked)))
     (is (= :checked (:status checked)) (pr-str checked))
     (is (= :declared-invariants-hold-on-selected-replay-projections (:conclusion checked)))
