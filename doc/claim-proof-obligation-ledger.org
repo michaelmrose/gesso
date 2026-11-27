@@ -8925,3 +8925,59 @@ over the closed admitted guard-and-put fragment, identifying precisely
 which provider semantics must be assumed rather than proved by the
 selected execution probes. Connect those conditions to the original
 physical obligation inventory without changing discharge status.
+
+* v2845 — derive the conditional mapped transition argument
+
+Introduce a standalone equational simulation schema for arbitrary closed
+mapped row images satisfying the named conditions. For a committed
+command, use equality of the actual prestate with the prepared image,
+equality of the actual poststate with its source-derived put image,
+and the original abstract relation on the prepared projected endpoints.
+Substitute the equalities into the goal while retaining the original
+alternative and inputs. For abort and qualified maintenance, derive
+projected stuttering by substituting complete mapped-row equality.
+Do not require the prepared image to equal the actual prestate of an
+aborted attempt. Faithful functional projection and original abstract
+transition semantics remain explicit assumptions.
+
+Check the conditional three-case composition independently using the
+existing opaque propositional decision procedure. All 16 valuations
+are checked, seven satisfy the premises. Removing the coverage premise
+admits a counterexample. The case implications follow from the local
+equational schema under its assumptions; the coverage of actual
+transactions is not established by the Boolean decision.
+
+Add an internal selected-evidence binding diagnostic. Reuse the
+original transfer inventory checker to verify the original open
+premises and their declared dependencies. Require matching selected
+transactions, alternatives, row-effect classifications, original cut
+and exact coordinates. Locate the related guarded-write, abort,
+submission, aborted-attempt, projection, writer-coverage and, when
+applicable, worker-clock premise fingerprints. Retain all original
+open physical premises. These are related selected obligations, not
+proof that selected premises imply the general conditions. Source-write
+correctness and original abstract transition semantics remain without
+direct selected physical-premise bindings. In an adjacent history,
+maintenance conditions also remain unbound.
+
+Focused JVM: initial two-test suite passed 44 assertions after
+correcting a test delimiter and the opaque propositional input format.
+Final five-namespace regression (transition argument, transition
+refinement, recovery inventory, snapshot and propositional soundness)
+passed 50 tests / 852 assertions, zero failures or errors. Exercise
+missing equational premises, changed alternatives and inputs,
+foreign cut and selected evidence, broken dependency declarations,
+premature acceptance/discharge, and adjacent and interleaved
+diagnostic histories. Both code blobs verified against tested files.
+
+The general argument is conditional, not an independently kernel-proved
+implementation theorem. Binding uses supplied diagnostic evidence;
+it has not yet been integrated into the issued historical judgment.
+Historical v12 judgment unchanged. Persistent assembled-host recovery
+and full project gates not rerun. No premise accepted or discharged.
+
+Next: derive the source-write correctness condition for the supported
+mapped replacement fragment, from exact document and journal replacement
+and frame semantics, rather than assuming the resulting abstract
+transition. Keep admission, provider execution and writer closure
+distinct from that source-level argument.
