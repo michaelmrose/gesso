@@ -1,6 +1,11 @@
 (ns gesso.assurance.reference-physical-envelope-argument
   "Join issued envelope correspondence to pinned selected physical rows."
-  (:require [gesso.assurance.reference-issued-envelope-argument :as issued]
+  (:require [clojure.set :as set]
+            [gesso.assurance.reference-issued-envelope-argument :as issued]
+            [gesso.assurance.reference-admitted-step-argument :as admitted]
+            [gesso.assurance.reference-mapped-outcome :as outcome]
+            [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
+            [gesso.model.inductive-plan :as induction]
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
@@ -21,6 +26,9 @@
    #'refinement/check-step! refinement/check-step!
    #'poststate/project-visible! poststate/project-visible!
    #'invariant/check-projected-invariants! invariant/check-projected-invariants!
+   #'outcome/derive-cases! outcome/derive-cases!
+   #'provider-contract/derive! provider-contract/derive!
+   #'induction/recheck-mapped-induction! induction/recheck-mapped-induction!
    #'xt/q xt/q
    #'basis/<-time-basis-str basis/<-time-basis-str})
 (def ^:private base
@@ -105,6 +113,64 @@
      :invariant-ids invariant-ids
      :conditions (into #{} (mapcat :conditions) reports)}))
 
+(defn- general-correspondence! [admission source declarations local projected]
+  (let [identity (:induction-identity local)
+        fp (:catalog-fingerprint identity)
+        cases (:cases (outcome/derive-cases! source declarations))
+        abstract (induction/recheck-mapped-induction! admission)
+        contract (provider-contract/derive! admission source declarations fp cases provider-contract/reviewed-provider)
+        inventory (:original-inventory contract)
+        binding (:original-binding inventory)
+        general (:argument binding)
+        conditions (:remaining-conditions binding)
+        writer-links (get-in inventory [:groups :writer-mediation :conditions])
+        provider-links (:condition-links contract)
+        linked (set/union writer-links (set (keys provider-links)))
+        alternatives (get-in general [:schemas ::admitted/committed :alternatives])
+        steps (:steps projected)]
+    (require! (and (= identity (:identity abstract))
+                   (= (:fingerprint abstract) (:abstract-report-fingerprint binding))
+                   (= :source-bound-conditional-abstract-safety (:verdict abstract))
+                   (= :source-bound-conditional-induction (get-in abstract [:classification :checked-abstract :status]))
+                   (= (:invariant-ids projected) (:declared-invariant-ids abstract))
+                   (= :open-provider-contract (:status contract))
+                   (= :complete-open-condition-review (:status inventory))
+                   (= :conditional-original-clm-r2-binding (:status binding))
+                   (= :conditional-general-admitted-step-derivation (:status general))
+                   (= fp (:catalog-fingerprint inventory) (:catalog-fingerprint binding) (:catalog-fingerprint general))
+                   (= (:induction-fingerprint identity) (:induction-fingerprint inventory) (:induction-fingerprint binding))
+                   (= :all-original-obligations-remain-open (get-in abstract [:classification :original-obligations :status]))
+                   (= (:original-open-obligation-ids-by-operation binding) (get-in abstract [:classification :original-obligations :by-operation]))
+                   (= :not-performed (:assumption-discharge abstract) (:proof-discharge contract) (:proof-discharge inventory)
+                      (:proof-discharge binding) (:proof-discharge general) (:premise-acceptance contract) (:premise-acceptance binding))
+                   (= :not-established (:universal-refinement general) (:writer-coverage general) (:temporal-coverage general))
+                   (= :assumed-not-derived (get-in general [:case-split :coverage]))
+                   (= :related-not-entailing (:condition-link-semantics contract))
+                   (set? conditions) (= conditions (:remaining-conditions inventory) (:remaining-conditions contract) (:remaining-conditions general))
+                   (set/subset? linked conditions)
+                   (empty? (set/intersection writer-links (set (keys provider-links))))
+                   (= 3 (count steps))
+                   (= [:committed-abstract-transition :aborted-stutter :committed-abstract-transition] (mapv :relation steps))
+                   (every? (fn [{:keys [identity]}]
+                             (= identity (get-in alternatives [(:alternative-id identity) :identity]))) steps)
+                   (= :derived-by-equality-substitution (get-in general [:schemas ::admitted/aborted :argument :status])))
+              :physical-envelope-general-argument-mismatch)
+    {:status :conditional-selected-general-argument-binding
+     :abstract-report-fingerprint (:fingerprint abstract)
+     :original-open-obligations (:original-open-obligation-ids-by-operation binding)
+     :abstract-open-assumptions (:abstract-open-assumptions binding)
+     :abstract-invariant-induction (select-keys (:classification abstract) [:checked-abstract :open-abstract])
+     :general-conditions conditions
+     :condition-groups (:groups inventory)
+     :related-writer-isolation-conditions writer-links
+     :related-provider-conditions provider-links
+     :other-general-conditions (set/difference conditions linked)
+     :condition-link-semantics :related-not-entailing
+     :configured-trust-adoption :not-observed
+     :premise-acceptance :not-performed
+     :proof-discharge :not-performed
+     :universal-refinement :not-established}))
+
 (defn compare-recovery!
   "Selected local three-attempt recovery only. Match issued envelopes and
    retained history, then pin historical reads of mapped documents and journal.
@@ -170,7 +236,8 @@
           (require! (and (= (:post winner) (:pre abort)) (= (:pre abort) (:post abort))
                          (= (:post abort) (:pre refusal)) (not= (:pre winner) (:pre abort)))
                     :physical-envelope-recovery-continuity-mismatch)
-          (let [projected (checked-projections! source local steps selected images)]
+          (let [projected (checked-projections! source local steps selected images)
+                general (general-correspondence! admission source declarations local projected)]
             (require! (= token (token! (xt/q node "SHOW SNAPSHOT_TOKEN" opts))) :physical-envelope-token-mismatch)
           (require! (= sample (coverage/observe-local-processed-retained-replay-inputs! node))
                     :physical-envelope-history-changed)
@@ -187,7 +254,8 @@
                  :invariant-correspondence :checked-both-evaluators-at-selected-endpoints
                  :projection-correspondence :matched-both-coordinate-decoders
                  :refusal-effect :matched-journal-only-mapped-effect
-                 :remaining-conditions (into (into (:remaining-conditions local) (:conditions projected))
+                 :general-argument general
+                 :remaining-conditions (into (set/union (:remaining-conditions local) (:conditions projected) (:general-conditions general))
                                              #{:faithful-pinned-provider-readbacks
                                                :faithful-retained-source-log-decoding-and-retention
                                                :faithful-provider-ledger-identity-and-outcome

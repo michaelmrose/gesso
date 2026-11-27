@@ -9,6 +9,7 @@
             [gesso.assurance.reference-physical-envelope-argument :as physical-envelope]
             [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-transition-refinement :as refinement]
+            [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
@@ -229,6 +230,25 @@
                          (is (= :checked-both-evaluators-at-selected-endpoints (:invariant-correspondence r)))
                          (is (= :matched-both-coordinate-decoders (:projection-correspondence r)))
                          (is (= :matched-journal-only-mapped-effect (:refusal-effect r)))
+                         (let [g (:general-argument r)
+                               conditions (:general-conditions g)
+                               writer (:related-writer-isolation-conditions g)
+                               provider (set (keys (:related-provider-conditions g)))
+                               other (:other-general-conditions g)]
+                           (is (= :conditional-selected-general-argument-binding (:status g)))
+                           (is (= 39 (count conditions)))
+                           (is (= conditions (into writer (concat provider other))))
+                           (is (= 39 (+ (count writer) (count provider) (count other))))
+                           (is (every? (:remaining-conditions r) conditions))
+                           (is (= (:original-open-obligations catalog) (:original-open-obligations g)))
+                           (is (= :related-not-entailing (:condition-link-semantics g)))
+                           (is (= :not-observed (:configured-trust-adoption g)))
+                           (is (= :not-performed (:premise-acceptance g) (:proof-discharge g)))
+                           (is (= :not-established (:universal-refinement g))))
+                         (let [bad (with-redefs [provider-contract/derive! (constantly {})]
+                                     (check-physical! tables steps @observation-handle))]
+                           (is (= :physical-envelope-boundary-replaced (:reason bad)))
+                           (is (not (contains? bad :general-argument))))
                          (doseq [bad [(with-redefs [refinement/check-step! (constantly {:status :conditional-step-correspondence})]
                                         (check-physical! tables steps @observation-handle))
                                       (with-redefs [invariant/check-projected-invariants! (constantly #{})]

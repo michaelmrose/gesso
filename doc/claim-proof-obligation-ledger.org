@@ -10166,3 +10166,31 @@ is unchanged.
 Next: compose the selected physical-envelope/abstract correspondence with
 the original conditional invariant and refinement arguments and configured
 trust inventory, explicitly retaining each unestablished general premise.
+
+* v2875 — bind selected physical recovery to general CLM-R2 conditions
+
+Recheck the original live abstract induction and the versioned open XTDB
+provider contract, including its original condition inventory and CLM-R2
+binding. Match the induction identity, abstract report fingerprint,
+declared invariant identities and original open operation obligations.
+Match all three selected alternative identities to the original committed
+schemas and retain the separate generic abort equality argument. The
+result preserves checked and open abstract induction classifications,
+all 39 original general conditions and the additional selected physical
+conditions. Distinguish five writer-isolation-related conditions, eleven
+provider-related conditions and twenty-three other general conditions.
+These are relevance links, not implication or discharge, and the
+selected fixture does not observe configured host trust adoption.
+
+Focused JVM regression: 1 test / 622 assertions, zero failures or errors,
+including actual XTDB recovery and reopening. Check exact condition
+partition, original open register, no acceptance or discharge, and reject
+substituted provider-contract derivation. Full project gates not rerun.
+No production submission behavior changed. All original general conditions
+remain open; universal refinement and complete writer coverage are not
+established.
+
+Next: integrate the selected envelope correspondence at the configured
+owner boundary with the exact adoption scopes, activation root and
+original condition register, without treating a current declaration as
+proof of historical mediation.
