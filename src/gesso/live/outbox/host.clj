@@ -21,6 +21,7 @@
             [gesso.assurance.operational-report :as operational-report]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-physical-envelope-argument :as physical-envelope]
+            [gesso.assurance.reference-retained-acquisition :as retained-acquisition]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.assurance.reference-writer-isolation :as isolation]
             [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
@@ -913,6 +914,10 @@
 (def ^:private original-configured-adopt adopt-implementation-trust!)
 (def ^:private original-physical-envelope physical-envelope/compare-recovery!)
 (def ^:private original-activated-recovery observed-recovery/compare-activated!)
+(def ^:private original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
+(def ^:private original-local-activated-recovery observed-recovery/compare-local-activated!)
+(def ^:private original-recovery-acquisition retained-acquisition/read-acquisition!)
+(def ^:private original-recovery-worker-match worker-capture/worker-outcome-capture-matches?)
 (def ^:private original-framed-observation publication/read-framed-submission-observation!)
 
 (defn- configured-recovery-boundaries! []
@@ -920,14 +925,15 @@
   (when-not (and (identical? original-configured-adopt adopt-implementation-trust!)
                  (identical? original-physical-envelope physical-envelope/compare-recovery!)
                  (identical? original-activated-recovery observed-recovery/compare-activated!)
+                 (identical? original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
+                 (identical? original-local-activated-recovery observed-recovery/compare-local-activated!)
+                 (identical? original-recovery-acquisition retained-acquisition/read-acquisition!)
+                 (identical? original-recovery-worker-match worker-capture/worker-outcome-capture-matches?)
                  (identical? original-framed-observation publication/read-framed-submission-observation!))
     (reject! :configured-recovery-boundary-replaced {})))
 
-(defn compare-configured-envelope-recovery!
-  "Compare adjacent recovery on the exact currently configured owner.
-   Reacquire both declarations under its retirement lock and match the
-   issued and retained activation root. Not historical mediation evidence."
-  [system tables source declarations steps observation]
+(defn- compare-configured-envelope-recovery*
+  [system tables source declarations steps observation worker-scope]
   (let [i (locking writer-isolation-hosts (.get writer-isolation-hosts (::writer-isolation-token system)))
         p (locking provider-trust-hosts (.get provider-trust-hosts (::provider-trust-token system)))]
     (when-not (and i p (identical? system (.get ^java.lang.ref.WeakReference (:system i)))
@@ -941,12 +947,22 @@
       (let [node (:xtdb/connectable system) admission (::mapped-admission system)
             token (::mapped-policy-token system)
             activation (original-combined-root node admission token)
-            observed (original-framed-observation admission observation)]
+            observed (original-framed-observation admission observation)
+            acquisition (:acquisition worker-scope)
+            capture (:capture worker-scope)
+            sample (when worker-scope (original-recovery-acquisition node acquisition))]
         (when-not (and activation (= activation (:activation-root observed)))
           (reject! :configured-recovery-activation-mismatch {}))
+        (when (and worker-scope (not (and sample (original-recovery-worker-match system capture))))
+          (reject! :configured-recovery-worker-origin-mismatch {}))
         (let [configured (original-configured-adopt system source declarations)
-              retained (original-activated-recovery node tables admission source declarations steps observation)
-              physical (original-physical-envelope node tables admission source declarations steps observation)
+              retained (if worker-scope
+                         (original-local-activated-recovery node tables admission source declarations steps observation acquisition true)
+                         (original-activated-recovery node tables admission source declarations steps observation))
+              physical (if worker-scope
+                         (original-interleaved-envelope system tables admission source declarations steps observation acquisition capture)
+                         (original-physical-envelope node tables admission source declarations steps observation))
+              maintenance (:maintenance-correspondence physical)
               general (:general-argument physical)
               binding (:original-clm-r2-binding configured)
               root (:activation-root configured)]
@@ -962,6 +978,17 @@
                          (= (select-keys root [:manifest-tx-id :initialization-tx-id])
                             (select-keys retained [:manifest-tx-id :initialization-tx-id]))
                          (= (:selected-tx-ids retained) (:selected-tx-ids physical))
+                         (if worker-scope
+                           (and (= observed-recovery/activated-interleaved-profile (:activated-recovery-profile retained))
+                                (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding retained))
+                                (= :matched-local-issued-host-capture (:worker-observation-provenance maintenance))
+                                (= (:payload-fingerprint sample) (:retained-payload-fingerprint maintenance))
+                                (seq (:intervening-maintenance retained))
+                                (= (:intervening-maintenance retained)
+                                   (mapv #(select-keys % [:tx-id :intent-id :maintenance]) (:steps maintenance)))
+                                (every? #(= :matched-mapped-stutter-and-single-outbox-replacement (:effect %)) (:steps maintenance)))
+                           (and (= observed-recovery/activated-profile (:activated-recovery-profile retained))
+                                (= :not-applicable maintenance)))
                          (= (:abstract-report-fingerprint binding) (:abstract-report-fingerprint general))
                          (= (:original-open-obligation-ids-by-operation binding) (:original-open-obligations general))
                          (= (:remaining-conditions configured) (:general-conditions general))
@@ -976,8 +1003,12 @@
           (require-open-provider-generation! system)
           (when-not (= activation (original-combined-root node admission token))
             (reject! :combined-trust-activation-changed {}))
+          (when (and worker-scope (not (and (= sample (original-recovery-acquisition node acquisition))
+                                            (original-recovery-worker-match system capture))))
+            (reject! :configured-recovery-worker-origin-mismatch {}))
           {:status :conditional-configured-envelope-recovery
            :profile :configured-clm-r2-envelope-recovery-v1
+           :recovery-scope (if worker-scope :worker-interleaved :adjacent)
            :subject (:subject configured) :activation-root root
            :activation-root-binding :matched-current-owner-and-issued-retained-root
            :selected-tx-ids (:selected-tx-ids physical)
@@ -996,3 +1027,20 @@
            :provider-refinement :not-established :universal-refinement :not-established
            :premise-acceptance :explicit-declarations-only :proof-discharge :not-performed
            :authority :none :certificate :not-issued})))))
+
+
+(defn compare-configured-envelope-recovery!
+  "Compare adjacent recovery on the exact currently configured owner.
+   Reacquire both declarations under its retirement lock and match the
+   issued and retained activation root. Not historical mediation evidence."
+  [system tables source declarations steps observation]
+  (compare-configured-envelope-recovery* system tables source declarations steps observation nil))
+
+(defn compare-configured-worker-envelope-recovery!
+  "Compare the selected worker-interleaved recovery on its exact current
+   owner using the same issued retained acquisition for root and physical
+   comparison, and the original host worker capture. Historical diagnostic,
+   not continuous mediation or worker authentication."
+  [system tables source declarations steps observation acquisition capture]
+  (compare-configured-envelope-recovery* system tables source declarations steps observation
+                                        {:acquisition acquisition :capture capture}))

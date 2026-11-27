@@ -1035,8 +1035,27 @@
                         (is (= :not-performed (:proof-discharge qualified)))
                         (let [compare! #(physical-envelope/compare-worker-interleaved!
                                          started tables admit mapped-source outcome-declarations steps observation %1 %2)
-                              result (compare! handle worker-capture)
+                              configured! #(host/compare-configured-worker-envelope-recovery!
+                                            %1 tables mapped-source outcome-declarations steps observation %2 %3)
+                              joined (configured! started handle worker-capture)
+                              result (:physical-correspondence joined)
                               maintenance-result (:maintenance-correspondence result)]
+                          (is (= :conditional-configured-envelope-recovery (:status joined)))
+                          (is (= :worker-interleaved (:recovery-scope joined)))
+                          (is (= :matched-current-owner-and-issued-retained-root (:activation-root-binding joined)))
+                          (is (= (:selected-tx-ids r) (:selected-tx-ids joined)))
+                          (is (= (:activation-root joined) (get-in joined [:adoption-scopes :writer-isolation :activation-root])))
+                          (is (= [5 8] (mapv #(count (get-in joined [:trusted-assumptions-by-contract %])) [:writer-isolation :provider-trust])))
+                          (is (= 39 (count (:remaining-general-conditions joined))))
+                          (is (= (:remaining-conditions result) (:remaining-conditions joined)))
+                          (is (every? (:remaining-conditions joined) #{:faithful-worker-and-dispatch-origin :faithful-worker-provider-envelope}))
+                          (is (= :not-established (:historical-mediation joined) (:continuous-mediation joined) (:storage-lineage joined)))
+                          (is (= :not-performed (:proof-discharge joined)))
+                          (is (= :unissued-combined-trust-host (trust-problem #(configured! (into {} started) handle worker-capture))))
+                          (is (= :configured-recovery-worker-origin-mismatch (trust-problem #(configured! started sample worker-capture))))
+                          (is (= :configured-recovery-worker-origin-mismatch (trust-problem #(configured! started handle (into {} worker-capture)))))
+                          (with-redefs [physical-envelope/compare-worker-interleaved! (constantly result)]
+                            (is (= :configured-recovery-boundary-replaced (trust-problem #(configured! started handle worker-capture)))))
                           (is (= :conditional-physical-source-envelope-recovery (:status result)) (pr-str (select-keys result [:status :reason])))
                           (is (= :matched-local-issued-host-capture (:worker-observation-provenance maintenance-result)))
                           (is (= maintenance (mapv #(select-keys % [:tx-id :intent-id :maintenance]) (:steps maintenance-result))))
@@ -1133,6 +1152,7 @@
                   (let [compare! #(host/compare-configured-envelope-recovery! %1 tables mapped-source outcome-declarations (recovery-steps history) %2)
                         joined (compare! started observation)]
                     (is (= :conditional-configured-envelope-recovery (:status joined)))
+                    (is (= :adjacent (:recovery-scope joined)))
                     (is (= :matched-current-owner-and-issued-retained-root (:activation-root-binding joined)))
                     (is (= (:selected-tx-ids r) (:selected-tx-ids joined)))
                     (is (= 39 (count (:remaining-general-conditions joined))))

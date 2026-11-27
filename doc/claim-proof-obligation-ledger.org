@@ -10255,3 +10255,36 @@ gates were not rerun. No production submission behavior changed.
 Next: integrate the worker-interleaved envelope diagnostic with the
 configured owner trust-adoption and exact activated retained root
 comparison, preserving both the adjacent and interleaved scopes.
+
+* v2878 — bind configured owner trust to interleaved recovery
+
+Extend the exact-owner diagnostic with a separate worker-interleaved
+entry point, sharing the owner retirement lock, live provider generation,
+activation root and original implementation trust composition with the
+adjacent entry point. Require the original host-issued worker capture
+and retained acquisition before adoption. Use the same issued acquisition
+for the local activated comparison and the physical envelope comparison.
+Require the exact retained maintenance sequence, worker provenance,
+retained payload fingerprint and mapped-stutter/outbox-replacement
+classification; recheck capture and acquisition identities before returning.
+The result distinguishes adjacent and worker-interleaved recovery scopes.
+Preserve the exact trust adoption scopes, 39 original general conditions
+and additional worker-origin and provider-envelope conditions. This is
+current owner adoption joined to selected historical correspondence, not
+historical or continuous mediation, authentication, lineage or universal
+refinement. No authority, certificate or proof discharge is issued.
+
+Focused installed-host JVM regression: 1 test / 1339 assertions, zero
+failures or errors (exit 0), in assembled-command-transport-worker-
+interleaved-recovery. The positive physical comparison now runs through
+the configured owner entry point; retain the physical rejection cases
+and add copied owner, copied capture, unissued acquisition and substituted
+interleaved comparison rejection. The retained storage reopening checks
+passed. The adjacent scope assertion was added but its variant and full
+project gates were not rerun. Update the reviewed host digest for the
+diagnostic-only changes; no production submission behavior changed.
+
+Next: compose the configured selected recovery correspondence with the
+existing issued writer-history qualification for the complete selected
+post-initialization prefix, preserving exact retained acquisition and
+keeping finite history qualification distinct from universal closure.
