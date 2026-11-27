@@ -103,6 +103,30 @@
     (reject! :invalid-physical-lease {:intent-id intent-id}))
   intent)
 
+(def ^:private ^ThreadLocal maintenance-handoff (ThreadLocal.))
+(def ^:private original-execute live.xtdb/execute-tx!)
+
+(defn claim-maintenance-handoff!
+  "Consume the exact synchronous constructor-to-adapter handoff once.
+   This is local submission observation, not admission or a commit receipt."
+  [node ops]
+  (let [scope (.get maintenance-handoff)]
+    (when (and scope (identical? original-execute live.xtdb/execute-tx!)
+               (identical? node (:node scope)) (identical? ops (:ops scope)))
+      (.remove maintenance-handoff)
+      (:maintenance scope))))
+
+(defn- execute-maintenance! [node maintenance ops]
+  (let [prior (.get maintenance-handoff)
+        execute! live.xtdb/execute-tx!]
+    (.remove maintenance-handoff)
+    (try
+      (when (identical? original-execute execute!)
+        (.set maintenance-handoff {:node node :ops ops :maintenance maintenance}))
+      (execute! node ops)
+      (finally
+        (if prior (.set maintenance-handoff prior) (.remove maintenance-handoff))))))
+
 (defn acknowledge-dispatch!
   "Record a trusted adapter's reported acceptance under the live XTDB lease.
 
@@ -153,7 +177,7 @@
                         (:gesso.live.outbox/lease-until intent)]
                        [:put-docs outbox/intent-table updated]]]
               (try
-                (merge (live.xtdb/execute-tx! node ops)
+                (merge (execute-maintenance! node :dispatch-acknowledgment ops)
                        {:status :acknowledged
                         :intent-id intent-id
                         :lease-id lease-id

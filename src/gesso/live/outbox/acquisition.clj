@@ -139,6 +139,30 @@
      [guard-max-new-deadline-sql lease-until]
      [:put-docs outbox/intent-table claimed]]))
 
+(def ^:private ^ThreadLocal maintenance-handoff (ThreadLocal.))
+(def ^:private original-execute live.xtdb/execute-tx!)
+
+(defn claim-maintenance-handoff!
+  "Consume the exact synchronous constructor-to-adapter handoff once.
+   This is local submission observation, not admission or a commit receipt."
+  [node ops]
+  (let [scope (.get maintenance-handoff)]
+    (when (and scope (identical? original-execute live.xtdb/execute-tx!)
+               (identical? node (:node scope)) (identical? ops (:ops scope)))
+      (.remove maintenance-handoff)
+      (:maintenance scope))))
+
+(defn- execute-maintenance! [node maintenance ops]
+  (let [prior (.get maintenance-handoff)
+        execute! live.xtdb/execute-tx!]
+    (.remove maintenance-handoff)
+    (try
+      (when (identical? original-execute execute!)
+        (.set maintenance-handoff {:node node :ops ops :maintenance maintenance}))
+      (execute! node ops)
+      (finally
+        (if prior (.set maintenance-handoff prior) (.remove maintenance-handoff))))))
+
 (defn acquire-pending!
   "Attempt a single CAS acquisition of one pending intent from a live XTDB node.
 
@@ -180,7 +204,7 @@
           :else
           (let [tx-ops (acquire-ops intent claim)]
             (try
-              (let [result (live.xtdb/execute-tx! node tx-ops)]
+              (let [result (execute-maintenance! node :lease-acquisition tx-ops)]
                 (merge result
                        {:status :acquired
                         :intent-id intent-id
@@ -308,7 +332,7 @@
                        [guard-max-new-deadline-sql lease-until]
                        [:put-docs outbox/intent-table new-intent]]]
               (try
-                (merge (live.xtdb/execute-tx! node ops)
+                (merge (execute-maintenance! node :expired-lease-reclamation ops)
                        {:status :reclaimed
                         :intent-id intent-id
                         :lease-id lease-id

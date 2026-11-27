@@ -3,6 +3,11 @@
    physical XTDB-to-Live emission from an automatically scheduled cycle."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.live.core :as live]
+            [gesso.live.consistency.xtdb :as xtdb]
+            [gesso.live.outbox.acquisition :as acquisition]
+            [gesso.live.outbox.discovery :as discovery]
+            [gesso.live.outbox.maintenance-policy :as maintenance]
+            [gesso.live.outbox.writer-policy :as writer-policy]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.cycle :as cycle]
             [gesso.live.outbox.delivery :as delivery]
@@ -12,7 +17,8 @@
             [manifold.stream :as s]
             [xtdb.api :as xt]
             [xtdb.node :as xtn])
-  (:import [java.util UUID]
+  (:import [java.time Instant]
+           [java.util UUID]
            [java.util.concurrent CountDownLatch TimeUnit]))
 
 (def ^:private source-id "gesso/test-lifecycle")
@@ -886,3 +892,68 @@
                 (is (nil? (:last-cycle state)) (str label)))
               (is (= 1 @calls) (str label " cannot run another cycle"))
               (finally (lifecycle/stop! handle 3000)))))))))
+
+(deftest exact-maintenance-handoffs-within-real-scheduled-cycle
+  (with-open [node (xtn/start-node {})]
+    (let [sys (system)
+          direct-id (intent-id 811)
+          scheduled-id (intent-id 812)
+          raw-id (intent-id 813)
+          worker-id "handoff-worker"
+          scope {:source-id source-id :worker-id worker-id}
+          seen (atom [])
+          raw-once? (atom false)
+          observe #'writer-policy/observe-maintenance-origin
+          discover discovery/discover-eligible!
+          release (xtdb/register-submission-policy!
+                   node (fn [{:keys [tx-ops]}]
+                          (when-let [kind (maintenance/admit node scope tx-ops)]
+                            ;; An equal but nonidentical vector cannot consume the frame.
+                            (let [copy (into [] (seq tx-ops))]
+                              (is (= tx-ops copy))
+                              (is (not (identical? tx-ops copy)))
+                              (is (= kind (observe node scope copy kind))))
+                            (let [observed (observe node scope tx-ops kind)]
+                              (swap! seen conj observed)
+                              (is (= kind (observe node scope tx-ops kind))))
+                            true)))]
+      (try
+        (seed! node direct-id)
+        (is (= 1 (:dispatch-accepted
+                  (cycle/process-cycle! node sys {} source-id {:worker-id worker-id}))))
+        (is (= 2 (count @seen)))
+        (is (every? #(not (contains? % :worker-origin)) @seen))
+        (seed! node scheduled-id)
+        (seed! node raw-id)
+        (with-redefs [discovery/discover-eligible!
+                      (fn [n opts]
+                        (when (compare-and-set! raw-once? false true)
+                          ;; This valid maintenance write occurs on the real scheduler
+                          ;; thread but does not pass the acquisition constructor's handoff.
+                          (is (some? (lifecycle/current-worker-origin n source-id worker-id)))
+                          (let [now (Instant/now)
+                                claim {:intent-id raw-id :source-id source-id :worker-id worker-id
+                                       :lease-id (random-uuid) :now now :lease-until (.plusSeconds now 60)}
+                                current (first (xt/q n ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" raw-id]))
+                                ops (#'acquisition/acquire-ops current claim)]
+                            (xtdb/execute-tx! n ops)))
+                        (discover n opts))]
+          (let [handle (lifecycle/start! node sys {} source-id
+                                         {:worker-id worker-id :poll-ms 30 :max-items 4})]
+            (try
+              (is (eventually #(>= (:total-dispatch-accepted (lifecycle/status handle)) 1)))
+              (finally (is (= :drained (:outcome (lifecycle/stop! handle 10000))))))))
+        (let [[raw acquired acknowledged :as scheduled] (subvec @seen 2)
+              origins (mapv :worker-origin [acquired acknowledged])]
+          (is (= 3 (count scheduled)))
+          (is (= raw-id (:intent-id raw)))
+          (is (not (contains? raw :worker-origin)))
+          (is (= [scheduled-id scheduled-id] (mapv :intent-id [acquired acknowledged])))
+          (is (= [:lease-acquisition :dispatch-acknowledgment] (mapv :maintenance origins)))
+          (is (= [1 1] (mapv :cycle-number origins)))
+          (is (uuid? (:lifecycle-ref (first origins))))
+          (is (= (dissoc (first origins) :maintenance) (dissoc (second origins) :maintenance)))
+          (is (every? #(= :not-established (:authentication %)) origins))
+          (is (= :leased (:gesso.live.outbox/status (row node raw-id))))
+          (is (= :dispatch-accepted (:gesso.live.outbox/status (row node scheduled-id)))))
+        (finally (release) (live/close! sys))))))

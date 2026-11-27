@@ -7,6 +7,9 @@
   (:require [gesso.live.outbox.model-publication :as publication]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.maintenance-policy :as maintenance]
+            [gesso.live.outbox.acquisition :as acquisition]
+            [gesso.live.outbox.acknowledgment :as acknowledgment]
+            [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.physical-correspondence :as correspondence]
@@ -129,6 +132,26 @@
         (reset! phase :failed)
         (throw e)))))
 
+(def ^:private original-worker-origin lifecycle/current-worker-origin)
+(def ^:private original-acquisition-handoff acquisition/claim-maintenance-handoff!)
+(def ^:private original-acknowledgment-handoff acknowledgment/claim-maintenance-handoff!)
+
+(defn- observe-maintenance-origin
+  "Add local provenance only after independent exact maintenance admission.
+   Scope does not establish the installed host owner or dispatch provenance."
+  [node {:keys [source-id worker-id]} ops kind]
+  (if (and (= :worker (:kind kind))
+           (identical? original-worker-origin lifecycle/current-worker-origin)
+           (identical? original-acquisition-handoff acquisition/claim-maintenance-handoff!)
+           (identical? original-acknowledgment-handoff acknowledgment/claim-maintenance-handoff!))
+    (let [phase (case (:status kind)
+                  :leased (original-acquisition-handoff node ops)
+                  :dispatch-accepted (original-acknowledgment-handoff node ops)
+                  nil)
+          origin (when phase (original-worker-origin node source-id worker-id))]
+      (cond-> kind origin (assoc :worker-origin (assoc origin :maintenance phase))))
+    kind))
+
 (defn build-policy!
   "Bind admission to the owned connectable. Return the literal-boolean
    predicate expected by the XTDB adapter. Maintenance is bound to the
@@ -168,7 +191,8 @@
                                      (not (initialization/initialized? connectable source-id checked-init))
                                      (compare-and-set! initialized? false true))
                             {:kind :initializer})
-                          (maintenance/admit connectable infrastructure tx-ops)))]
+                          (when-let [maintenance-kind (maintenance/admit connectable infrastructure tx-ops)]
+                            (observe-maintenance-origin connectable infrastructure tx-ops maintenance-kind))))]
            (when kind
              (observe! kind)
              true)))))]

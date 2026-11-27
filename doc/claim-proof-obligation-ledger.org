@@ -7609,3 +7609,40 @@ Next: bind the original scheduled cycle to exact acquisition and
 acknowledgment submission boundaries, distinguishing an arbitrary
 write inside an active cycle from an actual maintenance handoff.
 Then compare issued maintenance origin with retained transactions.
+
+* v2814 — bind worker origin to exact maintenance handoffs
+
+Frame the original synchronous XTDB execute boundary in the physical
+acquisition, expired-lease reclamation and acknowledgment constructors.
+Consume only the identical node and operation vector, once, on the
+originating thread and through the pinned adapter. Clear or restore the
+scope on every exit. The mapped writer independently admits the exact
+maintenance footprint before joining the relevant constructor handoff
+to the scheduled cycle's configured source and worker identities.
+
+The resulting optional worker-origin classification is a local policy
+admission observation, not a returned transaction key, a retained
+transaction comparison or evidence of dispatch acceptance. A direct
+cycle outside the scheduler and a raw maintenance transaction inside
+a scheduled cycle remain admitted when otherwise valid but acquire no
+worker origin. Equal copied vectors and repeated consumption cannot
+supply the framed origin. No physical payload, polling, lease fencing
+or writer admission rule is changed.
+
+Focused JVM: 56 tests / 775 assertions, zero failures or errors, in
+acquisition, acknowledgment, lifecycle, maintenance-policy and
+worker-origin namespaces. The new physical regression uses actual XTDB,
+a scheduled lifecycle and the real Live delivery path, with a test
+submission policy invoking the production observation helper. Discovery
+is wrapped to inject an otherwise valid raw maintenance write as a
+negative case. The older offline dependency bundle was used; full
+project gates and assembled Claim recovery were not rerun.
+
+Next: qualify origin through the actual installed mapped host and
+bind it to the owning lifecycle and selected maintenance submissions.
+This seam alone does not distinguish a constructor invoked by another
+trusted callback on the scheduler thread from the normal acquisition
+or delivery call chain. Establish that call-chain distinction before
+claiming stronger provenance; bind issued observations to actual
+adapter outcomes and retained transactions. No authentication or
+CLM-R2 premise is discharged.
