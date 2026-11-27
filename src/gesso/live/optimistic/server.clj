@@ -793,8 +793,8 @@
         command'
         (normalize-command command)
         principal
-        (-> ((:principal-fn server') ctx)
-            require-principal!)
+        ((:principal-fn server') ctx)
+        _ (require-principal! principal)
         operation-entry
         (resolve-operation server'
                            (get command' protocol/operation-key))
@@ -1124,12 +1124,13 @@
 ;; =============================================================================
 
 (def ^:private ^ThreadLocal command-origin (ThreadLocal.))
-(def ^:private original-begin-command begin-command)
-(def ^:private original-operation-context operation-context)
+(def ^:private origin-boundaries
+  (into {} (map (juxt identity deref))
+        [#'begin-command #'operation-context #'require-server! #'server?
+         #'normalize-command #'require-principal! #'identity/principal? #'resolve-operation]))
 
 (defn- origin-boundaries-current? []
-  (and (identical? original-begin-command begin-command)
-       (identical? original-operation-context operation-context)))
+  (every? (fn [[v original]] (identical? original @v)) origin-boundaries))
 
 (defn- active-command-origin [invocation]
   (let [scope (.get command-origin)]
@@ -1142,8 +1143,9 @@
 (defn current-command-origin
   "Describe the exact invocation during its registered synchronous execution.
    Copies, other threads and completed invocations have no origin here.
-   The configured resolver is trusted, not independently authenticated;
-   this sensitive local observation is neither authority nor a receipt.
+   The original configured resolver return and registry entry must be retained.
+   The resolver is trusted, not independently authenticated; this sensitive
+   local observation is neither authority nor a receipt.
    The two-argument form also requires the exact registry-selected executor."
   ([invocation] (active-command-origin invocation))
   ([invocation executor]
@@ -1169,12 +1171,18 @@
      (try
        (let [original? (origin-boundaries-current?)
              boundary (begin-command prepared-server ctx command)
+             original? (and original? (origin-boundaries-current?)
+                            (identical? prepared-server (:server boundary))
+                            (identical? ctx (:ctx boundary))
+                            (identical? (:operation-entry boundary)
+                                        (get-in prepared-server [:operations (get-in boundary [:command protocol/operation-key])])))
              ;; Transport enrichment may supply context, not command identity.
              boundary (if bind-context (assoc boundary :ctx (bind-context boundary)) boundary)
              execute! (get-in boundary [:operation-entry :execute!])
              invocation (operation-context boundary)
              result (try
-                      (when (and original? (origin-boundaries-current?))
+                      (when (and original? (origin-boundaries-current?)
+                                 (identical? (:principal boundary) (:principal invocation)))
                         (.set command-origin {:invocation invocation :executor execute!}))
                       (execute! invocation)
                       (finally (.remove command-origin)))]

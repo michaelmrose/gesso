@@ -10693,3 +10693,30 @@ CLM-R2 conditions remain open.
 Next: examine attribution to the exact installed principal resolver and
 registered server boundary, distinguishing its actual local resolution from
 independent authentication of the application's principal/session authority.
+
+* v2893 — retain exact configured resolver and registry attribution
+
+Keep the configured principal function's actual returned identity as the
+principal; validation must not supply a replacement identity. Pin the original
+server validation, normalization, principal validation, registry resolution,
+boundary construction and invocation construction functions for local command
+origin observation. Check the exact prepared server, initial context and
+registry-selected entry before transport enrichment, and preserve the exact
+resolved principal in the active invocation. A replaced boundary suppresses
+origin evidence rather than creating new authority or changing the command's
+settlement classification. Retain the existing origin report vocabulary and
+thread-local nesting and exceptional-exit behavior. The prepared server is a
+trusted argument here; this is not independently authenticated installation
+identity or a security sandbox against arbitrary in-process substitution.
+
+Focused JVM: server, command origin, HTTP operation and resolved operation,
+76 tests / 557 assertions, zero failures or errors (exit 0). Includes exact
+resolver call/context/return identity, substituted validator/registry/server
+helpers, replacement during transport enrichment, actual assembled HTTP and
+XTDB execution/replay. Canonical assembled-host retained-history regression
+and full project gates were not rerun. Both command authentication premises
+and all 39 original general CLM-R2 conditions remain open.
+
+Next: bind the actual canonical HTTP route and installed prepared server to
+issued command-origin observation, preserving the independent application
+request-gate and principal/session authentication obligations.
