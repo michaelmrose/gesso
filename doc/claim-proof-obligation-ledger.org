@@ -8635,3 +8635,52 @@ boundary, distinguishing a provider contract and independent retained
 replay from an unconditional implementation theorem. Use original
 transaction coordinates and observable snapshot-token behavior rather
 than merely adding a descriptive premise.
+
+* v2839 — qualify selected pinned snapshot and valid-time continuity
+
+Advance the physical readback profile to v3. Decode the original
+XTDB snapshot token through the pinned basis decoder. Require a single
+comparable point for the xtdb database, strictly increasing original
+selected system times, and a snapshot point not earlier than the
+selected recovery cut. Confirm the token via SHOW SNAPSHOT_TOKEN on
+the same pinned read basis before and after the selected reads.
+Use one token and one current-time option for all selected ledger
+and historical document queries. Do not publish the raw token.
+
+On that same basis query xt.txs for every selected retained transaction
+including the manifest, initializer, maintenance, winner, abort and
+recovery. Require one row with the exact transaction ID, system time
+and commit/abort result independently predicted by retained replay.
+Continue the four-way selected state projection correspondence and
+explicitly check the physical prior poststate against the following
+prestate at the next valid-time coordinate. Retain the decoded
+snapshot time, ledger observations and exact checked points. Require
+this snapshot evidence, including complete ledger and point identity
+and correct commitment classification, in conditional physical
+invariant derivation. Pin the basis decoder seam.
+
+Focused JVM: initial invariant suite passed 3 tests / 140 assertions.
+Final combined invariant, projection, expression, inventory and
+assembled-host recovery suites passed 18 tests / 3251 assertions, zero
+failures or errors. Both persistent recovery fixtures passed with the
+original worker polling, including reopened and copied stores. The
+new real-provider regression captures an older token, advances the
+store, verifies its pinned echo and exclusion of a later transaction
+from the pinned ledger, and rejects a token earlier than the selected
+cut. Exercise changed ledger outcomes, changed token echoes, missing
+or altered snapshot evidence and incomplete point/ledger sequences.
+Both code blobs verified against the tested files.
+
+The check is restricted to comparable single-database snapshot points
+and the selected retained transaction boundaries. The token decoder,
+provider query semantics, canonical record validation and loaded
+runtime remain trusted implementation dependencies. Agreement does
+not establish universal XTDB snapshot semantics, complete writer
+coverage, authenticated storage identity, or coverage of arbitrary
+valid-time instants. Historical judgment v11 retained. Full project
+gates not run. No premise accepted or discharged.
+
+Next: bind the retained snapshot correspondence to the exact open
+snapshot-continuity premise and its ledger/source-log prerequisites.
+Compose the three condition-specific support results without treating
+selected observations as universal physical refinement.

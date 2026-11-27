@@ -138,6 +138,29 @@
           (is (= coordinates (:field-coordinates evidence))))
         (with-redefs-fn {#'invariant/original-independent-project (constantly {:fixture/value 999})}
           #(is (= :independent-retained-projection-mismatch (:reason (run inputs)))))
+        (let [snapshot (:snapshot-correspondence matched)]
+          (is (= invariant/snapshot-profile (:profile snapshot)))
+          (is (= :matched (:status snapshot)))
+          (is (= (t 6) (:snapshot-system-time snapshot)))
+          (is (= :matched-before-and-after (:token-echo snapshot)))
+          (is (= :matched-prior-poststate-to-next-prestate (:valid-time-continuity snapshot)))
+          (is (= points (:checked-coordinates snapshot)))
+          (is (= [0 1 2 3 4 5] (mapv :tx-id (:ledger snapshot))))
+          (is (= [true true true true false true] (mapv :committed? (:ledger snapshot))))
+          (is (= :not-established (:provider-refinement snapshot))))
+        (let [query @#'invariant/original-query]
+          (doseq [[alter reason]
+                  [[(fn [sql rows] (if (and (vector? sql) (= 4 (second sql))
+                                           (= "SELECT _id, committed, system_time FROM xt.txs WHERE _id = ?" (first sql)))
+                                    (mapv #(assoc % :committed true) rows) rows)) :selected-pinned-ledger-mismatch]
+                   [(fn [sql rows] (if (= sql "SHOW SNAPSHOT_TOKEN") [{:snapshot-token "foreign"}] rows))
+                    :selected-pinned-token-mismatch]]]
+            (with-redefs-fn {#'invariant/original-query
+                             (fn ([n sql] (query n sql))
+                               ([n sql opts] (alter sql (query n sql opts))))}
+              #(let [bad (run inputs)]
+                 (is (= reason (:reason bad)))
+                 (is (not (contains? bad :snapshot-correspondence)))))))
         (is (= (t 1) (:system-time (second points))))
         (is (= (t 2) (:valid-time (second points))))
         (is (= matched (run (pop inputs))))
@@ -158,6 +181,12 @@
                                      [checked (assoc matched :status :mismatch)]
                                      [checked (assoc matched :status :unavailable)]
                                      [checked (assoc matched :profile :other)]
+                                     [checked (dissoc matched :snapshot-correspondence)]
+                                     [checked (assoc-in matched [:snapshot-correspondence :snapshot-system-time] (t 4))]
+                                     [checked (assoc-in matched [:snapshot-correspondence :token-echo] :unknown)]
+                                     [checked (assoc-in matched [:snapshot-correspondence :ledger 4 :committed?] true)]
+                                     [checked (update-in matched [:snapshot-correspondence :ledger] pop)]
+                                     [checked (update-in matched [:snapshot-correspondence :checked-coordinates] pop)]
                                      [checked (dissoc matched :projection-correspondence)]
                                      [checked (assoc-in matched [:projection-correspondence :status] :mismatch)]
                                      [checked (update-in matched [:projection-correspondence :checked-coordinates] pop)]
@@ -180,6 +209,31 @@
     (is (= :invariant-boundary-replaced
            (:reason (invariant/audit-issued-selection! nil nil nil nil nil nil nil nil))))))
 
+(deftest pinned-snapshot-excludes-later-transaction
+  (with-open [node (xtn/start-node {})]
+    (let [submit! (fn [tx]
+                    (let [id (:tx-id (xt/submit-tx node (:ops tx) {:system-time (:system-time tx)}))]
+                      (.awaitTxBlocking (db/primary-db node) id (Duration/ofSeconds 15))))
+          selected (subvec inputs 0 6)]
+      (doseq [tx (pop selected)] (submit! tx))
+      (let [older (#'invariant/snapshot-token! (xt/q node "SHOW SNAPSHOT_TOKEN"))]
+        (submit! (peek selected))
+        (let [token (#'invariant/snapshot-token! (xt/q node "SHOW SNAPSHOT_TOKEN"))
+              basis {:snapshot-token token :current-time (Instant/now)}]
+          (submit! (peek inputs))
+          (is (not= token (#'invariant/snapshot-token! (xt/q node "SHOW SNAPSHOT_TOKEN"))))
+          (is (nil? (#'invariant/confirm-basis! node basis)))
+          (is (= (t 5) (#'invariant/snapshot-point! token selected)))
+          (is (= :selected-snapshot-does-not-cover-cut
+                 (try (#'invariant/snapshot-point! older selected)
+                      (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))
+          (is (empty? (xt/q node ["SELECT _id, committed, system_time FROM xt.txs WHERE _id = ?" 6] basis)))
+          (is (= 2 (get-in (#'invariant/read-physical-visible! node basis #{:fixture_rows} (t 5) (t 6))
+                           [:fixture_rows "row" :value])))
+          (is (= -1 (get-in (#'invariant/read-physical-visible! node {:snapshot-token (#'invariant/snapshot-token! (xt/q node "SHOW SNAPSHOT_TOKEN"))
+                                                                     :current-time (Instant/now)} #{:fixture_rows} (t 6) (t 6))
+                            [:fixture_rows "row" :value]))))))))
+
 (defn check-judgment! [result scope original]
   (let [checked (:selected-invariant-evidence result)
         ids (:selected-tx-ids original)
@@ -196,6 +250,15 @@
       (is (= (mapv :tx-id boundaries) (mapv :tx-id (remove #(= :prestate (:side %)) points))))
       (is (= :not-established (:physical-invariant-theorem physical) (:universal-refinement physical)))
       (is (= :not-performed (:proof-discharge physical)))
+      (let [snapshot (:snapshot-correspondence physical)]
+        (is (= invariant/snapshot-profile (:profile snapshot)))
+        (is (= :matched (:status snapshot)))
+        (is (= :matched-before-and-after (:token-echo snapshot)))
+        (is (= :matched-prior-poststate-to-next-prestate (:valid-time-continuity snapshot)))
+        (is (= points (:checked-coordinates snapshot)))
+        (is (= (into [(:manifest-tx-id original)] (map :tx-id boundaries)) (mapv :tx-id (:ledger snapshot))))
+        (is (= (into [true] (map #(not= :aborted-stutter (:relation %)) boundaries)) (mapv :committed? (:ledger snapshot))))
+        (is (= :not-established (:provider-refinement snapshot))))
       (let [evidence (:projection-correspondence physical)]
         (is (= projection/profile (:profile evidence)))
         (is (= :matched (:status evidence)))

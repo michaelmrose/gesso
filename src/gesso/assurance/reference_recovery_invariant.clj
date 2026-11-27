@@ -13,8 +13,9 @@
             [gesso.assurance.transition :as construction]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.model.inductive-plan :as induction]
-            [xtdb.api :as xt])
-  (:import [java.time Instant]))
+            [xtdb.api :as xt]
+            [xtdb.basis :as basis])
+  (:import [java.time Instant ZonedDateTime]))
 
 (def profile :selected-retained-invariant-boundaries-v1)
 (def ^:private original-project poststate/project-visible!)
@@ -30,6 +31,7 @@
 (def ^:private original-observation publication/read-framed-submission-observation!)
 (def ^:private original-initialization induction/check-mapped-initialization!)
 (def ^:private original-query xt/q)
+(def ^:private original-decode-basis basis/<-time-basis-str)
 (def ^:private original-expression-catalog expression/check-catalog!)
 (def ^:private original-expression-boundaries expression/boundaries-current?)
 (def ^:private original-independent-project projection/project!)
@@ -50,6 +52,7 @@
        (identical? original-observation publication/read-framed-submission-observation!)
        (identical? original-initialization induction/check-mapped-initialization!)
        (identical? original-query xt/q)
+       (identical? original-decode-basis basis/<-time-basis-str)
        (identical? original-expression-catalog expression/check-catalog!)
        (identical? original-expression-boundaries expression/boundaries-current?)
        (original-expression-boundaries)
@@ -205,7 +208,49 @@
                                                    (= :committed-abstract-transition relation)
                                                    (assoc :alternative-id operation-id)))))))))))))))
 
-(def physical-profile :selected-pinned-invariant-readbacks-v2)
+(def physical-profile :selected-pinned-invariant-readbacks-v3)
+(def snapshot-profile :selected-pinned-snapshot-continuity-v1)
+
+(defn- snapshot-token! [rows]
+  (let [token (when (and (sequential? rows) (= 1 (count rows))
+                         (= #{:snapshot-token} (set (keys (first rows)))))
+                (:snapshot-token (first rows)))]
+    (when-not (and (string? token) (seq token))
+      (throw (ex-info "Invalid selected snapshot token" {:reason :invalid-selected-snapshot-token})))
+    token))
+
+(defn- snapshot-point! [token selected]
+  (let [decoded (try (original-decode-basis token)
+                     (catch Exception _ nil))
+        times (when (and (map? decoded) (= #{"xtdb"} (set (keys decoded)))) (get decoded "xtdb"))
+        point (when (and (sequential? times) (= 1 (count times))) (first times))]
+    (when-not (and (instance? Instant point) (seq selected)
+                   (every? #(instance? Instant (:system-time %)) selected)
+                   (every? (fn [[a b]] (.isBefore ^Instant (:system-time a) ^Instant (:system-time b)))
+                           (partition 2 1 selected))
+                   (not (.isBefore ^Instant point ^Instant (:system-time (peek selected)))))
+      (throw (ex-info "Unqualified selected snapshot point" {:reason :selected-snapshot-does-not-cover-cut})))
+    point))
+
+(defn- confirm-basis! [node basis]
+  (when-not (= (:snapshot-token basis)
+               (snapshot-token! (original-query node "SHOW SNAPSHOT_TOKEN" basis)))
+    (throw (ex-info "Pinned snapshot token changed" {:reason :selected-pinned-token-mismatch}))))
+
+(defn- check-selected-ledger! [node basis selected history]
+  (when-not (and (= (count selected) (count history))
+                 (= (mapv :system-time selected) (mapv :system-time history)))
+    (throw (ex-info "Unqualified retained replay history" {:reason :selected-ledger-history-mismatch})))
+  (mapv (fn [{:keys [tx-id system-time]} {:keys [committed?]}]
+          (let [rows (original-query node ["SELECT _id, committed, system_time FROM xt.txs WHERE _id = ?" tx-id] basis)
+                row (when (and (sequential? rows) (= 1 (count rows))) (first rows))]
+            (when-not (and (map? row) (= #{:xt/id :committed :system-time} (set (keys row)))
+                           (= tx-id (:xt/id row)) (instance? Boolean committed?)
+                           (= committed? (:committed row)) (instance? ZonedDateTime (:system-time row))
+                           (= system-time (.toInstant ^ZonedDateTime (:system-time row))))
+              (throw (ex-info "Selected pinned ledger disagrees with replay" {:reason :selected-pinned-ledger-mismatch})))
+            {:tx-id tx-id :system-time system-time :committed? committed?}))
+        selected history))
 
 (defn- read-physical-visible! [node basis tables system valid]
   (into {} (map (fn [table]
@@ -231,10 +276,7 @@
             replay (original-replay (mapv #(dissoc % :tx-id) selected))
             tables (set (map (fn [[kind table]] (if (= :journal-slot kind) :gesso_commands table))
                              (vals coordinates)))
-            tokens (original-query node "SHOW SNAPSHOT_TOKEN")
-            token (when (and (sequential? tokens) (= 1 (count tokens))
-                             (= #{:snapshot-token} (set (keys (first tokens)))))
-                    (:snapshot-token (first tokens)))]
+            token (snapshot-token! (original-query node "SHOW SNAPSHOT_TOKEN"))]
         (if-not (and (= :checked (:status checked)) (seq ids)
                      (= ids (mapv :tx-id (rest selected)))
                      (= :predicted (:status replay)) (seq tables)
@@ -242,6 +284,9 @@
                      (string? token) (seq token))
           (fail :unsupported :unqualified-physical-invariant-readback)
           (let [basis {:snapshot-token token :current-time (Instant/now)}
+                snapshot-time (snapshot-point! token selected)
+                _ (confirm-basis! node basis)
+                ledger (check-selected-ledger! node basis selected (:history replay))
                 initial (second selected)
                 points (into [{:tx-id (:tx-id initial) :side :initial
                                :system-time (:system-time initial) :valid-time (:system-time initial)}]
@@ -252,10 +297,20 @@
                                          :system-time (:system-time tx) :valid-time (:system-time tx)}])
                                      (partition 2 1 (rest selected))))
                 project #(original-project coordinates % {:outcome-cases cases})]
-            (loop [[point & remaining] points]
+            (loop [[point & remaining] points prior nil]
               (if-not point
-                (assoc base :status :matched :correspondence :matched-selected-physical-projections
+                (do (confirm-basis! node basis)
+                    (assoc base :status :matched :correspondence :matched-selected-physical-projections
                        :checked-coordinates points :invariant-ids (:invariant-ids checked)
+                       :snapshot-correspondence
+                       {:profile snapshot-profile :status :matched
+                        :scope :selected-pinned-provider-observations-only
+                        :snapshot-system-time snapshot-time :database "xtdb"
+                        :token-echo :matched-before-and-after
+                        :ledger ledger :checked-coordinates points
+                        :valid-time-continuity :matched-prior-poststate-to-next-prestate
+                        :provider-refinement :not-established :proof-discharge :not-performed
+                        :authority :none :certificate :not-issued}
                        :projection-correspondence
                        {:profile projection/profile :status :matched
                         :scope :selected-supplied-visible-rows-only
@@ -264,8 +319,8 @@
                         :closed-outcome-case-count (count cases) :closed-outcome-cases cases
                         :record-validation :shared-canonical-record-validator
                         :provider-refinement :not-established :universal-projection :not-established
-                        :proof-discharge :not-performed :authority :none :certificate :not-issued})
-                (let [{:keys [system-time valid-time]} point
+                        :proof-discharge :not-performed :authority :none :certificate :not-issued}))
+                (let [{:keys [system-time valid-time side]} point
                       retained-rows (original-visible replay system-time valid-time)
                       physical-rows (read-physical-visible! node basis tables system-time valid-time)
                       retained-state (project retained-rows)
@@ -277,7 +332,9 @@
                     (fail :mismatch :independent-physical-projection-mismatch)
                     (not= retained-state physical-state)
                     (fail :mismatch :physical-invariant-projection-mismatch)
-                    :else (recur remaining))))))))
+                    (and (= :prestate side) (not= prior physical-state))
+                    (fail :mismatch :selected-physical-valid-time-continuity-mismatch)
+                    :else (recur remaining physical-state))))))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
         (throw e))
@@ -320,10 +377,24 @@
              (= :original-selected-invariant-coordinates-only (:scope physical))
              (= :matched-selected-physical-projections (:correspondence physical))
              (set? invariant-ids) (seq invariant-ids) (= invariant-ids (:invariant-ids physical))
+             (= snapshot-profile (get-in physical [:snapshot-correspondence :profile]))
+             (= :matched (get-in physical [:snapshot-correspondence :status]))
+             (= :matched-before-and-after (get-in physical [:snapshot-correspondence :token-echo]))
+             (= :matched-prior-poststate-to-next-prestate (get-in physical [:snapshot-correspondence :valid-time-continuity]))
+             (= "xtdb" (get-in physical [:snapshot-correspondence :database]))
+             (instance? Instant (get-in physical [:snapshot-correspondence :snapshot-system-time]))
+             (seq expected)
+             (not (.isBefore ^Instant (get-in physical [:snapshot-correspondence :snapshot-system-time])
+                             ^Instant (:system-time (peek selected))))
+             (= (mapv #(select-keys % [:tx-id :system-time]) selected)
+                (mapv #(select-keys % [:tx-id :system-time]) (get-in physical [:snapshot-correspondence :ledger])))
+             (= (into [true] (map #(not= :aborted-stutter (:relation %)) (:checked-boundaries checked)))
+                (mapv :committed? (get-in physical [:snapshot-correspondence :ledger])))
              (= projection/profile (get-in physical [:projection-correspondence :profile]))
              (= :matched (get-in physical [:projection-correspondence :status]))
              (seq expected) (= expected (:checked-coordinates physical)
-                               (get-in physical [:projection-correspondence :checked-coordinates])))
+                               (get-in physical [:projection-correspondence :checked-coordinates])
+                               (get-in physical [:snapshot-correspondence :checked-coordinates])))
       (assoc base :status :conditional
              :conclusion :declared-invariants-hold-on-selected-physical-projections
              :derivation :finite-invariant-evaluation-and-projection-equality
