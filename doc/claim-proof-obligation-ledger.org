@@ -10466,3 +10466,42 @@ general conditions remain open; no authority or proof discharge is issued.
 Next: bind the strict scheduled origin to the exact managed lifecycle
 and its explicitly authorized successor lineage before the first cycle,
 without introducing a startup race or breaking worker recovery.
+
+* v2885 — bind maintenance to the current managed worker lineage
+
+Reserve one exact local managed lineage during canonical mapped-host startup,
+share it between the installed policy and Biff worker startup, and require
+its presence before provider creation. Reserve the root handle before starting
+its thread. Scheduled origin remains thread-local and does not expose the
+reservation in diagnostic evidence. An explicitly qualified restart may move
+that reservation only from the exact current predecessor to its successor,
+before the successor's first cycle, under the existing restart/retirement
+boundary. Derive the maintenance worker identity from that current lineage
+instead of the startup worker name; require the independent exact envelope,
+current activated generation and consumed original scheduled call chain as
+before. Standalone policies and unmanaged lifecycle startup remain compatible.
+Pin the reviewed lifecycle and Biff sources alongside the changed host and
+writer predicate, and record the installed-lineage requirement for all three
+worker branches. This is trusted in-process enforcement, not isolation from
+arbitrary JVM code, external writer closure or receipt authentication.
+
+Frozen-candidate JVM gate: 46 tests / 321 assertions, zero failures or errors
+(exit 0), covering classification, physical activation and managed-lineage
+admission, worker origin, Biff startup/teardown and acquisition recovery.
+An independent scheduler using the same names, direct constructor calls and
+scheduler discovery callbacks cannot acquire; the reserved root can acquire
+and acknowledge, and a qualified successor with a new worker ID can do so
+after a discovery failure. Reject a second root on the same reservation and
+drain the successor through the original root. The initial run passed the
+physical cases but rejected the reviewed source digests after host and Biff
+were edited during that JVM's run; the frozen rerun passed without relaxing
+source review. Full worker-interleaved installed-host JVM regression: 1 test /
+1383 assertions, zero failures or errors (exit 0), including configured trust
+composition and retained-storage reopening/substitution. Adjacent variant and
+full project gates not rerun. All 39 original general conditions remain open.
+The existing historical worker-capture diagnostic remains root-scoped; it
+must not yet claim complete successor-lineage attribution.
+
+Next: qualify original managed successor provenance in the issued worker
+outcome capture and retained writer-history path, with exact lineage and
+worker identities rather than accepting any same-name scheduler.

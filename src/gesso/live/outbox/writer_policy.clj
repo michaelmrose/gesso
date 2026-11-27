@@ -136,6 +136,7 @@
         (throw e)))))
 
 (def ^:private original-worker-origin lifecycle/current-worker-origin)
+(def ^:private original-managed-origin lifecycle/current-managed-worker-origin)
 (def ^:private original-acquisition-handoff acquisition/claim-maintenance-handoff!)
 (def ^:private original-acknowledgment-handoff acknowledgment/claim-maintenance-handoff!)
 
@@ -175,7 +176,8 @@
   "Bind admission to the owned connectable. Return the literal-boolean
    predicate expected by the XTDB adapter. Maintenance is bound to the
    host-owned source, worker and descriptor. Installed hosts require the
-   original scheduled maintenance call chain. Observer failure refuses
+   original scheduled maintenance call chain and exact managed lineage.
+   Observer failure refuses
    submission. Initialization is consumed locally on admission and
    durably on commit of the seed and its marker. Mapped operations
    and worker maintenance remain disabled until activate-policy! checks the captured initializer."
@@ -213,16 +215,25 @@
                             {:kind :initializer})
                           ;; Manifest establishment precedes activation. Worker
                           ;; maintenance requires the current activated generation.
-                          (when-let [maintenance-kind (maintenance/admit connectable infrastructure tx-ops)]
-                            (when (or (= :manifest (:kind maintenance-kind))
-                                      (and (= :worker (:kind maintenance-kind))
-                                           (xtdb/submission-policy-current? connectable (:registration @phase))))
-                              (when (identical? original-observe-maintenance-origin observe-maintenance-origin)
-                                (let [observed (original-observe-maintenance-origin connectable infrastructure tx-ops maintenance-kind)]
-                                  (when (or (= :manifest (:kind observed))
-                                            (not (:require-worker-call-chain? infrastructure))
-                                            (= :matched-scheduled-maintenance (get-in observed [:worker-origin :call-chain])))
-                                    observed)))))))]
+                          (let [lineage (:managed-lineage infrastructure)
+                                managed-origin (when (and lineage (identical? original-managed-origin lifecycle/current-managed-worker-origin))
+                                                 (original-managed-origin lineage connectable source-id))
+                                scope (if lineage (assoc infrastructure :worker-id (:worker-id managed-origin)) infrastructure)]
+                            (when-let [maintenance-kind (maintenance/admit connectable scope tx-ops)]
+                              (when (or (= :manifest (:kind maintenance-kind))
+                                        (and (= :worker (:kind maintenance-kind))
+                                             (xtdb/submission-policy-current? connectable (:registration @phase))
+                                             (or (not lineage) managed-origin)))
+                                (when (identical? original-observe-maintenance-origin observe-maintenance-origin)
+                                  (let [observed (original-observe-maintenance-origin connectable scope tx-ops maintenance-kind)
+                                        origin (:worker-origin observed)]
+                                    (when (or (= :manifest (:kind observed))
+                                              (and (or (not (:require-worker-call-chain? infrastructure))
+                                                       (= :matched-scheduled-maintenance (:call-chain origin)))
+                                                   (or (not lineage)
+                                                       (and (= managed-origin (dissoc origin :maintenance :call-chain))
+                                                            (= :matched-scheduled-maintenance (:call-chain origin))))))
+                                      observed))))))))]
            (when kind
              (observe! kind)
              (when (:worker-origin kind)

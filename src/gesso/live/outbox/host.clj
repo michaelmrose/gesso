@@ -273,6 +273,10 @@
                    {:path path :conflicts conflicts}))))))
 
 (defn- start-xtdb! [system]
+  (when (and (get-in system [config-key :mapped-writer-policy])
+             (not (instance? gesso.live.outbox.lifecycle.ManagedLineage
+                             (get system managed/managed-lineage-key))))
+    (reject! :missing-managed-worker-lineage {}))
   (let [release (atom nil)
         owned-policy (atom nil)
         provider-closed? (atom false)
@@ -302,6 +306,7 @@
                     node mapped {:source-id (:source-id config)
                                  :worker-id (get-in config [:worker-options :worker-id])
                                  :require-worker-call-chain? true
+                                 :managed-lineage (get system managed/managed-lineage-key)
                                  :descriptor (::publication-manifest system)})
                    (:xtdb-submission-policy! config))]
       (when policy
@@ -579,6 +584,8 @@
                          managed/source-id-key (:source-id config)
                          managed/options-key (:worker-options config)
                          managed/context-key (:rules-context config)}
+                  (:mapped-writer-policy config)
+                  (assoc managed/managed-lineage-key (lifecycle/new-managed-lineage))
                   (contains? config :stop-timeout-ms)
                   (assoc managed/stop-timeout-key (:stop-timeout-ms config)))]
     (let [network? (contains? config :http-jdk)

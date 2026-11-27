@@ -31,7 +31,16 @@
 (def ^:private default-poll-ms 250)
 
 (defrecord Lifecycle [state stop-signal done thread node expected-source-id
-                      system ctx restart-claimed successor retired lifecycle-ref])
+                      system ctx restart-claimed successor retired lifecycle-ref managed-lineage])
+
+(deftype ManagedLineage [current]
+  Object
+  (toString [_] "#<GessoManagedWorkerLineage>"))
+
+(defn new-managed-lineage
+  "Create a one-use local root reservation for a trusted host startup."
+  []
+  (ManagedLineage. (atom nil)))
 
 (defn- reject! [reason data]
   (throw (ex-info "Invalid Live outbox lifecycle."
@@ -208,13 +217,24 @@
                (identical? node (:node scope))
                (= source-id (:source-id scope))
                (= worker-id (:worker-id scope)))
-      (dissoc scope :node :cycle-opts))))
+      (dissoc scope :node :cycle-opts :managed-lineage))))
   ([node source-id worker-id cycle-opts]
    (when (and cycle-opts (identical? cycle-opts (:cycle-opts (.get worker-origin))))
      (current-worker-origin node source-id worker-id))))
 
+(defn current-managed-worker-origin
+  "Observe the active cycle only for the exact reserved managed lineage.
+   A diagnostic reference is not a startup or restart credential."
+  [lineage node source-id]
+  (when (instance? ManagedLineage lineage)
+    (let [scope (.get worker-origin)
+          handle @(.-current ^ManagedLineage lineage)]
+      (when (and handle (identical? lineage (:managed-lineage scope))
+                 (= (.-lifecycle-ref ^Lifecycle handle) (:lifecycle-ref scope)))
+        (current-worker-origin node source-id (:worker-id (status handle)))))))
+
 (defn- process-scheduled-cycle!
-  [node system ctx source-id opts lifecycle-ref cycle-number]
+  [node system ctx source-id opts lifecycle-ref cycle-number managed-lineage]
   (let [prior (.get worker-origin)
         process! cycle/process-cycle!]
     (.remove worker-origin)
@@ -223,13 +243,14 @@
         (.set worker-origin {:node node :source-id source-id :cycle-opts opts
                              :worker-id (:worker-id opts)
                              :lifecycle-ref lifecycle-ref :cycle-number cycle-number
+                             :managed-lineage managed-lineage
                              :origin :scheduled-local-cycle
                              :authentication :not-established}))
       (process! node system ctx source-id opts)
       (finally
         (if prior (.set worker-origin prior) (.remove worker-origin))))))
 
-(defn- run-loop! [node system ctx expected-source-id opts state stop-signal done lifecycle-ref]
+(defn- run-loop! [node system ctx expected-source-id opts state stop-signal done lifecycle-ref managed-lineage]
   (try
     (loop [cursor nil]
       (if (zero? (.getCount ^CountDownLatch stop-signal))
@@ -242,7 +263,7 @@
                              cursor (assoc :after cursor))
                 result (require-cycle-result!
                         (process-scheduled-cycle! node system ctx expected-source-id cycle-opts
-                                                  lifecycle-ref (inc (:cycles @state)))
+                                                  lifecycle-ref (inc (:cycles @state)) managed-lineage)
                         (:worker-id opts) cursor (:max-items cycle-opts))
                 next-cursor (when (= :page-budget (:halt-reason result))
                               (:next-after result))]
@@ -269,7 +290,7 @@
     (finally
       (.countDown ^CountDownLatch done))))
 
-(defn start!
+(defn- start-in-lineage!
   "Start one explicitly owned polling lifecycle (one daemon thread).
 
    Options: {:worker-id nonblank-string, :lease-millis 1..300000,
@@ -284,7 +305,7 @@
    Starting a new worker after failure requires independent XTDB reconciliation
    and explicit host action. Multiple start! calls create independent workers;
    each one's processing is sequential, but no global singleton is asserted."
-  [node system ctx expected-source-id opts]
+  [node system ctx expected-source-id opts lineage predecessor]
   (validate! system ctx expected-source-id opts)
   (let [state (atom {:status :starting
                      :worker-id (:worker-id opts)
@@ -302,14 +323,29 @@
         done (CountDownLatch. 1)
         thread (Thread. ^Runnable
                         (fn [] (run-loop! node system ctx expected-source-id
-                                          opts state stop-signal done lifecycle-ref))
+                                          opts state stop-signal done lifecycle-ref lineage))
                         (str "gesso-live-outbox-" (:worker-id opts)))
         handle (->Lifecycle state stop-signal done thread
                             node expected-source-id system ctx
-                            (atom false) (atom nil) (atom false) lifecycle-ref)]
+                            (atom false) (atom nil) (atom false) lifecycle-ref lineage)]
+    ;; Reserve before the first cycle can run; failed startup is sticky.
+    (when (and lineage (not (compare-and-set! (.-current ^ManagedLineage lineage) predecessor handle)))
+      (reject! :managed-lineage-already-claimed {}))
     (.setDaemon thread true)
     (.start thread)
     handle))
+
+(defn start!
+  "Start an independent polling lifecycle, without managed write authority."
+  [node system ctx expected-source-id opts]
+  (start-in-lineage! node system ctx expected-source-id opts nil nil))
+
+(defn start-managed!
+  "Start the unique root of a host-reserved lineage before its first cycle."
+  [node system ctx expected-source-id opts lineage]
+  (when-not (instance? ManagedLineage lineage)
+    (reject! :invalid-managed-lineage {}))
+  (start-in-lineage! node system ctx expected-source-id opts lineage nil))
 
 (defn- stop-owned!
   [handle timeout-ms]
@@ -415,15 +451,21 @@
   (locking handle
     (when @(.-retired ^Lifecycle handle)
       (reject! :retired-lifecycle {}))
+    (when-let [lineage (.-managed-lineage ^Lifecycle handle)]
+      (when-not (identical? handle @(.-current ^ManagedLineage lineage))
+        (reject! :managed-lineage-predecessor-mismatch {})))
     (when-not (compare-and-set! (.-restart-claimed ^Lifecycle handle) false true)
       (reject! :already-restarted {}))
     ;; The reservation stays sticky if thread construction/start fails. Such
     ;; a failure is not evidence that no worker escaped to the host.
-    (let [child (start! (.-node ^Lifecycle handle)
-                        (.-system ^Lifecycle handle)
-                        (.-ctx ^Lifecycle handle)
-                        (.-expected-source-id ^Lifecycle handle)
-                        opts)]
+    (let [node (.-node ^Lifecycle handle)
+          system (.-system ^Lifecycle handle)
+          ctx (.-ctx ^Lifecycle handle)
+          source-id (.-expected-source-id ^Lifecycle handle)
+          lineage (.-managed-lineage ^Lifecycle handle)
+          child (if lineage
+                  (start-in-lineage! node system ctx source-id opts lineage handle)
+                  (start! node system ctx source-id opts))]
       (reset! (.-successor ^Lifecycle handle) child)
       {:handle child
        :recovery-mode recovery-mode

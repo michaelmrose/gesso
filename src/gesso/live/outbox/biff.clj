@@ -33,6 +33,7 @@
 (def context-key :gesso.live.outbox/rules-context)
 (def stop-timeout-key :gesso.live.outbox/stop-timeout-ms)
 (def init-policy-key :gesso.live.outbox/init-policy)
+(def managed-lineage-key :gesso.live.outbox/managed-lineage)
 
 (def ^:private default-stop-timeout-ms 10000)
 
@@ -89,10 +90,13 @@
   [system]
   (validate-config! system)
   (let [[node live-system] (require-providers! system)
-        handle (lifecycle/start! node live-system (get system context-key)
-                                 (get system source-id-key)
-                                 (get system options-key))]
-    (assoc system handle-key handle)))
+        lineage (get system managed-lineage-key)
+        handle (if (contains? system managed-lineage-key)
+                 (lifecycle/start-managed! node live-system (get system context-key)
+                                           (get system source-id-key) (get system options-key) lineage)
+                 (lifecycle/start! node live-system (get system context-key)
+                                   (get system source-id-key) (get system options-key)))]
+    (assoc (dissoc system managed-lineage-key) handle-key handle)))
 
 (defn stop-module!
   "Biff's reverse-order stop permanently retires the original worker AND

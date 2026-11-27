@@ -1091,7 +1091,7 @@
             (finally (release))))))))
 
 
-(deftest installed-profile-requires-original-worker-call-chain
+(deftest installed-profile-requires-original-managed-worker-lineage
   (let [admission (admission!)
         seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
         seen (atom [])
@@ -1100,7 +1100,8 @@
                                :purpose :gesso.live/refresh}
                               [{:topic :request :id "r1" :change/kind :updated}])
         config {:admission admission :initializer seed :observe! #(swap! seen conj %)}
-        scope {:source-id "s" :worker-id "w" :require-worker-call-chain? true}
+        lineage (lifecycle/new-managed-lineage)
+        scope {:source-id "s" :worker-id "w" :require-worker-call-chain? true :managed-lineage lineage}
         sys (live/create {:rules [{:when-topic :request
                                   :expand (fn [_ change] [(select-keys change [:topic :id :change/kind])])}]})]
     (try
@@ -1113,7 +1114,12 @@
                                                               :lease-until (.plusSeconds now 60)}))
               row #(first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id]))
               original discovery/discover-eligible!
-              callback-result (promise)]
+              callback-result (promise)
+              root* (atom nil)
+              fail-next? (atom false)
+              eventually (fn [pred] (loop [n 0]
+                                      (cond (pred) true (>= n 400) false
+                                            :else (do (Thread/sleep 25) (recur (inc n))))))]
           (try
             (policy/activate-policy! writer)
             ;; Fixture-only bypass to seed valid pending work.
@@ -1121,25 +1127,46 @@
             (is (= :submission-policy-refused (reason acquire!)))
             (is (= :pending (:gesso.live.outbox/status (row))))
             (is (= [:initializer] (mapv :kind @seen)))
-            (with-redefs [discovery/discover-eligible!
-                          (fn [n opts]
-                            ;; Genuine constructor, scheduler thread, but not the
-                            ;; scheduled acquisition call chain.
-                            (when-not (realized? callback-result)
-                              (deliver callback-result (reason acquire!)))
-                            (original n opts))]
-              (let [handle (lifecycle/start! node sys {} "s" {:worker-id "w" :poll-ms 30})]
-                (try
+            ;; A real but independently started scheduler with identical names
+            ;; has the complete call chain but not this policy's lineage.
+            (let [foreign (lifecycle/start! node sys {} "s" {:worker-id "w" :poll-ms 30})]
+              (try
+                (is (eventually #(= :failed (:status (lifecycle/status foreign)))))
+                (is (= :pending (:gesso.live.outbox/status (row))))
+                (is (= [:initializer] (mapv :kind @seen)))
+                (finally (is (= :failed (:outcome (lifecycle/retire! foreign 10000)))))))
+            (try
+              (with-redefs [discovery/discover-eligible!
+                            (fn [n opts]
+                              (when-not (realized? callback-result)
+                                (deliver callback-result (reason acquire!)))
+                              (when @fail-next? (throw (ex-info "fixture discovery failure" {})))
+                              (original n opts))]
+                (let [root (lifecycle/start-managed! node sys {} "s" {:worker-id "w" :poll-ms 30} lineage)]
+                  (reset! root* root)
                   (is (= :submission-policy-refused (deref callback-result 10000 :timeout)))
-                  (is (loop [n 0]
-                        (cond (= :dispatch-accepted (:gesso.live.outbox/status (row))) true
-                              (= :failed (:status (lifecycle/status handle))) false
-                              (>= n 200) false
-                              :else (do (Thread/sleep 25) (recur (inc n))))))
-                  (finally (is (= :drained (:outcome (lifecycle/stop! handle 10000))))))))
-            (let [worker-events (filterv #(= :worker (:kind %)) @seen)]
-              (is (= [:lease-acquisition :dispatch-acknowledgment]
-                     (mapv #(get-in % [:worker-origin :maintenance]) worker-events)))
-              (is (every? #(= :matched-scheduled-maintenance (get-in % [:worker-origin :call-chain])) worker-events)))
+                  (is (eventually #(= :dispatch-accepted (:gesso.live.outbox/status (row)))))
+                  (reset! fail-next? true)
+                  (is (eventually #(= :failed (:status (lifecycle/status root)))))
+                  (is (= :failed (:outcome (lifecycle/stop! root 10000))))))
+              (let [root @root* next-id (random-uuid)
+                    next-plan (outbox/prepare! {:intent-ids [next-id] :source-id "s" :operation :example/update
+                                                :purpose :gesso.live/refresh}
+                                               [{:topic :request :id "r1" :change/kind :updated}])]
+                (is (= :managed-lineage-already-claimed
+                       (reason #(lifecycle/start-managed! node sys {} "s" {:worker-id "w"} lineage))))
+                (xt/execute-tx node (conj (vec (:guard-ops next-plan)) (:tx-op next-plan)))
+                (let [child (:handle (lifecycle/restart-after-acquisition! root {:worker-id "successor" :poll-ms 30}))]
+                  (is (eventually #(= :dispatch-accepted (:gesso.live.outbox/status
+                                                        (first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" next-id]))))))
+                  (let [events (filterv #(= :worker (:kind %)) @seen)
+                        origins (mapv :worker-origin events)]
+                    (is (= [:lease-acquisition :dispatch-acknowledgment :lease-acquisition :dispatch-acknowledgment]
+                           (mapv :maintenance origins)))
+                    (is (= ["w" "w" "successor" "successor"] (mapv :worker-id origins)))
+                    (is (= (mapv lifecycle/lifecycle-reference [root root child child]) (mapv :lifecycle-ref origins)))
+                    (is (every? #(= :matched-scheduled-maintenance (:call-chain %)) origins)))))
+              (finally (when-let [root @root*]
+                         (is (= :drained (:successor-outcome (lifecycle/retire! root 10000)))))))
             (finally (release)))))
       (finally (live/close! sys)))))

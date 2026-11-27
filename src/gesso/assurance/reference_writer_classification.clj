@@ -15,10 +15,12 @@
 (def ^:private derive-replay replay/derive!)
 (def ^:private derive-transition transition/derive!)
 (def ^:private reviewed-sources
-  {"gesso/live/outbox/writer_policy.clj" "08d5c47f103562ccc2c874cbaea88d2f808d85b4dad455019d45f1c71fd9169c"
+  {"gesso/live/outbox/writer_policy.clj" "516f538810795950a2efc4debb09014bad945bb711d61dc77fd1a02b84d50368"
    "gesso/live/outbox/maintenance_policy.clj" "59e7463ada951a30944d189913f29399fd3217e6676c93b1ac3eb4db8490109b"
    "gesso/live/outbox/initialization.clj" "36aac083e410e05b806137bf4540559f1ef3d77d4284dc6f387604aff3d81de7"
-   "gesso/live/outbox/host.clj" "5a54dc5a7c95fb41acf7fe6ff3a6895beb33b48b72f7f13bd9495cf3b6e62c9f"
+   "gesso/live/outbox/host.clj" "fa84a4141e78793854be95f5b851d108af373800cb4544f6b8d613cf14b4cfc9"
+   "gesso/live/outbox/lifecycle.clj" "78d1b5a98b1e9805786a0ecac34cd51d948989c4299e2e1a12d6d1c225bfb614"
+   "gesso/live/outbox/biff.clj" "0a53c933f9c0f8c5cff6e60825cce396d8e49e31a552af5a20a7391d76020e1a"
    "gesso/live/consistency/xtdb.clj" "2f191e2cdba15d7ce2ce07da02bc35671b44babb713bd85fce01c6d396156697"})
 
 (defn- reject! [reason]
@@ -59,11 +61,11 @@
      :manifest {:policy-kind :manifest :effect :infrastructure-establishment
                 :write-tables manifest :requires :exact-source-manifest-establishment}
      :lease-acquisition {:policy-kind :worker :effect :conditional-mapped-stutter
-                         :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :requires :pending-row-cas-and-clock}
+                         :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :installed-lineage :current-managed-lifecycle :requires :pending-row-cas-and-clock}
      :lease-reclaim {:policy-kind :worker :effect :conditional-mapped-stutter
-                     :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :requires :expired-lease-cas-and-clock}
+                     :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :installed-lineage :current-managed-lifecycle :requires :expired-lease-cas-and-clock}
      :dispatch-acknowledgment {:policy-kind :worker :effect :conditional-mapped-stutter
-                               :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :requires :current-lease-cas-and-receipt}}))
+                               :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :installed-lineage :current-managed-lifecycle :requires :current-lease-cas-and-receipt}}))
 
 (defn- classify! [checked writes reads generic]
   (let [mappings (:operation-mappings checked)
