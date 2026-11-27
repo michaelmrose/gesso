@@ -9035,3 +9035,44 @@ then address the read-only replay alternatives and the scope of the
 admitted-writer classification. Preserve the original assumptions
 rather than infer universal implementation correctness from symbolic
 equation agreement.
+
+* v2847 — compose the conditional source-write and transition arguments
+
+Re-derive the original catalog projection, source-write equations and
+conditional transition argument. Require their exact catalog identity,
+complete journal-writing alternative set and explicit outside fragment.
+For each writing alternative bind the original subject, transition and
+mapping fingerprints, closed journal case, guard, assignments and frame.
+Independently reconstruct the required field terms from the original
+replacement and frame equations, without calling the symbolic writer's
+RHS helper. Require complete target coverage, both nullable presence
+branches, exact projected and expected terms and the fresh journal case.
+Reject even matching changes to both sides of a prior symbolic equation.
+
+Specialize the committed-case equality substitution to the same original
+alternative, mapping, projection, symbolic admitted inputs and derived
+put-image. Check the normalized endpoint goal against the source-equation
+fact. Expand the generic source-write relation condition into the
+underlying source-write and projection conditions, additionally requiring
+well-typed complete projected endpoints. Retain all other general
+conditions, including original abstract relation semantics, provider
+execution, attribution and complete admitted-writer coverage. This is
+not a discharge of the original physical premises or a kernel theorem.
+The four read-only replay alternatives remain outside the composition;
+abort and maintenance arguments are not newly qualified by this work.
+
+Focused JVM: initial composition suite passed 2 tests / 62 assertions.
+After specializing the physical projection and put-image, the combined
+six-namespace regression (source-transition composition, source-write
+argument, transition argument, transition refinement, recovery projection
+and independent transition semantics) passed 44 tests / 7474 assertions,
+zero failures or errors. Exercise all four original writing alternatives,
+foreign catalog/mapping/alternative, altered guard/assignments/frame,
+missing target or nullable branch, jointly corrupted expected/projected
+terms, foreign case, changed input placeholder and replaced checkers.
+Historical v12 judgment unchanged; persistent assembled-host recovery
+and full project gates not rerun. No premise accepted or discharged.
+
+Next: derive the read-only replay relation and its physical read-only
+correspondence for the four remaining declared Claim alternatives. Do not
+confuse read-only observation with the qualification of physical writers.
