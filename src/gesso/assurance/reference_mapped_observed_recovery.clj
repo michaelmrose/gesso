@@ -2,6 +2,7 @@
   "Compose local issued submission observation and retained recovery correspondence."
   (:require [gesso.assurance.assumption :as assumption]
             [gesso.assurance.inductive-report :as inductive-report]
+            [gesso.assurance.reference-command-authority :as command-authority]
             [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-submission :as submission]
@@ -783,6 +784,51 @@
        (identical? original-projection-binding projection/bind-premise)
        (identical? original-snapshot-binding snapshot/bind-premise)
        (identical? original-support-composition snapshot/compose-support)))
+
+(def ^:private original-command-authority-entry conditional-entry)
+(def ^:private original-command-authority-premises command-authentication-premises)
+(def ^:private original-command-authority-describe command-authority/describe!)
+(def ^:private original-command-authority-select command-authority/select!)
+(def ^:private original-command-authority-match assumption/match-premise!)
+
+(defn- command-authority-boundaries-current? []
+  (and (acceptance-boundaries-current?)
+       (identical? original-command-authority-entry conditional-entry)
+       (identical? original-command-authority-premises command-authentication-premises)
+       (identical? original-command-authority-describe command-authority/describe!)
+       (identical? original-command-authority-select command-authority/select!)
+       (identical? original-command-authority-match assumption/match-premise!)))
+
+(defn- command-authority-contract* [handle admission policy select? offered]
+  (let [fail #(assoc (conditional-report :unsupported) :reason %)]
+    (if-not (command-authority-boundaries-current?)
+      (fail :command-authority-boundary-replaced)
+      (if-let [entry (original-command-authority-entry handle)]
+        (if-not (identical? admission (:admission entry))
+          (fail :command-authority-admission-mismatch)
+          (try
+            (let [command (original-command-authority-premises entry)
+                  report (if select?
+                           (original-command-authority-select command policy offered)
+                           (original-command-authority-describe command policy))]
+              (if (command-authority-boundaries-current?)
+                (assoc report :subject-provenance :matched-original-issued-cut)
+                (fail :command-authority-boundary-replaced)))
+            (catch clojure.lang.ExceptionInfo e
+              (fail (or (:reason (ex-data e)) :invalid-command-authority-contract)))))
+        (fail :unissued-conditional-recovery)))))
+
+(defn describe-command-authority-contract!
+  "Re-derive open application authority premises from the original issued cut.
+   Policy names are supplied declarations, not verified host configuration."
+  [handle admission policy]
+  (command-authority-contract* handle admission policy false nil))
+
+(defn select-command-authority-contract!
+  "Match both exact raw environmental premises; do not accept or discharge them.
+   The original command implementation obligations and inventory are unchanged."
+  [handle admission policy offered]
+  (command-authority-contract* handle admission policy true offered))
 
 (def judgment-profile :selected-conditional-activated-recovery-judgment-v16)
 

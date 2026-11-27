@@ -624,6 +624,25 @@
                                (is (= :storage-trust-policy-mismatch
                                       (trust-problem #(host/adopt-storage-trust! started handle)))))
                              [[relation kind] {:handle handle :premises premises :declaration declaration}])))]
+    (let [policy {:deployment-id :fixture/deployment :request-gate-policy :fixture/request-gate
+                  :principal-session-policy :fixture/principal-session}
+          handle (get-in selections [[:authorized-historical-lineage :exact-content] :handle])
+          contract (observed-recovery/describe-command-authority-contract! handle admit policy)
+          premises (mapv :assumption (:obligations contract))]
+      (is (= :open-command-authority-contract (:status contract)))
+      (is (= :matched-original-issued-cut (:subject-provenance contract)))
+      (is (= :matched-issued-command-bindings (get-in contract [:scope :command-subject :origin-correspondence])))
+      (is (= :not-established (:configured-authority contract) (:command-authentication contract)))
+      (is (= :command-authority-admission-mismatch
+             (:reason (observed-recovery/describe-command-authority-contract! handle other-admission policy))))
+      (doseq [[_ selection] selections]
+        (is (= contract (observed-recovery/describe-command-authority-contract! (:handle selection) admit policy)))
+        (let [selected (observed-recovery/select-command-authority-contract! (:handle selection) admit policy premises)]
+          (is (= :selected-open-command-authority-contract (:status selected)))
+          (is (= :matched-original-issued-cut (:subject-provenance selected)))
+          (is (= (:obligations contract) (:obligations selected)))
+          (is (= :not-performed (:premise-acceptance selected) (:proof-discharge selected)))
+          (is (not (contains? selected :trusted-assumptions))))))
     (is (not (identical? admit other-admission)))
     (is (= (induction/describe-mapped-admission admit)
            (induction/describe-mapped-admission other-admission)))

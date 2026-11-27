@@ -10754,3 +10754,31 @@ origin observation boundary before further substantial expansion.
 Next: qualify the configured application request-gate and principal/session
 authority contract against the original issued command subject, without
 promoting local acceptance into independently authenticated authority.
+
+* v2895 — qualify selected application command authority contract
+
+Derive two separate environmental premises for faithful request-gate
+acceptance and authenticated principal/session resolution. Bind both to
+named deployment and policy declarations, the exact original command
+subject, and its two original open command-premise fingerprints. Require
+complete issued command bindings and canonical locally accepted HTTP route
+observations. Match only the two exact raw environmental declarations;
+reject missing, duplicate, altered, cross-policy and cross-cut premises.
+The structural contract builder is not an issuer. The recovery entry points
+rederive the original subject from an issued conditional recovery handle
+and require its exact admission and unchanged reviewed boundaries. Selection
+is target-storage independent and does not accept or discharge any premise.
+Policy names are declared, not verified installed callback identities. Do not
+alter the original command obligations, inventory, or runtime authorization.
+
+Focused JVM: command route and authority contract tests, 2 tests / 61
+assertions; full canonical adjacent assembled-host recovery, 1 test / 1770
+assertions. Both exited 0; total 3 tests / 1831 assertions, zero failures or
+errors. The latter exercises issued contract selection across all four
+prepared historical comparisons and rejects a distinct admission. Other
+assembled variants and full project gates were not rerun. All 39 original
+general CLM-R2 conditions and both original command premises remain open.
+
+Next: bind the declared application authority policies to the actual host's
+installed request gate and prepared principal resolver, with local owner and
+lifecycle qualification before considering explicit environmental adoption.

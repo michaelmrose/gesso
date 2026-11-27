@@ -1,5 +1,6 @@
 (ns gesso.assurance.reference-command-route-test
   (:require [clojure.test :refer [deftest is]]
+            [gesso.assurance.reference-command-authority :as authority]
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.choreo.identity :as identity]
@@ -58,3 +59,61 @@
           (is (not-any? (:open-premise-fingerprints premise) (:open-premise-fingerprints changed)))
           (is (= :not-established (:command-authentication changed)))
           (is (= :not-performed (:premise-acceptance changed))))))))
+
+(deftest command-authority-contract-is-exact-and-unaccepted
+  (let [origins [(origin "one" "e1") (origin "two" "e2") (origin "two" "e2")]
+        steps (mapv (fn [tx o] {:spec {:binding (select-keys o resolution/binding-keys)}
+                                :expectation {:tx-id tx}}) [1 2 3] origins)
+        report (assoc (#'submission/compare-command-origins! steps (mapv #(hash-map :command-origin %) origins))
+                      :command-origin-correspondence :matched-issued-command-bindings)
+        entry {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
+               :command-observation-ref "original-cut"
+               :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
+               :original-recovery (merge report {:selected-tx-ids [1 2 3]
+                                                :selected-commitments [:committed :aborted :committed]})}
+        command (#'recovery/command-authentication-premises entry)
+        policy {:deployment-id :fixture/host :request-gate-policy :fixture/csrf
+                :principal-session-policy :fixture/session}
+        contract (authority/describe! command policy)
+        premises (mapv :assumption (:obligations contract))
+        selected (authority/select! command policy (vec (reverse premises)))
+        problem (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+    (is (= :open-command-authority-contract (:status contract)))
+    (is (= :selected-open-command-authority-contract (:status selected)))
+    (is (= (:obligations contract) (:obligations selected)))
+    (is (= (:scope command) (get-in contract [:scope :command-subject])))
+    (is (= (:open-premise-fingerprints command) (get-in contract [:scope :original-command-premises])))
+    (is (not-any? (:open-premise-fingerprints command) (:open-premise-fingerprints contract)))
+    (is (= [:reference-command-authority/request-gate :reference-command-authority/principal-session]
+           (mapv :id premises)))
+    (is (every? #(= :environment (:origin %)) premises))
+    (is (every? #(= :open (:discharge-state %)) (:obligations selected)))
+    (is (= :not-established (:configured-authority selected) (:command-authentication selected)))
+    (is (= :not-performed (:premise-acceptance selected) (:proof-discharge selected)))
+    (is (= :none (:authority selected)))
+    (is (not (contains? selected :trusted-assumptions)))
+    (is (not (contains? selected :subject-provenance)))
+    (doseq [bad [nil [] [(first premises) (first premises)] (pop premises)
+                 (:obligations contract) (mapv :assumption (:obligations command))]]
+      (is (= :incorrect-command-authority-premise-selection
+             (problem #(authority/select! command policy bad)))))
+    (doseq [changed [(assoc policy :deployment-id :fixture/other)
+                     (assoc policy :request-gate-policy :fixture/other)
+                     (assoc policy :principal-session-policy :fixture/other)]]
+      (is (= :subject-mismatch (problem #(authority/select! command changed premises)))))
+    (is (= :premise-mismatch (problem #(authority/select! command policy (assoc-in premises [0 :proposition] [:fixture/other])))))
+    (is (= :invalid-command-authority-policy (problem #(authority/describe! command (assoc policy :extra true)))))
+    (doseq [changed [(assoc-in entry [:original-recovery :command-origin-correspondence] :matched-supplied-command-bindings)
+                     (assoc-in entry [:original-recovery :command-origin-correspondence] :partial-issued-command-bindings)
+                     (update-in entry [:original-recovery :selected-command-origins 0] dissoc :http-route)]]
+      (is (= :incomplete-issued-http-command-subject
+             (problem #(authority/describe! (#'recovery/command-authentication-premises changed) policy)))))
+    (let [other (#'recovery/command-authentication-premises (assoc entry :command-observation-ref "different-cut"))]
+      (is (= :subject-mismatch (problem #(authority/select! other policy premises)))))
+    (is (= :unissued-conditional-recovery
+           (:reason (recovery/describe-command-authority-contract! (Object.) (Object.) policy))))
+    (is (= :unissued-conditional-recovery
+           (:reason (recovery/select-command-authority-contract! (Object.) (Object.) policy premises))))
+    (with-redefs [authority/describe! (constantly contract)]
+      (is (= :command-authority-boundary-replaced
+             (:reason (recovery/describe-command-authority-contract! (Object.) (Object.) policy)))))))
