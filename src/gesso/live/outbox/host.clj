@@ -932,6 +932,7 @@
 (def ^:private original-configured-adopt adopt-implementation-trust!)
 (def ^:private original-configured-storage-adopt adopt-storage-trust!)
 (def ^:private original-recovery-inventory recovery-inventory/compose!)
+(def ^:private original-command-inventory command-authority/extend-inventory!)
 (def ^:private original-physical-envelope physical-envelope/compare-recovery!)
 (def ^:private original-activated-recovery observed-recovery/compare-activated!)
 (def ^:private original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
@@ -948,6 +949,7 @@
   (when-not (and (identical? original-configured-adopt adopt-implementation-trust!)
                  (identical? original-configured-storage-adopt adopt-storage-trust!)
                  (identical? original-recovery-inventory recovery-inventory/compose!)
+                 (identical? original-command-inventory command-authority/extend-inventory!)
                  (identical? original-physical-envelope physical-envelope/compare-recovery!)
                  (identical? original-activated-recovery observed-recovery/compare-activated!)
                  (identical? original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
@@ -1115,7 +1117,8 @@
             (configured-recovery-boundaries!)
             (require-open-provider-generation! system)
             (let [inventory (when storage-adoption
-                              (original-recovery-inventory configured physical history refined (:adopted storage-adoption)))]
+                              (original-command-inventory system (:comparison historical)
+                                (original-recovery-inventory configured physical history refined (:adopted storage-adoption)) refined))]
               (configured-recovery-boundaries!)
               (cond-> {:status :conditional-configured-envelope-recovery
            :profile :configured-clm-r2-envelope-recovery-v1
@@ -1150,7 +1153,6 @@
                                        :storage-lineage :not-established
                                        :proof-discharge :not-performed})
               inventory (assoc :configured-obligation-inventory inventory)))))))))
-
 
 (defn compare-configured-envelope-recovery!
   "Compare adjacent recovery on the exact currently configured owner.

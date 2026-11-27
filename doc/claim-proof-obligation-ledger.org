@@ -10868,3 +10868,34 @@ recovery inventory alongside the existing 16 environmental assumptions,
 without discharging original conditions or treating related conditions as
 entailed. Keep the host namespace within the size limit by extracting the
 composition boundary as needed.
+
+* v2899 — compose adopted command authority in configured inventory
+
+Extend the existing checked sixteen-premise configured recovery inventory
+only for the exact live owner with startup-selected command authority
+adoption. Under the retirement lock, rederive the adopted contract and
+match its installation, original command premise subject and fingerprints
+against the refined historical judgment. Require exact environmental
+premise descriptions, disjoint identities and the original open command
+premises. Add both adopted fingerprints, their family, scope and structural
+dependency order to a versioned eighteen-premise inventory. Keep the old
+profile for hosts without explicit authority adoption. Do not derive
+condition links or cross-family entailments, modify original conditions,
+or discharge authentication or other obligations. Extract the extension
+into the existing inventory and command-owner namespaces; pin the host
+join and update the reviewed host digest.
+
+Focused JVM: configured inventory, command route/authority and reviewed
+writer classification, 8 tests / 184 assertions; complete canonical
+worker-interleaved assembled recovery, 1 test / 1469 assertions. Both
+exited 0; total 9 tests / 1653 assertions, zero failures or errors. Includes
+subject, installation, declaration, fingerprint and duplicate extension
+rejection, actual consolidated eighteen-premise inventory, same-store
+reopening and independent byte-copy rejection. Other assembled variants
+and full project gates were not rerun. All 39 original general CLM-R2
+conditions and both original command authentication premises remain open.
+
+Next: derive the selected command-attribution support argument from the
+issued local command and route correspondence plus explicitly adopted
+application authority premises; keep the conditional conclusion distinct
+from independent authentication and universal implementation refinement.

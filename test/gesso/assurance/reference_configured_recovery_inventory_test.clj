@@ -3,6 +3,10 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-configured-recovery-inventory :as configured]
+            [gesso.assurance.reference-command-authority :as authority]
+            [gesso.assurance.reference-mapped-observed-recovery :as recovery]
+            [gesso.choreo.identity :as identity]
+            [gesso.live.outbox.command-authority-owner :as owner]
             [gesso.assurance.reference-recovery-inventory :as historical]
             [gesso.assurance.reference-storage-identity :as storage]))
 
@@ -25,7 +29,7 @@
              {:trusted-assumptions fps :deployment-adoption :configured-local-host :premise-acceptance :explicit-declaration-only}
              {:premise-acceptance :not-performed}))))
 
-(defn- fixture []
+(defn- fixture [& [command-builder]]
   ;; Structural fixture only. The installed-host regression exercises the
   ;; actual issued, source-relative declarations and observations.
   (let [cut {:payload-binding-profile storage/cut-profile :record-offsets [0 1 2]
@@ -40,12 +44,14 @@
                                :acceptance :trust-open-premises
                                :premises (mapv :assumption (:obligations (storage/describe-obligations scope)))})
                       :status :conditional :judgment-scope scope :proof-discharge :not-performed)
+        command (if command-builder (command-builder cut) (family :command 1 false))
+        stored (assoc stored :command-authentication-premises command)
         register {:fixture/operation #{:fixture/original}}
         abstract {:fingerprint "abstract" :declared-operation-ids (set (keys register))
                   :classification {:open {:assumptions #{} :assumption-classes {} :certificate-premises #{}}
                                    :certificate {:open-premises #{}}
                                    :original-obligations {:status :all-original-obligations-remain-open :by-operation register}}}
-        original (historical/describe-inventory abstract stored (family :command 1 false)
+        original (historical/describe-inventory abstract stored command
                                                 (family :worker 1 false) (family :physical 1 false))
         writer (family :writer-isolation 5 true) provider (family :provider-trust 8 true)
         general #{:writer-condition :provider-condition :other-condition}
@@ -103,3 +109,72 @@
       (is (thrown? clojure.lang.ExceptionInfo (apply configured/compose! bad))))
     (with-redefs [assumption/describe-assumption (constantly {})]
       (is (thrown? clojure.lang.ExceptionInfo (apply configured/compose! args))))))
+
+(deftest command-authority-extension-retains-original-obligations
+  (let [policy {:deployment-id :fixture/host :request-gate-policy :fixture/gate
+                :principal-session-policy :fixture/session}
+        binding {:installation-ref (str (random-uuid)) :policy policy}
+        route {:route-id :fixture/claim :path "/claim" :uri "/claim" :method :post
+               :operation :fixture/claim :required-transport :htmx :path-arguments {}
+               :request-gate :locally-accepted :evidence :matched-canonical-htmx-handoff
+               :authority-binding binding}
+        command-builder (fn [cut]
+                          (#'recovery/command-authentication-premises
+                           {:scope {:publication-source-id "source" :historical-cut cut}
+                            :judgment-subject {:catalog-id :fixture/claim}
+                            :command-observation-ref "original"
+                            :original-recovery
+                            {:selected-tx-ids [1 2 3] :selected-commitments [:committed :aborted :committed]
+                             :command-origin-correspondence :matched-issued-command-bindings
+                             :abort-recovery-execution :same-observed-execution
+                             :selected-command-origins
+                             (mapv (fn [tx id] {:principal (identity/principal "helper")
+                                               :command-id (identity/command-id id)
+                                               :execution-id (identity/execution-id id)
+                                               :operation :fixture/claim :selected-tx-id tx
+                                               :origin :registered-server-invocation
+                                               :authentication :conditional-on-trusted-principal-resolver
+                                               :http-route route}) [1 2 3] ["a" "b" "b"])}}))
+        [_ _ _ refined _ :as args] (fixture command-builder)
+        base (apply configured/compose! args)
+        command (get-in refined [:historical-judgment :command-authentication-premises])
+        description (authority/describe! command policy)
+        qualified (#'owner/match-contract! binding (assoc description :subject-provenance :matched-original-issued-cut))
+        selected (assoc (authority/select! command policy (mapv :assumption (:obligations description)))
+                        :subject-provenance :matched-original-issued-cut)
+        declaration {:acceptance :trust-open-premises
+                     :premise-ids #{:reference-command-authority/request-gate :reference-command-authority/principal-session}}
+        adopted (#'owner/adopt-selected! qualified declaration selected)
+        joined (configured/extend-command-authority! base refined adopted)
+        fps (:trusted-assumptions adopted)]
+    (is (= configured/command-authority-profile (:profile joined)))
+    (is (= 18 (count (:deployment-declared-premise-fingerprints joined))))
+    (is (= 22 (count (:all-described-open-premise-fingerprints joined)) (count (:dependency-order joined))))
+    (is (= (:unaccepted-premise-fingerprints base) (:unaccepted-premise-fingerprints joined)))
+    (is (= fps (get-in joined [:adopted-by-contract :command-authority])
+           (get-in joined [:premise-families :command-authority])))
+    (is (= (:scope adopted) (get-in joined [:adoption-scopes :command-authority])))
+    (is (= (:open-premise-fingerprints command) (get-in joined [:command-authority-relevance :original-command-premises])))
+    (is (= :not-derived (get-in joined [:command-authority-relevance :general-condition-links])))
+    (is (= (select-keys base [:original-historical-inventory :remaining-general-conditions :remaining-conditions
+                             :general-condition-links :original-open-obligations :proof-discharge :cross-family-implications])
+           (select-keys joined [:original-historical-inventory :remaining-general-conditions :remaining-conditions
+                               :general-condition-links :original-open-obligations :proof-discharge :cross-family-implications])))
+    (is (= (:premises-by-fingerprint base) (select-keys (:premises-by-fingerprint joined) (keys (:premises-by-fingerprint base)))))
+    (is (every? #(= :open (:discharge-state %)) (vals (:premises-by-fingerprint joined))))
+    (is (= base (owner/extend-inventory! {} nil base refined)))
+    (doseq [bad [qualified (assoc adopted :trusted-assumptions #{})
+                 (assoc adopted :proof-discharge :performed)
+                 (assoc adopted :subject-provenance :supplied)
+                 (assoc-in adopted [:installation-binding :installation-ref] (str (random-uuid)))
+                 (assoc-in adopted [:deployment-acceptance :premise-ids] #{})
+                 (assoc-in adopted [:scope :command-subject :command-observation-ref] "other")
+                 (assoc-in adopted [:obligations 0 :discharge-state] :discharged)]]
+      (is (thrown? clojure.lang.ExceptionInfo (configured/extend-command-authority! base refined bad))))
+    (doseq [bad [(assoc refined :historical-cut {})
+                 (assoc-in refined [:historical-judgment :command-authentication-premises :scope :command-observation-ref] "other")
+                 (assoc-in refined [:historical-judgment :command-authentication-premises :open-premise-fingerprints] #{})]]
+      (is (thrown? clojure.lang.ExceptionInfo (configured/extend-command-authority! base bad adopted))))
+    (is (thrown? clojure.lang.ExceptionInfo (configured/extend-command-authority! joined refined adopted)))
+    (with-redefs [authority/describe! (constantly description)]
+      (is (thrown? clojure.lang.ExceptionInfo (configured/extend-command-authority! base refined adopted))))))

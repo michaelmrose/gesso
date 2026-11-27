@@ -1,6 +1,7 @@
 (ns gesso.live.outbox.command-authority-owner
   "Local installed command authority qualification and explicit environmental adoption."
   (:require [gesso.assurance.reference-mapped-observed-recovery :as recovery]
+            [gesso.assurance.reference-configured-recovery-inventory :as inventory]
             [gesso.live.outbox.http-operation :as http]
             [gesso.live.outbox.http-route :as route]))
 
@@ -103,3 +104,22 @@
               selected (original-select comparison (:gesso.live.outbox.host/mapped-admission system)
                                         (:policy binding) (mapv :assumption (:obligations contract)))]
           (adopt-selected! contract declaration selected))))))
+
+(def ^:private original-adopt adopt!)
+(def ^:private original-inventory-extension inventory/extend-command-authority!)
+
+(defn extend-inventory!
+  "Join only explicitly startup-selected command trust, under the same live
+   owner lock as adoption. A policy-only host retains the original inventory."
+  [system comparison base refined]
+  (if-not (get system token-key)
+    base
+    (with-current-owner
+      system
+      (fn [_ options]
+        (when-not (and (identical? original-adopt adopt!)
+                       (identical? original-inventory-extension inventory/extend-command-authority!))
+          (reject! :command-authority-owner-boundary-replaced))
+        (if (contains? options :authority-acceptance)
+          (original-inventory-extension base refined (original-adopt system comparison))
+          base)))))

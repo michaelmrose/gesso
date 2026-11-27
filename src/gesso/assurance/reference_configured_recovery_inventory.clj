@@ -2,7 +2,9 @@
   "Internal structural inventory for an already checked owner recovery join.
    Neither a standalone admission boundary nor a proof of any premise."
   (:require [clojure.set :as set]
-            [gesso.assurance.assumption :as assumption]))
+            [gesso.assurance.assumption :as assumption]
+            [gesso.assurance.reference-command-authority :as command-authority]
+            [gesso.live.outbox.http-route :as route]))
 
 (def profile :configured-selected-recovery-obligation-inventory-v1)
 (def ^:private original-describe assumption/describe-assumption)
@@ -136,3 +138,70 @@
      :cross-family-implications :not-established
      :proof-discharge :not-performed :universal-refinement :not-established
      :authority :none :certificate :not-issued}))
+
+(def command-authority-profile :configured-selected-recovery-obligation-inventory-v2)
+(def ^:private original-command-description command-authority/describe!)
+(def ^:private original-authority-acceptance? route/authority-acceptance?)
+(def ^:private original-authority-binding? route/authority-binding?)
+
+(defn extend-command-authority!
+  "Extend an already composed inventory with the original owner's adopted
+   command authority contract. Structural join only; no provenance or proof."
+  [inventory refined adopted]
+  (let [command (get-in refined [:historical-judgment :command-authentication-premises])
+        binding (:installation-binding adopted)
+        declaration (:deployment-acceptance adopted)
+        fps (:trusted-assumptions adopted)
+        original (:original-historical-inventory inventory)
+        original-command (get-in original [:premise-families :command])
+        index (:premises-by-fingerprint inventory)
+        all (:all-described-open-premise-fingerprints inventory)
+        accepted (:deployment-declared-premise-fingerprints inventory)]
+    (require! (and (identical? original-describe assumption/describe-assumption)
+                   (identical? original-command-description command-authority/describe!)
+                   (identical? original-authority-acceptance? route/authority-acceptance?)
+                   (identical? original-authority-binding? route/authority-binding?)
+                   (= profile (:profile inventory))
+                   (= :conditional-configured-obligation-inventory (:status inventory))
+                   (= original (:obligation-inventory refined))
+                   (= (:historical-cut inventory) (:historical-cut refined)
+                      (get-in command [:scope :historical-cut]))
+                   (= :conditional (:status refined) (get-in refined [:historical-judgment :status]))
+                   (= original-command (:open-premise-fingerprints command))
+                   (= 2 (count original-command))
+                   (every? (:unaccepted-premise-fingerprints inventory) original-command)
+                   (= 16 (count accepted))
+                   (original-authority-binding? binding)
+                   (original-authority-acceptance? declaration)
+                   (every? #(= binding (get-in % [:http-route :authority-binding]))
+                           (:selected-command-origins command)))
+              :configured-inventory-command-subject-mismatch)
+    (let [description (original-command-description command (:policy binding))
+          expected (assoc description :status :conditional-configured-command-authority
+                          :subject-provenance :matched-original-issued-cut
+                          :configured-authority :matched-current-local-installation
+                          :installation-binding binding :deployment-adoption :configured-local-host
+                          :premise-acceptance :explicit-declaration-only
+                          :trusted-assumptions (:open-premise-fingerprints description)
+                          :deployment-acceptance declaration)
+          family (implementation-family! :command-authority adopted (:obligations adopted))
+          combined (merge index (:index family))]
+      (require! (and (= expected adopted)
+                     (= fps (:fingerprints family))
+                     (= 2 (count fps))
+                     (empty? (set/intersection all fps))
+                     (= (+ (count all) 2) (count combined) (count (set (map :id (vals combined))))))
+                :configured-inventory-command-authority-mismatch)
+      (-> inventory
+          (assoc :profile command-authority-profile
+                 :premises-by-fingerprint combined
+                 :dependency-order (dependency-order! combined)
+                 :command-authority-relevance {:scope :original-selected-command-only
+                                               :premise-fingerprints fps
+                                               :original-command-premises original-command
+                                               :general-condition-links :not-derived}
+                 :all-described-open-premise-fingerprints (set/union all fps)
+                 :deployment-declared-premise-fingerprints (set/union accepted fps))
+          (assoc-in [:premise-families :command-authority] fps)
+          (assoc-in [:adopted-by-contract :command-authority] fps)
+          (assoc-in [:adoption-scopes :command-authority] (:scope adopted))))))
