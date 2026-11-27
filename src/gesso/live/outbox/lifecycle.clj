@@ -187,7 +187,41 @@
       (reject! :invalid-cycle-result {:cycle-status (:status result)}))
     result))
 
-(defn- run-loop! [node system ctx expected-source-id opts state stop-signal done]
+(def ^:private ^ThreadLocal worker-origin (ThreadLocal.))
+(def ^:private original-process-cycle cycle/process-cycle!)
+
+(defn current-worker-origin
+  "Observe a synchronous scheduled cycle for the exact connectable and
+   configured source/worker names, on its own scheduler thread. The
+   lifecycle reference is process-local; it is not a credential. This
+   describes the active cycle, not the origin of an individual write,
+   delivery, installed host, or independently authenticated worker."
+  [node source-id worker-id]
+  (let [scope (.get worker-origin)]
+    (when (and scope
+               (identical? original-process-cycle cycle/process-cycle!)
+               (identical? node (:node scope))
+               (= source-id (:source-id scope))
+               (= worker-id (:worker-id scope)))
+      (dissoc scope :node))))
+
+(defn- process-scheduled-cycle!
+  [node system ctx source-id opts lifecycle-ref cycle-number]
+  (let [prior (.get worker-origin)
+        process! cycle/process-cycle!]
+    (.remove worker-origin)
+    (try
+      (when (identical? original-process-cycle process!)
+        (.set worker-origin {:node node :source-id source-id
+                             :worker-id (:worker-id opts)
+                             :lifecycle-ref lifecycle-ref :cycle-number cycle-number
+                             :origin :scheduled-local-cycle
+                             :authentication :not-established}))
+      (process! node system ctx source-id opts)
+      (finally
+        (if prior (.set worker-origin prior) (.remove worker-origin))))))
+
+(defn- run-loop! [node system ctx expected-source-id opts state stop-signal done lifecycle-ref]
   (try
     (loop [cursor nil]
       (if (zero? (.getCount ^CountDownLatch stop-signal))
@@ -199,7 +233,8 @@
                                     :max-items (get opts :max-items default-max-items)}
                              cursor (assoc :after cursor))
                 result (require-cycle-result!
-                        (cycle/process-cycle! node system ctx expected-source-id cycle-opts)
+                        (process-scheduled-cycle! node system ctx expected-source-id cycle-opts
+                                                  lifecycle-ref (inc (:cycles @state)))
                         (:worker-id opts) cursor (:max-items cycle-opts))
                 next-cursor (when (= :page-budget (:halt-reason result))
                               (:next-after result))]
@@ -254,11 +289,12 @@
                      :total-dispatch-accepted 0
                      :last-cycle nil
                      :failure nil})
+        lifecycle-ref (random-uuid)
         stop-signal (CountDownLatch. 1)
         done (CountDownLatch. 1)
         thread (Thread. ^Runnable
                         (fn [] (run-loop! node system ctx expected-source-id
-                                          opts state stop-signal done))
+                                          opts state stop-signal done lifecycle-ref))
                         (str "gesso-live-outbox-" (:worker-id opts)))
         handle (->Lifecycle state stop-signal done thread
                             node expected-source-id system ctx

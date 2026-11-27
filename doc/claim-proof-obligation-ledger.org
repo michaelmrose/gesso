@@ -7577,3 +7577,35 @@ Next: trace installed worker maintenance execution and determine
 which actual worker-origin observations can be bound to the selected
 retained maintenance transactions. Preserve the distinction between
 local worker identity and independent authentication.
+
+* v2813 — observe scheduled worker cycle origin
+
+Establish a synchronous thread-local origin scope around the original
+outbox processing-cycle function at the lifecycle scheduler boundary.
+Bind observations to the exact connectable, configured source and worker
+names, a fresh process-local lifecycle reference and sequential cycle
+number. Direct cycles on other threads, mismatched connectables or names,
+and substituted cycle functions cannot supply this observation. Clear
+the scope before result validation and failure reporting, including
+exceptional exits. Independent lifecycle starts have distinct references.
+
+The scope is descriptive evidence of an active scheduled cycle only.
+It is not evidence that an individual write or delivery originated
+from the worker, that the scheduler was installed by a particular host,
+or that worker identity is independently authenticated. No changes to
+maintenance admission, transaction payload, polling, worker authority,
+or retained recovery judgments.
+
+Focused JVM: 55 tests / 864 assertions, zero failures or errors, in
+worker-origin, lifecycle and cycle namespaces, including existing
+physical XTDB lifecycle and processing-cycle regressions. The new
+scope tests substitute acquisition or the cycle as indicated; they
+do not establish physical write origin. Initial test draft had a
+reader error, corrected before the successful focused run. Older
+offline dependency bundle; full project gates and persistent assembled
+Claim recovery fixtures not rerun. No proof premise is discharged.
+
+Next: bind the original scheduled cycle to exact acquisition and
+acknowledgment submission boundaries, distinguishing an arbitrary
+write inside an active cycle from an actual maintenance handoff.
+Then compare issued maintenance origin with retained transactions.
