@@ -9684,3 +9684,43 @@ supported exact transaction and read fragments, separating provider
 assumptions from checked lowering and deployment isolation. Bind
 the contract to the original open provider-effect and read/time
 conditions without treating selected experiments as universal proof.
+
+* v2864 — specify the versioned XTDB provider semantic contract
+
+Introduce an open provider contract for the embedded single-node mapped
+Claim fragment, targeting XTDB 2.2.0-beta1 and the reviewed local API
+and core artifact SHA-256 identities. These identify the reviewed
+target, not the actually executing classes or the complete dependency
+closure. Re-derive the original issued CLM-R2 condition inventory and
+retain its entire original operation register and remaining conditions.
+
+Describe eight structural open premises: decoded assertion semantics
+(including counts, scalar distinctions and nested journal shapes),
+ordered transaction-internal basis, exact document replacement and
+valid-time overlay, commit and abort atomicity, worker transaction
+clock and row-version meaning, pinned snapshot readback, retained
+source/ledger history, and complete valid-time boundary observation.
+Bind the contract to the original catalog and induction fingerprints.
+Require exact links to the eleven provider-effect and read/time
+conditions; check the dependency inventory for missing or unknown
+premises and cycles. These links are relevance descriptions, not
+entailments or a sufficient set of hypotheses. Preserve independent
+lowering, actual envelope identity, projection, attribution, writer
+mediation, deployment isolation, executing-artifact correspondence
+and complete temporal observation requirements.
+
+Focused JVM: 2 tests / 26 assertions, zero failures or errors. Check
+genuine issued catalog and original obligation preservation, exact
+version and artifact target rejection, unissued admission, replaced
+derivation boundary, missing and foreign links and dependency cycles.
+No actual provider semantic experiment added or rerun in this revision.
+Broader regression, persistent-host suites and full project gates not
+run. No production execution behavior or historical judgment changed.
+All eight contract premises remain open; no trust accepted or proof
+premise discharged.
+
+Next: bind the reviewed provider target to the actual local loaded
+artifact boundary and qualify the existing finite transaction,
+snapshot and temporal experiments against the corresponding exact
+open contract premises. Preserve the distinction between artifact
+identity, finite evidence and universal provider semantics.
