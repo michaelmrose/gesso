@@ -8291,3 +8291,42 @@ rerun. No proof premise discharged.
 Next: justify the scalar comparison observation abstraction and
 representative coverage for the supported domains, separating the
 integer interval argument from equality-only and nullable domains.
+
+* v2831 — justify abstract scalar partition coverage
+
+Rebuild the original literal partition and independently construct closed
+integer intervals, including singleton cutpoints and unbounded exterior
+cells. Check both exterior bounds, nonempty intervals and exact successor
+adjacency between consecutive cells. Under discrete integer order these
+conditions establish complete disjoint coverage of the mathematical
+integer line. Use exact arithmetic at machine-integer boundaries.
+For keyword/string equality use named singleton cells and their nonnil
+complement; Boolean cells are true and false. Add an isolated nil cell
+only for nullable descriptors. Reject optional or unsupported domains.
+
+Require exactly one admitted representative in each cell and no
+unclassified or duplicate representatives. Derive constant observations
+for every original literal from the whole cell's bounds or equality
+class, rejecting any comparison that crosses a cell. Independently
+compare each observation with its representative. Retain the original
+rule, typed readers, cells, representatives and explicit mathematical
+conditions. Both genuine Claim invariants and Init pass.
+
+Focused JVM: standalone coverage suite passed 4 tests / 93 assertions.
+Combined coverage, congruence, substitution, partition, typed-atom,
+typed-proposition and propositional soundness suites passed 125 tests /
+4282 assertions, zero failures or errors. Exercise adjacent cutpoints,
+values outside machine integer bounds, nullable and equality domains,
+holes, overlap, missing exterior cells, bad representatives, crossed
+cutpoints and replaced boundaries.
+
+This is conditional abstract coverage and observation constancy checked
+using finite structural conditions; it assumes mathematical discrete
+integer order and typed scalar equality. It is not a new kernel theorem
+or proof of the Clojure evaluator implementation. Historical judgment
+unchanged; host recovery and full project gates not rerun. No premise
+discharged.
+
+Next: compose the source-derived abstract coverage with the structural
+congruence derivation and representative truth results for the exact
+original rule, retaining the independent executable refinement boundary.
