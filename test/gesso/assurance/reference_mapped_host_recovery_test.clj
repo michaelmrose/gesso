@@ -26,6 +26,7 @@
             [gesso.live.consistency.xtdb :as live-xtdb]
             [gesso.live.optimistic.protocol :as protocol]
             [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox.discovery :as discovery]
             [gesso.live.outbox.claim-race-fixture :refer [mapping]]
             [gesso.live.outbox.claim-semantic-fixture :as claim]
             [gesso.live.outbox.host :as host]
@@ -71,6 +72,42 @@
           (or (= :failed (:status s)) (> (System/nanoTime) deadline))
           (throw (ex-info "Worker maintenance cycle did not settle" {:status (:status s) :cycles (:cycles s)}))
           :else (do (Thread/sleep 50) (recur)))))))
+
+(defn- await-worker-state! [worker ready?]
+  (let [deadline (+ (System/nanoTime) 90000000000)]
+    (loop []
+      (let [s (lifecycle/status worker)]
+        (cond
+          (ready? s) s
+          (or (= :failed (:status s)) (> (System/nanoTime) deadline))
+          (throw (ex-info "Expected worker state not reached" {:snapshot s}))
+          :else (do (Thread/sleep 50) (recur)))))))
+
+(defn- recover-between-intents! [started root]
+  ;; Interrupt the second discovery, after the first physical acknowledgment.
+  ;; Do not replace the scheduler, acquisition, delivery, or provider boundary.
+  (let [discover! discovery/discover-eligible!
+        failure (atom false)]
+    (with-redefs [discovery/discover-eligible!
+                  (fn [node opts]
+                    (if (and (:after opts) (compare-and-set! failure false true))
+                      (throw (ex-info "Fixture continuation discovery failure" {}))
+                      (discover! node opts)))]
+      (let [failed (await-worker-state! root #(= :failed (:status %)))]
+        (is @failure)
+        (is (= :acquisition (get-in failed [:failure :phase])))
+        (is (= 1 (count (get-in failed [:failure :completed]))))
+        (is (= :failed (:outcome (lifecycle/stop! root 10000))))))
+    (let [{:keys [handle recovery-mode reconciliation]}
+          (managed/recover-module! started :acquisition-rescan
+                                   {:worker-id "assembled-successor" :poll-ms 60000})
+          done (await-worker-state! handle #(and (= :idle (:status %))
+                                                 (pos? (:cycles %))))]
+      (is (= :acquisition-rescan recovery-mode))
+      (is (= [:matching-acknowledgment-recorded]
+             (mapv :status (:completed-observations reconciliation))))
+      (is (= 1 (:total-processed done) (:total-dispatch-accepted done)))
+      {:successor handle :done done})))
 
 (defn- selected-rows [node tables]
   (into {} (map (fn [table]
@@ -589,7 +626,7 @@
           (is (not (contains? result :abstract-induction))))))
     (get-in selections [[:authorized-historical-lineage :prefix-content] :handle])))
 
-(defn- check-assembled-recovery! [interleaved?]
+(defn- check-assembled-recovery! [interleaved? successor?]
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
         source-id "assembled-recovery"
@@ -711,11 +748,13 @@
                                                    pending (live-xtdb/q-from ctx "SELECT * FROM gesso_live_outbox")
                                                    worker-capture (host/capture-worker-outcomes!
                                                                    @host* 16
-                                                                   #(await-maintenance-cycle! @worker*))
-                                                   done (:result worker-capture)]
+                                                                   #(if successor?
+                                                                      (recover-between-intents! @host* @worker*)
+                                                                      {:done (await-maintenance-cycle! @worker*)}))
+                                                   {:keys [done successor]} (:result worker-capture)]
                                                (reset! gap* {:before prior
                                                              :after (selected-rows (:xtdb/connectable ctx) protected)
-                                                             :pending pending :done done :worker-capture worker-capture}))))
+                                                             :pending pending :done done :successor successor :worker-capture worker-capture}))))
                                          candidate))
                          :construct-after-abort! (fn [invocation]
                                                    (swap! recovered inc)
@@ -853,7 +892,7 @@
                   (when-not interleaved?
                     (reset! restart* {:retained-handle handle :cut-handle cut-handle :comparison r}))
                   (when interleaved?
-                    (let [{:keys [before after pending done worker-capture]} @gap*
+                    (let [{:keys [before after pending done successor worker-capture]} @gap*
                           ids (set (map :xt/id pending))
                           maintenance (:intervening-maintenance r)
                           audit (history-coverage/audit! node admit 16)
@@ -932,10 +971,16 @@
                                           (= :scheduled-local-cycle (:origin %))
                                           (= :not-established (:authentication %))
                                           (= source-id (:source-id %))
-                                          (= "assembled-recovery" (:worker-id %))
-                                          (= 2 (:cycle-number %))
                                           (uuid? (:lifecycle-ref %))) origins))
-                        (is (apply = (map :lifecycle-ref origins))))
+                        (is (= (if successor?
+                                 ["assembled-recovery" "assembled-recovery" "assembled-successor" "assembled-successor"]
+                                 (vec (repeat 4 "assembled-recovery")))
+                               (mapv :worker-id origins)))
+                        (is (= (if successor? [2 2 1 1] [2 2 2 2])
+                               (mapv :cycle-number origins)))
+                        (is (= (mapv lifecycle/lifecycle-reference
+                                     [worker worker (or successor worker) (or successor worker)])
+                               (mapv :lifecycle-ref origins))))
                       (is (= [:lease-acquisition :dispatch-acknowledgment :lease-acquisition :dispatch-acknowledgment]
                              (mapv :maintenance maintenance)))
                       (is (= 2 (count pending) (count ids)))
@@ -944,7 +989,8 @@
                       (is (every? #(apply = (map :intent-id %)) (partition 2 maintenance)))
                       (is (every? #(= :dispatch-accepted (:gesso.live.outbox/status %)) terminal))
                       (is (= before after))
-                      (is (= 2 (:cycles done) (:total-processed done) (:total-dispatch-accepted done)))
+                      (is (= (if successor? 1 2)
+                             (:cycles done) (:total-processed done) (:total-dispatch-accepted done)))
                       (is (= :predicted (:status prediction)))
                       (is (= [true true true true true true true false true] (mapv :committed? (:history prediction))))
                       (is (= :observed-interval-checked (:status audit)))
@@ -957,10 +1003,12 @@
                       (is (= sample (coverage/observe-local-processed-retained-replay-inputs! node)))
                       ;; The captured second cycle is exact; later read-only
                       ;; checks can overlap additional empty scheduler polls.
-                      (let [status (lifecycle/status worker)]
-                        (is (<= 2 (:cycles status)))
-                        (is (= 2 (:total-processed status) (:total-dispatch-accepted status)))
-                        (is (#{:idle :running} (:status status))))
+                      (let [status (lifecycle/status (or successor worker))]
+                        (is (<= (if successor? 1 2) (:cycles status)))
+                        (is (= (if successor? 1 2) (:total-processed status) (:total-dispatch-accepted status)))
+                        (is (#{:idle :running} (:status status)))
+                        (when successor?
+                          (is (= :failed (:status (lifecycle/status worker))))))
                       (let [capture! #(observed-recovery/capture-local-worker-recovery-cut!
                                        %1 tables admit mapped-source outcome-declarations steps observation %2 %3)
                             qualified (writer-history/derive! started tables admit mapped-source outcome-declarations
@@ -980,6 +1028,9 @@
                                           [:authorized-historical-lineage :same-store-incarnation])]
                         (is (= :conditional-installed-retained-writer-history (:status qualified)) (pr-str (dissoc qualified :recovery)))
                         (is (= :complete-at-selected-cut (:retained-transaction-classification qualified)))
+                        (is (= :matched-issued-managed-lineage (:worker-lineage-correspondence worker-evidence)))
+                        (is (= (mapv :worker-origin @policy-maintenance)
+                               (mapv :worker-origin (:selected-maintenance worker-evidence))))
                         (let [comparison (first foreign)
                               scope (observed-recovery/read-conditional-recovery-scope! comparison)
                               declaration {:deployment-id :fixture/refinement
@@ -1170,7 +1221,7 @@
                                                    enhanced admit))
                         (reset! restart* {:foreign-comparisons foreign
                                          :worker-capture worker-capture
-                                         :node node :worker worker :ring-handler @handler*
+                                         :node node :worker (or successor worker) :ring-handler @handler*
                                         :token (live-xtdb/current-submission-policy-token node)
                                         :sample sample :rows (selected-rows node tables)
                                         :observation observation :steps steps :comparison enhanced :retained-handle handle :cut-handle enhanced-cut
@@ -1269,10 +1320,13 @@
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
 
 (deftest assembled-command-transport-observed-recovery
-  (check-assembled-recovery! false))
+  (check-assembled-recovery! false false))
 
 (deftest assembled-command-transport-worker-interleaved-recovery
-  (check-assembled-recovery! true))
+  (check-assembled-recovery! true false))
+
+(deftest assembled-command-transport-managed-successor-recovery
+  (check-assembled-recovery! true true))
 
 (deftest command-authentication-premises-are-exact-and-unaccepted
   (let [describe #'observed-recovery/command-authentication-premises

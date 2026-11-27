@@ -10539,3 +10539,29 @@ writer coverage established.
 Next: exercise managed successor recovery through the canonical assembled host
 and its issued retained writer-history boundary, then advance local dispatch
 receipt attribution rather than assuming external source acceptance.
+
+* v2887 — exercise canonical assembled-host successor recovery
+
+Extend the canonical assembled Claim recovery fixture with an explicit
+managed-successor variant, preserving the adjacent and root-only variants.
+Interrupt discovery before the second intent is acquired, after the first
+intent's real physical acknowledgment. Recover through the installed Biff
+module's acquisition-rescan entry point under a new worker ID, and require
+physical reconciliation of the completed prefix. Match the four committed
+maintenance transactions to the exact original and successor lifecycle
+references, worker IDs, and cycle numbers in the issued retained history.
+Require matched issued managed lineage in the complete installed writer
+classification and preserve configured recovery, retirement, reopening and
+substituted-storage rejection checks. Only the discovery failure is injected;
+the acquisition, delivery, submission and recovery boundaries are real.
+
+Focused JVM: canonical assembled managed-successor recovery, 1 test / 1395
+assertions, zero failures or errors (exit 0). The original root-only and
+adjacent variants and full project gates were not rerun. No production source
+was changed. All 39 original general CLM-R2 conditions remain open; local
+managed lineage does not authenticate external dispatch acceptance or prove
+universal physical refinement, writer coverage or temporal coverage.
+
+Next: advance local dispatch receipt attribution through the exact installed
+worker handoff and independently observed physical acknowledgment, without
+assuming external source acceptance or downstream delivery.
