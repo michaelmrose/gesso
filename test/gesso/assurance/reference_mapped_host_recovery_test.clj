@@ -966,6 +966,17 @@
                                           [:authorized-historical-lineage :same-store-incarnation])]
                         (is (= :conditional-installed-retained-writer-history (:status qualified)) (pr-str (dissoc qualified :recovery)))
                         (is (= :complete-at-selected-cut (:retained-transaction-classification qualified)))
+                        (let [temporal (:selected-temporal-coverage qualified)
+                              intervals (:intervals temporal)]
+                          (is (= :conditional-selected-diagonal-coverage (:status temporal)))
+                          (is (= (mapv (juxt :tx-id) (subvec history 2))
+                                 (mapv (comp vector :to-tx-id) intervals)))
+                          (is (= [:source-bound-committed-transition :maintenance-stutter
+                                  :maintenance-stutter :maintenance-stutter :maintenance-stutter
+                                  :aborted-stutter :source-bound-committed-transition]
+                                 (mapv :schema intervals)))
+                          (is (every? #(= :none (:intervening-protected-boundaries %)) intervals))
+                          (is (= :not-established (:replay-coverage temporal) (:universal-refinement temporal))))
                         (is (= (mapv :tx-id (subvec history 2)) (mapv :tx-id (:post-initialization-steps qualified))))
                         (is (= [:committed-mapped :committed-worker :committed-worker :committed-worker :committed-worker :aborted-attempt :committed-mapped]
                                (mapv :class (:post-initialization-steps qualified))))

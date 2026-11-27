@@ -2,6 +2,8 @@
   "Conditional classification of the exact issued retained transaction cut."
   (:require [gesso.assurance.reference-installed-writer-classification :as installed]
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
+            [gesso.assurance.reference-retained-acquisition :as retained]
+            [gesso.assurance.reference-writer-temporal-coverage :as temporal]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.writer-policy :as policy]))
@@ -10,6 +12,8 @@
 (def ^:private classify installed/derive!)
 (def ^:private capture recovery/capture-local-worker-recovery-cut!)
 (def ^:private read-cut recovery/read-local-recovery-cut!)
+(def ^:private read-acquisition retained/read-acquisition!)
+(def ^:private check-temporal temporal/check-selection!)
 (def ^:private current-token xtdb/current-submission-policy-token)
 (def ^:private active-root policy/activated-policy-root)
 (def ^:private read-observation publication/read-framed-submission-observation!)
@@ -21,6 +25,8 @@
   (when-not (and (identical? classify installed/derive!)
                  (identical? capture recovery/capture-local-worker-recovery-cut!)
                  (identical? read-cut recovery/read-local-recovery-cut!)
+                 (identical? read-acquisition retained/read-acquisition!)
+                 (identical? check-temporal temporal/check-selection!)
                  (identical? current-token xtdb/current-submission-policy-token)
                  (identical? active-root policy/activated-policy-root)
                  (identical? read-observation publication/read-framed-submission-observation!))
@@ -106,7 +112,12 @@
             (reject! :unqualified-installed-history-policy))
           (let [compared (capture system tables admission source declarations steps observation acquisition worker-capture)
                 cut (read-cut admission observation (:recovery-cut-observation compared))
-                partition (partition! classified steps compared cut)]
+                partition (partition! classified steps compared cut)
+                sample (read-acquisition node acquisition)
+                _ (when-not (and sample (= cut (select-keys sample (keys cut))))
+                    (reject! :installed-history-temporal-sample-mismatch))
+                temporal-report (check-temporal (:replay-inputs sample) cut partition
+                                                (:protected-tables classified))]
             (boundaries!)
             (when-not (and (identical? token (current-token node))
                            (= root (active-root node admission token)))
@@ -115,7 +126,8 @@
                          :scope :selected-issued-post-initialization-transaction-cut
                          :retained-transaction-classification :complete-at-selected-cut
                          :post-initialization-steps partition
-                         :remaining-conditions (into (:remaining-conditions classified)
+                         :selected-temporal-coverage temporal-report
+                         :remaining-conditions (into (into (:remaining-conditions classified) (:remaining-conditions temporal-report))
                                                      #{:historical-generation-and-continuous-mediation
                                                        :provider-and-retained-source-completeness
                                                        :complete-read-only-and-temporal-observation-coverage})

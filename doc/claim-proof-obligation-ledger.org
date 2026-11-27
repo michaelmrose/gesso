@@ -9220,3 +9220,34 @@ Next: qualify temporal boundary coverage and compose the selected history
 classification with the general conditional transition and replay schemas.
 Preserve the distinction between selected transaction exhaustiveness and
 universal admitted-writer refinement.
+
+* v2852 — qualify selected diagonal-time writer coverage
+
+Recheck the exact issued retained sample against the recovery cut and
+independently replay the complete selected transaction sequence. Require
+the predicted commitments and strictly increasing system times to match
+the classified history. At every post-initialization transaction inspect
+the preceding system snapshot's protected valid-time segments. Reject
+any protected boundary in (previous system time, next system time],
+including transient changes that vanish before the next observation.
+This conservative interval rule checks constancy of the modeled
+protected rows between successive diagonal endpoints.
+
+Bind each interval to its classified committed-source, aborted-stutter
+or maintenance-stutter schema. The report concerns the selected finite
+diagonal history, not arbitrary bitemporal reads, read-only request
+coverage, future time, continuous installation or universal provider
+correspondence. Preserve all earlier conditions and add explicit
+temporal replay, clock-history and schema correspondence requirements.
+
+Ten-namespace assurance regression: 52 tests / 7599 assertions.
+Complete persistent mapped-host recovery namespace: 5 tests / 3074
+assertions. Both passed without failures or errors. The latter includes
+the adjacent and worker-interleaved trajectories, persistent restart
+and copied-store checks, and the selected temporal interval assertions.
+Full project gates not run. Historical v12 unchanged; no original
+premise accepted or discharged.
+
+Next: compose the selected temporal and transaction classifications
+with the general conditional transition and replay arguments. Retain
+universal writer, provider and temporal completeness as open premises.
