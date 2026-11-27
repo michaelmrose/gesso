@@ -8330,3 +8330,38 @@ discharged.
 Next: compose the source-derived abstract coverage with the structural
 congruence derivation and representative truth results for the exact
 original rule, retaining the independent executable refinement boundary.
+
+* v2832 — compose conditional abstract finite reduction
+
+Recompute partition, coverage and congruence evidence from the same
+original rule and typed reader footprint. Require matching source,
+profiles, representative domains and checked case counts. Evaluate the
+source-derived congruence tree from each Cartesian tuple of scalar
+cell observations; independently compare the resulting Boolean with
+both executable evaluators at that tuple's representative binding.
+Require one distinct binding per tuple and complete counts. Retain the
+actual truth table, coverage, congruence and partition reports rather
+than relying only on aggregate agreement. Reject substituted checker
+boundaries, unsupported expressions and per-row truth disagreements.
+
+Under the stated discrete integer order and typed scalar equality
+conditions, abstract truth is constant on each represented cell tuple.
+The original Claim Init and both invariants yield 819 representative
+valuations, eight true and 811 false, all agreeing with the two
+executable evaluators. This characterizes abstract truth on the
+partition, not reachable states or universal JVM evaluator correctness.
+
+Focused JVM: standalone reduction suite passed 3 tests / 41 assertions.
+Combined reduction, coverage, congruence, substitution, partition,
+typed-atom oracle, typed-proposition bridge and propositional soundness
+suites passed 128 tests / 4323 assertions, zero failures or errors.
+Exercise empty reader footprints, exact per-binding truth values,
+changed abstract truth, unsupported syntax and substituted boundaries.
+Historical judgment unchanged; host recovery and full project gates
+not rerun. No premise discharged.
+
+Next: establish a source-relative executable evaluator refinement
+strategy for the admitted fragment. Prefer independently checked
+semantic rules and exact executable correspondence over further
+descriptive report layers; do not infer universal JVM refinement
+from the complete abstract truth table alone.
