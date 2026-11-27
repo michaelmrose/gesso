@@ -7380,3 +7380,33 @@ Next: qualify the connection from this selected historical judgment to
 the Claim assurance subject, preserving exact original operation and
 admission identities, and reject attempted cross-subject composition.
 Authenticated command and worker provenance remain open.
+
+* v2807 — bind conditional recovery to the exact assurance subject
+
+Retain the original checked catalog and induction fingerprints, catalog
+identity, and ordered selected alternative identities with their command
+operations, subject, transition and mapping fingerprints. Derive these
+from the issued mapped admission and checked original trajectory, and
+retain them with the issued cut and prepared comparison. Check the pinned
+admission-description boundary. The historical judgment now carries its
+original subject, including when the acquisition is extended or reopened.
+
+The subject-checked declaration arity requires the identical original
+admission and exact expected subject. Reject an independently issued
+admission with identical declarations, copied admission descriptions,
+changed catalog or induction identities, reordered alternatives and changed
+transition fingerprints without returning positive judgment material.
+The existing declaration and configured host adoption retain their local
+handle-bound scope; neither establishes authenticated provenance.
+
+Focused JVM: 3 tests / 746 assertions, zero failures or errors. Both genuine
+persistent assembled-host recovery fixtures and the submission-origin
+regression ran with unchanged worker polling and the older offline
+dependency bundle. Full project gates not run. No storage premise,
+Claim invariant theorem, authenticated command or worker provenance,
+universal provider refinement, certificate or CLM-R2 discharge follows.
+
+Next: establish the exact boundary between this subject-bound historical
+judgment and the original abstract induction evidence, carrying forward
+all open obligations and refusing mismatched induction subjects. Continue
+with authenticated command and worker provenance.

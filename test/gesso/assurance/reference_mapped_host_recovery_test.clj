@@ -68,9 +68,24 @@
 (defn- trust-problem [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
 
-(defn- check-recovery-judgment! [result scope original]
+(defn- expected-recovery-subject [admit]
+  (let [description (induction/describe-mapped-admission admit)]
+    (assoc (select-keys description [:catalog-fingerprint :induction-fingerprint])
+           :catalog-id (:id (claim/catalog))
+           :selected-operations
+           (mapv (fn [[helper branch]]
+                   (let [id (claim/alternative-id helper branch)
+                         mapping (plan/check-target-mapping! (claim/source helper branch) claim/target-map)]
+                     {:alternative-id id :command-operation :request/claim
+                      :subject-fingerprint (:subject-fingerprint mapping)
+                      :transition-fingerprint (:transition-fingerprint mapping)
+                      :mapping-fingerprint (:fingerprint mapping)}))
+                 [["helper-1" :accept] ["helper-2" :accept] ["helper-2" :refuse]]))))
+
+(defn- check-recovery-judgment! [result scope original admit]
   (is (= observed-recovery/judgment-profile (:judgment-profile result)))
   (is (= scope (:judgment-scope result)))
+  (is (= (expected-recovery-subject admit) (:judgment-subject result)))
   (let [trajectory (:original-recovery result)]
     (is (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding trajectory)))
     (is (= :matched-local-activated-retained-root (:activation-root-binding trajectory)))
@@ -150,7 +165,7 @@
               (is (= (:relation policy) (:relation adopted)))
               (is (= :conditional-on-declared-trust (:historical-assurance adopted)))
               (is (= (assoc trusted :deployment-adoption :configured-local-host) adopted))
-              (check-recovery-judgment! adopted scope comparison)
+              (check-recovery-judgment! adopted scope comparison admit)
               (is (not (contains? selected :judgment-profile)))
               (is (not (contains? trusted :deployment-adoption)))
               (with-redefs [observed-recovery/compare-local-activated! (constantly comparison)]
@@ -243,9 +258,11 @@
                                   outcome-declarations policy-events original))
       (finally (doseq [f (reverse (file-seq (.toFile copy-root)))] (io/delete-file f true))))))
 
-(defn- check-conditional-extension! [started node admit observation cut-handle earlier target original]
+(defn- check-conditional-extension! [started node admit mapped-source observation cut-handle earlier target original]
   (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)
         extended (:historical-cut (cut/derive-cut! node target))
+        other-admission (induction/build-inductive-mapped-admission! mapped-source)
+        expected-subject (expected-recovery-subject admit)
         prepare! (fn [relation acquisition]
                    (observed-recovery/prepare-conditional-recovery!
                     admit observation cut-handle node acquisition
@@ -280,7 +297,22 @@
                                     (:authorized-historical-lineage selected)))
                              (is (= :conditional (:status trusted)))
                              (is (= :conditional-on-declared-trust (:historical-assurance trusted)))
-                             (check-recovery-judgment! trusted scope original)
+                             (check-recovery-judgment! trusted scope original admit)
+                             (is (= trusted (observed-recovery/declare-conditional-recovery-trust!
+                                             handle admit expected-subject declaration)))
+                             (doseq [[candidate subject reason]
+                                     [[other-admission expected-subject :recovery-admission-mismatch]
+                                      [(induction/describe-mapped-admission admit) expected-subject :recovery-admission-mismatch]
+                                      [admit (assoc expected-subject :catalog-id :fixture/other) :recovery-subject-mismatch]
+                                      [admit (assoc expected-subject :induction-fingerprint "other") :recovery-subject-mismatch]
+                                      [admit (update expected-subject :selected-operations #(vec (reverse %))) :recovery-subject-mismatch]
+                                      [admit (assoc-in expected-subject [:selected-operations 0 :transition-fingerprint] "other") :recovery-subject-mismatch]]]
+                               (let [failure (observed-recovery/declare-conditional-recovery-trust!
+                                              handle candidate subject declaration)]
+                                 (is (= :unsupported (:status failure)))
+                                 (is (= reason (:reason failure)))
+                                 (is (not-any? #(contains? failure %)
+                                               [:judgment-subject :judgment-profile :trusted-assumptions :original-recovery]))))
                              (is (not (contains? trusted :deployment-adoption)))
                              (is (not (contains? selected :judgment-profile)))
                              (is (= :explicit-declaration-only (:premise-acceptance trusted)))
@@ -310,6 +342,9 @@
                                (is (= :storage-trust-policy-mismatch
                                       (trust-problem #(host/adopt-storage-trust! started handle)))))
                              [[relation kind] {:handle handle :premises premises :declaration declaration}])))]
+    (is (not (identical? admit other-admission)))
+    (is (= (induction/describe-mapped-admission admit)
+           (induction/describe-mapped-admission other-admission)))
     (is (= 5 (count (:transaction-ids required))))
     (is (= 9 (count (:transaction-ids extended))))
     (is (= (:transaction-ids required) (subvec (:transaction-ids extended) 0 5)))
@@ -652,7 +687,7 @@
                         target (:acquisition (acquisition/capture! node))]
                     (is (= sample2 (acquisition/read-acquisition! node target)))
                     (swap! restart* assoc :trust-handle
-                           (check-conditional-extension! started node admit observation cut-handle retained-handle target (:comparison @restart*)))))))
+                           (check-conditional-extension! started node admit mapped-source observation cut-handle retained-handle target (:comparison @restart*)))))))
               (finally (host/stop! started)))
             (when-not interleaved?
               (is (= :storage-trust-host-retired

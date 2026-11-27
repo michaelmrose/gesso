@@ -196,11 +196,13 @@
 (def ^:private recovery-cuts (java.util.WeakHashMap.))
 (def ^:private original-local-comparison compare-local-activated!)
 (def ^:private original-cut-derivation cut/derive-cut!)
+(def ^:private original-admission-description induction/describe-mapped-admission)
 
 (defn- cut-boundaries-current? []
   (and (local-boundaries-current?)
        (identical? original-local-comparison compare-local-activated!)
-       (identical? original-cut-derivation cut/derive-cut!)))
+       (identical? original-cut-derivation cut/derive-cut!)
+       (identical? original-admission-description induction/describe-mapped-admission)))
 
 (def ^:private original-recovery-keys
   [:activated-recovery-profile :observed-recovery-profile :local-acquisition-profile
@@ -208,6 +210,25 @@
    :manifest-tx-id :initialization-tx-id :selected-tx-ids :selected-commitments
    :recovery-linkage :provider-refinement :source-provenance :outcome-provenance
    :submission-provenance :aborted-receipt-identity :worker-observation-provenance])
+
+(defn- recovery-subject [admission source steps comparison]
+  (let [description (original-admission-description admission)
+        fingerprints (select-keys description [:catalog-fingerprint :induction-fingerprint])
+        operations (mapv (fn [step]
+                           (let [id (get-in step [:spec :alternative])
+                                 mapping (get-in description [:operation-mappings id])]
+                             (when (and mapping (= id (get-in step [:original :subject :id])))
+                               {:alternative-id id
+                                :command-operation (get-in step [:spec :binding :operation])
+                                :subject-fingerprint (:subject-fingerprint mapping)
+                                :transition-fingerprint (:transition-fingerprint mapping)
+                                :mapping-fingerprint (:fingerprint mapping)}))) steps)]
+    (when (and (= :matched-issued-declarations (:issued-admission-binding comparison))
+               (= (:catalog-fingerprint fingerprints) (:issued-catalog-fingerprint comparison))
+               (= (:induction-fingerprint fingerprints) (:issued-induction-fingerprint comparison))
+               (every? some? operations))
+      (assoc fingerprints :catalog-id (get-in source [:inductive-source :catalog :id])
+             :selected-operations operations))))
 
 (defn capture-local-recovery-cut!
   "Issue a historical cut only after the exact observation and acquisition
@@ -232,8 +253,10 @@
                     (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding r))))
           (fail :unsupported :invalid-local-recovery-comparison)
           :else
-          (let [derived (original-cut-derivation node acquisition)]
+          (let [subject (recovery-subject admission source steps r)
+                derived (original-cut-derivation node acquisition)]
             (cond
+              (nil? subject) (fail :unsupported :invalid-recovery-subject)
               (not (cut-boundaries-current?)) (fail :unsupported :recovery-cut-boundary-replaced)
               (not= :derived (:status derived)) (fail (:status derived) (:reason derived))
               (not (original-origin-matcher admission observation node))
@@ -244,6 +267,7 @@
                   (.put recovery-cuts handle {:admission admission :observation observation
                                               :historical-cut (:historical-cut derived)
                                               :original-recovery (select-keys r original-recovery-keys)
+                                              :judgment-subject subject
                                               :publication-source-id (:source-id (first steps))}))
                 (merge r base {:recovery-cut-observation handle
                                :recovery-cut-binding :matched-local-recovery-cut})))))))))
@@ -322,6 +346,7 @@
                         {:scope scope :cut-correspondence (:cut-correspondence r)
                          :original-cut original-cut :target target
                          :original-recovery (:original-recovery origin)
+                         :judgment-subject (:judgment-subject origin)
                          :target-node (java.lang.ref.WeakReference. node)
                          :admission admission}))
                 (assoc (conditional-report :prepared) :conditional-recovery handle))))
@@ -368,6 +393,28 @@
 
 (def judgment-profile :selected-conditional-activated-recovery-judgment-v1)
 
+(defn- declare-recovery-trust* [entry declaration]
+  (let [fail #(assoc (conditional-report :unsupported) :reason %)]
+    (if-not (acceptance-boundaries-current?)
+      (fail :conditional-recovery-boundary-replaced)
+      (if-let [{:keys [scope cut-correspondence original-recovery judgment-subject]} entry]
+        (try
+          (let [r (original-deployment-acceptance scope declaration)]
+            (if-not (acceptance-boundaries-current?)
+              (fail :conditional-recovery-boundary-replaced)
+              (merge r (conditional-report :conditional)
+                     {:judgment-profile judgment-profile
+                      :judgment-scope scope
+                      :judgment-subject judgment-subject
+                      :original-recovery original-recovery
+                      :cut-correspondence cut-correspondence
+                      :historical-assurance :conditional-on-declared-trust
+                      :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))
+                      :proof-discharge :not-performed})))
+          (catch clojure.lang.ExceptionInfo e
+            (fail (or (:reason (ex-data e)) :invalid-deployment-acceptance))))
+        (fail :unissued-conditional-recovery)))))
+
 (defn declare-conditional-recovery-trust!
   "Compose an explicit deployment trust declaration with an issued historical
    comparison, rederiving the exact selected premises from its registry.
@@ -377,27 +424,20 @@
    declared trust. Host adoption, when present, is recorded by the host
    boundary, not by this declaration. Open premises remain open. No
    Claim invariant theorem or universal refinement is established.
-   The result is sensitive internal material, not a receipt or credential."
-  [handle declaration]
-  (let [fail #(assoc (conditional-report :unsupported) :reason %)]
-    (if-not (acceptance-boundaries-current?)
-      (fail :conditional-recovery-boundary-replaced)
-      (if-let [{:keys [scope cut-correspondence original-recovery]} (conditional-entry handle)]
-        (try
-          (let [r (original-deployment-acceptance scope declaration)]
-            (if-not (acceptance-boundaries-current?)
-              (fail :conditional-recovery-boundary-replaced)
-              (merge r (conditional-report :conditional)
-                     {:judgment-profile judgment-profile
-                      :judgment-scope scope
-                      :original-recovery original-recovery
-                      :cut-correspondence cut-correspondence
-                      :historical-assurance :conditional-on-declared-trust
-                      :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))
-                      :proof-discharge :not-performed})))
-          (catch clojure.lang.ExceptionInfo e
-            (fail (or (:reason (ex-data e)) :invalid-deployment-acceptance))))
-        (fail :unissued-conditional-recovery)))))
+   The four-argument form additionally requires the exact original issued
+   admission and expected catalog/ordered-operation identities. The result
+   is sensitive internal material, not a receipt or credential."
+  ([handle declaration]
+   (declare-recovery-trust* (conditional-entry handle) declaration))
+  ([handle admission expected-subject declaration]
+   (let [entry (conditional-entry handle)
+         fail #(assoc (conditional-report :unsupported) :reason %)]
+     (cond
+       (not (acceptance-boundaries-current?)) (fail :conditional-recovery-boundary-replaced)
+       (nil? entry) (fail :unissued-conditional-recovery)
+       (not (identical? admission (:admission entry))) (fail :recovery-admission-mismatch)
+       (not= expected-subject (:judgment-subject entry)) (fail :recovery-subject-mismatch)
+       :else (declare-recovery-trust* entry declaration)))))
 
 (defn conditional-recovery-target-matches?
   "Match the exact prepared target, original admission and publication source.
