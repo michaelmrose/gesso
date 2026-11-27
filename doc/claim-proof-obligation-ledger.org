@@ -10590,3 +10590,26 @@ All 39 original general CLM-R2 conditions remain open.
 Next: carry the checked receipt attribution into the original selected-cut
 worker/dispatch premise subject and exercise that binding through the canonical
 assembled host; retain the open source-acceptance authentication obligation.
+
+* v2889 — bind checked dispatch receipts into original cut premises
+
+Preserve the checked local receipt's exact intent, lease, worker, receipt ID,
+adapter, result and evidence in the original selected maintenance subject.
+Encode only the UUID positions as strings for the structural assumption
+encoder. Include the checked receipt correspondence status, version the worker
+premise and recovery judgment profiles, and retain all authentication premises
+as open. Changing or removing any receipt field or its correspondence status
+changes the premise fingerprints; a changed target acquisition does not.
+The canonical assembled-host successor case matches both local receipts and
+checks their inclusion in the original judgment, including historical recovery.
+
+Focused JVM: worker premise binding and canonical assembled managed-successor
+recovery, 2 tests / 1478 assertions, zero failures or errors (exit 0).
+The other assembled variants and full project gates were not rerun. All 39
+original general CLM-R2 conditions remain open. No external source acceptance,
+client delivery or new admission authority is established by this binding.
+
+Next: examine the exact installed synchronous source execution and its
+acceptance observation, binding any further local correspondence to the
+original delivery handoff without treating an acceptance report as external
+authentication or durable delivery.

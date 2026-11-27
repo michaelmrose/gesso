@@ -226,6 +226,14 @@
     (is (= (mapv #(str (get-in % [:worker-origin :lifecycle-ref])) observed)
            (mapv #(get-in % [:worker-origin :lifecycle-ref]) (:observed-maintenance interface))))
     (is (= (mapv #(str (:system-time %)) observed) (mapv :system-time (:observed-maintenance interface))))
+    (is (= (or (get-in original [:worker-correspondence :dispatch-receipt-correspondence])
+               :not-established)
+           (:dispatch-receipt-correspondence interface)))
+    (is (= (mapv (fn [step]
+                   (when-let [receipt (:local-dispatch-receipt step)]
+                     (-> receipt (update :intent-id str) (update :lease-id str) (update :receipt-id str))))
+                 observed)
+           (mapv :local-dispatch-receipt (:observed-maintenance interface))))
     (is (= (or (:worker-observation-provenance original) :not-established)
            (:worker-observation-provenance interface)))
     (is (= (:open-premise-fingerprints worker) (set (map :premise-fingerprint (:obligations worker)))))
@@ -1029,6 +1037,12 @@
                         (is (= :conditional-installed-retained-writer-history (:status qualified)) (pr-str (dissoc qualified :recovery)))
                         (is (= :complete-at-selected-cut (:retained-transaction-classification qualified)))
                         (is (= :matched-issued-managed-lineage (:worker-lineage-correspondence worker-evidence)))
+                        (is (= :matched-local-handoff-retained-acknowledgments
+                               (:dispatch-receipt-correspondence worker-evidence)))
+                        (is (= (if successor? [nil "assembled-recovery" nil "assembled-successor"]
+                                             [nil "assembled-recovery" nil "assembled-recovery"])
+                               (mapv #(get-in % [:local-dispatch-receipt :worker-id])
+                                     (:selected-maintenance worker-evidence))))
                         (is (= (mapv :worker-origin @policy-maintenance)
                                (mapv :worker-origin (:selected-maintenance worker-evidence))))
                         (let [comparison (first foreign)
@@ -1388,17 +1402,25 @@
                                                :cycle-number 2 :maintenance (:maintenance %)
                                                :origin :scheduled-local-cycle :authentication :not-established
                                                :call-chain :matched-scheduled-maintenance}) selected)
+        receipt {:intent-id intent :lease-id (random-uuid) :worker-id "worker"
+                 :receipt-id (random-uuid) :adapter :gesso.live/synchronous-source
+                 :result :accepted :evidence :matched-local-delivery-handoff}
+        observed (assoc-in observed [1 :local-dispatch-receipt] receipt)
         entry {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
                :command-observation-ref "original-cut"
                :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
                :original-recovery {:selected-tx-ids [1 4 5] :selected-commitments [:committed :aborted :committed]
                                    :intervening-maintenance selected
                                    :worker-observation-provenance :matched-local-issued-host-capture
-                                   :worker-correspondence {:selected-maintenance observed}}}
+                                   :worker-correspondence {:selected-maintenance observed
+                                                           :dispatch-receipt-correspondence :matched-local-handoff-retained-acknowledgments}}}
         r (describe entry)
         fingerprints (:open-premise-fingerprints r)]
     (is (= r (describe (assoc-in entry [:scope :retained-acquisition-ref] "new-target"))))
     (is (= 3 (count fingerprints)))
+    (is (= :matched-local-handoff-retained-acknowledgments (get-in r [:scope :dispatch-receipt-correspondence])))
+    (is (= [nil (-> receipt (update :intent-id str) (update :lease-id str) (update :receipt-id str))]
+           (mapv :local-dispatch-receipt (get-in r [:scope :observed-maintenance]))))
     (is (= :not-established (:worker-authentication r) (:dispatch-authentication r)))
     (is (= :not-performed (:premise-acceptance r)))
     (is (every? #(= :open (:discharge-state %)) (:obligations r)))
@@ -1416,6 +1438,16 @@
         (is (not-any? fingerprints (:open-premise-fingerprints other)))
         (is (= :not-established (:worker-authentication other) (:dispatch-authentication other)))
         (is (= :not-performed (:premise-acceptance other)))))
+    (let [receipt-path [:original-recovery :worker-correspondence :selected-maintenance 1 :local-dispatch-receipt]]
+      (doseq [changed (concat [(update-in entry (pop receipt-path) dissoc :local-dispatch-receipt)
+                               (assoc-in entry [:original-recovery :worker-correspondence :dispatch-receipt-correspondence] :not-established)]
+                              (map (fn [[k v]] (assoc-in entry (conj receipt-path k) v))
+                                   {:intent-id (random-uuid) :lease-id (random-uuid) :receipt-id (random-uuid)
+                                    :worker-id "other-worker" :adapter :other/source :result :rejected :evidence :other/evidence}))]
+        (let [other (describe changed)]
+          (is (not-any? fingerprints (:open-premise-fingerprints other)))
+          (is (= :not-established (:worker-authentication other) (:dispatch-authentication other)))
+          (is (= :not-performed (:premise-acceptance other))))))
     (let [absent (describe (update entry :original-recovery #(-> % (dissoc :worker-correspondence)
                                                                   (assoc :worker-observation-provenance :not-established))))
           acquisition-only (describe (update entry :original-recovery assoc :intervening-maintenance [(first selected)]
@@ -1424,6 +1456,7 @@
                                      :worker-correspondence :worker-observation-provenance))]
       (is (= 3 (count (:obligations absent))))
       (is (empty? (get-in absent [:scope :observed-maintenance])))
+      (is (= :not-established (get-in absent [:scope :dispatch-receipt-correspondence])))
       (is (= :not-established (get-in absent [:scope :worker-observation-provenance])))
       (is (= :not-established (:worker-authentication absent) (:dispatch-authentication absent)))
       (is (not-any? fingerprints (:open-premise-fingerprints absent)))

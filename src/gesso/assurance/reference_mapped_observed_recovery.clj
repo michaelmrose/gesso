@@ -572,24 +572,36 @@
      :command-authentication :not-established
      :authority :none :certificate :not-issued}))
 
-(def worker-authentication-profile :selected-worker-authentication-premises-v1)
+(def worker-authentication-profile :selected-worker-authentication-premises-v2)
 
 (defn- maintenance-identity [selected]
   ;; The assumption encoder admits pure structural values, not UUID or
   ;; Instant objects. These positions have fixed types in the checked history.
   (update (select-keys selected [:tx-id :intent-id :maintenance]) :intent-id str))
 
+(defn- local-receipt-identity [receipt]
+  ;; Only the fixed UUID positions of the checked receipt require encoding.
+  ;; Keep adapter, result, evidence and worker identity in their original types.
+  (-> receipt
+      (select-keys [:intent-id :lease-id :worker-id :receipt-id :adapter :result :evidence])
+      (update :intent-id str)
+      (update :lease-id str)
+      (update :receipt-id str)))
+
 (defn- worker-origin-identity [selected]
-  (assoc (maintenance-identity selected)
-         :system-time (str (:system-time selected))
-         :committed? (:committed? selected)
-         :worker-origin (update (:worker-origin selected) :lifecycle-ref str)))
+  (cond-> (assoc (maintenance-identity selected)
+                 :system-time (str (:system-time selected))
+                 :committed? (:committed? selected)
+                 :worker-origin (update (:worker-origin selected) :lifecycle-ref str))
+    (contains? selected :local-dispatch-receipt)
+    (assoc :local-dispatch-receipt (local-receipt-identity (:local-dispatch-receipt selected)))))
 
 (defn- worker-authentication-premises
   "Describe, never accept or discharge, the worker and dispatch premises of
    the original issued cut. The cut fingerprint binds the full retained
-   envelopes, including acknowledgment receipts. Local origin does not
-   authenticate the configured worker or establish genuine source acceptance.
+   envelopes, including acknowledgment receipts. Bind the checked local
+   receipt attribution explicitly as well. Local origin does not authenticate
+   the configured worker or establish genuine source acceptance.
    No browser delivery or durable external delivery proposition is implied."
   [{:keys [scope original-recovery judgment-subject command-observation-ref]}]
   (let [id :reference-worker/selected-maintenance
@@ -610,6 +622,8 @@
                    :selected-acknowledgments acknowledged
                    :worker-observation-provenance (or (:worker-observation-provenance original-recovery)
                                                       :not-established)
+                   :dispatch-receipt-correspondence (or (get-in original-recovery [:worker-correspondence :dispatch-receipt-correspondence])
+                                                        :not-established)
                    :observed-maintenance observed}
         describe (fn [premise proposition boundary dependencies origin]
                    (original-assumption-description
@@ -744,7 +758,7 @@
        (identical? original-snapshot-binding snapshot/bind-premise)
        (identical? original-support-composition snapshot/compose-support)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v12)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v13)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
