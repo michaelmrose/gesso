@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
+            [gesso.assurance.reference-mapped-worker-submission :as worker-submission]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-storage-identity :as storage]
@@ -708,7 +709,50 @@
                         (is (= (mapv :tx-id maintenance)
                                (mapv #(.getTxId ^xtdb.api.TransactionKey (:tx-result %)) calls)))
                         (is (= :none (:authority worker-capture)))
-                        (is (= :not-issued (:certificate worker-capture))))
+                        (is (= :not-issued (:certificate worker-capture)))
+                        (let [compare! #(worker-submission/compare-issued!
+                                         %1 tables admit mapped-source outcome-declarations steps observation %2 %3)
+                              checked (compare! started handle worker-capture)
+                              selected (:selected-maintenance checked)
+                              compare-calls #'worker-submission/compare-calls!]
+                          (is (= :matched (:status checked)) (pr-str checked))
+                          (is (= :matched-issued-worker-retained-transactions (:maintenance-correspondence checked)))
+                          (is (= :matched-local-issued-host-capture (:worker-observation-provenance checked)))
+                          (is (= :matched-xtdb-microsecond-worker-envelope (:payload-correspondence checked)))
+                          (is (= maintenance (mapv #(select-keys % [:tx-id :intent-id :maintenance]) selected)))
+                          (is (= (mapv :worker-origin @policy-maintenance) (mapv :worker-origin selected)))
+                          (is (every? :committed? selected))
+                          (is (= (:selected-tx-ids r) (:selected-tx-ids checked)))
+                          (is (= (:payload-fingerprint sample) (:retained-payload-fingerprint checked)))
+                          (is (= :not-established (:worker-authentication checked) (:dispatch-authentication checked)
+                                 (:provider-refinement checked) (:complete-writer-coverage checked)))
+                          (is (= :none (:authority checked)))
+                          (is (= :not-issued (:certificate checked)))
+                          (doseq [bad [(compare! started handle (into {} worker-capture))
+                                       (compare! (into {} started) handle worker-capture)
+                                       (compare! started sample worker-capture)]]
+                            (is (= :unsupported (:status bad)))
+                            (is (not (contains? bad :selected-maintenance))))
+                          (doseq [changed [(pop calls) (conj calls (first calls)) (vec (reverse calls))
+                                           (assoc-in calls [0 :outcome] :threw)
+                                           (assoc-in calls [0 :tx-result] (:tx-result (second calls)))
+                                           (assoc-in calls [0 :admission :worker-origin :maintenance] :dispatch-acknowledgment)
+                                           (assoc-in calls [0 :tx-options] {:system-time (:system-time (first history))})
+                                           (update-in calls [0 :tx-ops] #(assoc-in % [(dec (count %)) 2 :fixture/tampered] true))
+                                           (update-in calls [0 :tx-ops 1 1] #(.plusSeconds ^java.time.Instant % 1))
+                                           (update-in calls [0 :tx-ops]
+                                                      (fn [ops]
+                                                        (let [path [(dec (count ops)) 2 :gesso.live.outbox/lease-until]
+                                                              changed (.plusSeconds ^java.time.Instant (get-in ops path) 1)]
+                                                          (-> ops (assoc-in path changed)
+                                                              (assoc-in [1 1] changed) (assoc-in [2 1] changed)))))]]
+                            (let [bad (compare-calls node source-id sample maintenance changed)]
+                              (is (= :mismatch (:status bad)) (pr-str bad))
+                              (is (not (contains? bad :selected-maintenance)))))
+                          (with-redefs [host/worker-outcome-capture-matches? (constantly true)]
+                            (let [bad (compare! started handle worker-capture)]
+                              (is (= :worker-comparison-boundary-replaced (:reason bad)))
+                              (is (not (contains? bad :selected-maintenance)))))))
                       ;; These are actual installed writer-policy observations,
                       ;; not a test policy calling the provenance helper.
                       (let [origins (mapv :worker-origin @policy-maintenance)]
@@ -874,3 +918,21 @@
       (is (= 2 (count (:obligations absent))))
       (is (every? #(= :open (:discharge-state %)) (:obligations absent)))
       (is (= :not-established (:command-authentication absent))))))
+
+(deftest worker-deadline-projection-is-provider-specific
+  (let [project #'worker-submission/provider-worker-ops
+        deadline (java.time.Instant/parse "2026-11-26T20:00:00.123456789Z")
+        encoded (java.time.Instant/parse "2026-11-26T20:00:00.123456Z")
+        old-deadline (java.time.Instant/parse "2026-11-26T19:59:00.123456789Z")
+        ops [["old guard" old-deadline]
+             ["ASSERT CURRENT_TIMESTAMP < ?" deadline]
+             ["ASSERT CURRENT_TIMESTAMP + INTERVAL '5' MINUTE >= ?" deadline]
+             [:put-docs :gesso_live_outbox {:gesso.live.outbox/lease-until deadline
+                                          :fixture/other old-deadline}]]
+        expected (-> ops (assoc-in [1 1] encoded) (assoc-in [2 1] encoded)
+                     (assoc-in [3 2 :gesso.live.outbox/lease-until] encoded))]
+    (is (= expected (project :lease-acquisition ops)))
+    (is (= expected (project :expired-lease-reclamation ops)))
+    (is (= ops (project :dispatch-acknowledgment ops)))
+    (is (nil? (project :lease-acquisition (assoc-in ops [1 1] encoded))))
+    (is (nil? (project :lease-acquisition (assoc-in ops [2 0] "unexpected guard"))))))

@@ -7757,3 +7757,48 @@ Next: independently compare the qualified issued maintenance capture
 with the exact selected retained maintenance transaction envelopes and
 outcomes. Keep local provenance, authenticated dispatch and physical
 refinement obligations distinct.
+
+* v2818 — check issued worker submissions against retained maintenance
+
+Independently recheck the original local activated worker-interleaved
+recovery under its exact issued retained acquisition. Require the
+original host-issued outcome capture and match every intervening
+maintenance submission in order, without accepting a supplied history
+or positive comparison. Check the returned transaction ID and system
+time, intent and command identities, publication source, maintenance
+phase, worker origin and complete decoded transaction envelope against
+the retained committed transaction. Freshly bracket the entire
+comparison with the issued sample and pin the original checkers.
+
+The first physical integration run exposed the provider's timestamp
+encoding boundary: the live worker's nanosecond Instant lease deadline
+is retained at microsecond precision. An independent physical XTDB
+probe confirmed the difference in both SQL guard arguments and the
+replacement document. Project only the identical new deadline in
+these three locations to the selected XTDB 2.2.0-beta1 representation.
+Preserve the original issued capture, all other fields and the
+existing strict envelope checker; do not imply submicrosecond retained
+equality. No worker write, polling interval or admission rule changes.
+
+Focused JVM after correction: 2 tests / 401 assertions, zero failures
+or errors, in the provider-specific projection and genuine persistent
+worker-interleaved assembled-host recovery tests, including reopening
+and independently copied storage. The first run had seven failed
+assertions from the envelope mismatch; the isolated provider probe
+confirmed its cause. The final run exercises all four maintenance
+transactions and rejects copied owners/captures, unissued acquisition,
+missing, extra and reordered calls, incorrect receipt, outcome, phase,
+options, payload and deadline changes, and substituted host matcher.
+The older offline dependency bundle was retained. The adjacent-history
+fixture and full project gates were not rerun.
+
+The checker returns a descriptive local correspondence result, not an
+issued historical-cut extension or independently authenticated worker,
+dispatch, provider or writer-closure evidence. No CLM-R2 or other proof
+premise is discharged.
+
+Next: bind the checked worker correspondence to the original issued
+recovery cut and compose it into the conditional historical judgment
+without admitting a caller-supplied comparison or changing the existing
+unobserved-worker classification for unsupported cases. Then describe
+the remaining subject-bound worker and dispatch authentication premises.
