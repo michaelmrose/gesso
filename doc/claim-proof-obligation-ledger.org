@@ -7410,3 +7410,36 @@ Next: establish the exact boundary between this subject-bound historical
 judgment and the original abstract induction evidence, carrying forward
 all open obligations and refusing mismatched induction subjects. Continue
 with authenticated command and worker provenance.
+
+* v2808 — bind recovery to original abstract induction evidence
+
+Recheck the abstract induction report through the original issued mapped
+admission and its live evidence handles. Retain that report with the
+issued cut and prepared historical comparison. Join its catalog and
+induction identities and original open obligations to the checked
+physical subject. The v2 conditional judgment additionally binds the
+complete abstract report fingerprint and identity, including certificate
+and dependency fingerprints. Rebuild the report at declaration/adoption
+and require exact equality with the original; reject a replaced checker
+or mismatched expected induction evidence without emitting positive
+judgment material. No caller-supplied report becomes evidence.
+
+Preserve the complete original abstract obligation register, open
+assumptions, certificate premises and conditional scope alongside the
+separate historical storage premises. Configured trust accepts only its
+selected storage premises and does not discharge either set.
+
+Focused JVM: 3 tests / 880 assertions, zero failures or errors. Both
+genuine persistent assembled-host recovery fixtures and the
+submission-origin regression ran with unchanged worker polling and the
+older offline dependency bundle. Exact and extended histories and
+reopened and copied stores were exercised. Full project gates not run.
+The repeated abstract rechecks incur additional cost; no caching or
+weaker freshness rule is introduced here. No authenticated command or
+worker provenance, universal physical refinement, production invariant
+theorem, certificate, or CLM-R2 discharge follows.
+
+Next: close the authenticated command provenance boundary for the
+selected original Claim execution, distinguishing local submission
+observation from authenticated command identity, and preserve all
+remaining worker and physical refinement obligations.

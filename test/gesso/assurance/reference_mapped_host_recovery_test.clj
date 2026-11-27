@@ -69,8 +69,11 @@
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
 
 (defn- expected-recovery-subject [admit]
-  (let [description (induction/describe-mapped-admission admit)]
+  (let [description (induction/describe-mapped-admission admit)
+        abstract (induction/recheck-mapped-induction! admit)]
     (assoc (select-keys description [:catalog-fingerprint :induction-fingerprint])
+           :abstract-induction-fingerprint (:fingerprint abstract)
+           :abstract-induction-identity (:identity abstract)
            :catalog-id (:id (claim/catalog))
            :selected-operations
            (mapv (fn [[helper branch]]
@@ -86,6 +89,23 @@
   (is (= observed-recovery/judgment-profile (:judgment-profile result)))
   (is (= scope (:judgment-scope result)))
   (is (= (expected-recovery-subject admit) (:judgment-subject result)))
+  (let [abstract (:abstract-induction result)
+        original (induction/recheck-mapped-induction! admit)]
+    (is (= :matched-original-issued-induction (:abstract-induction-binding result)))
+    (is (= original abstract))
+    (is (= :source-bound-conditional-abstract-safety (:verdict abstract)))
+    (is (= :closed-declared-abstract-machine-only (:scope abstract)))
+    (is (= :not-performed (:assumption-discharge abstract)))
+    (is (= :all-original-obligations-remain-open
+           (get-in abstract [:classification :original-obligations :status])))
+    (is (= (:original-open-obligations (induction/describe-mapped-admission admit))
+           (get-in abstract [:classification :original-obligations :by-operation])))
+    (is (seq (get-in abstract [:classification :open :assumptions])))
+    (is (= (get-in abstract [:classification :certificate :open-premises])
+           (get-in abstract [:classification :open :certificate-premises])))
+    (is (= :not-established (:implementation-correspondence abstract)
+           (:production-certification abstract)))
+    (is (= :none (:authority abstract) (:transaction-authority abstract))))
   (let [trajectory (:original-recovery result)]
     (is (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding trajectory)))
     (is (= :matched-local-activated-retained-root (:activation-root-binding trajectory)))
@@ -305,6 +325,9 @@
                                       [(induction/describe-mapped-admission admit) expected-subject :recovery-admission-mismatch]
                                       [admit (assoc expected-subject :catalog-id :fixture/other) :recovery-subject-mismatch]
                                       [admit (assoc expected-subject :induction-fingerprint "other") :recovery-subject-mismatch]
+                                      [admit (assoc expected-subject :abstract-induction-fingerprint "other") :recovery-subject-mismatch]
+                                      [admit (assoc-in expected-subject [:abstract-induction-identity :certificate-fingerprint] "other") :recovery-subject-mismatch]
+                                      [admit (assoc-in expected-subject [:abstract-induction-identity :dependency-fingerprint] "other") :recovery-subject-mismatch]
                                       [admit (update expected-subject :selected-operations #(vec (reverse %))) :recovery-subject-mismatch]
                                       [admit (assoc-in expected-subject [:selected-operations 0 :transition-fingerprint] "other") :recovery-subject-mismatch]]]
                                (let [failure (observed-recovery/declare-conditional-recovery-trust!
@@ -312,7 +335,8 @@
                                  (is (= :unsupported (:status failure)))
                                  (is (= reason (:reason failure)))
                                  (is (not-any? #(contains? failure %)
-                                               [:judgment-subject :judgment-profile :trusted-assumptions :original-recovery]))))
+                                               [:judgment-subject :judgment-profile :trusted-assumptions :original-recovery
+                                                :abstract-induction :abstract-induction-binding]))))
                              (is (not (contains? trusted :deployment-adoption)))
                              (is (not (contains? selected :judgment-profile)))
                              (is (= :explicit-declaration-only (:premise-acceptance trusted)))
@@ -326,6 +350,11 @@
                                     (:authorized-historical-lineage trusted)))
                              (is (= :unissued-conditional-recovery
                                     (:reason (observed-recovery/declare-conditional-recovery-trust! prepared declaration))))
+                             (with-redefs [induction/recheck-mapped-induction!
+                                           (constantly (:abstract-induction trusted))]
+                               (let [failure (observed-recovery/declare-conditional-recovery-trust! handle declaration)]
+                                 (is (= :conditional-recovery-boundary-replaced (:reason failure)))
+                                 (is (not (contains? failure :abstract-induction)))))
                              (with-redefs [storage/describe-deployment-acceptance (constantly trusted)]
                                (is (= :conditional-recovery-boundary-replaced
                                       (:reason (observed-recovery/declare-conditional-recovery-trust! handle declaration)))))
@@ -360,7 +389,8 @@
           (is (= (if (= relation other-relation) :subject-mismatch :incorrect-premise-set) (:reason result)))
           (is (not (contains? result :historical-assurance)))
           (is (not (contains? result :trusted-assumptions)))
-          (is (not (contains? result :judgment-profile))))))
+          (is (not (contains? result :judgment-profile)))
+          (is (not (contains? result :abstract-induction))))))
     (get-in selections [[:authorized-historical-lineage :prefix-content] :handle])))
 
 (defn- check-assembled-recovery! [interleaved?]

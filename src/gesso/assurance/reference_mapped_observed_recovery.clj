@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-mapped-observed-recovery
   "Compose local issued submission observation and retained recovery correspondence."
-  (:require [gesso.assurance.reference-historical-cut :as cut]
+  (:require [gesso.assurance.inductive-report :as inductive-report]
+            [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.assurance.reference-provider :as provider]
@@ -197,12 +198,14 @@
 (def ^:private original-local-comparison compare-local-activated!)
 (def ^:private original-cut-derivation cut/derive-cut!)
 (def ^:private original-admission-description induction/describe-mapped-admission)
+(def ^:private original-induction-recheck induction/recheck-mapped-induction!)
 
 (defn- cut-boundaries-current? []
   (and (local-boundaries-current?)
        (identical? original-local-comparison compare-local-activated!)
        (identical? original-cut-derivation cut/derive-cut!)
-       (identical? original-admission-description induction/describe-mapped-admission)))
+       (identical? original-admission-description induction/describe-mapped-admission)
+       (identical? original-induction-recheck induction/recheck-mapped-induction!)))
 
 (def ^:private original-recovery-keys
   [:activated-recovery-profile :observed-recovery-profile :local-acquisition-profile
@@ -211,7 +214,25 @@
    :recovery-linkage :provider-refinement :source-provenance :outcome-provenance
    :submission-provenance :aborted-receipt-identity :worker-observation-provenance])
 
-(defn- recovery-subject [admission source steps comparison]
+(defn- checked-abstract-induction [admission]
+  ;; Reports are descriptive data. Only the captured checker over the exact
+  ;; issued admission and its original live handles may supply this report.
+  (try
+    (let [report (original-induction-recheck admission)]
+      (when (and (= inductive-report/report-type (:type report))
+                 (= inductive-report/report-version (:version report))
+                 (= :original-sources-and-both-live-handles-rechecked (:checking report))
+                 (= :source-bound-conditional-abstract-safety (:verdict report))
+                 (= :closed-declared-abstract-machine-only (:scope report))
+                 (= :all-original-obligations-remain-open
+                    (get-in report [:classification :original-obligations :status]))
+                 (= :not-performed (:assumption-discharge report))
+                 (= :not-established (:production-certification report))
+                 (= :none (:authority report) (:transaction-authority report)))
+        report))
+    (catch clojure.lang.ExceptionInfo _ nil)))
+
+(defn- recovery-subject [admission source steps comparison abstract]
   (let [description (original-admission-description admission)
         fingerprints (select-keys description [:catalog-fingerprint :induction-fingerprint])
         operations (mapv (fn [step]
@@ -223,11 +244,18 @@
                                 :subject-fingerprint (:subject-fingerprint mapping)
                                 :transition-fingerprint (:transition-fingerprint mapping)
                                 :mapping-fingerprint (:fingerprint mapping)}))) steps)]
-    (when (and (= :matched-issued-declarations (:issued-admission-binding comparison))
+    (when (and abstract
+               (= (get-in source [:inductive-source :catalog :id]) (:catalog-id abstract))
+               (= fingerprints (select-keys (:identity abstract) (keys fingerprints)))
+               (= (:original-open-obligations description)
+                  (get-in abstract [:classification :original-obligations :by-operation]))
+               (= :matched-issued-declarations (:issued-admission-binding comparison))
                (= (:catalog-fingerprint fingerprints) (:issued-catalog-fingerprint comparison))
                (= (:induction-fingerprint fingerprints) (:issued-induction-fingerprint comparison))
                (every? some? operations))
       (assoc fingerprints :catalog-id (get-in source [:inductive-source :catalog :id])
+             :abstract-induction-fingerprint (:fingerprint abstract)
+             :abstract-induction-identity (:identity abstract)
              :selected-operations operations))))
 
 (defn capture-local-recovery-cut!
@@ -253,11 +281,13 @@
                     (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding r))))
           (fail :unsupported :invalid-local-recovery-comparison)
           :else
-          (let [subject (recovery-subject admission source steps r)
+          (let [abstract (checked-abstract-induction admission)
+                subject (recovery-subject admission source steps r abstract)
                 derived (original-cut-derivation node acquisition)]
             (cond
-              (nil? subject) (fail :unsupported :invalid-recovery-subject)
               (not (cut-boundaries-current?)) (fail :unsupported :recovery-cut-boundary-replaced)
+              (nil? abstract) (fail :unsupported :invalid-abstract-induction)
+              (nil? subject) (fail :unsupported :invalid-recovery-subject)
               (not= :derived (:status derived)) (fail (:status derived) (:reason derived))
               (not (original-origin-matcher admission observation node))
               (fail :unsupported :submission-origin-mismatch)
@@ -268,6 +298,7 @@
                                               :historical-cut (:historical-cut derived)
                                               :original-recovery (select-keys r original-recovery-keys)
                                               :judgment-subject subject
+                                              :abstract-induction abstract
                                               :publication-source-id (:source-id (first steps))}))
                 (merge r base {:recovery-cut-observation handle
                                :recovery-cut-binding :matched-local-recovery-cut})))))))))
@@ -347,6 +378,7 @@
                          :original-cut original-cut :target target
                          :original-recovery (:original-recovery origin)
                          :judgment-subject (:judgment-subject origin)
+                         :abstract-induction (:abstract-induction origin)
                          :target-node (java.lang.ref.WeakReference. node)
                          :admission admission}))
                 (assoc (conditional-report :prepared) :conditional-recovery handle))))
@@ -391,21 +423,28 @@
        (conditional-boundaries-current?)
        (identical? original-deployment-acceptance storage/describe-deployment-acceptance)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v1)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v2)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
     (if-not (acceptance-boundaries-current?)
       (fail :conditional-recovery-boundary-replaced)
-      (if-let [{:keys [scope cut-correspondence original-recovery judgment-subject]} entry]
+      (if-let [{:keys [scope cut-correspondence original-recovery judgment-subject
+                       admission abstract-induction]} entry]
         (try
-          (let [r (original-deployment-acceptance scope declaration)]
-            (if-not (acceptance-boundaries-current?)
-              (fail :conditional-recovery-boundary-replaced)
+          (let [r (original-deployment-acceptance scope declaration)
+                fresh (checked-abstract-induction admission)]
+            (cond
+              (not (acceptance-boundaries-current?)) (fail :conditional-recovery-boundary-replaced)
+              (not (and abstract-induction (= abstract-induction fresh)))
+              (fail :abstract-induction-mismatch)
+              :else
               (merge r (conditional-report :conditional)
                      {:judgment-profile judgment-profile
                       :judgment-scope scope
                       :judgment-subject judgment-subject
+                      :abstract-induction-binding :matched-original-issued-induction
+                      :abstract-induction abstract-induction
                       :original-recovery original-recovery
                       :cut-correspondence cut-correspondence
                       :historical-assurance :conditional-on-declared-trust
@@ -421,11 +460,13 @@
    This is an unauthenticated declaration, not an assertion that a controller
    has actually authorized the lifecycle. Compose the selected original
    activated trajectory with its issued historical comparison and exact
-   declared trust. Host adoption, when present, is recorded by the host
+   declared trust. Recheck the original issued abstract induction and
+   retain its entire report, including all open obligations. Host adoption, when present, is recorded by the host
    boundary, not by this declaration. Open premises remain open. No
    Claim invariant theorem or universal refinement is established.
    The four-argument form additionally requires the exact original issued
-   admission and expected catalog/ordered-operation identities. The result
+   admission and expected catalog, abstract evidence and ordered-operation
+   identities. The result
    is sensitive internal material, not a receipt or credential."
   ([handle declaration]
    (declare-recovery-trust* (conditional-entry handle) declaration))
