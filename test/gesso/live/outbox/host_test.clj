@@ -796,3 +796,32 @@
        (let [release (live.xtdb/register-submission-policy! @opened (constantly false))]
          (is (fn? release))
          (release))))))
+
+(deftest worker-capture-requires-owning-lifecycle-reference
+  (let [node (Object.)
+        source-id "fixture/source"
+        opts {:worker-id "same-worker" :poll-ms 60000}
+        cycle-var (requiring-resolve 'gesso.live.outbox.cycle/process-cycle!)
+        seen? #'host/owned-worker-call?]
+    (with-redefs-fn {cycle-var (fn [& _] (throw (ex-info "fixture exit" {})))}
+      (fn []
+        (let [a (lifecycle/start! node {:source :fixture} {} source-id opts)
+              b (lifecycle/start! node {:source :fixture} {} source-id opts)]
+          (try
+            (let [owner {managed/source-id-key source-id managed/options-key opts}
+                  entry {:lifecycle-ref (lifecycle/lifecycle-reference a)}
+                  call {:admission {:kind :worker
+                                    :worker-origin {:lifecycle-ref (lifecycle/lifecycle-reference a)
+                                                    :origin :scheduled-local-cycle
+                                                    :call-chain :matched-scheduled-maintenance
+                                                    :authentication :not-established
+                                                    :source-id source-id :worker-id (:worker-id opts)}}}]
+              (is (uuid? (:lifecycle-ref entry)))
+              (is (not= (:lifecycle-ref entry) (lifecycle/lifecycle-reference b)))
+              (is (seen? owner entry call))
+              (is (not (seen? owner entry (assoc-in call [:admission :worker-origin :lifecycle-ref]
+                                                    (lifecycle/lifecycle-reference b)))))
+              (is (not (seen? owner entry (assoc-in call [:admission :worker-origin :worker-id] "other"))))
+              (is (not (seen? owner entry (assoc-in call [:admission :worker-origin :source-id] "other"))))
+              (is (not (seen? owner entry (update call :admission dissoc :worker-origin)))))
+            (finally (lifecycle/stop! a 3000) (lifecycle/stop! b 3000))))))))

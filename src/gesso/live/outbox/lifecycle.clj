@@ -31,7 +31,7 @@
 (def ^:private default-poll-ms 250)
 
 (defrecord Lifecycle [state stop-signal done thread node expected-source-id
-                      system ctx restart-claimed successor retired])
+                      system ctx restart-claimed successor retired lifecycle-ref])
 
 (defn- reject! [reason data]
   (throw (ex-info "Invalid Live outbox lifecycle."
@@ -78,6 +78,11 @@
   (when-not (instance? Lifecycle handle)
     (reject! :invalid-handle {}))
   handle)
+
+(defn lifecycle-reference
+  "Local diagnostic identity of this lifecycle, not an authentication token."
+  [handle]
+  (.-lifecycle-ref ^Lifecycle (require-handle! handle)))
 
 (defn status
   "Thread-safe immutable snapshot of one lifecycle's observed state.
@@ -301,7 +306,7 @@
                         (str "gesso-live-outbox-" (:worker-id opts)))
         handle (->Lifecycle state stop-signal done thread
                             node expected-source-id system ctx
-                            (atom false) (atom nil) (atom false))]
+                            (atom false) (atom nil) (atom false) lifecycle-ref)]
     (.setDaemon thread true)
     (.start thread)
     handle))

@@ -7721,3 +7721,39 @@ Next: qualify capture ownership by the exact installed host, policy
 generation and lifecycle; then implement independent retained maintenance
 comparison of the issued payloads and returned transaction identities.
 Keep external dispatch authentication and CLM-R2 premises open.
+
+* v2817 — bind maintenance capture to the installed host
+
+Register the exact mapped host system with its original writer-policy
+registration token and owning managed lifecycle reference. Qualify a
+bounded adapter outcome capture against that registration before and
+after the thunk and require every captured admission to carry matched
+scheduled maintenance for the exact lifecycle and configured source
+and worker. Empty and mixed-origin windows do not issue host evidence.
+Retain the original issued adapter report when qualified; no copied
+report or reconstructed owner can substitute for it. Retirement fences
+new captures at native shutdown. Historical recognition remains tied
+to the original host and original issued report after shutdown, not
+to a reopened host or independently copied store. The lifecycle's
+reference is a process-local label, not a durable credential.
+
+Focused JVM: 4 tests / 26 assertions in the worker-origin and host
+ownership checks, including distinct lifecycle references with identical
+source and worker names; 1 test / 356 assertions in the genuine
+persistent worker-interleaved assembled-host recovery fixture. Both
+runs completed with zero failures or errors. The host regression
+captures the actual four maintenance submissions and returned keys,
+checks reconstructed owners and reports, empty windows, retirement
+and cross-host rejection at both reopened and copied stores. The
+original worker polling and older offline dependency bundle were
+retained. Adjacent-history fixture and full project gates not rerun.
+
+The host qualification is conditional local observation, not external
+worker authentication or a universal claim of writer coverage. A
+provider return alone does not establish retained commitment. No
+CLM-R2 or other proof premise is discharged.
+
+Next: independently compare the qualified issued maintenance capture
+with the exact selected retained maintenance transaction envelopes and
+outcomes. Keep local provenance, authenticated dispatch and physical
+refinement obligations distinct.

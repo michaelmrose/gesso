@@ -97,6 +97,87 @@
            :lock lock :active active :trust trust}))
   system)
 
+(def ^:private worker-capture-hosts (java.util.WeakHashMap.))
+(def ^:private worker-capture-origins (java.util.WeakHashMap.))
+(def ^:private original-outcome-capture xtdb/capture-policy-outcomes!)
+(def ^:private original-outcome-match xtdb/policy-capture-origin-matches?)
+(def ^:private original-policy-current xtdb/submission-policy-current?)
+(def ^:private original-lifecycle-reference lifecycle/lifecycle-reference)
+
+(defn- worker-capture-boundaries-current? []
+  (and (identical? original-outcome-capture xtdb/capture-policy-outcomes!)
+       (identical? original-outcome-match xtdb/policy-capture-origin-matches?)
+       (identical? original-policy-current xtdb/submission-policy-current?)
+       (identical? original-lifecycle-reference lifecycle/lifecycle-reference)))
+
+(defn- register-worker-capture-host! [system token active]
+  (let [worker (get system managed/handle-key)]
+    (locking worker-capture-hosts
+      (.put worker-capture-hosts token
+            {:system (java.lang.ref.WeakReference. system)
+             :active active :policy-token (::mapped-policy-token system)
+             :lifecycle-ref (original-lifecycle-reference worker)})))
+  system)
+
+(defn- worker-capture-owner [system]
+  (let [entry (locking worker-capture-hosts
+                (.get worker-capture-hosts (::worker-capture-token system)))]
+    (when (and entry (identical? system (.get ^java.lang.ref.WeakReference (:system entry))))
+      entry)))
+
+(defn- owned-worker-call? [system entry call]
+  (let [origin (get-in call [:admission :worker-origin])]
+    (and (= :worker (get-in call [:admission :kind]))
+         (= :matched-scheduled-maintenance (:call-chain origin))
+         (= :scheduled-local-cycle (:origin origin))
+         (= :not-established (:authentication origin))
+         (= (:lifecycle-ref entry) (:lifecycle-ref origin))
+         (= (get system managed/source-id-key) (:source-id origin))
+         (= (get-in system [managed/options-key :worker-id]) (:worker-id origin)))))
+
+(defn capture-worker-outcomes!
+  "Observe a bounded window on the exact installed mapped host. All captured
+   calls must carry the owning lifecycle's matched maintenance origin.
+   Refuse new windows after retirement; invalidate mixed/unowned or empty
+   windows without changing the thunk outcome. This is sensitive historical
+   evidence, not worker authentication, a durable receipt or writer closure."
+  [system limit thunk]
+  (let [entry (worker-capture-owner system)
+        node (:xtdb/connectable system)]
+    (when-not entry (reject! :unissued-worker-capture-host {}))
+    (when-not @(:active entry) (reject! :worker-capture-host-retired {}))
+    (when-not (worker-capture-boundaries-current?)
+      (reject! :worker-capture-boundary-replaced {}))
+    (when-not (original-policy-current node (:policy-token entry))
+      (reject! :worker-capture-policy-mismatch {}))
+    ;; Do not hold the host stop lock around arbitrary thunk execution.
+    (let [report (original-outcome-capture node limit thunk)]
+      (if (and @(:active entry) (worker-capture-boundaries-current?)
+               (original-policy-current node (:policy-token entry))
+               (= :matched-local-policy-outcome-window (:policy-window report))
+               (original-outcome-match report node)
+               (seq (:calls report))
+               (every? #(owned-worker-call? system entry %) (:calls report)))
+        (do (locking worker-capture-origins
+              (.put worker-capture-origins (:local-origin report)
+                    {:host-token (::worker-capture-token system)
+                     :report (java.lang.ref.WeakReference. report)}))
+            report)
+        (-> report (dissoc :local-origin)
+            (assoc :policy-window :invalidated-local-worker-outcome-window :calls []))))))
+
+(defn worker-outcome-capture-matches?
+  "Recognize only the exact issued historical capture and original owner.
+   Remains a historical match after shutdown, not authority to open a window."
+  [system report]
+  (boolean
+   (when (and (worker-capture-owner system) (worker-capture-boundaries-current?))
+     (let [issued (locking worker-capture-origins
+                    (.get worker-capture-origins (:local-origin report)))]
+       (and issued (identical? (::worker-capture-token system) (:host-token issued))
+            (identical? report (.get ^java.lang.ref.WeakReference (:report issued)))
+            (original-outcome-match report (:xtdb/connectable system)))))))
+
 (defn- validate-config! [config]
   (when-not (map? config)
     (reject! :invalid-config {}))
@@ -194,6 +275,7 @@
 
 (defn- start-xtdb! [system]
   (let [release (atom nil)
+        policy-token (volatile! nil)
         audit (atom nil)
         timeout-ms (get-in system [config-key :stop-timeout-ms] 10000)
         close! (fn [node]
@@ -212,7 +294,8 @@
                                  :descriptor (::publication-manifest system)})
                    (:xtdb-submission-policy! config))]
       (when policy
-        (reset! release (xtdb/register-submission-policy! node policy)))
+        (reset! release (xtdb/register-submission-policy! node policy))
+        (vreset! policy-token (xtdb/submission-policy-token node policy)))
       (manifest/require-compatible! node (:source-id config)
                                     (::publication-manifest system))
       (when (:mapped-writer-policy config)
@@ -221,7 +304,8 @@
         (reset! audit (history-controller/start! node (get-in config [:mapped-writer-policy :admission]) options))))
     (cond-> (assoc system :xtdb/connectable node ::close-node! close!)
       (get-in system [config-key :mapped-writer-policy :admission])
-      (assoc ::mapped-admission (get-in system [config-key :mapped-writer-policy :admission]))
+      (assoc ::mapped-admission (get-in system [config-key :mapped-writer-policy :admission])
+             ::mapped-policy-token @policy-token)
       @audit (assoc ::history-controller @audit))))
 
 (defn- stop-xtdb! [system]
@@ -484,6 +568,7 @@
           native-stop (:biff.core/stop-system started)
           stop-lock (Object.)
           trust-token (Object.)
+          worker-capture-token (Object.)
           trust-active (atom true)
           stop-owned! (fn []
                         (locking stop-lock
@@ -515,7 +600,10 @@
                                               :disconnected-count :closed? :drained?]))
           @recovery* (assoc recovery-status-key
                             (select-keys @recovery* [:status :stats :drained?]))
-                       (:storage-trust config) (assoc ::storage-trust-token trust-token))]
+                       (:storage-trust config) (assoc ::storage-trust-token trust-token)
+                       (::mapped-policy-token started) (assoc ::worker-capture-token worker-capture-token))]
+          (when (::worker-capture-token system)
+            (register-worker-capture-host! system worker-capture-token trust-active))
           (if-let [trust (:storage-trust config)]
             (register-storage-trust! system trust-token stop-lock trust-active trust)
             system))

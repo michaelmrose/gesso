@@ -157,7 +157,7 @@
 
 (defn- check-reopened-recovery!
   [assembly handler config tables admit mapped-source outcome-declarations
-   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle cut-handle foreign-comparisons]}]
+   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle cut-handle foreign-comparisons worker-capture]}]
   (is (= :stopped (:status (lifecycle/status worker))))
   (is (= 503 (:status (ring-handler {:uri "/"}))))
   (is (nil? (correspondence/initialization-observation node admit)))
@@ -166,6 +166,7 @@
         new-worker (get started managed/handle-key)
         adopted-handle (volatile! nil)]
     (try
+      (is (not (host/worker-outcome-capture-matches? started worker-capture)))
       ;; Identical history and policy do not transfer a target capability.
       (doseq [foreign foreign-comparisons]
         (is (= :storage-trust-target-mismatch
@@ -451,7 +452,7 @@
         refusal-guards #{[:requests "r1" :status :claimed] [:requests "r1" :revision 1] [:requests "r1" :updated-at "t1"]}
         snapshots (atom {}) recovered (atom 0)
         handler* (atom nil) winner-response (atom nil)
-        worker* (atom nil) gap* (atom nil) restart* (atom nil)
+        worker* (atom nil) host* (atom nil) gap* (atom nil) restart* (atom nil)
         request! (fn [b allowed?]
                    (@handler* {:request-method :post :uri "/operations/request/claim"
                                :headers {"content-type" "application/x-www-form-urlencoded"
@@ -548,8 +549,8 @@
                                                    protected (disj tables :gesso_live_outbox)
                                                    prior (selected-rows (:xtdb/connectable ctx) protected)
                                                    pending (live-xtdb/q-from ctx "SELECT * FROM gesso_live_outbox")
-                                                   worker-capture (live-xtdb/capture-policy-outcomes!
-                                                                   (:xtdb/connectable ctx) 16
+                                                   worker-capture (host/capture-worker-outcomes!
+                                                                   @host* 16
                                                                    #(await-maintenance-cycle! @worker*))
                                                    done (:result worker-capture)]
                                                (reset! gap* {:before prior
@@ -592,6 +593,13 @@
             (try
               (reset! handler* (:biff.ring/handler started))
               (reset! worker* worker)
+              (reset! host* started)
+              (is (= :unissued-worker-capture-host
+                     (trust-problem #(host/capture-worker-outcomes! (into {} started) 1 (constantly nil)))))
+              (let [empty-capture (host/capture-worker-outcomes! started 1 (constantly :empty))]
+                (is (= :empty (:result empty-capture)))
+                (is (= :invalidated-local-worker-outcome-window (:policy-window empty-capture)))
+                (is (not (host/worker-outcome-capture-matches? started empty-capture))))
               (is (= :idle (:status (await-empty-cycle! worker))))
               (is (= 403 (:status (request! loser false))))
               (is (empty? @snapshots))
@@ -689,6 +697,9 @@
                       (let [calls (:calls worker-capture)]
                         (is (= :matched-local-policy-outcome-window (:policy-window worker-capture)))
                         (is (live-xtdb/policy-capture-origin-matches? worker-capture node))
+                        (is (host/worker-outcome-capture-matches? started worker-capture))
+                        (is (not (host/worker-outcome-capture-matches? (into {} started) worker-capture)))
+                        (is (not (host/worker-outcome-capture-matches? started (into {} worker-capture))))
                         (is (not (live-xtdb/policy-capture-origin-matches? (into {} worker-capture) node)))
                         (is (= 4 (count calls)))
                         (is (every? #(and (= :execute-tx (:api %)) (= :returned (:outcome %))
@@ -744,6 +755,7 @@
                         (is (= :configured-local-host
                                (:deployment-adoption (host/adopt-storage-trust! started (first foreign)))))
                         (reset! restart* {:foreign-comparisons foreign
+                                         :worker-capture worker-capture
                                          :node node :worker worker :ring-handler @handler*
                                         :token (live-xtdb/current-submission-policy-token node)
                                         :sample sample :rows (selected-rows node tables)
@@ -809,6 +821,9 @@
               (is (= :storage-trust-host-retired
                      (trust-problem #(host/adopt-storage-trust! started (:trust-handle @restart*))))))
             (when interleaved?
+              (is (= :worker-capture-host-retired
+                     (trust-problem #(host/capture-worker-outcomes! started 1 (constantly nil)))))
+              (is (host/worker-outcome-capture-matches? started (:worker-capture @restart*)))
               (doseq [foreign (:foreign-comparisons @restart*)]
                 (is (= :storage-trust-host-retired
                        (trust-problem #(host/adopt-storage-trust! started foreign)))))
