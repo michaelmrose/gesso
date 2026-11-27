@@ -114,6 +114,7 @@
             (not (original-host-matcher system worker-capture)) (report :unsupported :unissued-worker-capture)
             (= :matched (:status checked))
             (assoc checked :retained-payload-fingerprint (:payload-fingerprint sample)
-                   :worker-observation-provenance :matched-local-issued-host-capture)
+                   :worker-observation-provenance :matched-local-issued-host-capture
+                   :worker-lineage-correspondence :matched-issued-managed-lineage)
             :else checked))
         (report :unsupported :unissued-retained-acquisition)))))

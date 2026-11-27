@@ -14,13 +14,13 @@
 (def ^:private original-outcome-capture xtdb/capture-policy-outcomes!)
 (def ^:private original-outcome-match xtdb/policy-capture-origin-matches?)
 (def ^:private original-policy-current xtdb/submission-policy-current?)
-(def ^:private original-lifecycle-reference lifecycle/lifecycle-reference)
+(def ^:private original-lineage-members lifecycle/managed-lineage-members)
 
 (defn- worker-capture-boundaries-current? []
   (and (identical? original-outcome-capture xtdb/capture-policy-outcomes!)
        (identical? original-outcome-match xtdb/policy-capture-origin-matches?)
        (identical? original-policy-current xtdb/submission-policy-current?)
-       (identical? original-lifecycle-reference lifecycle/lifecycle-reference)))
+       (identical? original-lineage-members lifecycle/managed-lineage-members)))
 
 (defn- register-worker-capture-host! [system token active]
   (let [worker (get system managed/handle-key)]
@@ -28,7 +28,7 @@
       (.put worker-capture-hosts token
             {:system (java.lang.ref.WeakReference. system)
              :active active :policy-token (:gesso.live.outbox.host/mapped-policy-token system)
-             :lifecycle-ref (original-lifecycle-reference worker)})))
+             :root worker})))
   system)
 
 (defn- worker-capture-owner [system]
@@ -37,19 +37,32 @@
     (when (and entry (identical? system (.get ^java.lang.ref.WeakReference (:system entry))))
       entry)))
 
-(defn- owned-worker-call? [system entry call]
-  (let [origin (get-in call [:admission :worker-origin])]
-    (and (= :worker (get-in call [:admission :kind]))
-         (= :matched-scheduled-maintenance (:call-chain origin))
-         (= :scheduled-local-cycle (:origin origin))
-         (= :not-established (:authentication origin))
-         (= (:lifecycle-ref entry) (:lifecycle-ref origin))
-         (= (get system managed/source-id-key) (:source-id origin))
-         (= (get-in system [managed/options-key :worker-id]) (:worker-id origin)))))
+(defn- owned-worker-calls? [system entry calls]
+  (let [members (original-lineage-members (:root entry))
+        by-ref (into {} (map-indexed (fn [i m] [(:lifecycle-ref m) [i m]])) members)
+        origins (mapv #(get-in % [:admission :worker-origin]) calls)]
+    (and (seq members) (seq calls)
+         (every? (fn [[call origin]]
+                   (let [[_ member] (get by-ref (:lifecycle-ref origin))]
+                     (and member (= :worker (get-in call [:admission :kind]))
+                          (= :matched-scheduled-maintenance (:call-chain origin))
+                          (= :scheduled-local-cycle (:origin origin))
+                          (= :not-established (:authentication origin))
+                          (= member (select-keys origin [:lifecycle-ref :source-id :worker-id]))
+                          (= (get system managed/source-id-key) (:source-id origin))
+                          (pos-int? (:cycle-number origin)))))
+                 (map vector calls origins))
+         ;; Calls may begin anywhere in the issued lineage but may not go
+         ;; backwards across successor handoffs or within a lifecycle.
+         (every? (fn [[a b]] (not (pos? (compare a b))))
+                 (partition 2 1 (map (fn [origin]
+                                       [(first (get by-ref (:lifecycle-ref origin)))
+                                        (:cycle-number origin)]) origins))))))
 
 (defn capture-worker-outcomes!
   "Observe a bounded window on the exact installed mapped host. All captured
-   calls must carry the owning lifecycle's matched maintenance origin.
+   calls must carry the root or an explicitly issued successor's matched
+   maintenance origin, in lineage/cycle order.
    Refuse new windows after retirement; invalidate mixed/unowned or empty
    windows without changing the thunk outcome. This is sensitive historical
    evidence, not worker authentication, a durable receipt or writer closure."
@@ -69,7 +82,7 @@
                (= :matched-local-policy-outcome-window (:policy-window report))
                (original-outcome-match report node)
                (seq (:calls report))
-               (every? #(owned-worker-call? system entry %) (:calls report)))
+               (owned-worker-calls? system entry (:calls report)))
         (do (locking worker-capture-origins
               (.put worker-capture-origins (:local-origin report)
                     {:host-token (:gesso.live.outbox.host/worker-capture-token system)

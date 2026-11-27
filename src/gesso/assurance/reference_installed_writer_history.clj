@@ -62,6 +62,7 @@
                    (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding compared))
                    (= :matched-local-issued-host-capture (:worker-observation-provenance compared))
                    (= :matched-issued-worker-retained-transactions (:maintenance-correspondence worker))
+                   (= :matched-issued-managed-lineage (:worker-lineage-correspondence worker))
                    (string? (:payload-fingerprint cut))
                    (= (:payload-fingerprint cut) (:retained-payload-fingerprint worker))
                    (= 3 (count steps) (count selected))

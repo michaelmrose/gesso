@@ -10505,3 +10505,37 @@ must not yet claim complete successor-lineage attribution.
 Next: qualify original managed successor provenance in the issued worker
 outcome capture and retained writer-history path, with exact lineage and
 worker identities rather than accepting any same-name scheduler.
+
+* v2886 — qualify issued managed successor history
+
+Retain the exact registered managed root at the installed worker-capture
+boundary. Snapshot its issued successor chain under the lifecycle monitors,
+matching the shared reservation, provider, source, unique lifecycle refs and
+current terminal member. Require each captured worker call to match a member's
+source, worker identity, lifecycle ref and original scheduled call chain in
+nondecreasing lineage/cycle order. Preserve the exact issued report identity
+and historical recognition after retirement; do not grant a credential or
+accept a new capture on a retired owner. Pin the lineage reader and reviewed
+capture/lifecycle sources. Require the resulting managed-lineage correspondence
+in the retained installed writer-history qualification. Neither a standalone
+scheduler nor a copied diagnostic report acquires historical authority.
+
+Focused JVM gate: 46 tests / 337 assertions, zero failures or errors (exit 0).
+The physical fixture uses the actual capture registration with a fixture-owned
+system and captures four real maintenance commits across a qualified restart
+with a new worker ID. Match both workers against the independently issued
+retained acquisition; reject copied owner/report and substituted lineage reader.
+Initial fixture runs used an in-memory log, then an unsupported nullable table
+name; switch to a disposable local log and the existing supported
+request_assignments mapping without broadening the replay decoder. Full
+worker-interleaved installed-host JVM regression: 1 test / 1383 assertions,
+zero failures or errors (exit 0), including configured recovery and retained
+storage reopening/substitution. The canonical installed-host regression is
+root-worker scoped; the focused physical fixture exercises mixed lineage.
+Adjacent variant and full project gates not rerun. All 39 original general
+conditions remain open; no external dispatch authentication or universal
+writer coverage established.
+
+Next: exercise managed successor recovery through the canonical assembled host
+and its issued retained writer-history boundary, then advance local dispatch
+receipt attribution rather than assuming external source acceptance.

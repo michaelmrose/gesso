@@ -233,6 +233,34 @@
                  (= (.-lifecycle-ref ^Lifecycle handle) (:lifecycle-ref scope)))
         (current-worker-origin node source-id (:worker-id (status handle)))))))
 
+(defn managed-lineage-members
+  "Snapshot diagnostic identities of the exact managed root and its issued
+   successor chain. Serialize with successor publication and retirement; no
+   lifecycle handle or reservation escapes. Nil denotes an incomplete or
+   unmanaged chain. Only the installed owner can establish root provenance."
+  [root]
+  (when (instance? Lifecycle root)
+    (let [lineage (.-managed-lineage ^Lifecycle root)
+          node (.-node ^Lifecycle root)
+          source (.-expected-source-id ^Lifecycle root)]
+      (when (instance? ManagedLineage lineage)
+        (letfn [(walk [^Lifecycle handle seen members]
+                  (locking handle
+                    (let [ref (.-lifecycle-ref handle)
+                          member {:lifecycle-ref ref :source-id source
+                                  :worker-id (:worker-id (status handle))}]
+                      (when (and (identical? lineage (.-managed-lineage handle))
+                                 (identical? node (.-node handle))
+                                 (= source (.-expected-source-id handle))
+                                 (not (contains? seen ref)))
+                        (let [members (conj members member)]
+                          (if-let [child @(.-successor handle)]
+                            (when @(.-restart-claimed handle)
+                              (walk child (conj seen ref) members))
+                            (when (identical? handle @(.-current ^ManagedLineage lineage))
+                              members)))))))]
+          (walk root #{} []))))))
+
 (defn- process-scheduled-cycle!
   [node system ctx source-id opts lifecycle-ref cycle-number managed-lineage]
   (let [prior (.get worker-origin)

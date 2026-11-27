@@ -10,6 +10,9 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.lifecycle :as lifecycle]
+            [gesso.live.outbox.worker-capture :as capture]
+            [gesso.assurance.reference-retained-acquisition :as retained]
+            [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.live.outbox.discovery :as discovery]
             [gesso.live.core :as live]
             [gesso.live.outbox.publication-manifest :as manifest]
@@ -1092,7 +1095,7 @@
 
 
 (deftest installed-profile-requires-original-managed-worker-lineage
-  (let [admission (admission!)
+  (let [admission (admission! :requests #{} :example/initialization :request_assignments)
         seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
         seen (atom [])
         id (random-uuid)
@@ -1102,10 +1105,14 @@
         config {:admission admission :initializer seed :observe! #(swap! seen conj %)}
         lineage (lifecycle/new-managed-lineage)
         scope {:source-id "s" :worker-id "w" :require-worker-call-chain? true :managed-lineage lineage}
+        directory (java.nio.file.Files/createTempDirectory
+                   "gesso-v2886-lineage-" (make-array java.nio.file.attribute.FileAttribute 0))
+        provider-config {:log [:local {:path (str directory "/log")}]
+                         :storage [:local {:path (str directory "/storage")}]}
         sys (live/create {:rules [{:when-topic :request
                                   :expand (fn [_ change] [(select-keys change [:topic :id :change/kind])])}]})]
     (try
-      (with-open [node (xtn/start-node {})]
+      (with-open [node (xtn/start-node provider-config)]
         (let [writer (policy/build-policy! node config scope)
               release (xtdb/register-submission-policy! node writer)
               acquire! #(let [now (java.time.Instant/now)]
@@ -1116,6 +1123,8 @@
               original discovery/discover-eligible!
               callback-result (promise)
               root* (atom nil)
+              continue-root (promise)
+              child* (atom nil)
               fail-next? (atom false)
               eventually (fn [pred] (loop [n 0]
                                       (cond (pred) true (>= n 400) false
@@ -1139,34 +1148,83 @@
               (with-redefs [discovery/discover-eligible!
                             (fn [n opts]
                               (when-not (realized? callback-result)
-                                (deliver callback-result (reason acquire!)))
+                                (deliver callback-result (reason acquire!))
+                                (when-not (= :go (deref continue-root 10000 :timeout))
+                                  (throw (ex-info "fixture root gate timed out" {}))))
                               (when @fail-next? (throw (ex-info "fixture discovery failure" {})))
                               (original n opts))]
-                (let [root (lifecycle/start-managed! node sys {} "s" {:worker-id "w" :poll-ms 30} lineage)]
+                (let [root (lifecycle/start-managed! node sys {} "s" {:worker-id "w" :poll-ms 30} lineage)
+                      token (Object.) active (atom true)
+                      owner {:xtdb/connectable node
+                             :gesso.live.outbox/managed-handle root
+                             :gesso.live.outbox/source-id "s"
+                             :gesso.live.outbox.host/worker-capture-token token
+                             :gesso.live.outbox.host/mapped-policy-token (xtdb/submission-policy-token node writer)}
+                      register! @#'capture/register-worker-capture-host!]
                   (reset! root* root)
+                  ;; Use the real capture registration with a fixture-owned
+                  ;; system, not a fabricated capture or provider response.
+                  (register! owner token active)
                   (is (= :submission-policy-refused (deref callback-result 10000 :timeout)))
-                  (is (eventually #(= :dispatch-accepted (:gesso.live.outbox/status (row)))))
-                  (reset! fail-next? true)
-                  (is (eventually #(= :failed (:status (lifecycle/status root)))))
-                  (is (= :failed (:outcome (lifecycle/stop! root 10000))))))
-              (let [root @root* next-id (random-uuid)
-                    next-plan (outbox/prepare! {:intent-ids [next-id] :source-id "s" :operation :example/update
-                                                :purpose :gesso.live/refresh}
-                                               [{:topic :request :id "r1" :change/kind :updated}])]
-                (is (= :managed-lineage-already-claimed
-                       (reason #(lifecycle/start-managed! node sys {} "s" {:worker-id "w"} lineage))))
-                (xt/execute-tx node (conj (vec (:guard-ops next-plan)) (:tx-op next-plan)))
-                (let [child (:handle (lifecycle/restart-after-acquisition! root {:worker-id "successor" :poll-ms 30}))]
-                  (is (eventually #(= :dispatch-accepted (:gesso.live.outbox/status
-                                                        (first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" next-id]))))))
-                  (let [events (filterv #(= :worker (:kind %)) @seen)
-                        origins (mapv :worker-origin events)]
+                  (let [report (capture/capture-worker-outcomes!
+                                owner 4
+                                (fn []
+                                  (deliver continue-root :go)
+                                  (is (eventually #(= :dispatch-accepted (:gesso.live.outbox/status (row)))))
+                                  (reset! fail-next? true)
+                                  (is (eventually #(= :failed (:status (lifecycle/status root)))))
+                                  (is (= :failed (:outcome (lifecycle/stop! root 10000))))
+                                  (is (= :managed-lineage-already-claimed
+                                         (reason #(lifecycle/start-managed! node sys {} "s" {:worker-id "w"} lineage))))
+                                  (let [next-id (random-uuid)
+                                        next-plan (outbox/prepare! {:intent-ids [next-id] :source-id "s" :operation :example/update
+                                                                   :purpose :gesso.live/refresh}
+                                                                  [{:topic :request :id "r1" :change/kind :updated}])]
+                                    (xt/execute-tx node (conj (vec (:guard-ops next-plan)) (:tx-op next-plan)))
+                                    (reset! fail-next? false)
+                                    (let [child (:handle (lifecycle/restart-after-acquisition! root {:worker-id "successor" :poll-ms 30}))]
+                                      (reset! child* child)
+                                      (is (eventually #(= :dispatch-accepted (:gesso.live.outbox/status
+                                                                           (first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" next-id]))))))
+                                      (is (= :drained (:outcome (lifecycle/stop! child 10000))))))))
+                        calls (:calls report)
+                        origins (mapv #(get-in % [:admission :worker-origin]) calls)
+                        selected (mapv (fn [call]
+                                         {:tx-id (.getTxId ^xtdb.api.TransactionKey (:tx-result call))
+                                          :intent-id (get-in call [:admission :intent-id])
+                                          :maintenance (get-in call [:admission :worker-origin :maintenance])}) calls)
+                        acquired (retained/capture! node)
+                        acquisition (:acquisition acquired)
+                        checked (worker-envelope/compare-issued-selection! owner acquisition "s" selected report)]
+                    (is (= :returned (:outcome report)))
+                    (is (= :matched-local-policy-outcome-window (:policy-window report)))
+                    (is (capture/worker-outcome-capture-matches? owner report))
+                    (is (not (capture/worker-outcome-capture-matches? (into {} owner) report)))
+                    (is (not (capture/worker-outcome-capture-matches? owner (into {} report))))
                     (is (= [:lease-acquisition :dispatch-acknowledgment :lease-acquisition :dispatch-acknowledgment]
                            (mapv :maintenance origins)))
                     (is (= ["w" "w" "successor" "successor"] (mapv :worker-id origins)))
-                    (is (= (mapv lifecycle/lifecycle-reference [root root child child]) (mapv :lifecycle-ref origins)))
-                    (is (every? #(= :matched-scheduled-maintenance (:call-chain %)) origins)))))
-              (finally (when-let [root @root*]
-                         (is (= :drained (:successor-outcome (lifecycle/retire! root 10000)))))))
+                    (is (= (mapv lifecycle/lifecycle-reference [root root @child* @child*]) (mapv :lifecycle-ref origins)))
+                    (is (= :issued (:status acquired)) (pr-str (select-keys acquired [:status :reason])))
+                    (is (= :matched (:status checked)) (pr-str (select-keys checked [:status :reason])))
+                    (is (= :matched-issued-managed-lineage (:worker-lineage-correspondence checked)))
+                    (is (= origins (mapv :worker-origin (:selected-maintenance checked))))
+                    (is (= :unissued-worker-capture (:reason (worker-envelope/compare-issued-selection! owner acquisition "s" selected (into {} report)))))
+                    (is (= [:initializer :worker :worker :worker :worker] (mapv :kind @seen)))
+                    (is (= (mapv lifecycle/lifecycle-reference [root @child*])
+                           (mapv :lifecycle-ref (lifecycle/managed-lineage-members root))))
+                    (with-redefs [lifecycle/managed-lineage-members (constantly [])]
+                      (is (not (capture/worker-outcome-capture-matches? owner report)))
+                      (is (= :worker-capture-boundary-replaced (reason #(capture/capture-worker-outcomes! owner 1 (constantly nil))))))
+                    (reset! active false)
+                    (is (capture/worker-outcome-capture-matches? owner report))
+                    (is (= :worker-capture-host-retired (reason #(capture/capture-worker-outcomes! owner 1 (constantly nil))))))))
+              (finally
+                (deliver continue-root :go)
+                (when-let [root @root*]
+                  (is (= :drained (:successor-outcome (lifecycle/retire! root 10000)))))))
             (finally (release)))))
-      (finally (live/close! sys)))))
+      (finally
+        (live/close! sys)
+        (doseq [f (reverse (file-seq (.toFile directory)))]
+          (io/delete-file f true))))))
