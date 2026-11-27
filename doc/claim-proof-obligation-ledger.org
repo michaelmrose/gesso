@@ -8981,3 +8981,57 @@ mapped replacement fragment, from exact document and journal replacement
 and frame semantics, rather than assuming the resulting abstract
 transition. Keep admission, provider execution and writer closure
 distinct from that source-level argument.
+
+* v2846 — derive conditional source-write equations
+
+Add a symbolic source-relative argument for the original declared
+journal-writing alternatives. Requalify the catalog, coordinate mapping
+and complete closed outcome cases. Pin the reviewed forward writer,
+mapped frame and transition-construction source artifacts and public
+checker identities. Derive literal and prestate/input read terms for
+the original assignments and frame, preserving simultaneous reads.
+Check the exact original guard, assignments and frame in the built
+abstract transition.
+
+Group coordinates by physical target. Symbolically execute the reviewed
+document row merge for an existing row and, where nullable, an absent
+row. For an existing row the writer replaces only the written mapped
+fields; for a created row it materializes all mapped fields, including
+framed nils from the absent prestate. For an unwritten document the
+image stays unchanged. Compare each projected field term with its
+original replacement or frame equation, treating other targets'
+prestate values as arbitrary. Require disjoint supplemental effects
+and faithful physical identities as conditions. For the single written
+journal slot require absence, the exact closed case key and its
+original literal replacement value. Other slots are unchanged.
+All four original Claim journal-writing alternatives qualify. The four
+read-only replay alternatives remain explicitly outside this fragment.
+
+The symbolic checks establish the row-equation argument under the
+named conditions. The reviewed-source relationship is a human-reviewed
+source model pinned by digests, not an automatically extracted or
+kernel-verified program proof. The model shares RHS term construction
+between its expected equations and symbolic row execution. Successful
+typed guard and admission, faithful prestate projection, fresh slot and
+command ID, record/outcome meaning, disjoint effects, loaded map
+semantics and abstract transition semantics remain assumptions.
+No provider atomicity or complete writer closure is established.
+
+Focused JVM: source-write argument suite passed 2 tests / 51 assertions.
+Combined source-write argument, transition argument, transition
+refinement, recovery projection and independent transition semantics
+suites passed 42 tests / 7400 assertions, zero failures or errors.
+Exercise original alternatives, present and absent document branches,
+materialization of framed nils, simultaneous prestate swap and input
+reads in local algebra, altered projected equations, missing case
+table and replaced write boundary. Both code blobs verified against
+the tested files. Reviewed source hashes match the remote parent.
+Historical v12 judgment unchanged; persistent assembled-host recovery
+and full project gates not rerun. No premise accepted or discharged.
+
+Next: connect the conditional source-write equations to the general
+transition argument with exact catalog/alternative correspondence,
+then address the read-only replay alternatives and the scope of the
+admitted-writer classification. Preserve the original assumptions
+rather than infer universal implementation correctness from symbolic
+equation agreement.
