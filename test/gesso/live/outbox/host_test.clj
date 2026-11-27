@@ -16,6 +16,7 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.biff :as managed]
             [gesso.live.outbox.host :as host]
+            [gesso.live.outbox.worker-capture :as worker-capture]
             [gesso.live.outbox.http-jdk :as jdk]
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.progression :as progression]
@@ -802,7 +803,7 @@
         source-id "fixture/source"
         opts {:worker-id "same-worker" :poll-ms 60000}
         cycle-var (requiring-resolve 'gesso.live.outbox.cycle/process-cycle!)
-        seen? #'host/owned-worker-call?]
+        seen? #'worker-capture/owned-worker-call?]
     (with-redefs-fn {cycle-var (fn [& _] (throw (ex-info "fixture exit" {})))}
       (fn []
         (let [a (lifecycle/start! node {:source :fixture} {} source-id opts)

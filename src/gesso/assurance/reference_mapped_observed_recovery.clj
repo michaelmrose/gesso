@@ -5,10 +5,12 @@
             [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-submission :as submission]
+            [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.worker-capture :as worker-capture]
             [gesso.model.inductive-plan :as induction]))
 
 (def profile :selected-issued-observed-mapped-recovery-v1)
@@ -202,6 +204,15 @@
 (def ^:private original-cut-derivation cut/derive-cut!)
 (def ^:private original-admission-description induction/describe-mapped-admission)
 (def ^:private original-induction-recheck induction/recheck-mapped-induction!)
+(def ^:private original-worker-comparison worker-envelope/compare-issued-selection!)
+(def ^:private original-worker-boundaries worker-envelope/boundaries-current?)
+(def ^:private original-worker-capture-match worker-capture/worker-outcome-capture-matches?)
+
+(defn- worker-boundaries-current? []
+  (and (identical? original-worker-capture-match worker-capture/worker-outcome-capture-matches?)
+       (identical? original-worker-comparison worker-envelope/compare-issued-selection!)
+       (identical? original-worker-boundaries worker-envelope/boundaries-current?)
+       (original-worker-boundaries)))
 
 (defn- cut-boundaries-current? []
   (and (local-boundaries-current?)
@@ -217,7 +228,7 @@
    :recovery-linkage :provider-refinement :source-provenance :outcome-provenance
    :submission-provenance :aborted-receipt-identity :worker-observation-provenance
    :command-origin-correspondence :selected-command-origins :abort-recovery-execution
-   :command-authentication])
+   :command-authentication :worker-correspondence])
 
 (defn- checked-abstract-induction [admission]
   ;; Reports are descriptive data. Only the captured checker over the exact
@@ -263,24 +274,39 @@
              :abstract-induction-identity (:identity abstract)
              :selected-operations operations))))
 
-(defn capture-local-recovery-cut!
-  "Issue a historical cut only after the exact observation and acquisition
-   match through the independent local recovery comparison. Derive the cut
-   from that same issued sample, not a supplied comparison or declared cut.
-   The handle survives node closure in this process, not process restart.
-   It is not a durable receipt or authenticated lifecycle binding."
-  [node tables admission source outcome-declarations steps observation acquisition interleaved?]
+(defn- capture-local-recovery-cut*
+  [node tables admission source outcome-declarations steps observation acquisition interleaved?
+   worker? system worker-capture]
   (let [base {:recovery-cut-profile recovery-cut-profile
               :authority :none :certificate :not-issued
               :observation-storage-identity :not-established
               :authorized-historical-lineage :not-established}
         fail #(assoc base :status %1 :reason %2)]
-    (if-not (cut-boundaries-current?)
+    (cond
+      (not (and (cut-boundaries-current?) (or (not worker?) (worker-boundaries-current?))))
       (fail :unsupported :recovery-cut-boundary-replaced)
-      (let [r (original-local-comparison node tables admission source outcome-declarations
-                                         steps observation acquisition interleaved?)]
+      (and worker? (not (original-worker-capture-match system worker-capture)))
+      (fail :unsupported :unissued-worker-capture)
+      :else
+      (let [r (if worker?
+                (original-acquisition-comparison
+                 node acquisition
+                 (fn []
+                   (let [local (original-local-comparison node tables admission source outcome-declarations
+                                                          steps observation acquisition true)]
+                     (if (= :matched (:status local))
+                       (let [checked (original-worker-comparison system acquisition (:source-id (first steps))
+                                                                 (:intervening-maintenance local) worker-capture)]
+                         (if (= :matched (:status checked))
+                           (assoc local :worker-observation-provenance (:worker-observation-provenance checked)
+                                  :worker-correspondence (assoc checked :selected-tx-ids (:selected-tx-ids local)))
+                           checked))
+                       local))))
+                (original-local-comparison node tables admission source outcome-declarations
+                                           steps observation acquisition interleaved?))]
         (cond
-          (not (cut-boundaries-current?)) (fail :unsupported :recovery-cut-boundary-replaced)
+          (not (and (cut-boundaries-current?) (or (not worker?) (worker-boundaries-current?))))
+          (fail :unsupported :recovery-cut-boundary-replaced)
           (not= :matched (:status r)) (fail (:status r) (:reason r))
           (not (and (= local-acquisition-profile (:local-acquisition-profile r))
                     (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding r))))
@@ -290,10 +316,21 @@
                 subject (recovery-subject admission source steps r abstract)
                 derived (original-cut-derivation node acquisition)]
             (cond
-              (not (cut-boundaries-current?)) (fail :unsupported :recovery-cut-boundary-replaced)
+              (not (and (cut-boundaries-current?) (or (not worker?) (worker-boundaries-current?))))
+              (fail :unsupported :recovery-cut-boundary-replaced)
+              (and worker? (not (original-worker-capture-match system worker-capture)))
+              (fail :unsupported :unissued-worker-capture)
               (nil? abstract) (fail :unsupported :invalid-abstract-induction)
               (nil? subject) (fail :unsupported :invalid-recovery-subject)
               (not= :derived (:status derived)) (fail (:status derived) (:reason derived))
+              (and worker?
+                   (not (and (= :matched-local-issued-host-capture (:worker-observation-provenance r))
+                             (= :matched-issued-worker-retained-transactions
+                                (get-in r [:worker-correspondence :maintenance-correspondence]))
+                             (= (:selected-tx-ids r) (get-in r [:worker-correspondence :selected-tx-ids]))
+                             (= (get-in derived [:historical-cut :payload-fingerprint])
+                                (get-in r [:worker-correspondence :retained-payload-fingerprint])))))
+              (fail :unsupported :invalid-worker-cut-correspondence)
               (not (original-origin-matcher admission observation node))
               (fail :unsupported :submission-origin-mismatch)
               :else
@@ -308,6 +345,26 @@
                                               :publication-source-id (:source-id (first steps))}))
                 (merge r base {:recovery-cut-observation handle
                                :recovery-cut-binding :matched-local-recovery-cut})))))))))
+
+(defn capture-local-recovery-cut!
+  "Issue a historical cut only after the exact observation and acquisition
+   match through the independent local recovery comparison. Derive the cut
+   from that same issued sample, not a supplied comparison or declared cut.
+   The handle survives node closure in this process, not process restart.
+   It is not a durable receipt or authenticated lifecycle binding."
+  [node tables admission source outcome-declarations steps observation acquisition interleaved?]
+  (capture-local-recovery-cut* node tables admission source outcome-declarations steps observation
+                               acquisition interleaved? false nil nil))
+
+(defn capture-local-worker-recovery-cut!
+  "Issue a worker-interleaved cut only after independently rechecking the
+   exact host-issued maintenance capture and original command observation
+   against the same issued retained acquisition. Never accept a supplied
+   comparison. The cut carries local historical correspondence only;
+   worker, dispatch and provider authentication remain open."
+  [system tables admission source outcome-declarations steps observation acquisition worker-capture]
+  (capture-local-recovery-cut* (:xtdb/connectable system) tables admission source outcome-declarations
+                               steps observation acquisition true true system worker-capture))
 
 (defn read-local-recovery-cut!
   "Read sensitive historical cut material for the exact issued admission
@@ -474,11 +531,13 @@
        (identical? original-deployment-acceptance storage/describe-deployment-acceptance)
        (identical? original-assumption-description assumption/describe-assumption)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v3)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v4)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
-    (if-not (acceptance-boundaries-current?)
+    (if-not (and (acceptance-boundaries-current?)
+                 (or (nil? (get-in entry [:original-recovery :worker-correspondence]))
+                     (worker-boundaries-current?)))
       (fail :conditional-recovery-boundary-replaced)
       (if-let [{:keys [scope cut-correspondence original-recovery judgment-subject
                        admission abstract-induction]} entry]
@@ -487,7 +546,10 @@
                 fresh (checked-abstract-induction admission)
                 command-premises (command-authentication-premises entry)]
             (cond
-              (not (acceptance-boundaries-current?)) (fail :conditional-recovery-boundary-replaced)
+              (not (and (acceptance-boundaries-current?)
+                        (or (nil? (:worker-correspondence original-recovery))
+                            (worker-boundaries-current?))))
+              (fail :conditional-recovery-boundary-replaced)
               (not (and abstract-induction (= abstract-induction fresh)))
               (fail :abstract-induction-mismatch)
               :else

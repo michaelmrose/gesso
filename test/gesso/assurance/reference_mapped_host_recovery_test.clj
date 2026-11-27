@@ -6,6 +6,7 @@
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-mapped-worker-submission :as worker-submission]
+            [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-storage-identity :as storage]
@@ -122,7 +123,17 @@
     (is (= (:manifest-tx-id original) (:manifest-tx-id trajectory)))
     (is (= (:initialization-tx-id original) (:initialization-tx-id trajectory)))
     (is (= :not-established (:submission-provenance trajectory) (:provider-refinement trajectory)))
-    (is (= (:worker-observation-provenance original) (:worker-observation-provenance trajectory))))
+    (is (= (:worker-observation-provenance original) (:worker-observation-provenance trajectory)))
+    (is (= (:worker-correspondence original) (:worker-correspondence trajectory)))
+    (when-let [worker (:worker-correspondence trajectory)]
+      (is (= :matched-local-issued-host-capture (:worker-observation-provenance worker)))
+      (is (= :matched-issued-worker-retained-transactions (:maintenance-correspondence worker)))
+      (is (= (:selected-tx-ids trajectory) (:selected-tx-ids worker)))
+      (is (= (get-in scope [:historical-cut :payload-fingerprint]) (:retained-payload-fingerprint worker)))
+      (is (= :not-established (:worker-authentication worker) (:dispatch-authentication worker)
+             (:provider-refinement worker) (:complete-writer-coverage worker)))
+      (is (= :none (:authority worker)))
+      (is (= :not-issued (:certificate worker)))))
   (let [command (:command-authentication-premises result)
         original (:original-recovery result)
         interface (:scope command)
@@ -187,7 +198,9 @@
             bad (observed-recovery/compare-activated-worker-interleaved!
                  reopened tables admit mapped-source outcome-declarations steps (:observation fresh))]
         (is (= :matched (:status r)) (pr-str r))
-        (is (= comparison r))
+        (is (= (dissoc comparison :worker-correspondence)
+               (cond-> r (:worker-correspondence comparison)
+                 (assoc :worker-observation-provenance (:worker-observation-provenance comparison)))))
         ;; Content equality across reopening (or a byte copy) does not
         ;; transfer either locally issued capability.
         (let [new-handle (:acquisition (acquisition/capture! reopened))
@@ -714,7 +727,7 @@
                                          %1 tables admit mapped-source outcome-declarations steps observation %2 %3)
                               checked (compare! started handle worker-capture)
                               selected (:selected-maintenance checked)
-                              compare-calls #'worker-submission/compare-calls!]
+                              compare-calls #'worker-envelope/compare-calls!]
                           (is (= :matched (:status checked)) (pr-str checked))
                           (is (= :matched-issued-worker-retained-transactions (:maintenance-correspondence checked)))
                           (is (= :matched-local-issued-host-capture (:worker-observation-provenance checked)))
@@ -786,24 +799,57 @@
                       (is (= :nonadjacent-recovery-selection (:reason adjacent)))
                       (is (not (contains? adjacent :activation-root-binding)))
                       (is (= sample (coverage/observe-local-processed-retained-replay-inputs! node)))
-                      (is (= 2 (:cycles (lifecycle/status worker))))
-                      (is (= :idle (:status (lifecycle/status worker))))
-                      (let [policy (get-in host-config [:storage-trust :policy])
+                      ;; The captured second cycle is exact; later read-only
+                      ;; checks can overlap additional empty scheduler polls.
+                      (let [status (lifecycle/status worker)]
+                        (is (<= 2 (:cycles status)))
+                        (is (= 2 (:total-processed status) (:total-dispatch-accepted status)))
+                        (is (#{:idle :running} (:status status))))
+                      (let [capture! #(observed-recovery/capture-local-worker-recovery-cut!
+                                       %1 tables admit mapped-source outcome-declarations steps observation %2 %3)
+                            worker-bound (capture! started handle worker-capture)
+                            enhanced-cut (:recovery-cut-observation worker-bound)
+                            worker-evidence (:worker-correspondence worker-bound)
+                            enhanced (assoc r :worker-observation-provenance (:worker-observation-provenance worker-bound)
+                                            :worker-correspondence worker-evidence)
+                            policy (get-in host-config [:storage-trust :policy])
                             foreign (mapv (fn [relation]
                                             (let [prepared (observed-recovery/prepare-conditional-recovery!
-                                                            admit observation cut-handle node handle
+                                                            admit observation enhanced-cut node handle
                                                             (assoc policy :relation relation))]
                                               (is (= :prepared (:status prepared)))
                                               (:conditional-recovery prepared)))
                                           [:authorized-historical-lineage :same-store-incarnation])]
-                        (is (= :configured-local-host
-                               (:deployment-adoption (host/adopt-storage-trust! started (first foreign)))))
+                        (is (= :matched (:status worker-bound)) (pr-str worker-bound))
+                        (is (= :matched-local-issued-host-capture (:worker-observation-provenance worker-bound)))
+                        (is (= maintenance (mapv #(select-keys % [:tx-id :intent-id :maintenance])
+                                                 (:selected-maintenance worker-evidence))))
+                        (is (= required (observed-recovery/read-local-recovery-cut! admit observation enhanced-cut)))
+                        (is (not (contains? local :worker-correspondence)))
+                        (doseq [bad [(capture! started handle (into {} worker-capture))
+                                     (capture! started handle {:status :matched :worker-correspondence worker-evidence})
+                                     (capture! started sample worker-capture)]]
+                          (is (= :unsupported (:status bad)))
+                          (is (not-any? #(contains? bad %) [:recovery-cut-observation :worker-correspondence :worker-observation-provenance])))
+                        (with-redefs [worker-envelope/compare-issued-selection! (constantly worker-evidence)]
+                          (let [bad (capture! started handle worker-capture)]
+                            (is (= :recovery-cut-boundary-replaced (:reason bad)))
+                            (is (not (contains? bad :recovery-cut-observation)))))
+                        (with-redefs [worker-envelope/compare-issued-selection! (constantly worker-evidence)]
+                          (let [bad (host/adopt-storage-trust! started (first foreign))]
+                            (is (= :conditional-recovery-boundary-replaced (:reason bad)))
+                            (is (not (contains? bad :judgment-profile)))))
+                        (let [adopted (host/adopt-storage-trust! started (first foreign))]
+                          (is (= :configured-local-host (:deployment-adoption adopted)))
+                          (check-recovery-judgment! adopted
+                                                   (observed-recovery/read-conditional-recovery-scope! (first foreign))
+                                                   enhanced admit))
                         (reset! restart* {:foreign-comparisons foreign
                                          :worker-capture worker-capture
                                          :node node :worker worker :ring-handler @handler*
                                         :token (live-xtdb/current-submission-policy-token node)
                                         :sample sample :rows (selected-rows node tables)
-                                        :observation observation :steps steps :comparison r :retained-handle handle :cut-handle cut-handle
+                                        :observation observation :steps steps :comparison enhanced :retained-handle handle :cut-handle enhanced-cut
                                         :initial (correspondence/initialization-observation node admit)
                                         :events @policy-events})))))
                 ;; This test explicitly exercises a quiescent interval between
@@ -920,7 +966,7 @@
       (is (= :not-established (:command-authentication absent))))))
 
 (deftest worker-deadline-projection-is-provider-specific
-  (let [project #'worker-submission/provider-worker-ops
+  (let [project #'worker-envelope/provider-worker-ops
         deadline (java.time.Instant/parse "2026-11-26T20:00:00.123456789Z")
         encoded (java.time.Instant/parse "2026-11-26T20:00:00.123456Z")
         old-deadline (java.time.Instant/parse "2026-11-26T19:59:00.123456789Z")

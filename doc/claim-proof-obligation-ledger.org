@@ -7802,3 +7802,51 @@ recovery cut and compose it into the conditional historical judgment
 without admitting a caller-supplied comparison or changing the existing
 unobserved-worker classification for unsupported cases. Then describe
 the remaining subject-bound worker and dispatch authentication premises.
+
+* v2819 — compose checked worker correspondence into the issued cut
+
+Extract the installed-host capture ownership boundary and selected
+maintenance-envelope checker into lower-level namespaces. Retain the
+existing public host capture and independent worker comparison APIs.
+The envelope helper compares a supplied selection descriptively; it
+does not establish the complete recovery selection or issue a cut.
+
+Add an explicit worker-enhanced recovery-cut issuer. Require the exact
+host-issued capture, independently recheck the original local activated
+worker-interleaved recovery and its selected maintenance under the
+same freshly bracketed issued retained acquisition, and bind the
+result to the derived historical payload fingerprint and ordered
+selected command identities. No supplied positive comparison is
+accepted. Keep the existing unenhanced cut path unchanged.
+
+Retain the verified worker correspondence in the original-recovery
+material of the issued cut and v4 conditional historical judgment.
+Check the original worker comparison boundaries at issuance and
+enhanced judgment composition. Reopened and independently copied
+hosts can compose the original historical evidence under their
+selected storage premises, but do not acquire its original capture
+ownership. No change to the transaction path or worker polling.
+
+Focused JVM: initial combined host and assembled recovery run,
+27 tests / 1435 assertions, zero failures and two errors from a
+test-only shadowed lifecycle binding at the two restart checks.
+All other 26 tests passed. A subsequent targeted run corrected the
+binding but exposed a late timing assertion (1 test, 488 passes,
+1 failure, zero errors) when an additional empty poll completed.
+Keep the exact captured second-cycle check; replace the later
+cycle-count equality with a lower bound, unchanged processed and
+dispatch totals, and a valid running/idle state. The final isolated
+worker-interleaved fixture passed 1 test / 490 assertions with zero
+failures or errors, including reopened and copied stores. Production
+source remained unchanged across these runs. Original polling and
+older offline dependency bundle retained. Full project gates not run.
+
+The enhanced judgment establishes local selected worker submission
+correspondence, not authenticated worker identity, authenticated
+external dispatch, universal writer coverage, provider refinement,
+or an invariant theorem. No CLM-R2 or other proof premise is discharged.
+
+Next: describe the outstanding worker and external dispatch
+authentication premises bound to the original cut, its selected
+maintenance identities, and the original semantic subject. Preserve
+the separate command, storage and abstract-induction obligations.
