@@ -9812,3 +9812,43 @@ Next: formulate the explicit provider trust selection and dependency
 closure against the exact issued open contract and locally observed
 artifact target. Keep it separate from writer-isolation adoption,
 runtime attestation and the truth of provider semantic clauses.
+
+* v2866 — implement explicit provider trust selection
+
+Prepare a process-local scope from the exact issued mapped admission,
+original source, declarations and closed cases, rederiving the open
+provider contract with selected local artifact origins. Bind the
+contract scope, observed artifact identities, original premise
+fingerprints, condition links, remaining conditions and unverified
+identity requirements to a fresh issued scope reference. Keep a
+private weak registry with the original inputs. A copied or newly
+constructed handle does not qualify.
+
+Require the exact issued admission and scope, explicit
+:trust-open-premises acceptance, and all eight raw premise declarations
+exactly once. Check structural premise identity and dependency closure.
+Re-derive the contract and local origin evidence before accepting;
+require the same scope binding, premise descriptions and fingerprints.
+Pin the derivation and premise matching boundaries. Return only a
+conditional explicit declaration, preserving the original open
+discharge states, complete origin report and outstanding conditions.
+This mechanism does not authenticate the declarant, bind a physical
+node or owner deployment, establish runtime attestation, prove provider
+semantics or grant writer authority.
+
+Focused JVM: 1 test / 24 assertions, zero failures or errors.
+Exercise the genuine issued admission and actual local artifact
+observations, complete selection, unissued scope and foreign admission,
+missing and duplicate premises, changed scope, provider version and
+artifact observations, changed propositions and dependencies, and
+replaced derivation and provider execution boundaries. Candidate
+source and test blobs match the tested local files. No new physical
+transaction experiment, broader regression, persistent-host test or
+full project gate run. Historical judgments unchanged; no original
+premise discharged.
+
+Next: integrate optional owner-configured provider trust adoption
+at the mapped host boundary, requiring the exact reviewed provider
+target and premise selection, and preserving separation from storage
+lineage and writer isolation. Then compose the separate contracts
+without treating declared assumptions as implementation proofs.
