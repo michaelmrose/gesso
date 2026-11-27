@@ -10811,3 +10811,29 @@ Next: exercise positive and negative installed authority qualification through
 the canonical assembled mapped host and its issued original recovery cut,
 including distinct installations, retirement and unchanged premise inventory,
 before explicit environmental adoption.
+
+* v2897 — exercise configured command authority through retained recovery
+
+Enable the declared authority policy in the canonical worker-interleaved
+fixture, retaining the unconfigured adjacent variant. Match the actual
+installation binding in each selected command origin and qualify the original
+issued cut under its exact owner across both historical comparison relations.
+Require the original command premise subject and fingerprints, two open
+environmental declarations, and no acceptance, authority or discharge. Reject
+copied owners, unissued comparisons and substituted qualification boundaries.
+After retirement, reject qualification by the original owner. Reopen the same
+store and an independent byte copy under distinct installations with identical
+policy names; reject both original and newly prepared historical comparisons
+for command authority. Storage qualification remains a separate argument.
+
+Focused JVM: full canonical worker-interleaved assembled recovery, 1 test /
+1439 assertions, zero failures or errors (exit 0). This includes physical
+XTDB maintenance, same-store reopening, substituted storage and the existing
+16-premise configured inventory. The adjacent and managed-successor variants
+and full project gates were not rerun. No production source changed. Both
+original command authentication premises and all 39 general CLM-R2 conditions
+remain open.
+
+Next: support explicit configured adoption of the exact two environmental
+command authority premises under the qualified original owner, keeping local
+attribution, environmental trust and implementation proof discharge distinct.

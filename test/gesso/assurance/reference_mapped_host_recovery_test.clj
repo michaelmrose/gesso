@@ -371,6 +371,13 @@
         adopted-handle (volatile! nil)]
     (try
       (is (not (host/worker-outcome-capture-matches? started worker-capture)))
+      (let [binding (host/read-command-authority-binding! started)
+            original-binding (get-in comparison [:selected-command-origins 0 :http-route :authority-binding])]
+        (is (= (:policy original-binding) (:policy binding)))
+        (is (not= (:installation-ref original-binding) (:installation-ref binding)))
+        (doseq [foreign foreign-comparisons]
+          (is (= :command-authority-original-installation-mismatch
+                 (trust-problem #(host/qualify-command-authority! started foreign))))))
       ;; Identical history and policy do not transfer a target capability.
       (doseq [foreign foreign-comparisons]
         (is (= :storage-trust-target-mismatch
@@ -418,6 +425,9 @@
                                    :acceptance :trust-open-premises :premises premises})
                   adopted (host/adopt-storage-trust! started handle)]
               (vreset! adopted-handle handle)
+              ;; A fresh target comparison does not change the original command installation.
+              (is (= :command-authority-original-installation-mismatch
+                     (trust-problem #(host/qualify-command-authority! started handle))))
               (is (= :prepared (:status prepared)))
               (is (= :conditional (:status adopted)))
               (is (= (:relation policy) (:relation adopted)))
@@ -821,7 +831,10 @@
                                                      ::provider-contract/put-replacement ::provider-contract/commit-abort
                                                      ::provider-contract/worker-clock ::provider-contract/pinned-read
                                                      ::provider-contract/retained-history ::provider-contract/valid-time-boundaries}}
-                     :assembled-operations {:authorize-request? #(and (= "yes" (get-in % [:headers "fixture-gate"])) (some? (principal-fn %)))}
+                     :assembled-operations (cond-> {:authorize-request? #(and (= "yes" (get-in % [:headers "fixture-gate"])) (some? (principal-fn %)))}
+                                             interleaved? (assoc :authority-policy {:deployment-id :fixture/deployment
+                                                                                  :request-gate-policy :fixture/request-gate
+                                                                                  :principal-session-policy :fixture/principal-session}))
                      :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                                    :require-derived-model? true :operation-model-entities {:request/claim #{:requests :request_assignments}})
                      :mapped-writer-policy {:admission admit :initializer seed
@@ -837,7 +850,13 @@
           (when-not assembly (throw (ex-info "Fixture assembly failed" {:report report})))
           (let [started (host/start! assembly (fn [_] (g/html-response surface)) host-config)
                 node (:xtdb/connectable started)
-                worker (get started managed/handle-key)]
+                worker (get started managed/handle-key)
+                authority-binding (when interleaved? (host/read-command-authority-binding! started))
+                expected-route (cond-> {:route-id :request/claim :path "/operations/request/claim"
+                                        :method :post :operation :request/claim :required-transport :htmx
+                                        :uri "/operations/request/claim" :path-arguments {}
+                                        :request-gate :locally-accepted :evidence :matched-canonical-htmx-handoff}
+                                 authority-binding (assoc :authority-binding authority-binding))]
             (try
               (reset! handler* (:biff.ring/handler started))
               (reset! worker* worker)
@@ -863,10 +882,7 @@
                                  (assoc b :execution-id (identity/execution-id (str "e-" (resolution/record-id b)))
                                         :origin :registered-server-invocation
                                         :authentication :conditional-on-trusted-principal-resolver
-                                        :http-route {:route-id :request/claim :path "/operations/request/claim"
-                                                     :method :post :operation :request/claim :required-transport :htmx
-                                                     :uri "/operations/request/claim" :path-arguments {}
-                                                     :request-gate :locally-accepted :evidence :matched-canonical-htmx-handoff}))]
+                                        :http-route expected-route))]
                   (is (= (mapv expected [winner loser loser]) (mapv :command-origin claims)))
                   (is (= (mapv resolution/record-id [winner loser loser])
                          (mapv #(get-in % [:checked :identity :command-id]) claims))))
@@ -928,10 +944,7 @@
                                         :authentication :conditional-on-trusted-principal-resolver
                                         :execution-id (identity/execution-id (str "e-" (resolution/record-id b)))
                                         :selected-tx-id (get-in step [:expectation :tx-id])
-                                        :http-route {:route-id :request/claim :path "/operations/request/claim"
-                                                     :method :post :operation :request/claim :required-transport :htmx
-                                                     :uri "/operations/request/claim" :path-arguments {}
-                                                     :request-gate :locally-accepted :evidence :matched-canonical-htmx-handoff}))
+                                        :http-route expected-route))
                                [winner loser loser] steps)
                          (:selected-command-origins r)))
                   (is (= :not-established (:submission-provenance r)))
@@ -1103,6 +1116,31 @@
                           (is (= writer-history/refined-judgment-profile (:judgment-profile refined)))
                           (is (= observed-recovery/judgment-profile (:judgment-profile original)))
                           (is (= (:obligation-inventory original) (:obligation-inventory refined)))
+                          (let [contract (host/qualify-command-authority! started comparison)
+                                command-premises (:command-authentication-premises original)
+                                premises (mapv :assumption (:obligations contract))]
+                            (is (= :open-command-authority-contract (:status contract)))
+                            (is (= :matched-original-issued-cut (:subject-provenance contract)))
+                            (is (= :matched-current-local-installation (:configured-authority contract)))
+                            (is (= authority-binding (:installation-binding contract)))
+                            (is (= (:scope command-premises) (get-in contract [:scope :command-subject])))
+                            (is (= (:open-premise-fingerprints command-premises)
+                                   (get-in contract [:scope :original-command-premises])))
+                            (is (= 2 (count premises)))
+                            (is (every? #(= :open (:discharge-state %)) (:obligations contract)))
+                            (is (= :not-performed (:premise-acceptance contract) (:proof-discharge contract)))
+                            (is (= :not-established (:command-authentication contract)))
+                            (is (= :none (:authority contract)))
+                            (is (= :not-issued (:certificate contract)))
+                            (is (not (contains? contract :trusted-assumptions)))
+                            (is (= contract (host/qualify-command-authority! started (second foreign))))
+                            (is (= :unissued-command-authority-host
+                                   (trust-problem #(host/qualify-command-authority! (into {} started) comparison))))
+                            (is (= :command-authority-original-installation-mismatch
+                                   (trust-problem #(host/qualify-command-authority! started (Object.)))))
+                            (with-redefs [transport/read-command-authority-binding! (constantly authority-binding)]
+                              (is (= :command-authority-owner-boundary-replaced
+                                     (trust-problem #(host/qualify-command-authority! started comparison))))))
                           (is (= (:selected-physical-refinement qualified) (:selected-physical-refinement refined)))
                           (is (= :open (get-in refined [:original-clm-r2-binding :original-obligation-status])))
                           (is (= :not-established (:universal-refinement refined) (:writer-coverage refined)))
@@ -1366,7 +1404,9 @@
               (is (host/worker-outcome-capture-matches? started (:worker-capture @restart*)))
               (doseq [foreign (:foreign-comparisons @restart*)]
                 (is (= :storage-trust-host-retired
-                       (trust-problem #(host/adopt-storage-trust! started foreign)))))
+                       (trust-problem #(host/adopt-storage-trust! started foreign))))
+                (is (= :command-authority-host-retired
+                       (trust-problem #(host/qualify-command-authority! started foreign)))))
               (let [reopen-config (assoc-in host-config [:storage-trust :policy :relation]
                                             :same-store-incarnation)
                     reopened-handle (check-reopened-recovery!
