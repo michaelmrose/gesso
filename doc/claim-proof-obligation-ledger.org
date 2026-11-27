@@ -8181,3 +8181,38 @@ Next: inspect the existing source-derived expression and proposition
 semantics proof machinery for a reusable correspondence derivation over the
 Claim invariant expression fragment; distinguish universally justified
 expression semantics from selected execution agreement.
+
+* v2828 — derive literal comparison partitions from original source
+
+Introduce a standalone diagnostic for the Claim invariant fragment of
+Boolean connectives over typed scalar read/literal comparisons. Derive
+per-reader literal sets directly from the original expression. Include
+distinct integer cutpoints and representatives of nonempty intervening
+and exterior intervals, named keyword/string literals and a fresh
+other value, Boolean alternatives and nullable nil. The existing
+independent typed-atom oracle checks the exact original rule over the
+resulting Cartesian product. Reject unsupported syntax, optional
+readers, reader-to-reader comparisons and unqualified checker results.
+Keep explicit resource bounds and exact source and type identities.
+
+The genuine assembled Claim fixture's original ownership/journal
+invariant yields 768 representative valuations (5 true, 763 false);
+the nonnegative revision invariant yields 3 (2 true, 1 false);
+Init yields 48 (1 true, 47 false). All 819 agree between the oracle
+and production evaluator. These are expression valuations, not
+reachable states or execution histories. Partition construction is
+source-derived, not a user-selected sample; the abstract comparison
+classes motivate the finite reduction, but executable evaluator
+invariance under representative substitution is not yet justified.
+
+Focused JVM: standalone partition suite passed 2 tests / 35 assertions.
+Combined partition, typed-atom oracle and typed-proposition bridge
+suites passed 75 tests / 3418 assertions, zero failures or errors.
+Initial test delimiter error corrected before the passing runs.
+Existing historical judgment and runtime paths unchanged; host
+recovery and full project gates not rerun. No premise discharged.
+
+Next: independently qualify the partition substitution relation and
+its preservation of original expression semantics. Establish the
+conditions required to lift representative agreement, before binding
+such a result to the original judgment or discharging any premise.
