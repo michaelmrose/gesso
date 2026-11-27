@@ -8,6 +8,7 @@
             [gesso.assurance.reference-writer-isolation :as isolation]
             [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
             [gesso.assurance.reference-installed-writer-history :as writer-history]
+            [gesso.assurance.reference-configured-recovery-inventory :as recovery-inventory]
             [gesso.assurance.reference-recovery-inventory :as inventory]
             [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-recovery-invariant-test :as invariant-test]
@@ -1067,6 +1068,24 @@
                             (is (= :not-established (:storage-lineage adopted)
                                    (get-in adopted [:deployment-acceptance :authentication])))
                             (is (= :not-performed (:proof-discharge adopted))))
+                          (let [i (:configured-obligation-inventory joined)
+                                adopted (:adopted-by-contract i)
+                                original (:original-historical-inventory i)
+                                all (:all-described-open-premise-fingerprints i)
+                                accepted (:deployment-declared-premise-fingerprints i)]
+                            (is (= :conditional-configured-obligation-inventory (:status i)))
+                            (is (= [3 5 8] (mapv #(count (get adopted %)) [:storage-lineage :writer-isolation :provider-trust])))
+                            (is (= 16 (count accepted)))
+                            (is (= all (into accepted (:unaccepted-premise-fingerprints i))))
+                            (is (= (:premises-by-fingerprint original) (select-keys (:premises-by-fingerprint i) (:all-described-open-premise-fingerprints original))))
+                            (is (= (:original-open-obligations joined) (:original-open-obligations i)))
+                            (is (= (:remaining-general-conditions joined) (:remaining-general-conditions i)))
+                            (is (= (:remaining-conditions joined) (:remaining-conditions i)))
+                            (is (= :not-derived (get-in i [:storage-relevance :general-condition-links])))
+                            (is (every? #(= :open (:discharge-state %)) (vals (:premises-by-fingerprint i))))
+                            (is (= :not-performed (:proof-discharge i))))
+                          (with-redefs [recovery-inventory/compose! (constantly {})]
+                            (is (= :configured-recovery-boundary-replaced (trust-problem #(storage! comparison)))))
                           (is (= :storage-trust-policy-mismatch (trust-problem #(storage! (second foreign)))))
                           (is (= :storage-trust-target-mismatch (trust-problem #(storage! (Object.)))))
                           (with-redefs [host/adopt-storage-trust! (constantly {})]

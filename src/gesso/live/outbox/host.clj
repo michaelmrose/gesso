@@ -22,6 +22,7 @@
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-physical-envelope-argument :as physical-envelope]
             [gesso.assurance.reference-installed-writer-history :as writer-history]
+            [gesso.assurance.reference-configured-recovery-inventory :as recovery-inventory]
             [gesso.assurance.reference-retained-acquisition :as retained-acquisition]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.assurance.reference-writer-isolation :as isolation]
@@ -914,6 +915,7 @@
 
 (def ^:private original-configured-adopt adopt-implementation-trust!)
 (def ^:private original-configured-storage-adopt adopt-storage-trust!)
+(def ^:private original-recovery-inventory recovery-inventory/compose!)
 (def ^:private original-physical-envelope physical-envelope/compare-recovery!)
 (def ^:private original-activated-recovery observed-recovery/compare-activated!)
 (def ^:private original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
@@ -929,6 +931,7 @@
   (combined-boundaries!)
   (when-not (and (identical? original-configured-adopt adopt-implementation-trust!)
                  (identical? original-configured-storage-adopt adopt-storage-trust!)
+                 (identical? original-recovery-inventory recovery-inventory/compose!)
                  (identical? original-physical-envelope physical-envelope/compare-recovery!)
                  (identical? original-activated-recovery observed-recovery/compare-activated!)
                  (identical? original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
@@ -1095,7 +1098,10 @@
               (reject! :configured-writer-history-changed {}))
             (configured-recovery-boundaries!)
             (require-open-provider-generation! system)
-            (cond-> {:status :conditional-configured-envelope-recovery
+            (let [inventory (when storage-adoption
+                              (original-recovery-inventory configured physical history refined (:adopted storage-adoption)))]
+              (configured-recovery-boundaries!)
+              (cond-> {:status :conditional-configured-envelope-recovery
            :profile :configured-clm-r2-envelope-recovery-v1
            :recovery-scope (if worker-scope :worker-interleaved :adjacent)
            :subject (:subject configured) :activation-root root
@@ -1126,7 +1132,8 @@
                                        :deployment-acceptance (:deployment-acceptance (:adopted storage-adoption))
                                        :trusted-assumptions (:trusted-assumptions (:adopted storage-adoption))
                                        :storage-lineage :not-established
-                                       :proof-discharge :not-performed}))))))))
+                                       :proof-discharge :not-performed})
+              inventory (assoc :configured-obligation-inventory inventory)))))))))
 
 
 (defn compare-configured-envelope-recovery!

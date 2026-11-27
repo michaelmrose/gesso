@@ -10375,3 +10375,38 @@ Next: consolidate the complete configured selected recovery argument
 into a source-bound inventory of the three adopted trust contracts,
 their relevance links and the still-open original and selected
 conditions, without identifying trust declarations with proof discharge.
+
+* v2882 — consolidate configured recovery obligation inventory
+
+Extend the original selected historical inventory with the exact configured
+writer-isolation and provider-trust premise families. Recheck canonical
+premise descriptions, unique identities, family-local dependencies and
+acyclic dependency order. Preserve the original historical inventory,
+abstract report fingerprint, operation obligation register, activation
+root, historical cut and distinct adoption scopes. Index all described
+open premises, partition the sixteen explicitly adopted fingerprints
+from unaccepted fingerprints, and retain the original general conditions
+and both selected condition sets. Preserve existing writer and provider
+relevance links; storage relevance remains scoped to the selected
+historical comparison, with no derived general-condition links. Neither
+relevance nor explicit adoption implies discharge or cross-family
+implication. The helper is structural, not a standalone admission boundary;
+invoke it inside the rechecked exact-owner composition only.
+
+Focused JVM unit gate: 13 tests / 394 assertions, zero failures or errors,
+across configured recovery inventory, historical recovery inventory and
+storage identity. Includes the new structural fixture's 2 tests / 22
+assertions covering forged fingerprints, missing dependencies, incorrect
+links and lost conditions. Installed-host worker-interleaved regression:
+1 test / 1383 assertions, zero failures or errors (exit 0), including
+actual configured adoption and rejection of a substituted inventory
+composer, retained-storage reopening and substitution. Update the reviewed
+host digest. Adjacent variant and full project gates not rerun. No
+submission behavior changed; all 39 original general conditions remain
+open, and no authority or proof discharge is issued.
+
+Next: derive the next actual general-condition evidence route from this
+inventory, starting with the source-bound admitted writer/attribution
+coverage argument; distinguish enforceable local closure from open
+external isolation and provider premises rather than expanding the
+selected historical report further.
