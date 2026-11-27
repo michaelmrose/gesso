@@ -23,6 +23,21 @@
            :provider-refinement :not-established :complete-writer-coverage :not-established}
     reason (assoc :reason reason)))
 
+(defn- match-local-receipt? [maintenance admission row]
+  (if (= :dispatch-acknowledgment maintenance)
+    (and (uuid? (:gesso.live.outbox/lease-id row))
+         (uuid? (:gesso.live.outbox/dispatch-receipt-id row))
+         (= :gesso.live/synchronous-source (:gesso.live.outbox/dispatch-adapter row))
+         (= {:intent-id (:xt/id row)
+             :lease-id (:gesso.live.outbox/lease-id row)
+             :worker-id (:gesso.live.outbox/lease-owner row)
+             :receipt-id (:gesso.live.outbox/dispatch-receipt-id row)
+             :adapter (:gesso.live.outbox/dispatch-adapter row)
+             :result :accepted
+             :evidence :matched-local-delivery-handoff}
+            (:local-dispatch-receipt admission)))
+    (not (contains? admission :local-dispatch-receipt))))
+
 (defn- match-call? [source-id expected retained call]
   (let [{:keys [tx-ops tx-result admission]} call
         origin (:worker-origin admission)
@@ -50,7 +65,8 @@
          (= :scheduled-local-cycle (:origin origin))
          (= :not-established (:authentication origin))
          (uuid? (:lifecycle-ref origin))
-         (pos-int? (:cycle-number origin)))))
+         (pos-int? (:cycle-number origin))
+         (match-local-receipt? (:maintenance expected) admission row))))
 
 (defn- provider-worker-ops [maintenance ops]
   ;; XTDB 2.2.0-beta1 encodes the new Instant deadline in microseconds,
@@ -88,12 +104,17 @@
                           (:status checked) :unsupported)
                         (or (:reason checked) :invalid-worker-envelope-comparison))
                 (recur (next pairs)
-                       (conj matched (assoc expected :committed? true
-                                            :system-time (get-in by-id [(:tx-id expected) :system-time])
-                                            :worker-origin (get-in call [:admission :worker-origin])))))))
+                       (conj matched (cond-> (assoc expected :committed? true
+                                                    :system-time (get-in by-id [(:tx-id expected) :system-time])
+                                                    :worker-origin (get-in call [:admission :worker-origin]))
+                                       (= :dispatch-acknowledgment (:maintenance expected))
+                                       (assoc :local-dispatch-receipt (get-in call [:admission :local-dispatch-receipt]))))))))
           (assoc (report :matched nil)
                  :maintenance-correspondence :matched-issued-worker-retained-transactions
                  :payload-correspondence :matched-xtdb-microsecond-worker-envelope
+                 :dispatch-receipt-correspondence (if (some :local-dispatch-receipt matched)
+                                                    :matched-local-handoff-retained-acknowledgments
+                                                    :not-applicable)
                  :selected-maintenance matched))))))
 
 (defn compare-issued-selection!

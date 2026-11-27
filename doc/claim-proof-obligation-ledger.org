@@ -10565,3 +10565,28 @@ universal physical refinement, writer coverage or temporal coverage.
 Next: advance local dispatch receipt attribution through the exact installed
 worker handoff and independently observed physical acknowledgment, without
 assuming external source acceptance or downstream delivery.
+
+* v2888 — match local dispatch receipts to retained acknowledgments
+
+Record the exact synchronous delivery-to-acknowledgment submission's receipt
+only after matching the original scheduled maintenance handoffs. Preserve the
+receipt separately from worker identity so managed-lineage checks are unchanged.
+Match its intent, lease, worker, receipt ID, adapter and accepted-result claim
+against the captured acknowledgment envelope and independently retained
+committed transaction. Do not accept receipt attribution on acquisition or
+reclamation. Reject missing, changed or cross-worker transplanted receipts
+without a partial successful selection. Pin the reviewed writer-policy and
+delivery sources. This is descriptive local correspondence under the existing
+trusted in-process boundary, not authentication of the external source,
+delivery to a client, or a new admission credential.
+
+Focused JVM gate: initialization, lifecycle and reference writer classification,
+51 tests / 938 assertions, zero failures or errors (exit 0). The real XTDB
+managed-successor fixture matches both receipts and rejects seven receipt
+mutations; the existing exact report and owner identity checks remain in force.
+Canonical assembled-host variants and full project gates were not rerun.
+All 39 original general CLM-R2 conditions remain open.
+
+Next: carry the checked receipt attribution into the original selected-cut
+worker/dispatch premise subject and exercise that binding through the canonical
+assembled host; retain the open source-acceptance authentication obligation.

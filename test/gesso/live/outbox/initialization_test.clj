@@ -1209,6 +1209,31 @@
                     (is (= :matched (:status checked)) (pr-str (select-keys checked [:status :reason])))
                     (is (= :matched-issued-managed-lineage (:worker-lineage-correspondence checked)))
                     (is (= origins (mapv :worker-origin (:selected-maintenance checked))))
+                    (is (= :matched-local-handoff-retained-acknowledgments
+                           (:dispatch-receipt-correspondence checked)))
+                    (is (= :not-established (:dispatch-authentication checked)))
+                    (let [receipts (mapv #(get-in % [:admission :local-dispatch-receipt]) calls)
+                          sample (retained/read-acquisition! node acquisition)
+                          compare-calls! #'worker-envelope/compare-calls!]
+                      (is (= receipts (mapv :local-dispatch-receipt (:selected-maintenance checked))))
+                      (is (= [nil "w" nil "successor"] (mapv :worker-id receipts)))
+                      (doseq [i [1 3]]
+                        (let [receipt (nth receipts i)
+                              row (peek (peek (:tx-ops (nth calls i))))]
+                          (is (= (:gesso.live.outbox/dispatch-receipt-id row) (:receipt-id receipt)))
+                          (is (= (:gesso.live.outbox/lease-id row) (:lease-id receipt)))
+                          (is (= :matched-local-delivery-handoff (:evidence receipt)))))
+                      (doseq [changed [(update-in calls [1 :admission] dissoc :local-dispatch-receipt)
+                                       (assoc-in calls [1 :admission :local-dispatch-receipt :receipt-id] (random-uuid))
+                                       (assoc-in calls [1 :admission :local-dispatch-receipt :lease-id] (random-uuid))
+                                       (assoc-in calls [1 :admission :local-dispatch-receipt :worker-id] "successor")
+                                       (assoc-in calls [1 :admission :local-dispatch-receipt :adapter] :other/source)
+                                       (assoc-in calls [0 :admission :local-dispatch-receipt] (nth receipts 1))
+                                       (assoc-in calls [3 :admission :local-dispatch-receipt] (nth receipts 1))]]
+                        (let [bad (compare-calls! node "s" sample selected changed)]
+                          (is (= :mismatch (:status bad)))
+                          (is (not (contains? bad :selected-maintenance)))
+                          (is (not (contains? bad :dispatch-receipt-correspondence))))))
                     (is (= :unissued-worker-capture (:reason (worker-envelope/compare-issued-selection! owner acquisition "s" selected (into {} report)))))
                     (is (= [:initializer :worker :worker :worker :worker] (mapv :kind @seen)))
                     (is (= (mapv lifecycle/lifecycle-reference [root @child*])

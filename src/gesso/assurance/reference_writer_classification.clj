@@ -15,7 +15,8 @@
 (def ^:private derive-replay replay/derive!)
 (def ^:private derive-transition transition/derive!)
 (def ^:private reviewed-sources
-  {"gesso/live/outbox/writer_policy.clj" "516f538810795950a2efc4debb09014bad945bb711d61dc77fd1a02b84d50368"
+  {"gesso/live/outbox/writer_policy.clj" "fb1557ae6a904a182538cc8b51ef62b1f2786657cfa514d90403c5535ed9b716"
+   "gesso/live/outbox/delivery.clj" "716cf5c7c0df1fcaa27c40caed65bccc5d42ef3498310baf3ad6eb95bc1da2d7"
    "gesso/live/outbox/maintenance_policy.clj" "59e7463ada951a30944d189913f29399fd3217e6676c93b1ac3eb4db8490109b"
    "gesso/live/outbox/initialization.clj" "36aac083e410e05b806137bf4540559f1ef3d77d4284dc6f387604aff3d81de7"
    "gesso/live/outbox/host.clj" "fa84a4141e78793854be95f5b851d108af373800cb4544f6b8d613cf14b4cfc9"

@@ -146,7 +146,7 @@
 
 (defn- observe-maintenance-origin
   "Add local provenance only after independent exact maintenance admission.
-   Scope does not establish the installed host owner or dispatch provenance."
+   Scope does not authenticate the installed owner or external source acceptance."
   [node {:keys [source-id worker-id]} ops kind]
   (if (and (= :worker (:kind kind))
            (identical? original-worker-origin lifecycle/current-worker-origin)
@@ -166,8 +166,14 @@
                     (original-acquisition-call node maintenance submission)))
           cycle-opts (when input (original-cycle-call node phase input))
           origin (when cycle-opts (original-worker-origin node source-id worker-id cycle-opts))]
-      (cond-> kind origin (assoc :worker-origin (assoc origin :maintenance maintenance
-                                                       :call-chain :matched-scheduled-maintenance))))
+      (cond-> kind
+        origin (assoc :worker-origin (assoc origin :maintenance maintenance
+                                            :call-chain :matched-scheduled-maintenance))
+        (and origin (= :delivery phase))
+        (assoc :local-dispatch-receipt
+               (merge (select-keys submission [:intent-id :lease-id :worker-id])
+                      (select-keys (:receipt submission) [:receipt-id :adapter :result])
+                      {:evidence :matched-local-delivery-handoff}))))
     kind))
 
 (def ^:private original-observe-maintenance-origin observe-maintenance-origin)
