@@ -10345,3 +10345,33 @@ Adjacent variant and full project gates not rerun.
 Next: bind the historical storage declaration to the actual startup-selected
 storage trust policy at the configured owner boundary, preserving the
 distinction between local adoption and authenticated lineage evidence.
+
+* v2881 — bind configured storage trust to historical recovery
+
+Add a separate configured worker-storage recovery entry point that
+accepts the issued comparison but no caller storage declaration.
+Require the original storage-trust registration to belong to the exact
+owner and share the retirement lock and active state of the implementation
+trust registrations. Reuse the original storage adoption boundary,
+derive the declaration from its startup-selected policy and canonical
+obligations, and require exact equality of the adopted judgment and the
+historical judgment within the refined composition (apart from the
+local adoption marker). Preserve the separately declared historical
+entry point, the three distinct trust scopes, and all remaining
+conditions. Configured adoption is not authenticated storage lineage,
+historical mediation, or proof discharge.
+
+Focused installed-host JVM regression: 1 test / 1371 assertions, zero
+failures or errors (exit 0), in assembled-command-transport-worker-
+interleaved-recovery. Exercise startup-selected storage policy and
+deployment, exact adopted historical scope and trusted assumptions,
+rejection of mismatched storage relation, unissued comparison and
+substituted storage adoption boundary. Retained storage reopening
+and substitution checks passed. Update the reviewed host digest.
+Adjacent variant and full project gates not rerun. All 39 original
+general conditions remain open. No submission behavior changed.
+
+Next: consolidate the complete configured selected recovery argument
+into a source-bound inventory of the three adopted trust contracts,
+their relevance links and the still-open original and selected
+conditions, without identifying trust declarations with proof discharge.

@@ -1046,11 +1046,31 @@
                               historical! #(host/compare-configured-worker-historical-recovery!
                                              started tables mapped-source outcome-declarations steps observation
                                              handle worker-capture enhanced-cut %1 %2)
-                              joined (historical! comparison declaration)
+                              storage! #(host/compare-configured-worker-storage-recovery!
+                                          started tables mapped-source outcome-declarations steps observation
+                                          handle worker-capture enhanced-cut %)
+                              joined (storage! comparison)
                               result (:physical-correspondence joined)
                               maintenance-result (:maintenance-correspondence result)]
                           (is (= :conditional-configured-envelope-recovery (:status joined)))
                           (is (= :worker-interleaved (:recovery-scope joined)))
+                          (let [adopted (:configured-storage-adoption joined)
+                                j (:historical-judgment-binding joined)]
+                            (is (= :configured-local-host (:status adopted)))
+                            (is (= (get-in host-config [:storage-trust :policy]) (:policy adopted)))
+                            (is (= scope (:scope adopted) (:storage-declaration-scope j)))
+                            (is (= (get-in host-config [:storage-trust :deployment-id])
+                                   (get-in adopted [:deployment-acceptance :deployment-id])))
+                            (is (= (:deployment-acceptance adopted)
+                                   (get-in j [:refined-judgment :historical-judgment :deployment-acceptance])))
+                            (is (= (:trusted-assumptions adopted) (:storage-trusted-assumptions j)))
+                            (is (= :not-established (:storage-lineage adopted)
+                                   (get-in adopted [:deployment-acceptance :authentication])))
+                            (is (= :not-performed (:proof-discharge adopted))))
+                          (is (= :storage-trust-policy-mismatch (trust-problem #(storage! (second foreign)))))
+                          (is (= :storage-trust-target-mismatch (trust-problem #(storage! (Object.)))))
+                          (with-redefs [host/adopt-storage-trust! (constantly {})]
+                            (is (= :configured-recovery-boundary-replaced (trust-problem #(storage! comparison)))))
                           (let [j (:historical-judgment-binding joined)
                                 refined (:refined-judgment j)]
                             (is (= :conditional-configured-historical-judgment-binding (:status j)))

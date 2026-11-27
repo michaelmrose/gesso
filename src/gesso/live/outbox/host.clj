@@ -913,6 +913,7 @@
           result)))))
 
 (def ^:private original-configured-adopt adopt-implementation-trust!)
+(def ^:private original-configured-storage-adopt adopt-storage-trust!)
 (def ^:private original-physical-envelope physical-envelope/compare-recovery!)
 (def ^:private original-activated-recovery observed-recovery/compare-activated!)
 (def ^:private original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
@@ -927,6 +928,7 @@
 (defn- configured-recovery-boundaries! []
   (combined-boundaries!)
   (when-not (and (identical? original-configured-adopt adopt-implementation-trust!)
+                 (identical? original-configured-storage-adopt adopt-storage-trust!)
                  (identical? original-physical-envelope physical-envelope/compare-recovery!)
                  (identical? original-activated-recovery observed-recovery/compare-activated!)
                  (identical? original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
@@ -938,6 +940,29 @@
                  (identical? original-recovery-worker-match worker-capture/worker-outcome-capture-matches?)
                  (identical? original-framed-observation publication/read-framed-submission-observation!))
     (reject! :configured-recovery-boundary-replaced {})))
+
+(defn- configured-storage-declaration! [system owner comparison]
+  (let [entry (locking storage-trust-hosts
+                (.get storage-trust-hosts (::storage-trust-token system)))]
+    (when-not (and entry (identical? system (.get ^java.lang.ref.WeakReference (:system entry)))
+                   (identical? (:lock owner) (:lock entry))
+                   (identical? (:active owner) (:active entry)) @(:active entry))
+      (reject! :unissued-combined-storage-trust-host {}))
+    (let [adopted (original-configured-storage-adopt system comparison)
+          {:keys [deployment-id acceptance policy]} (:trust entry)
+          scope (:judgment-scope adopted)
+          declaration {:deployment-id deployment-id :acceptance acceptance
+                       :identity-policy (:identity-policy policy)
+                       :premises (mapv :assumption (:obligations adopted))}]
+      (when-not (and (= :conditional (:status adopted))
+                     (= :configured-local-host (:deployment-adoption adopted))
+                     (= policy (select-keys scope storage-policy-keys))
+                     (= deployment-id (get-in adopted [:deployment-acceptance :deployment-id]))
+                     (= (:identity-policy policy) (get-in adopted [:deployment-acceptance :identity-policy]))
+                     (= :not-established (get-in adopted [:deployment-acceptance :authentication]))
+                     (= :not-performed (:proof-discharge adopted)))
+        (reject! :configured-storage-judgment-mismatch {:storage-reason (:reason adopted)}))
+      {:adopted adopted :declaration declaration :policy policy})))
 
 (defn- join-historical-judgment! [history configured physical refined]
   (let [original (:historical-judgment refined)
@@ -1000,9 +1025,13 @@
               read-history #(original-qualified-history system tables admission source declarations steps observation acquisition capture history-cut)
               qualified (when (contains? worker-scope :history-cut) (read-history))
               historical (:historical worker-scope)
+              storage-adoption (when (:configured-storage? historical)
+                                 (configured-storage-declaration! system i (:comparison historical)))
               refined (when historical
                         (original-refined-judgment admission observation history-cut
-                                                   (:comparison historical) (:declaration historical)))
+                                                   (:comparison historical)
+                                                   (if storage-adoption (:declaration storage-adoption)
+                                                       (:declaration historical))))
               _ (when (and historical (not (= :conditional (:status refined))))
                   (reject! :configured-historical-judgment-mismatch {:historical-reason (:reason refined)}))
               configured (original-configured-adopt system source declarations)
@@ -1058,6 +1087,10 @@
             (reject! :configured-recovery-worker-origin-mismatch {}))
           (let [history (when qualified (original-history-join qualified physical root sample))
                 historical-binding (when historical (join-historical-judgment! history configured physical refined))]
+            (when (and storage-adoption
+                       (not= (dissoc (:adopted storage-adoption) :deployment-adoption)
+                             (:historical-judgment refined)))
+              (reject! :configured-storage-judgment-mismatch {}))
             (when (and qualified (not= qualified (read-history)))
               (reject! :configured-writer-history-changed {}))
             (configured-recovery-boundaries!)
@@ -1085,7 +1118,15 @@
            :authority :none :certificate :not-issued}
               history (assoc :qualified-writer-history history
                              :remaining-conditions (into (:remaining-conditions physical) (:remaining-conditions history)))
-              historical-binding (assoc :historical-judgment-binding historical-binding))))))))
+              historical-binding (assoc :historical-judgment-binding historical-binding)
+              storage-adoption (assoc :configured-storage-adoption
+                                      {:status :configured-local-host
+                                       :policy (:policy storage-adoption)
+                                       :scope (:judgment-scope (:adopted storage-adoption))
+                                       :deployment-acceptance (:deployment-acceptance (:adopted storage-adoption))
+                                       :trusted-assumptions (:trusted-assumptions (:adopted storage-adoption))
+                                       :storage-lineage :not-established
+                                       :proof-discharge :not-performed}))))))))
 
 
 (defn compare-configured-envelope-recovery!
@@ -1122,3 +1163,13 @@
   (compare-configured-envelope-recovery* system tables source declarations steps observation
                                         {:acquisition acquisition :capture capture :history-cut history-cut
                                          :historical {:comparison comparison :declaration declaration}}))
+
+
+(defn compare-configured-worker-storage-recovery!
+  "Join selected recovery to all three startup-selected trust contracts.
+   Storage premises come from the exact owner's policy, not a caller's
+   declaration. Local adoption does not authenticate historical lineage."
+  [system tables source declarations steps observation acquisition capture history-cut comparison]
+  (compare-configured-envelope-recovery* system tables source declarations steps observation
+                                        {:acquisition acquisition :capture capture :history-cut history-cut
+                                         :historical {:comparison comparison :configured-storage? true}}))
