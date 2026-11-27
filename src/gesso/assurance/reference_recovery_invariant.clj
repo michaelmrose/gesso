@@ -7,6 +7,7 @@
             [gesso.assurance.reference-mapped-poststate :as poststate]
             [gesso.assurance.reference-retained-acquisition :as acquisition]
             [gesso.assurance.reference-recovery-expression :as expression]
+            [gesso.assurance.reference-recovery-projection :as projection]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.rule-eval :as production]
             [gesso.assurance.transition :as construction]
@@ -31,6 +32,8 @@
 (def ^:private original-query xt/q)
 (def ^:private original-expression-catalog expression/check-catalog!)
 (def ^:private original-expression-boundaries expression/boundaries-current?)
+(def ^:private original-independent-project projection/project!)
+(def ^:private original-projection-boundaries projection/boundaries-current?)
 
 (defn boundaries-current? []
   (and (identical? original-project poststate/project-visible!)
@@ -48,7 +51,10 @@
        (identical? original-query xt/q)
        (identical? original-expression-catalog expression/check-catalog!)
        (identical? original-expression-boundaries expression/boundaries-current?)
-       (original-expression-boundaries)))
+       (original-expression-boundaries)
+       (identical? original-independent-project projection/project!)
+       (identical? original-projection-boundaries projection/boundaries-current?)
+       (original-projection-boundaries)))
 
 (defn- report [status reason]
   (cond-> {:profile profile :status status
@@ -197,7 +203,7 @@
                                                    (= :committed-abstract-transition relation)
                                                    (assoc :alternative-id operation-id)))))))))))))))
 
-(def physical-profile :selected-pinned-invariant-readbacks-v1)
+(def physical-profile :selected-pinned-invariant-readbacks-v2)
 
 (defn- read-physical-visible! [node basis tables system valid]
   (into {} (map (fn [table]
@@ -244,13 +250,32 @@
                                          :system-time (:system-time tx) :valid-time (:system-time tx)}])
                                      (partition 2 1 (rest selected))))
                 project #(original-project coordinates % {:outcome-cases cases})]
-            (if (every? (fn [{:keys [system-time valid-time]}]
-                          (= (project (original-visible replay system-time valid-time))
-                             (project (read-physical-visible! node basis tables system-time valid-time))))
-                        points)
-              (assoc base :status :matched :correspondence :matched-selected-physical-projections
-                     :checked-coordinates points :invariant-ids (:invariant-ids checked))
-              (fail :mismatch :physical-invariant-projection-mismatch)))))
+            (loop [[point & remaining] points]
+              (if-not point
+                (assoc base :status :matched :correspondence :matched-selected-physical-projections
+                       :checked-coordinates points :invariant-ids (:invariant-ids checked)
+                       :projection-correspondence
+                       {:profile projection/profile :status :matched
+                        :scope :selected-supplied-visible-rows-only
+                        :checking :independent-coordinate-and-closed-outcome-decoding
+                        :checked-coordinates points :field-coordinates coordinates
+                        :closed-outcome-case-count (count cases)
+                        :record-validation :shared-canonical-record-validator
+                        :provider-refinement :not-established :universal-projection :not-established
+                        :proof-discharge :not-performed :authority :none :certificate :not-issued})
+                (let [{:keys [system-time valid-time]} point
+                      retained-rows (original-visible replay system-time valid-time)
+                      physical-rows (read-physical-visible! node basis tables system-time valid-time)
+                      retained-state (project retained-rows)
+                      physical-state (project physical-rows)]
+                  (cond
+                    (not= retained-state (original-independent-project coordinates retained-rows cases))
+                    (fail :mismatch :independent-retained-projection-mismatch)
+                    (not= physical-state (original-independent-project coordinates physical-rows cases))
+                    (fail :mismatch :independent-physical-projection-mismatch)
+                    (not= retained-state physical-state)
+                    (fail :mismatch :physical-invariant-projection-mismatch)
+                    :else (recur remaining))))))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
         (throw e))
@@ -293,7 +318,10 @@
              (= :original-selected-invariant-coordinates-only (:scope physical))
              (= :matched-selected-physical-projections (:correspondence physical))
              (set? invariant-ids) (seq invariant-ids) (= invariant-ids (:invariant-ids physical))
-             (seq expected) (= expected (:checked-coordinates physical)))
+             (= projection/profile (get-in physical [:projection-correspondence :profile]))
+             (= :matched (get-in physical [:projection-correspondence :status]))
+             (seq expected) (= expected (:checked-coordinates physical)
+                               (get-in physical [:projection-correspondence :checked-coordinates])))
       (assoc base :status :conditional
              :conclusion :declared-invariants-hold-on-selected-physical-projections
              :derivation :finite-invariant-evaluation-and-projection-equality

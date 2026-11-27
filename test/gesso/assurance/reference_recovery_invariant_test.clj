@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-recovery-expression :as expression]
+            [gesso.assurance.reference-recovery-projection :as projection]
             [gesso.assurance.reference-mapped-poststate :as poststate]
             [gesso.assurance.rule-eval :as production]
             [xtdb.api :as xt]
@@ -130,6 +131,13 @@
         (is (= [[1 :initial] [2 :prestate] [2 :poststate] [3 :prestate] [3 :poststate]
                 [4 :prestate] [4 :poststate] [5 :prestate] [5 :poststate]]
                (mapv (juxt :tx-id :side) points)))
+        (let [evidence (:projection-correspondence matched)]
+          (is (= projection/profile (:profile evidence)))
+          (is (= :matched (:status evidence)))
+          (is (= points (:checked-coordinates evidence)))
+          (is (= coordinates (:field-coordinates evidence))))
+        (with-redefs-fn {#'invariant/original-independent-project (constantly {:fixture/value 999})}
+          #(is (= :independent-retained-projection-mismatch (:reason (run inputs)))))
         (is (= (t 1) (:system-time (second points))))
         (is (= (t 2) (:valid-time (second points))))
         (is (= matched (run (pop inputs))))
@@ -150,6 +158,9 @@
                                      [checked (assoc matched :status :mismatch)]
                                      [checked (assoc matched :status :unavailable)]
                                      [checked (assoc matched :profile :other)]
+                                     [checked (dissoc matched :projection-correspondence)]
+                                     [checked (assoc-in matched [:projection-correspondence :status] :mismatch)]
+                                     [checked (update-in matched [:projection-correspondence :checked-coordinates] pop)]
                                      [checked (assoc matched :invariant-ids #{:fixture/other})]
                                      [checked (update matched :checked-coordinates pop)]
                                      [checked (update matched :checked-coordinates #(vec (reverse %)))]
@@ -184,7 +195,15 @@
       (is (= (inc (* 2 (dec (count boundaries)))) (count points)))
       (is (= (mapv :tx-id boundaries) (mapv :tx-id (remove #(= :prestate (:side %)) points))))
       (is (= :not-established (:physical-invariant-theorem physical) (:universal-refinement physical)))
-      (is (= :not-performed (:proof-discharge physical))))
+      (is (= :not-performed (:proof-discharge physical)))
+      (let [evidence (:projection-correspondence physical)]
+        (is (= projection/profile (:profile evidence)))
+        (is (= :matched (:status evidence)))
+        (is (= points (:checked-coordinates evidence)))
+        (is (= 7 (count (:field-coordinates evidence))))
+        (is (= 4 (:closed-outcome-case-count evidence)))
+        (is (= :not-established (:provider-refinement evidence) (:universal-projection evidence)))
+        (is (= :not-performed (:proof-discharge evidence)))))
     (let [conclusion (:conditional-physical-invariant checked)]
       (is (= invariant/conditional-physical-profile (:profile conclusion)))
       (is (= :conditional (:status conclusion)) (pr-str conclusion))

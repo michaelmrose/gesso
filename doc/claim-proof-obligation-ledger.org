@@ -8541,3 +8541,47 @@ declared physical coordinates and closed journal/outcome decoding.
 Keep source-level expression support separate from projection and
 provider snapshot semantics; prioritize substantive correspondence
 over additional descriptive layers.
+
+* v2837 — independently check selected authoritative projection
+
+Introduce an independent coordinate interpreter for the original
+required and nullable document coordinates and journal slots. Check
+physical names, document row identity and exact field presence;
+distinguish missing nullable documents from malformed present rows.
+Validate journal records with the shared canonical record validator,
+check row identity and scan for unique principal/operation matches.
+Decode only an exact closed principal/operation/arguments/outcome case
+with a keyword result. Do not invoke the mapped poststate projector
+or any open outcome decoder in this independent path.
+
+At each original selected historical coordinate compare the original
+and independent projected states on both retained replay rows and
+pinned XTDB readback rows. Require all four states to agree. Retain the
+checked points, field coordinates and closed case count in the v2
+physical readback report. Require matched independent projection
+evidence over the same complete coordinate sequence before deriving
+the conditional physical invariant conclusion. Pin the new projection
+boundary. Preserve the existing v10 historical judgment, expression
+support and open physical premise inventory.
+
+Focused JVM: projection and invariant suites passed 5 tests /
+132 assertions. Combined with expression, inventory and assembled-host
+recovery suites: 15 tests / 3009 assertions, zero failures or errors.
+Both genuine persistent fixtures passed, including reopened and copied
+store checks. Exercise malformed records, duplicate slots, unknown
+arguments/outcomes, missing documents/fields, present false/nil,
+invalid coordinates, replaced validator and deliberately disagreeing
+projectors. Verify all four code blobs against tested files.
+
+This is finite agreement on supplied visible rows. Both projectors
+share the canonical record validator, original coordinate mapping,
+closed outcome cases and provider row acquisition; these are not
+independently proved by agreement. Provider snapshot truth, universal
+projection, writer coverage and proof discharge remain unestablished.
+Full project gates not run. No premise discharged.
+
+Next: qualify the original coordinate mapping and closed outcome
+construction independently against the catalog, and bind the selected
+projection evidence to the exact open authoritative-projection premise.
+Separate shared validator and provider assumptions from checked finite
+correspondence.
