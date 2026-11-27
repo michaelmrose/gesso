@@ -625,7 +625,7 @@
      :dispatch-authentication (if (seq acknowledged) :not-established :not-applicable)
      :authority :none :certificate :not-issued}))
 
-(def physical-refinement-profile :selected-physical-refinement-premises-v1)
+(def physical-refinement-profile :selected-physical-refinement-premises-v2)
 
 (defn- physical-refinement-premises
   "Describe the open physical obligations of this original selected cut.
@@ -695,7 +695,13 @@
         closure-dependencies (set (map #(get-in % [:assumption :id]) obligations))
         obligations (conj obligations
                           (describe closure-id [:reference-physical/selected-cut-authoritative-writer-coverage]
-                                    :gesso.live.outbox.writer-policy/installed-writer-boundary closure-dependencies))]
+                                    :gesso.live.outbox.writer-policy/installed-writer-boundary closure-dependencies)
+                          (describe :reference-physical/authoritative-projection
+                                    [:reference-physical/faithful-authoritative-state-projection]
+                                    :gesso.assurance.reference-mapped-poststate/project-visible #{snapshot-id})
+                          (describe :reference-physical/invariant-expression-semantics
+                                    [:reference-physical/faithful-invariant-expression-semantics]
+                                    :gesso.assurance.proof.typed-presence-semantics/evaluate-expression #{}))]
     {:profile physical-refinement-profile
      :scope interface
      :obligations obligations
@@ -707,15 +713,17 @@
      :authority :none :certificate :not-issued}))
 
 (def ^:private original-inventory inventory/describe-inventory)
+(def ^:private original-transfer-binding inventory/describe-transfer-binding)
 
 (defn- acceptance-boundaries-current? []
   (and (cut-boundaries-current?)
        (conditional-boundaries-current?)
        (identical? original-deployment-acceptance storage/describe-deployment-acceptance)
        (identical? original-assumption-description assumption/describe-assumption)
-       (identical? original-inventory inventory/describe-inventory)))
+       (identical? original-inventory inventory/describe-inventory)
+       (identical? original-transfer-binding inventory/describe-transfer-binding)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v8)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v9)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
@@ -739,7 +747,10 @@
               (not (and abstract-induction (= abstract-induction fresh)))
               (fail :abstract-induction-mismatch)
               :else
-              (merge r (conditional-report :conditional)
+              (let [composed (original-inventory fresh r command-premises worker-premises physical-premises)
+                    transfer (original-transfer-binding (:selected-invariant-evidence entry)
+                                                        physical-premises composed fresh)]
+                (merge r (conditional-report :conditional)
                      {:judgment-profile judgment-profile
                       :judgment-scope scope
                       :judgment-subject judgment-subject
@@ -750,11 +761,12 @@
                       :command-authentication-premises command-premises
                       :worker-authentication-premises worker-premises
                       :physical-refinement-premises physical-premises
-                      :obligation-inventory (original-inventory fresh r command-premises worker-premises physical-premises)
+                      :obligation-inventory composed
+                      :physical-invariant-transfer transfer
                       :cut-correspondence cut-correspondence
                       :historical-assurance :conditional-on-declared-trust
                       :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))
-                      :proof-discharge :not-performed})))
+                      :proof-discharge :not-performed}))))
           (catch clojure.lang.ExceptionInfo e
             (fail (or (:reason (ex-data e)) :invalid-deployment-acceptance))))
         (fail :unissued-conditional-recovery)))))

@@ -226,8 +226,12 @@
                    :reference-physical/submission-attribution :reference-physical/abort-atomicity
                    :reference-physical/aborted-attempt-attribution]
              (seq (:intervening-maintenance original)) (conj :reference-physical/worker-clock)
-             true (conj :reference-physical/writer-coverage)) ids))
-    (is (= (set (butlast ids)) (get-in (peek obligations) [:assumption :dependencies])))
+             true (conj :reference-physical/writer-coverage :reference-physical/authoritative-projection
+                        :reference-physical/invariant-expression-semantics)) ids))
+    (is (= (set (drop-last 3 ids))
+           (get-in (nth obligations (- (count obligations) 3)) [:assumption :dependencies])))
+    (is (= #{:reference-physical/snapshot-continuity} (get-in (nth obligations (- (count obligations) 2)) [:assumption :dependencies])))
+    (is (= #{} (get-in (peek obligations) [:assumption :dependencies])))
     (is (= fingerprints (set (map :premise-fingerprint obligations))))
     (is (every? #(= interface (get-in % [:assumption :subject :interface])) obligations))
     (is (every? #(= :open (:discharge-state %)) obligations))
@@ -266,7 +270,26 @@
     (is (= :not-established (:cross-family-implications inventory) (:universal-refinement inventory)))
     (is (= :not-performed (:proof-discharge inventory)))
     (is (= :none (:authority inventory)))
-    (is (= :not-issued (:certificate inventory))))
+    (is (= :not-issued (:certificate inventory)))
+    (let [transfer (:physical-invariant-transfer result)
+          by-id (into {} (map (juxt (comp :id :assumption) :premise-fingerprint)) (:physical expected))
+          binding {:faithful-pinned-provider-readbacks (by-id :reference-physical/snapshot-continuity)
+                   :faithful-authoritative-state-projection (by-id :reference-physical/authoritative-projection)
+                   :faithful-invariant-expression-semantics (by-id :reference-physical/invariant-expression-semantics)}
+          required (into (set (vals binding)) (map by-id) [:reference-physical/source-log :reference-physical/ledger-outcome])]
+      (is (= inventory/transfer-profile (:profile transfer)))
+      (is (= :bound (:status transfer)) (pr-str transfer))
+      (is (= binding (:condition-premise-fingerprints transfer)))
+      (is (= required (:required-open-premise-fingerprints transfer)))
+      (is (= (filterv required order) (:dependency-order transfer)))
+      (is (= (get-in result [:selected-invariant-evidence :recovery-cut-ref]) (:recovery-cut-ref transfer)))
+      (is (= (:fingerprint abstract) (:abstract-report-fingerprint transfer)))
+      (is (= (:declared-invariant-ids abstract) (:invariant-ids transfer)))
+      (is (every? (:unaccepted-premise-fingerprints inventory) required))
+      (is (= :not-performed (:proof-discharge transfer) (:premise-acceptance transfer)))
+      (is (= :not-established (:sufficiency transfer) (:universal-refinement transfer)))
+      (is (= :none (:authority transfer)))
+      (is (= :not-issued (:certificate transfer)))))
   (is (= (set (map :premise-fingerprint (:obligations result)))
          (:open-premise-fingerprints result) (:trusted-assumptions result)))
   (is (every? #(= :open (:discharge-state %)) (:obligations result)))
@@ -519,6 +542,10 @@
                                (let [failure (observed-recovery/declare-conditional-recovery-trust! handle declaration)]
                                  (is (= :conditional-recovery-boundary-replaced (:reason failure)))
                                  (is (not (contains? failure :selected-invariant-evidence)))))
+                             (with-redefs [inventory/describe-transfer-binding (constantly (:physical-invariant-transfer trusted))]
+                               (let [failure (observed-recovery/declare-conditional-recovery-trust! handle declaration)]
+                                 (is (= :conditional-recovery-boundary-replaced (:reason failure)))
+                                 (is (not (contains? failure :physical-invariant-transfer)))))
                              (with-redefs [storage/describe-deployment-acceptance (constantly trusted)]
                                (is (= :conditional-recovery-boundary-replaced
                                       (:reason (observed-recovery/declare-conditional-recovery-trust! handle declaration)))))
@@ -1152,46 +1179,3 @@
       (is (empty? (:obligations adjacent)))
       (is (= :not-applicable (:worker-authentication adjacent) (:dispatch-authentication adjacent)))
       (is (empty? (:open-premise-fingerprints adjacent))))))
-
-(deftest physical-refinement-premises-bind-selected-history
-  (let [describe #'observed-recovery/physical-refinement-premises
-        selected [{:tx-id 3 :intent-id (random-uuid) :maintenance :lease-acquisition}]
-        entry {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
-               :command-observation-ref "original-cut"
-               :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
-               :original-recovery {:manifest-tx-id 0 :initialization-tx-id 1
-                                   :selected-tx-ids [2 4 5] :selected-commitments [:committed :aborted :committed]
-                                   :intervening-maintenance selected
-                                   :provider-refinement :not-established
-                                   :aborted-receipt-identity :not-established}}
-        r (describe entry)
-        fingerprints (:open-premise-fingerprints r)
-        obligations (:obligations r)
-        ids (mapv #(get-in % [:assumption :id]) obligations)]
-    (is (= 9 (count fingerprints)))
-    (is (= r (describe (assoc-in entry [:scope :retained-acquisition-ref] "other-target"))))
-    (is (= (set (butlast ids)) (get-in (peek obligations) [:assumption :dependencies])))
-    (is (= #{:reference-physical/submission-attribution :reference-physical/abort-atomicity}
-           (get-in (first (filter #(= :reference-physical/aborted-attempt-attribution
-                                     (get-in % [:assumption :id])) obligations)) [:assumption :dependencies])))
-    (is (= :not-established (:provider-refinement r) (:complete-writer-coverage r) (:universal-refinement r)))
-    (is (every? #(= :open (:discharge-state %)) obligations))
-    (doseq [changed [(assoc entry :command-observation-ref "other-cut")
-                     (assoc-in entry [:scope :publication-source-id] "other-source")
-                     (assoc-in entry [:scope :historical-cut :payload-fingerprint] "other-content")
-                     (assoc-in entry [:judgment-subject :catalog-id] :fixture/other)
-                     (assoc-in entry [:original-recovery :manifest-tx-id] 1)
-                     (assoc-in entry [:original-recovery :selected-tx-ids] [2 4 6])
-                     (assoc-in entry [:original-recovery :selected-commitments] [:committed :committed :committed])
-                     (assoc-in entry [:original-recovery :intervening-maintenance 0 :intent-id] (random-uuid))
-                     (assoc-in entry [:original-recovery :worker-observation-provenance] :matched-local-issued-host-capture)]]
-      (let [other (describe changed)]
-        (is (not-any? fingerprints (:open-premise-fingerprints other)))
-        (is (= :not-performed (:premise-acceptance other)))
-        (is (= :not-established (:universal-refinement other)))))
-    (let [adjacent (describe (update entry :original-recovery dissoc :intervening-maintenance))
-          no-abort (describe (assoc-in entry [:original-recovery :selected-commitments] [:committed :committed :committed]))]
-      (is (= 8 (count (:obligations adjacent))))
-      (is (= 7 (count (:obligations no-abort))))
-      (is (empty? (get-in no-abort [:scope :selected-aborted-tx-ids])))
-      (is (= :not-established (:complete-writer-coverage adjacent) (:complete-writer-coverage no-abort))))))

@@ -92,3 +92,90 @@
        :proof-discharge :not-performed
        :universal-refinement :not-established
        :authority :none :certificate :not-issued})))
+
+(def transfer-profile :selected-physical-invariant-transfer-v1)
+
+(def ^:private transfer-premise-ids
+  {:faithful-pinned-provider-readbacks :reference-physical/snapshot-continuity
+   :faithful-authoritative-state-projection :reference-physical/authoritative-projection
+   :faithful-invariant-expression-semantics :reference-physical/invariant-expression-semantics})
+
+(defn describe-transfer-binding
+  "Relate the original issued finite conclusion to the exact open physical
+   premise inventory. This is a dependency declaration, not a derivation of
+   the premises or a proof that these are sufficient for CLM-R2. Internal only;
+   callers must supply the original registry entry and freshly built inventory."
+  [checked physical inventory abstract]
+  (let [base {:profile transfer-profile :scope :original-selected-invariant-coordinates-only
+              :proof-discharge :not-performed :premise-acceptance :not-performed
+              :universal-refinement :not-established :authority :none :certificate :not-issued}
+        conclusion (:conditional-physical-invariant checked)
+        interface (:scope physical)
+        obligations (:obligations physical)
+        by-id (into {} (map (fn [d] [(get-in d [:assumption :id]) d])) obligations)
+        by-fp (into {} (map (juxt :premise-fingerprint identity)) obligations)
+        index (:premises-by-fingerprint inventory)
+        group (get-in inventory [:premise-families :physical])
+        binding (into {} (map (fn [[condition id]]
+                               [condition (:premise-fingerprint (get by-id id))])) transfer-premise-ids)
+        fail #(assoc base :status :not-established :reason %)]
+    (cond
+      (not (and (= :checked (:status checked)) (= :conditional (:status conclusion))
+                (= :declared-invariants-hold-on-selected-physical-projections (:conclusion conclusion))
+                (= (set (keys transfer-premise-ids)) (:conditional-on conclusion))
+                (= :matched (get-in checked [:physical-readbacks :status]))
+                (seq (:checked-coordinates conclusion))
+                (= (:checked-coordinates conclusion) (get-in checked [:physical-readbacks :checked-coordinates]))
+                (seq (:invariant-ids conclusion))
+                (= (:invariant-ids checked) (:invariant-ids conclusion)
+                   (:declared-invariant-ids abstract))))
+      (fail :unqualified-finite-physical-conclusion)
+
+      (not (and (= profile (:profile inventory))
+                (= :selected-historical-cut-only (:scope-kind interface))
+                (string? (:recovery-cut-ref checked))
+                (= (:recovery-cut-ref checked) (:recovery-cut-ref interface))
+                (some? (:historical-cut checked)) (= (:historical-cut checked) (:historical-cut interface))
+                (some? (:judgment-subject checked)) (= (:judgment-subject checked) (:judgment-subject interface))
+                (= (:catalog-fingerprint checked) (get-in interface [:judgment-subject :catalog-fingerprint]))
+                (= (:retained-payload-fingerprint checked) (get-in interface [:historical-cut :payload-fingerprint]))
+                (= (:selected-tx-ids checked) (:selected-tx-ids interface))
+                (string? (:fingerprint abstract))
+                (= (:fingerprint abstract) (get-in inventory [:abstract :report-fingerprint])
+                   (get-in interface [:judgment-subject :abstract-induction-fingerprint]))
+                (= (count obligations) (count by-id) (count by-fp))
+                (= (set (keys by-fp)) group (:open-premise-fingerprints physical))
+                (every? string? (vals binding))
+                (every? (fn [[fp d]]
+                          (let [entry (get index fp)]
+                            (and (= interface (get-in d [:assumption :subject :interface]))
+                                 (= :open (:discharge-state d) (:discharge-state entry))
+                                 (= :not-performed (:acceptance entry))
+                                 (= :physical (:family entry))
+                                 (= (get-in d [:assumption :id]) (:id entry))
+                                 (= (set (map #(get-in by-id [% :premise-fingerprint])
+                                              (get-in d [:assumption :dependencies])))
+                                    (:dependency-fingerprints entry))
+                                 (contains? (:unaccepted-premise-fingerprints inventory) fp)
+                                 (contains? (:all-described-open-premise-fingerprints inventory) fp)))) by-fp)))
+      (fail :unqualified-original-transfer-premises)
+
+      :else
+      (let [required (reduce (fn [seen fp]
+                               (if (or (some #{fp} (vals binding))
+                                       (some #(contains? (get-in index [% :dependency-fingerprints]) fp) seen))
+                                 (conj seen fp) seen))
+                             #{} (reverse (:dependency-order inventory)))]
+        (if (and (every? required (vals binding))
+                 (every? group required)
+                 (every? #(every? required (get-in index [% :dependency-fingerprints])) required))
+          (assoc base :status :bound
+                 :recovery-cut-ref (:recovery-cut-ref checked)
+                 :abstract-report-fingerprint (:fingerprint abstract)
+                 :invariant-ids (:invariant-ids conclusion)
+                 :condition-premise-fingerprints binding
+                 :required-open-premise-fingerprints required
+                 :dependency-order (filterv required (:dependency-order inventory))
+                 :dependency-classification :declared-transfer-requirements-only
+                 :sufficiency :not-established)
+          (fail :incomplete-transfer-dependency-closure))))))

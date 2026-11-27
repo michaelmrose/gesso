@@ -8112,3 +8112,40 @@ Full project gates not run. No proof premise discharged.
 Next: bind the conditional transfer conditions to the exact original
 judgment's open premise inventory, explicitly distinguishing established
 finite evidence from the remaining CLM-R2 proof obligations.
+
+* v2826 — bind selected physical invariant transfer premises
+
+Extend the selected physical premise family to v2 with explicit
+authoritative-state projection and invariant-expression semantics
+obligations. Preserve the prior selected writer-coverage dependencies;
+the two added premises are not writer-coverage claims. Both are scoped
+to the original historical cut and catalog subject. Projection depends
+on the existing snapshot-continuity premise; expression semantics is a
+separate open obligation.
+
+The v9 historical judgment binds the three descriptive conditions of
+the original issued finite physical invariant conclusion to canonical
+premise fingerprints in the freshly composed inventory. Require the
+original cut reference, retained payload, subject, catalog, induction
+report and selected transaction and invariant identities. Check matched
+physical coordinates, open unaccepted physical premises and consistent
+inventory dependencies. Include the transitive source-log and ledger
+outcome requirements: five distinct open premise fingerprints in the
+selected transfer. Reject missing or foreign dependencies and false
+acceptance or discharge classifications; pin the original binding
+function at the judgment boundary. No sufficiency, cross-family proof
+implication or universal CLM-R2 refinement is established.
+
+Focused JVM: combined host recovery, invariant and inventory tests
+passed 10 tests / 2725 assertions, zero failures or errors. During that
+run move the two standalone physical premise tests into the inventory
+namespace to keep the host test below 1200 lines; no test body or
+production code changes. Rerun the final inventory namespace: 3 tests /
+104 assertions, zero failures or errors. Both persistent adjacent and
+worker-interleaved recovery fixtures passed. Original polling and
+offline dependencies retained. Full project gates not run.
+
+Next: qualify invariant-expression correspondence against the original
+declared invariant source, reusing existing independent typed-rule
+semantics and proof machinery. Distinguish selected executable agreement
+from a universally justified evaluator theorem. No premise is discharged.
