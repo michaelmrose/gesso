@@ -24,7 +24,12 @@
                  :namespace 'gesso.assurance.proof.typed-presence-semantics :interpreter 'interpretation!
                  :sha256 "8c8380d2fb359c828b4d3238cf8759ca5b040f22339929195ecde73c964e1428"}
    :observation {:path "gesso/assurance/proof/typed_value_semantics.clj"
-                 :sha256 "70cdf9de02d52b9d1287462decc606ea811cb3f007054c0b829a209c5c84728d"}})
+                 :namespace 'gesso.assurance.proof.typed-value-semantics
+                 :sha256 "70cdf9de02d52b9d1287462decc606ea811cb3f007054c0b829a209c5c84728d"}
+   :production-syntax {:path "gesso/assurance/rule.clj" :namespace 'gesso.assurance.rule
+                       :sha256 "51f4a99ed469f46a5523a17bc0380c81ff0c9218caf1514ca8b9a8a462232738"}
+   :production-typing {:path "gesso/assurance/rule_type.clj" :namespace 'gesso.assurance.rule-type
+                       :sha256 "374f55133f4148e7cc4889334ef25b418f1d77cac86b25315156983e516d53e8"}})
 
 (defn- reject! [reason]
   (throw (ex-info "Unqualified literal evaluator source refinement" {:reason reason})))
@@ -129,17 +134,108 @@
       (reject! :interpreter-clause-mismatch))
     (set (keys expected))))
 
+(def admission-profile :literal-admission-source-handoff-v1)
+
+(def ^:private admission-handoffs
+  ;; Paths address body forms after docstring and arguments. Whole-source
+  ;; digests also pin validation code outside these exact handoff checks.
+  {:production-syntax
+   {'check-rule! ['[declaration] 4
+                  {[3 1] '[readers (:readers declaration)]
+                   [3 6 1] '[budget (atom 0) used (atom #{})]
+                   [3 6 2] '(check-expression! (:expression declaration) [:expression] 0 budget readers used)
+                   [3 6 3] '(when-not (= @used readers)
+                              (invalid! :unused-reader-declaration
+                                        {:at [:readers] :unused (set/difference readers @used)}))
+                   [3 6 4 :expression] '(:expression declaration)
+                   [3 6 4 :readers] 'readers}]}
+   :production-typing
+   {'check-rule-type! ['[declaration reader-types] 1
+                       {[0 0] 'let
+                        [0 1] '[syntax (rule/check-rule! declaration)
+                                types (validate-reader-types! (:readers syntax) reader-types)
+                                result (type-expression! (:expression syntax) [:expression] types
+                                                         {:present #{} :nonnull #{}})]
+                        [0 2] '(boolean! result [:expression])
+                        [0 3 :expression] '(:expression syntax)
+                        [0 3 :readers] '(:readers syntax)
+                        [0 3 :reader-types] 'reader-types}]}
+   :production
+   {'check-bindings! ['[checked bindings] 4 {[3] 'bindings}]
+    'evaluate-rule! ['[declaration reader-types bindings] 1
+                     {[0 0] 'let
+                      [0 1] '[checked (rule-type/check-rule-type! declaration reader-types)
+                              _ (check-bindings! checked bindings)
+                              value (strict-boolean! (interpret! (:expression checked) bindings [:expression])
+                                                     [:expression])]
+                      [0 2 :expression] '(:expression checked)
+                      [0 2 :readers] '(:readers checked)
+                      [0 2 :value] 'value}]}
+   :observation
+   {'observation ['[id descriptor state] 1
+                  {[0] '(if-not (contains? state id)
+                          (if (:optional? descriptor)
+                            {:presence :absent}
+                            (reject! :missing-required-reader [:state id] {:reader id}))
+                          (let [value (get state id) kind (value-kind! value)]
+                            (when-not (value-in-domain* descriptor value kind)
+                              (reject! :ill-typed-present-value [:state id]
+                                       {:reader id :declared-type (:type descriptor) :actual-kind kind}))
+                            {:presence :present :kind kind :value value}))}]
+    'observe-state! ['[reader-types state] 1
+                     {[0 0] 'let
+                      [0 1] '[types (types! reader-types) _ (exact-plain-map! state [:state])
+                              provided (set (keys state)) unexpected (set/difference provided (set (keys types)))]
+                      [0 2] '(when (seq unexpected) (reject! :undeclared-readers [:state] {:unexpected unexpected}))
+                      [0 3 0] 'let
+                      [0 3 1] '[fields (into {} (map (fn [[id descriptor]] [id (observation id descriptor state)])) types)]
+                      [0 3 2 :fields] 'fields}]}
+   :independent
+   {'evaluate-expression! ['[expression reader-types state] 1
+                           {[0 0] 'let
+                            [0 1] '[observed (values/observe-state! reader-types state)
+                                    used (atom #{}) budget (atom 0)
+                                    checked-type (type-expression! expression reader-types {:present #{} :nonnull #{}}
+                                                                   [:expression] 0 budget used)
+                                    declared (set (keys reader-types))]
+                            [0 2] '(nonnullable-boolean! checked-type [:expression])
+                            [0 3] '(when-not (= @used declared)
+                                      (reject! :reader-footprint-mismatch [:reader-types] {:unused (set/difference declared @used)}))
+                            [0 4 0] 'let
+                            [0 4 1] '[visited (atom []) evaluated (interpretation! expression (:fields observed) [:expression] visited)]
+                            [0 4 2 :expression] 'expression
+                            [0 4 2 :source-readers] 'declared
+                            [0 4 2 :value] 'evaluated}]}})
+
+(defn- form-at [form path]
+  (reduce (fn [node k]
+            (cond (and (integer? k) (sequential? node)) (nth node k ::missing)
+                  (map? node) (get node k ::missing)
+                  :else ::missing)) form path))
+
+(defn- check-handoffs! [side forms]
+  (let [expected (admission-handoffs side)]
+    (when-not (seq expected) (reject! :unknown-admission-source))
+    (doseq [[name [args body-count checks]] expected]
+      (let [matches (filter #(and (seq? %) (#{'defn 'defn-} (first %)) (= name (second %))) forms)
+            declaration (drop 2 (first matches))
+            [actual-args & body] (if (string? (first declaration)) (rest declaration) declaration)]
+        (when-not (and (= 1 (count matches)) (= args actual-args)
+                       (= body-count (count body))
+                       (every? (fn [[path form]] (= form (form-at body path))) checks))
+          (reject! :admission-handoff-mismatch))))
+    (set (keys expected))))
+
 (defn- check-source! [side spec source]
   (when-not (= (:sha256 spec) (digest source)) (reject! :unreviewed-evaluator-source))
-  (cond-> {:path (:path spec) :sha256 (:sha256 spec)}
-    (:interpreter spec)
-    (assoc :checked-operators
-           (with-open [r (PushbackReader. (StringReader. source))]
-             (binding [*read-eval* false *ns* (the-ns (:namespace spec))]
-               (let [forms (loop [result []]
-                             (let [form (read {:eof ::end} r)]
-                               (if (= ::end form) result (recur (conj result form)))))]
-                 (check-clauses! side forms (:interpreter spec))))))))
+  (with-open [r (PushbackReader. (StringReader. source))]
+    (binding [*read-eval* false *ns* (the-ns (:namespace spec))]
+      (let [forms (loop [result []]
+                    (let [form (read {:eof ::end} r)]
+                      (if (= ::end form) result (recur (conj result form)))))
+            artifact (cond-> {:path (:path spec) :sha256 (:sha256 spec)}
+                       (:interpreter spec) (assoc :checked-operators (check-clauses! side forms (:interpreter spec))))]
+        (assoc artifact :checked-admission-handoffs (check-handoffs! side forms))))))
 
 (defn- reviewed-artifacts! []
   (into {} (map (fn [[side spec]]
@@ -172,12 +268,21 @@
         (assoc base :status :conditional-source-refinement
                :rule rule :reader-types (:reader-types r) :source-artifacts artifacts
                :runtime-identity (assoc after :checking :before-and-after-refinement)
+               :admission-source {:profile admission-profile
+                                  :status :conditional-source-handoff
+                                  :scope :successfully-validated-required-reader-inputs-only
+                                  :checked-functions (into {} (map (fn [[role artifact]]
+                                                                   [role (:checked-admission-handoffs artifact)])) artifacts)
+                                  :conclusion :original-expression-and-present-scalar-bindings-preserved
+                                  :validator-acceptance-equivalence :not-established
+                                  :loaded-code-correspondence :not-established}
                :cases-checked (:cases-checked r)
                :conclusion :reviewed-interpreter-truth-factors-through-abstract-cells
                :argument [:required-read-and-literal-denotation :scalar-comparison-observations
                           :boolean-structural-induction :short-circuit-loop-induction]
                :conditions (into (:conditions r)
-                                 #{:successful-admission-preserves-source-and-bindings
+                                 #{:successful-validation-of-original-required-reader-inputs
+                                   :faithful-immutable-map-and-observation-semantics
                                    :faithful-clojure-scalar-equality-and-integer-compare
                                    :standard-clojure-control-flow-and-termination
                                    :loaded-code-implements-reviewed-source-without-substitution})))

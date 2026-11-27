@@ -8457,3 +8457,47 @@ Next: qualify admission source and binding correspondence for the
 restricted literal fragment, including the production syntax/type
 handoff and independent observation/type checking. Distinguish the
 remaining trusted execution assumptions from the source-level argument.
+
+* v2835 — qualify original admission and binding handoffs
+
+Extend reviewed-source qualification to production syntax and type
+validation, in addition to both evaluators and independent typed-value
+observation. Pin the complete five source artifacts. Check the relevant
+original function arguments, body counts, and structural handoff forms
+in seven functions. The original syntax check visits the original
+expression and requires the declared reader footprint; the type check
+uses that expression and returns the original reader types and source.
+The production evaluator validates the supplied binding map and passes
+that original map and checked expression to the interpreter. Independent
+observation validates the supplied state and constructs its field map
+from the original scalar values, preserving present nil and false.
+Independent expression checking uses the original expression, enforces
+the exact declared reader footprint and passes the observation fields
+to its interpreter.
+
+For the already qualified required-reader literal fragment and
+successfully validated inputs, these source-level handoffs establish
+the conditional argument that the same expression and scalar bindings
+reach both interpretations. The validation bodies outside the checked
+handoff forms remain pinned by whole-source digests. The argument
+assumes faithful immutable map and observation semantics and the
+existing primitive semantics, control flow and loaded-code conditions.
+It does not prove identical validator acceptance domains, justify
+arbitrary unsupported input, authenticate loaded code, or discharge
+the original invariant-expression semantics premise.
+
+Focused JVM: standalone source-refinement suite passed 6 tests /
+154 assertions. Combined nine proof namespaces passed 134 tests /
+4477 assertions, zero failures or errors. Mutate each of the five
+admission source artifacts to change expression, reader types,
+production interpreter bindings, observed scalar value or independent
+interpreter field input. Reject changed digests and the corresponding
+structural mutations even with a recomputed candidate digest.
+Verify both code blobs against tested files. Historical judgment
+unchanged; host recovery and full project gates not rerun.
+
+Next: compose the conditional source-level expression refinement with
+the exact original Claim catalog and its subject-bound invariant-expression
+semantics premise. Retain all primitive and loaded-code conditions
+as explicit open assumptions; do not substitute finite source evidence
+for an unconditional discharge.
