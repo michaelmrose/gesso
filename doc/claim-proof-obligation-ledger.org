@@ -10288,3 +10288,32 @@ Next: compose the configured selected recovery correspondence with the
 existing issued writer-history qualification for the complete selected
 post-initialization prefix, preserving exact retained acquisition and
 keeping finite history qualification distinct from universal closure.
+
+* v2879 — bind configured recovery to issued qualified writer history
+
+Retain the exact owner, admission, source, declarations, selected steps,
+acquisition, capture, generation and activation in the issued writer
+history qualification. Read only a qualified cut for those original
+inputs while the original owned policy remains open. Recheck the cut
+and its acquisition after composing configured physical correspondence.
+Match the full selected post-initialization prefix to the original
+command alternatives, worker policy branches, physical refinement
+steps and selected temporal intervals. Require the same retained
+payload and activation root and preserve the union of selected open
+conditions alongside all 39 original general conditions. The resulting
+finite prefix qualification is not universal writer or temporal coverage,
+historical mediation, storage lineage, or proof discharge.
+
+Focused installed-host JVM regression: 1 test / 1349 assertions, zero
+failures or errors (exit 0), in assembled-command-transport-worker-
+interleaved-recovery. Exercise three command attempts and four worker
+maintenance commits, complete prefix matching, rejection of an issued
+but unqualified cut, foreign cut and substituted history reader, and
+retained storage reopening and substitution checks. Update the reviewed
+host digest for the diagnostic-only change. Adjacent variant and full
+project gates not rerun. No production submission behavior changed.
+
+Next: join the configured selected prefix qualification to the original
+issued conditional historical recovery judgment at the same cut,
+retaining distinct storage-lineage and current-owner trust scopes and
+all original open conditions.

@@ -1037,7 +1037,8 @@
                                          started tables admit mapped-source outcome-declarations steps observation %1 %2)
                               configured! #(host/compare-configured-worker-envelope-recovery!
                                             %1 tables mapped-source outcome-declarations steps observation %2 %3)
-                              joined (configured! started handle worker-capture)
+                              joined (host/compare-configured-worker-history-recovery!
+                                      started tables mapped-source outcome-declarations steps observation handle worker-capture enhanced-cut)
                               result (:physical-correspondence joined)
                               maintenance-result (:maintenance-correspondence result)]
                           (is (= :conditional-configured-envelope-recovery (:status joined)))
@@ -1047,7 +1048,21 @@
                           (is (= (:activation-root joined) (get-in joined [:adoption-scopes :writer-isolation :activation-root])))
                           (is (= [5 8] (mapv #(count (get-in joined [:trusted-assumptions-by-contract %])) [:writer-isolation :provider-trust])))
                           (is (= 39 (count (:remaining-general-conditions joined))))
-                          (is (= (:remaining-conditions result) (:remaining-conditions joined)))
+                          (let [h (:qualified-writer-history joined)]
+                            (is (= :conditional-configured-selected-writer-history (:status h)))
+                            (is (= required (:historical-cut h)))
+                            (is (= (:post-initialization-steps qualified) (:post-initialization-steps h)))
+                            (is (= (:selected-temporal-coverage qualified) (:selected-temporal-coverage h)))
+                            (is (= (:selected-physical-refinement qualified) (:selected-physical-refinement h)))
+                            (is (= :not-established (:writer-coverage h) (:universal-refinement h) (:temporal-coverage h)))
+                            (is (= (into (:remaining-conditions result) (:remaining-conditions h)) (:remaining-conditions joined)))
+                            (is (= :not-performed (:proof-discharge h))))
+                          (let [check! #(host/compare-configured-worker-history-recovery!
+                                         started tables mapped-source outcome-declarations steps observation %1 worker-capture %2)]
+                            (is (= :unissued-qualified-writer-history (trust-problem #(check! handle cut-handle))))
+                            (is (= :unissued-qualified-writer-history (trust-problem #(check! handle (Object.)))))
+                            (with-redefs [writer-history/read-qualified-history! (constantly qualified)]
+                              (is (= :configured-recovery-boundary-replaced (trust-problem #(check! handle enhanced-cut))))))
                           (is (every? (:remaining-conditions joined) #{:faithful-worker-and-dispatch-origin :faithful-worker-provider-envelope}))
                           (is (= :not-established (:historical-mediation joined) (:continuous-mediation joined) (:storage-lineage joined)))
                           (is (= :not-performed (:proof-discharge joined)))

@@ -21,6 +21,7 @@
             [gesso.assurance.operational-report :as operational-report]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-physical-envelope-argument :as physical-envelope]
+            [gesso.assurance.reference-installed-writer-history :as writer-history]
             [gesso.assurance.reference-retained-acquisition :as retained-acquisition]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.assurance.reference-writer-isolation :as isolation]
@@ -917,6 +918,8 @@
 (def ^:private original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
 (def ^:private original-local-activated-recovery observed-recovery/compare-local-activated!)
 (def ^:private original-recovery-acquisition retained-acquisition/read-acquisition!)
+(def ^:private original-qualified-history writer-history/read-qualified-history!)
+(def ^:private original-history-join writer-history/join-configured-envelope!)
 (def ^:private original-recovery-worker-match worker-capture/worker-outcome-capture-matches?)
 (def ^:private original-framed-observation publication/read-framed-submission-observation!)
 
@@ -928,6 +931,8 @@
                  (identical? original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
                  (identical? original-local-activated-recovery observed-recovery/compare-local-activated!)
                  (identical? original-recovery-acquisition retained-acquisition/read-acquisition!)
+                 (identical? original-qualified-history writer-history/read-qualified-history!)
+                 (identical? original-history-join writer-history/join-configured-envelope!)
                  (identical? original-recovery-worker-match worker-capture/worker-outcome-capture-matches?)
                  (identical? original-framed-observation publication/read-framed-submission-observation!))
     (reject! :configured-recovery-boundary-replaced {})))
@@ -955,7 +960,10 @@
           (reject! :configured-recovery-activation-mismatch {}))
         (when (and worker-scope (not (and sample (original-recovery-worker-match system capture))))
           (reject! :configured-recovery-worker-origin-mismatch {}))
-        (let [configured (original-configured-adopt system source declarations)
+        (let [history-cut (:history-cut worker-scope)
+              read-history #(original-qualified-history system tables admission source declarations steps observation acquisition capture history-cut)
+              qualified (when (contains? worker-scope :history-cut) (read-history))
+              configured (original-configured-adopt system source declarations)
               retained (if worker-scope
                          (original-local-activated-recovery node tables admission source declarations steps observation acquisition true)
                          (original-activated-recovery node tables admission source declarations steps observation))
@@ -1006,7 +1014,12 @@
           (when (and worker-scope (not (and (= sample (original-recovery-acquisition node acquisition))
                                             (original-recovery-worker-match system capture))))
             (reject! :configured-recovery-worker-origin-mismatch {}))
-          {:status :conditional-configured-envelope-recovery
+          (let [history (when qualified (original-history-join qualified physical root sample))]
+            (when (and qualified (not= qualified (read-history)))
+              (reject! :configured-writer-history-changed {}))
+            (configured-recovery-boundaries!)
+            (require-open-provider-generation! system)
+            (cond-> {:status :conditional-configured-envelope-recovery
            :profile :configured-clm-r2-envelope-recovery-v1
            :recovery-scope (if worker-scope :worker-interleaved :adjacent)
            :subject (:subject configured) :activation-root root
@@ -1026,7 +1039,9 @@
            :storage-lineage :not-established :writer-coverage :not-established
            :provider-refinement :not-established :universal-refinement :not-established
            :premise-acceptance :explicit-declarations-only :proof-discharge :not-performed
-           :authority :none :certificate :not-issued})))))
+           :authority :none :certificate :not-issued}
+              history (assoc :qualified-writer-history history
+                             :remaining-conditions (into (:remaining-conditions physical) (:remaining-conditions history))))))))))
 
 
 (defn compare-configured-envelope-recovery!
@@ -1044,3 +1059,12 @@
   [system tables source declarations steps observation acquisition capture]
   (compare-configured-envelope-recovery* system tables source declarations steps observation
                                         {:acquisition acquisition :capture capture}))
+
+
+(defn compare-configured-worker-history-recovery!
+  "Join the interleaved envelope comparison to the exact previously issued
+   writer-history cut for this owner, observation, acquisition and capture.
+   Finite selected prefix only; no universal coverage or new trust."
+  [system tables source declarations steps observation acquisition capture history-cut]
+  (compare-configured-envelope-recovery* system tables source declarations steps observation
+                                        {:acquisition acquisition :capture capture :history-cut history-cut}))

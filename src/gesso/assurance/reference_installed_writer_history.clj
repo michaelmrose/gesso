@@ -157,6 +157,9 @@
                 (.put qualified-histories (:recovery-cut-observation compared)
                       {:admission admission :observation observation
                        :source source :declarations declarations :fingerprint fingerprint :cases cases
+                       :owner (java.lang.ref.WeakReference. system) :tables tables :steps steps
+                       :acquisition acquisition :worker-capture worker-capture
+                       :generation token :activation root
                        :history (dissoc result :recovery)}))
               result))))
       (catch clojure.lang.ExceptionInfo e
@@ -175,6 +178,81 @@
       (when (and entry (identical? admission (:admission entry))
                  (identical? observation (:observation entry)))
         entry))))
+
+(defn read-qualified-history!
+  "Read the exact issued qualification for its original owner, inputs,
+   acquisition and worker capture while the original policy is open."
+  [system tables admission source declarations steps observation acquisition worker-capture handle]
+  (boundaries!)
+  (let [entry (qualified-history admission observation handle)
+        node (:xtdb/connectable system)
+        token (current-token node)
+        cut (read-cut admission observation handle)
+        sample (read-acquisition node acquisition)]
+    (when-not (and entry (identical? system (.get ^java.lang.ref.WeakReference (:owner entry)))
+                   (= tables (:tables entry)) (= steps (:steps entry))
+                   (= source (:source entry)) (= declarations (:declarations entry))
+                   (identical? acquisition (:acquisition entry))
+                   (identical? worker-capture (:worker-capture entry))
+                   token (identical? token (:generation entry))
+                   (= :open (:phase (owned-state node token)))
+                   (= (:activation entry) (active-root node admission token))
+                   cut sample (= cut (select-keys sample (keys cut))))
+      (reject! :unissued-qualified-writer-history))
+    (boundaries!)
+    {:history (:history entry) :cut cut}))
+
+(defn join-configured-envelope!
+  "Internal composition over rederived configured correspondence and an
+   issued history read by the owner boundary. Not a public authority."
+  [qualified physical root sample]
+  (let [{:keys [history cut]} qualified
+        partition (:post-initialization-steps history)
+        refinement (:selected-physical-refinement history)
+        temporal (:selected-temporal-coverage history)
+        ids (:transaction-ids cut)
+        commands (:abstract-steps physical)
+        maintenance (get-in physical [:maintenance-correspondence :steps])
+        branch-for {:lease-acquisition :lease-acquisition
+                    :expired-lease-reclamation :lease-reclaim
+                    :dispatch-acknowledgment :dispatch-acknowledgment}
+        expected (vec (sort-by :tx-id
+                              (concat (map (fn [s]
+                                             {:tx-id (:tx-id s) :alternative (:identity s)
+                                              :class (case (:relation s)
+                                                       :committed-abstract-transition :committed-mapped
+                                                       :aborted-stutter :aborted-attempt nil)}) commands)
+                                      (map (fn [s] {:tx-id (:tx-id s) :class :committed-worker
+                                                    :policy-branch (branch-for (:maintenance s))}) maintenance))))]
+    (when-not (and (= :conditional-installed-retained-writer-history (:status history))
+                   (= :complete-at-selected-cut (:retained-transaction-classification history))
+                   (= :conditional-selected-physical-refinement (:status refinement))
+                   (= :conditional-selected-diagonal-coverage (:status temporal))
+                   (= :not-performed (:proof-discharge history) (:proof-discharge refinement) (:proof-discharge temporal))
+                   (= :not-established (:writer-coverage history) (:universal-refinement history) (:temporal-coverage history))
+                   (= cut (select-keys sample (keys cut)))
+                   (= (:payload-fingerprint cut) (get-in physical [:maintenance-correspondence :retained-payload-fingerprint]))
+                   (= [(:manifest-tx-id root) (:initialization-tx-id root)] (subvec ids 0 2))
+                   (= (:selected-tx-ids physical) (mapv :tx-id commands))
+                   (= (subvec ids 2) (mapv :tx-id expected) (mapv :tx-id partition)
+                      (mapv :tx-id (:steps refinement)) (mapv :to-tx-id (:intervals temporal)))
+                   (= expected partition (mapv #(dissoc % :schema :relation) (:steps refinement)))
+                   (every? :class expected)
+                   (every? :policy-branch (filter #(= :committed-worker (:class %)) expected))
+                   (= (mapv :schema (:steps refinement)) (mapv :schema (:intervals temporal)))
+                   (= (mapv :relation (:steps refinement))
+                      (mapv #(case (:class %) :committed-worker :maintenance-stutter
+                                             :committed-mapped :committed-abstract-transition
+                                             :aborted-attempt :aborted-stutter nil) expected)))
+      (reject! :configured-writer-history-mismatch))
+    {:status :conditional-configured-selected-writer-history
+     :scope :complete-selected-post-initialization-prefix
+     :historical-cut cut :post-initialization-steps partition
+     :selected-temporal-coverage temporal :selected-physical-refinement refinement
+     :remaining-conditions (:remaining-conditions history)
+     :writer-coverage :not-established :temporal-coverage :not-established
+     :universal-refinement :not-established :proof-discharge :not-performed
+     :authority :none :certificate :not-issued}))
 
 (defn- join-judgment! [history cut checked binding judgment]
   (let [refinement (:selected-physical-refinement history)
