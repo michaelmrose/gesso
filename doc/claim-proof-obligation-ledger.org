@@ -9287,3 +9287,42 @@ statement with explicit exhaustive writer and temporal premises,
 separate from selected issued history correspondence. Then bind the
 result to the original CLM-R2 obligation and historical judgment
 without upgrading unproved assumptions to discharged premises.
+
+* v2854 — derive the general conditional admitted-step schema
+
+Re-derive the original catalog classification, committed and replay
+arguments, and generic equational argument without consuming selected
+historical execution evidence. Require identical alternative identities,
+the exact writing/read-only partition, and the reviewed maintenance
+branches. Keep initialization and manifest establishment separate from
+post-initialization step preservation.
+
+Define the conditional schema for arbitrary post-initialization steps
+or attributed observations, with six qualified classes: committed
+mapped operation, abort, maintenance, replay, local refusal and time
+advance. Replay and refusal refer to attributed observation cuts, not
+arbitrary concurrent history endpoints. Refusal and time advance yield
+projected stutter only under the named endpoint equality conditions.
+Preserve all original classification and derivation conditions and
+explicitly require exhaustive qualified schema instantiation, continuous
+mediation, complete endpoint attribution and faithful typed semantics.
+
+Check the abstract case split over all 128 opaque Boolean valuations.
+There are 63 premise-satisfying valuations. Removing coverage or any
+one of the six case implications yields a counterexample. This checks
+only the propositional composition; the class atoms are not interpreted
+as provider behavior and exhaustiveness is assumed, not derived.
+No universally quantified physical premise or kernel implementation
+theorem is discharged by this result.
+
+Focused suite: 2 tests / 24 assertions. Twelve-namespace assurance
+regression: 55 tests / 7643 assertions, zero failures or errors. Reject
+missing alternatives, changed mapping identities, missing maintenance
+branches, reclassified initialization, missing generic case and
+substituted derivation boundary. Physical host tests and full gates
+not rerun. Historical judgment v12 unchanged.
+
+Next: bind the general conditional schema to the exact original CLM-R2
+obligation, preserving the separate selected physical evidence and
+universal premise scopes. Do not elevate conditional proof structure
+to discharged physical assumptions.
