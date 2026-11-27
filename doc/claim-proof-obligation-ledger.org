@@ -8252,3 +8252,42 @@ argument, reusing the existing propositional kernel where possible.
 Separate an abstract theorem from the remaining executable evaluator
 refinement obligations; checking concrete substitutions is not a
 universal proof of either.
+
+* v2830 — derive abstract comparison and Boolean congruence
+
+For the original typed literal-comparison fragment derive a structural
+congruence argument with the original expression at every node. Atomic
+comparison truth is expressed over its abstract equality and/or order
+observations. Under equality of corresponding observations, the
+comparison truth agrees. Constants agree by construction. For Not,
+And, Or and implication, derive a local congruence entailment assuming
+corresponding child truths agree. For variadic And/Or use the abstract
+binary left-fold semantics and apply the binary result at each fold.
+
+Use the existing independent propositional entailment decision procedure
+to exhaust all local opaque Boolean valuations, checking exact valuation
+counts, nonvacuity, and both directions of implication. No enumeration
+of all scalar valuations or whole-expression Boolean valuations is
+necessary. Recheck the original partition source and reject replaced
+audit/entailment boundaries. Retain a source-derived derivation tree
+including local premises, goals and exhaustive entailment results.
+Both original Claim invariants and Init receive derivations.
+
+Focused JVM: standalone congruence suite passed 3 tests / 108 assertions.
+Combined congruence, substitution, partition, typed-atom oracle,
+typed-proposition bridge and propositional soundness suites passed
+121 tests / 4189 assertions, zero failures or errors. Negative coverage
+includes a noncongruent conjunction/disjunction goal, unsupported
+comparisons and boundary substitution.
+
+The result is conditional abstract comparison/Boolean congruence checked
+by exhaustive local propositional semantics, not a new Ansatz theorem
+or proof that either executable evaluator implements that semantics.
+Scalar observation abstraction, representative existence/completeness,
+and executable evaluator refinement remain separate obligations.
+Historical judgment unchanged; host recovery and full project gates not
+rerun. No proof premise discharged.
+
+Next: justify the scalar comparison observation abstraction and
+representative coverage for the supported domains, separating the
+integer interval argument from equality-only and nullable domains.
