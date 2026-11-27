@@ -121,6 +121,21 @@
        (= (set (keys types)) (:present-readers (original-observe-state types state)))
        (every? #(holds? types state %) (vals invariants))))
 
+(defn check-projected-invariants!
+  "Check every original invariant on a supplied complete typed projection,
+   using both expression evaluators. This is finite evaluation, not a
+   physical observation or an invariant-preservation theorem."
+  [{:keys [operations invariants]} state]
+  (let [types (get-in operations [0 :construction :state-types])]
+    (when-not (and (boundaries-current?) (map? types) (seq types)
+                   (map? invariants) (seq invariants)
+                   (every? #(= types (get-in % [:construction :state-types])) operations)
+                   (check-state? types state invariants)
+                   (boundaries-current?))
+      (throw (ex-info "Unqualified projected invariant state"
+                      {:reason :projected-invariant-state-mismatch})))
+    (set (keys invariants))))
+
 (defn- audit-replay!
   [catalog coordinates cases seed-state inputs comparison steps]
   (let [{:keys [initial-condition invariants operations]} catalog

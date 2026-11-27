@@ -7,6 +7,8 @@
             [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.assurance.reference-issued-envelope-argument :as issued-envelope]
             [gesso.assurance.reference-physical-envelope-argument :as physical-envelope]
+            [gesso.assurance.reference-recovery-invariant :as invariant]
+            [gesso.assurance.reference-transition-refinement :as refinement]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
@@ -216,6 +218,23 @@
                          (is (= :matched-physical-stutter (:aborted-effect r)))
                          (is (= :matched-independent-retained-replay (:physical-rows r)))
                          (is (= [true false true] (mapv :committed? (:ledger r))))
+                         (is (= [:committed-abstract-transition :aborted-stutter :committed-abstract-transition]
+                                (mapv :relation (:abstract-steps r))))
+                         (is (= [:exact-source-derived-puts :exact-row-stutter :exact-source-derived-puts]
+                                (mapv :checked-row-effect (:abstract-steps r))))
+                         (is (= (mapv #(get-in % [:spec :alternative]) steps)
+                                (mapv #(get-in % [:identity :alternative-id]) (:abstract-steps r))))
+                         (is (= (set (keys (get-in mapped-source [:inductive-source :catalog :invariants])))
+                                (:invariant-ids r)))
+                         (is (= :checked-both-evaluators-at-selected-endpoints (:invariant-correspondence r)))
+                         (is (= :matched-both-coordinate-decoders (:projection-correspondence r)))
+                         (is (= :matched-journal-only-mapped-effect (:refusal-effect r)))
+                         (doseq [bad [(with-redefs [refinement/check-step! (constantly {:status :conditional-step-correspondence})]
+                                        (check-physical! tables steps @observation-handle))
+                                      (with-redefs [invariant/check-projected-invariants! (constantly #{})]
+                                        (check-physical! tables steps @observation-handle))]]
+                           (is (= :physical-envelope-boundary-replaced (:reason bad)))
+                           (is (not (contains? bad :abstract-steps))))
                          (is (= :not-established (:physical-preparation-provenance r) (:provider-refinement r)))
                          (doseq [bad [(check-physical! (disj tables :memberships) steps @observation-handle)
                                       (check-physical! tables (assoc-in steps [1 :expectation :tx-id] -1) @observation-handle)

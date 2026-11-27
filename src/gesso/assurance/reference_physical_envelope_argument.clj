@@ -4,6 +4,9 @@
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.reference-transition-refinement :as refinement]
+            [gesso.assurance.reference-mapped-poststate :as poststate]
+            [gesso.assurance.reference-recovery-invariant :as invariant]
             [xtdb.api :as xt]
             [xtdb.basis :as basis])
   (:import (java.time Instant ZonedDateTime)))
@@ -15,6 +18,9 @@
    #'coverage/observe-local-processed-retained-replay-inputs! coverage/observe-local-processed-retained-replay-inputs!
    #'temporal/replay temporal/replay
    #'temporal/visible-at temporal/visible-at
+   #'refinement/check-step! refinement/check-step!
+   #'poststate/project-visible! poststate/project-visible!
+   #'invariant/check-projected-invariants! invariant/check-projected-invariants!
    #'xt/q xt/q
    #'basis/<-time-basis-str basis/<-time-basis-str})
 (def ^:private base
@@ -60,6 +66,44 @@
     (require! (= physical (into {} (map (fn [t] [t (get expected t {})])) tables))
               :physical-envelope-readback-mismatch)
     physical))
+
+(defn- checked-projections! [source local steps selected images]
+  (let [catalog (get-in source [:inductive-source :catalog])
+        coordinates (:target-map source)
+        by-id (into {} (map (juxt :id :construction)) (:operations catalog))
+        invariant-ids (set (keys (:invariants catalog)))
+        reports (mapv
+                 (fn [{:keys [docs journal spec original targets expectation]} instance tx {:keys [pre post]} commitment]
+                   (let [id (:alternative spec)
+                         suffix (filterv #(and (vector? %) (= :put-docs (first %))
+                                               (contains? pre (second %))) (:ops tx))
+                         r (refinement/check-step! original coordinates docs journal spec suffix commitment pre post)
+                         relation (if (= :committed commitment) :committed-abstract-transition :aborted-stutter)]
+                     (require! (and (= original (by-id id)) (= coordinates targets) (= expectation tx)
+                                    (= id (get-in instance [:identity :alternative-id]) (:alternative-id r))
+                                    (= :conditional-source-envelope-instance (:status instance))
+                                    (= refinement/profile (:profile r))
+                                    (= :conditional-step-correspondence (:status r))
+                                    (= commitment (:commitment r)) (= relation (:relation r))
+                                    (= (:before r) (poststate/project-visible! coordinates pre spec))
+                                    (= (:after r) (poststate/project-visible! coordinates post spec)))
+                               :physical-envelope-abstract-relation-mismatch)
+                     (require! (= invariant-ids (invariant/check-projected-invariants! catalog (:before r))
+                                  (invariant/check-projected-invariants! catalog (:after r)))
+                               :physical-envelope-invariant-mismatch)
+                     (assoc (select-keys r [:relation :checked-row-effect :before :after :conditions])
+                            :tx-id (:tx-id tx) :identity (:identity instance))))
+                 steps (:instances local) selected images [:committed :aborted :committed])
+        refusal (peek images)]
+    (require! (and (= 3 (count reports)) (seq invariant-ids)
+                   (= (mapv :after (butlast reports)) (mapv :before (rest reports)))
+                   (= (:before (second reports)) (:after (second reports)))
+                   (= (dissoc (:pre refusal) :gesso_commands) (dissoc (:post refusal) :gesso_commands))
+                   (not= (get-in refusal [:pre :gesso_commands]) (get-in refusal [:post :gesso_commands])))
+              :physical-envelope-abstract-continuity-mismatch)
+    {:steps (mapv #(dissoc % :before :after :conditions) reports)
+     :invariant-ids invariant-ids
+     :conditions (into #{} (mapcat :conditions) reports)}))
 
 (defn compare-recovery!
   "Selected local three-attempt recovery only. Match issued envelopes and
@@ -126,7 +170,8 @@
           (require! (and (= (:post winner) (:pre abort)) (= (:pre abort) (:post abort))
                          (= (:post abort) (:pre refusal)) (not= (:pre winner) (:pre abort)))
                     :physical-envelope-recovery-continuity-mismatch)
-          (require! (= token (token! (xt/q node "SHOW SNAPSHOT_TOKEN" opts))) :physical-envelope-token-mismatch)
+          (let [projected (checked-projections! source local steps selected images)]
+            (require! (= token (token! (xt/q node "SHOW SNAPSHOT_TOKEN" opts))) :physical-envelope-token-mismatch)
           (require! (= sample (coverage/observe-local-processed-retained-replay-inputs! node))
                     :physical-envelope-history-changed)
           (boundaries!)
@@ -137,12 +182,18 @@
                  :preparation-images [:matched-predecessor :matched-earlier-selected-image :matched-predecessor]
                  :aborted-prestate :distinct-from-stale-preparation
                  :aborted-effect :matched-physical-stutter
-                 :remaining-conditions (into (:remaining-conditions local)
+                 :abstract-steps (:steps projected)
+                 :invariant-ids (:invariant-ids projected)
+                 :invariant-correspondence :checked-both-evaluators-at-selected-endpoints
+                 :projection-correspondence :matched-both-coordinate-decoders
+                 :refusal-effect :matched-journal-only-mapped-effect
+                 :remaining-conditions (into (into (:remaining-conditions local) (:conditions projected))
                                              #{:faithful-pinned-provider-readbacks
                                                :faithful-retained-source-log-decoding-and-retention
                                                :faithful-provider-ledger-identity-and-outcome
                                                :faithful-original-preparation-acquisition
-                                               :faithful-selected-aborted-attempt-attribution})))))
+                                               :faithful-selected-aborted-attempt-attribution
+                                               :faithful-original-invariant-expression-semantics}))))))
     (catch InterruptedException e (.interrupt (Thread/currentThread)) (throw e))
     (catch clojure.lang.ExceptionInfo e
       (assoc base :status :not-established :reason (or (:reason (ex-data e)) :unqualified-physical-envelope)))

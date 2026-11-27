@@ -10137,3 +10137,32 @@ Next: connect the checked selected physical rows to the original abstract
 projection and invariant-preservation equations at the committed cuts,
 including the journal-only refusal and physical abort stutter; distinguish
 selected conditional correspondence from a general CLM-R2 discharge.
+
+* v2874 — compose physical recovery with original abstract relations
+
+Extend the pinned physical-envelope diagnostic in place. For each of the
+three selected attempts, use the exact retained mapped put suffix and
+already checked physical predecessor/poststate row images in the original
+source-relative step simulation. Match the original alternative identity
+from the issued envelope and compare both coordinate decoders on each
+endpoint. Check complete typed states and all declared invariant expressions
+using both existing evaluators at each of the six selected endpoints.
+Require projected continuity, abstract stutter on abort, and the refusal's
+journal-only effect within the mapped tables (not across publication or
+evidence tables). Preserve the original source and physical conditions and
+add the step simulation and expression semantics conditions.
+
+Focused JVM regression: 1 test / 610 assertions, zero failures or errors,
+including actual XTDB commit, abort, recovered refusal and reopening.
+The new assertions cover all three relation and row-effect classifications,
+alternative identities, original invariant identities, decoder agreement,
+journal-only mapped effect, and rejection of substituted transition and
+invariant checkers. Full project gates not rerun. No submission behavior
+changed. Finite selected endpoint checks do not establish universal
+invariant preservation, actual preparation acquisition, or complete writer
+coverage. No original condition is discharged; the 39-condition register
+is unchanged.
+
+Next: compose the selected physical-envelope/abstract correspondence with
+the original conditional invariant and refinement arguments and configured
+trust inventory, explicitly retaining each unestablished general premise.
