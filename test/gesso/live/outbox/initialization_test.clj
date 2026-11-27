@@ -7,6 +7,8 @@
             [gesso.assurance.xtdb-source-log :as source-log]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.initialization :as init]
+            [gesso.live.outbox :as outbox]
+            [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.history-coverage :as history]
             [gesso.live.outbox.history-controller :as controller]
@@ -1039,3 +1041,48 @@
               (is (= :unsupported (:status (envelope/check-envelope! node tx-id ops false))))))
           (is (empty? (xt/q node "SELECT * FROM gesso_live_outbox")))
           (finally (release)))))))
+
+
+(deftest worker-maintenance-requires-current-activated-generation
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        events (atom [])
+        config {:admission admission :initializer seed :observe! #(swap! events conj (:kind %))}
+        scope {:source-id "s" :worker-id "w"}
+        id (random-uuid)
+        pending {:xt/id id :gesso.live.outbox/type outbox/intent-type
+                 :gesso.live.outbox/version outbox/intent-version
+                 :gesso.live.outbox/status :pending :gesso.live.outbox/source-id "s"
+                 :gesso.live.outbox/operation :example/update :gesso.live.outbox/purpose :gesso.live/refresh
+                 :gesso.live.outbox/topic :example :gesso.live.outbox/subject-id "r1"
+                 :gesso.live.outbox/command-id "c1"}
+        claim (fn [] (let [now (java.time.Instant/now)]
+                      {:intent-id id :source-id "s" :worker-id "w" :lease-id (random-uuid)
+                       :now now :lease-until (.plusSeconds now 60)}))]
+    (with-open [node (xtn/start-node {})]
+      (let [writer (policy/build-policy! node config scope)
+            release (xtdb/register-submission-policy! node writer)
+            acquire! #(acquisition/acquire-pending! node (claim))
+            read-row #(first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id]))]
+        (try
+          (policy/activate-policy! writer)
+          ;; Fixture-only raw write: create existing work after initialization.
+          (xt/execute-tx node [[:put-docs :gesso_live_outbox pending]])
+          (finally (release)))
+        (let [release (xtdb/register-submission-policy! node writer)]
+          (try
+            (is (= :submission-policy-refused (reason acquire!)))
+            (is (= pending (read-row)))
+            (is (= [:initializer] @events))
+            (finally (release))))
+        (let [fresh (policy/build-policy! node config scope)
+              release (xtdb/register-submission-policy! node fresh)]
+          (try
+            (is (= :submission-policy-refused (reason acquire!)))
+            (is (= pending (read-row)))
+            (is (= [:initializer] @events))
+            (policy/activate-policy! fresh)
+            (is (= :acquired (:status (acquire!))))
+            (is (= :leased (:gesso.live.outbox/status (read-row))))
+            (is (= [:initializer :worker] @events))
+            (finally (release))))))))

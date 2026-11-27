@@ -15,7 +15,7 @@
 (def ^:private derive-replay replay/derive!)
 (def ^:private derive-transition transition/derive!)
 (def ^:private reviewed-sources
-  {"gesso/live/outbox/writer_policy.clj" "1c9554c6860f7b88477190fda6bab0b332150383377c55f943325da8c8a2c593"
+  {"gesso/live/outbox/writer_policy.clj" "841615e768af140e13ad9ba09a9176325aadb41cd7d6082a27f8123af212f97c"
    "gesso/live/outbox/maintenance_policy.clj" "59e7463ada951a30944d189913f29399fd3217e6676c93b1ac3eb4db8490109b"
    "gesso/live/outbox/initialization.clj" "36aac083e410e05b806137bf4540559f1ef3d77d4284dc6f387604aff3d81de7"
    "gesso/live/outbox/host.clj" "1afcaa1b852c8ff206d8963c3eea1f833351a702a5160beda177a1283a03ebd0"
@@ -59,11 +59,11 @@
      :manifest {:policy-kind :manifest :effect :infrastructure-establishment
                 :write-tables manifest :requires :exact-source-manifest-establishment}
      :lease-acquisition {:policy-kind :worker :effect :conditional-mapped-stutter
-                         :write-tables worker :requires :pending-row-cas-and-clock}
+                         :write-tables worker :activation :current-activated-generation :requires :pending-row-cas-and-clock}
      :lease-reclaim {:policy-kind :worker :effect :conditional-mapped-stutter
-                     :write-tables worker :requires :expired-lease-cas-and-clock}
+                     :write-tables worker :activation :current-activated-generation :requires :expired-lease-cas-and-clock}
      :dispatch-acknowledgment {:policy-kind :worker :effect :conditional-mapped-stutter
-                               :write-tables worker :requires :current-lease-cas-and-receipt}}))
+                               :write-tables worker :activation :current-activated-generation :requires :current-lease-cas-and-receipt}}))
 
 (defn- classify! [checked writes reads generic]
   (let [mappings (:operation-mappings checked)

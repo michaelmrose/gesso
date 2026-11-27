@@ -10410,3 +10410,32 @@ inventory, starting with the source-bound admitted writer/attribution
 coverage argument; distinguish enforceable local closure from open
 external isolation and provider premises rather than expanding the
 selected historical report further.
+
+* v2883 — require current activation for worker maintenance
+
+Advance the local lifecycle-enforcement route rather than add another
+selected recovery report. The reviewed mapped writer predicate previously
+required the current activated registration for framed commands, but its
+maintenance branch could accept an otherwise exact worker envelope before
+activation or after re-registering the same stale policy callable. Require
+that same current activated generation for all three worker branches, before
+observation and provider submission. Keep manifest establishment available
+before activation; initializer and framed-command behavior are unchanged.
+Reject unknown maintenance classifications. Update the reviewed source
+digest and record the activation requirement on each worker policy branch.
+
+Focused JVM: 4 tests / 77 assertions, zero failures or errors, covering the
+new real XTDB lease acquisition regression, original mapped activation gate
+and declared writer classification. In a disposable node, seed a pending
+outbox row explicitly through raw XTDB after initialization to exercise an
+existing-work scenario. Both stale registration and fresh unactivated
+policy reject acquisition without changing the row or observing admission;
+activation of the fresh generation permits acquisition. This is evidence
+of local adapter lifecycle enforcement, not a proof that all workers or
+physical writes traverse it. Worker origin and external isolation remain
+open, as do provider effects and all 39 original general conditions. Full
+project gates and installed-host interleaved regression not rerun.
+
+Next: enforce and qualify original worker call-chain attribution at the
+selected installed owner boundary, preserving the distinction between an
+exact maintenance envelope and an authenticated external dispatch receipt.

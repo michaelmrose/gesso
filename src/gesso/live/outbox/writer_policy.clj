@@ -175,7 +175,7 @@
    host-owned source, worker and descriptor. Observer failure refuses
    submission. Initialization is consumed locally on admission and
    durably on commit of the seed and its marker. Mapped operations
-   remain disabled until activate-policy! checks the captured initializer."
+   and worker maintenance remain disabled until activate-policy! checks the captured initializer."
   [connectable config infrastructure]
   (let [{:keys [admission initializer observe!]} (validate-config! config)
         initialized? (atom false)
@@ -208,8 +208,13 @@
                                      (not (initialization/initialized? connectable source-id checked-init))
                                      (compare-and-set! initialized? false true))
                             {:kind :initializer})
+                          ;; Manifest establishment precedes activation. Worker
+                          ;; maintenance requires the current activated generation.
                           (when-let [maintenance-kind (maintenance/admit connectable infrastructure tx-ops)]
-                            (observe-maintenance-origin connectable infrastructure tx-ops maintenance-kind))))]
+                            (when (or (= :manifest (:kind maintenance-kind))
+                                      (and (= :worker (:kind maintenance-kind))
+                                           (xtdb/submission-policy-current? connectable (:registration @phase))))
+                              (observe-maintenance-origin connectable infrastructure tx-ops maintenance-kind)))))]
            (when kind
              (observe! kind)
              (when (:worker-origin kind)
