@@ -8684,3 +8684,49 @@ Next: bind the retained snapshot correspondence to the exact open
 snapshot-continuity premise and its ledger/source-log prerequisites.
 Compose the three condition-specific support results without treating
 selected observations as universal physical refinement.
+
+* v2840 — compose conditional physical invariant support
+
+Bind the retained snapshot correspondence to the exact original
+historical cut, payload, catalog and abstract induction identity.
+Independently reconstruct the manifest, initialization, selected
+command and intervening maintenance ledger sequence from the
+original physical premise interface. Check its prefix identity in
+the retained cut, commitment classifications, increasing system
+times, covering snapshot time and exact initial/prestate/poststate
+coordinates. Require the original matched token and valid-time
+continuity evidence. Bind the source-log, ledger-outcome and
+snapshot-continuity fingerprints and require their exact open
+unaccepted dependency chain in the original transfer inventory.
+
+Compose the snapshot, authoritative projection and invariant-expression
+support reports in the v12 historical judgment. Require the original
+cut, catalog, invariant and selected coordinate identities, exact
+condition-to-premise bindings and complete five-premise dependency
+closure. Recheck each open inventory entry and its dependencies;
+reject missing, substituted, accepted or discharged premises. Retain
+the remaining conditions separately by transfer condition. Pin the
+new binding and composition boundaries. Neither the source-log nor
+ledger premise is discharged by this composition.
+
+Focused JVM: new snapshot suite passed 2 tests / 53 assertions.
+Combined snapshot, invariant, projection, expression, inventory and
+assembled-host recovery suites passed 20 tests / 3430 assertions,
+zero failures or errors. Both genuine persistent recovery fixtures
+passed, including reopened and copied storage, with original polling.
+Exercise foreign cut and induction identities, changed ledger outcomes
+and times, insufficient snapshot coverage, incomplete coordinates,
+broken prerequisite chains, altered support reports and false premise
+acceptance/discharge. All four code blobs verified against tested files.
+
+The composed support concerns the selected historical coordinates
+only. Sufficiency, authenticated provider semantics, universal writer
+coverage and universal CLM-R2 refinement remain unestablished. All
+premises remain open. No authority or certificate is issued; full
+project gates not run.
+
+Next: turn to physical transition refinement. Reuse the existing
+checked guarded-write and abort correspondence to formulate the
+explicit provider atomicity and admitted-writer conditions required
+for the general physical-to-abstract transition implication. Keep
+selected witnesses distinct from a universal argument.

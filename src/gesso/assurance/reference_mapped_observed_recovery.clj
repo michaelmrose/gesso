@@ -11,6 +11,7 @@
             [gesso.assurance.reference-recovery-expression :as expression]
             [gesso.assurance.reference-recovery-projection :as projection]
             [gesso.assurance.reference-recovery-invariant :as invariant]
+            [gesso.assurance.reference-recovery-snapshot :as snapshot]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.live.outbox.model-publication :as publication]
@@ -718,6 +719,8 @@
 (def ^:private original-transfer-binding inventory/describe-transfer-binding)
 (def ^:private original-expression-binding expression/bind-premise)
 (def ^:private original-projection-binding projection/bind-premise)
+(def ^:private original-snapshot-binding snapshot/bind-premise)
+(def ^:private original-support-composition snapshot/compose-support)
 
 (defn- acceptance-boundaries-current? []
   (and (cut-boundaries-current?)
@@ -727,9 +730,11 @@
        (identical? original-inventory inventory/describe-inventory)
        (identical? original-transfer-binding inventory/describe-transfer-binding)
        (identical? original-expression-binding expression/bind-premise)
-       (identical? original-projection-binding projection/bind-premise)))
+       (identical? original-projection-binding projection/bind-premise)
+       (identical? original-snapshot-binding snapshot/bind-premise)
+       (identical? original-support-composition snapshot/compose-support)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v11)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v12)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
@@ -759,7 +764,11 @@
                     expression-support (original-expression-binding (:selected-invariant-evidence entry)
                                                                     transfer composed fresh)
                     projection-support (original-projection-binding (:selected-invariant-evidence entry)
-                                                                    transfer composed fresh)]
+                                                                    transfer composed fresh)
+                    snapshot-support (original-snapshot-binding (:selected-invariant-evidence entry)
+                                                                transfer composed fresh physical-premises)
+                    physical-support (original-support-composition (:selected-invariant-evidence entry) transfer composed
+                                                                   snapshot-support projection-support expression-support)]
                 (merge r (conditional-report :conditional)
                      {:judgment-profile judgment-profile
                       :judgment-scope scope
@@ -775,6 +784,8 @@
                       :physical-invariant-transfer transfer
                       :invariant-expression-refinement expression-support
                       :authoritative-projection-refinement projection-support
+                      :snapshot-continuity-refinement snapshot-support
+                      :conditional-physical-support physical-support
                       :cut-correspondence cut-correspondence
                       :historical-assurance :conditional-on-declared-trust
                       :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))

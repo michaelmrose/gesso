@@ -3,6 +3,7 @@
             [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-recovery-expression :as expression]
             [gesso.assurance.reference-recovery-projection :as projection]
+            [gesso.assurance.reference-recovery-snapshot :as snapshot]
             [gesso.assurance.reference-mapped-poststate :as poststate]
             [gesso.assurance.rule-eval :as production]
             [xtdb.api :as xt]
@@ -321,6 +322,31 @@
       (is (= (:remaining-conditions mapping) (:remaining-conditions support)))
       (is (= :open (:premise-state support)))
       (is (= :not-performed (:proof-discharge support) (:premise-acceptance support))))
+    (let [support (:snapshot-continuity-refinement result)
+          composed (:conditional-physical-support result)
+          transfer (:physical-invariant-transfer result)
+          physical (:physical-refinement-premises result)
+          inv (:obligation-inventory result)
+          by-id (into {} (map (juxt (comp :id :assumption) :premise-fingerprint)) (:obligations physical))]
+      (is (= snapshot/profile (:profile support)))
+      (is (= :conditional-premise-support (:status support)) (pr-str support))
+      (is (= (by-id :reference-physical/source-log) (:source-log-premise-fingerprint support)))
+      (is (= (by-id :reference-physical/ledger-outcome) (:ledger-outcome-premise-fingerprint support)))
+      (is (= (by-id :reference-physical/snapshot-continuity) (:premise-fingerprint support)))
+      (is (= :open (:premise-state support)))
+      (is (= :not-performed (:premise-acceptance support) (:proof-discharge support)))
+      (is (= snapshot/composition-profile (:profile composed)))
+      (is (= :conditional-support-composed (:status composed)) (pr-str composed))
+      (is (= (:required-open-premise-fingerprints transfer) (:required-open-premise-fingerprints composed)))
+      (is (= (:condition-premise-fingerprints transfer) (:condition-premise-fingerprints composed)))
+      (is (= (get-in checked [:physical-readbacks :checked-coordinates]) (:checked-coordinates composed)))
+      (is (= (:recovery-cut-ref checked) (:recovery-cut-ref composed)))
+      (is (= (:invariant-ids checked) (:invariant-ids composed)))
+      (is (= (set (keys (:condition-premise-fingerprints transfer)))
+             (set (keys (:remaining-conditions-by-transfer-condition composed)))))
+      (is (every? (:unaccepted-premise-fingerprints inv) (:required-open-premise-fingerprints composed)))
+      (is (= :not-performed (:premise-acceptance composed) (:proof-discharge composed)))
+      (is (= :not-established (:sufficiency composed) (:universal-refinement composed))))
     (is (= invariant/profile (:profile checked)))
     (is (= :checked (:status checked)) (pr-str checked))
     (is (= :declared-invariants-hold-on-selected-replay-projections (:conclusion checked)))
