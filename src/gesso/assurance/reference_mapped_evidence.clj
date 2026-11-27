@@ -286,7 +286,7 @@
 
 (def executor-retained-profile :selected-mapped-retained-evidence-v4)
 
-(defn- check-executor-envelope
+(defn check-executor-envelope
   "Pure source-relative validation shared by single-step and recovery diagnostics."
   [original targets docs journal expectation prefix-count spec context source-id declarations residual-declarations]
   (try

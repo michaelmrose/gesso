@@ -10020,3 +10020,47 @@ correspondence or original proof premise discharge claimed.
 Next: derive the exact source-to-admitted-envelope argument with
 the final witness extension and one-use consumption checks explicitly
 bound to the source-side symbolic write and guard arguments.
+
+* v2871 — compose the source-to-admitted-envelope argument
+
+Specialize the conditional original committed-transition argument to
+all declared journal-writing alternatives. Preserve the original
+catalog, alternative, transition, mapping, case and symbolic relation
+identities and every prior condition. Describe the required ordered
+witness-extension and final-consumption equations separately from the
+provider effect premises. Pin reviewed sources and checker boundaries.
+
+Add an instance checker that re-derives the symbolic argument, checks
+the exact independently lowered prefix, matches declared supplemental
+effects, publication and residual fragments, source-relative input
+selectors, mapped writes and the unbound evidence record, and requires
+the final vector to differ from the admitted vector only by the evidence
+absence assertion, final witness and its two binding fields. The
+existing pure executor-envelope validator is now accessible for reuse;
+its behavior is unchanged. Preserve exact supplied order across the
+extension even when the source checker permits residual permutations
+or write batching. Require equality of the supplied consumed and bound
+vectors; recomputing a digest of changed operations is insufficient.
+
+Final focused JVM regression: 9 tests / 307 assertions, zero failures
+or errors, across the new source-envelope, source-transition, read-only
+replay and mapped-evidence namespaces, including real retained XTDB
+evidence tests. Cover both helper orders and all four writing
+alternatives, changed source identities, declared effects, input
+selectors, mismatched consumption, freshly rebound wrong guard, write,
+witness and extra operation, and substituted checker/schema. The initial
+narrow run before tightening selectors/effects passed 2 tests / 61
+assertions. No production submission behavior changed. Full gates and
+installed mapped-host recovery not rerun.
+
+The new instance inputs are supplied diagnostic values, not actual
+issued admission or consumption observations. Induction fingerprint
+provenance, loaded-code fidelity, one-use installed mediation, provider
+semantics and universal coverage remain assumptions or open obligations.
+This does not alter the original 39-condition register, historical
+judgments, or any premise acceptance or discharge.
+
+Next: bind this source-relative argument to the original issued mapped
+admission and actual policy-scoped consumed handoff, independently
+qualifying the induction and preparation identity, rather than accepting
+a caller's admitted/consumed vectors as execution evidence.
