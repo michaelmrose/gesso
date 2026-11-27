@@ -7934,3 +7934,47 @@ dependency/acceptance classification without accepting or discharging
 unselected premises. Audit the gap between the selected physical
 correspondence and universal CLM-R2 refinement before proposing a
 conditional invariant conclusion.
+
+* v2822 — compose the declared historical obligation inventory
+
+Add a descriptive inventory of the v7 conditional historical judgment.
+Keep the entire original abstract classification, including its
+operation-relative symbolic obligations, open assumptions and certificate
+premises, separate from canonical concrete premise fingerprints. Index
+all described storage, command, worker and physical premises by their
+fingerprints and preserve their family membership and acceptance status.
+Only the exact storage declaration is classified as explicitly accepted;
+all described premises remain open, unadmitted and unchecked.
+
+Resolve declared dependencies to exact fingerprints within each family,
+reject missing or cross-family dependencies, duplicate identities and
+cycles, and emit a deterministic dependency order. Check that the
+abstract assumption classes cover their original open register without
+duplication. Reject inconsistent reported fingerprint sets or acceptance
+and discharge classifications. The inventory is descriptive and its
+completeness is relative to these declared families, not an assertion
+that all actual production obligations have been discovered. No
+cross-family implication or universal refinement is established.
+
+Pin the inventory builder at the original recovery composition boundary
+and invoke it only after the original abstract report has been rechecked.
+Preserve the existing storage-only open-premise-fingerprints field for
+compatibility; the inventory supplies the union and unaccepted subset
+separately. No caller-supplied inventory becomes evidence.
+
+Focused JVM: the combined run executed 7 tests / 2126 assertions,
+zero failures and one error in the standalone inventory fixture's empty
+semantic subject interface. All six assembled-host namespace tests
+passed (2125 assertions), including both genuine persistent recovery
+fixtures, reopened/copied stores and extended history. Correct the
+standalone fixture to use a nonempty interface; its isolated rerun passed
+1 test / 12 assertions with zero failures or errors. Production source
+and integration tests were unchanged between those runs. Older offline
+dependency bundle and original worker polling retained. Full project
+gates not run. No CLM-R2 or other proof premise is discharged.
+
+Next: audit the exact implication from the original abstract induction
+and selected historical correspondence to a conditional invariant
+conclusion. Distinguish checked selected-state evidence from a theorem
+over all physical executions; identify any missing composition premises
+before issuing such a conclusion.

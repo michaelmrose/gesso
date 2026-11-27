@@ -7,6 +7,7 @@
             [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.assurance.reference-provider :as provider]
+            [gesso.assurance.reference-recovery-inventory :as inventory]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.live.outbox.model-publication :as publication]
@@ -672,13 +673,16 @@
      :universal-refinement :not-established
      :authority :none :certificate :not-issued}))
 
+(def ^:private original-inventory inventory/describe-inventory)
+
 (defn- acceptance-boundaries-current? []
   (and (cut-boundaries-current?)
        (conditional-boundaries-current?)
        (identical? original-deployment-acceptance storage/describe-deployment-acceptance)
-       (identical? original-assumption-description assumption/describe-assumption)))
+       (identical? original-assumption-description assumption/describe-assumption)
+       (identical? original-inventory inventory/describe-inventory)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v6)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v7)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
@@ -712,6 +716,7 @@
                       :command-authentication-premises command-premises
                       :worker-authentication-premises worker-premises
                       :physical-refinement-premises physical-premises
+                      :obligation-inventory (original-inventory fresh r command-premises worker-premises physical-premises)
                       :cut-correspondence cut-correspondence
                       :historical-assurance :conditional-on-declared-trust
                       :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))

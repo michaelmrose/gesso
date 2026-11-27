@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
+            [gesso.assurance.reference-recovery-inventory :as inventory]
             [gesso.assurance.reference-mapped-worker-submission :as worker-submission]
             [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.assurance.reference-source-coverage :as coverage]
@@ -235,6 +236,34 @@
            (:universal-refinement physical)))
     (is (= :none (:authority physical)))
     (is (= :not-issued (:certificate physical))))
+  (let [inventory (:obligation-inventory result)
+        index (:premises-by-fingerprint inventory)
+        groups (:premise-families inventory)
+        order (:dependency-order inventory)
+        positions (zipmap order (range))
+        abstract (:abstract-induction result)
+        expected {:storage (:obligations result)
+                  :command (get-in result [:command-authentication-premises :obligations])
+                  :worker (get-in result [:worker-authentication-premises :obligations])
+                  :physical (get-in result [:physical-refinement-premises :obligations])}]
+    (is (= inventory/profile (:profile inventory)))
+    (is (= (into {} (map (fn [[family ds]] [family (set (map :premise-fingerprint ds))])) expected) groups))
+    (is (= (set (keys index)) (set order) (:all-described-open-premise-fingerprints inventory)))
+    (is (= (count index) (count order) (reduce + (map count (vals expected)))))
+    (is (= (:trusted-assumptions result) (:deployment-declared-premise-fingerprints inventory)))
+    (is (= (reduce disj (set (keys index)) (:trusted-assumptions result)) (:unaccepted-premise-fingerprints inventory)))
+    (is (= (:deployment-acceptance result) (:deployment-acceptance inventory)))
+    (is (= (:fingerprint abstract) (get-in inventory [:abstract :report-fingerprint])))
+    (is (= (:classification abstract) (select-keys (:abstract inventory) (keys (:classification abstract)))))
+    (doseq [[fp {:keys [family dependency-fingerprints acceptance discharge-state]}] index]
+      (is (contains? (get groups family) fp))
+      (is (every? #(< (positions %) (positions fp)) dependency-fingerprints))
+      (is (= (if (= :storage family) :explicit-declaration-only :not-performed) acceptance))
+      (is (= :open discharge-state)))
+    (is (= :not-established (:cross-family-implications inventory) (:universal-refinement inventory)))
+    (is (= :not-performed (:proof-discharge inventory)))
+    (is (= :none (:authority inventory)))
+    (is (= :not-issued (:certificate inventory))))
   (is (= (set (map :premise-fingerprint (:obligations result)))
          (:open-premise-fingerprints result) (:trusted-assumptions result)))
   (is (every? #(= :open (:discharge-state %)) (:obligations result)))
@@ -458,7 +487,7 @@
                                  (is (not-any? #(contains? failure %)
                                                [:judgment-subject :judgment-profile :trusted-assumptions :original-recovery
                                                 :abstract-induction :abstract-induction-binding :command-authentication-premises
-                                                :worker-authentication-premises :physical-refinement-premises]))))
+                                                :worker-authentication-premises :physical-refinement-premises :obligation-inventory]))))
                              (is (not (contains? trusted :deployment-adoption)))
                              (is (not (contains? selected :judgment-profile)))
                              (is (= :explicit-declaration-only (:premise-acceptance trusted)))
