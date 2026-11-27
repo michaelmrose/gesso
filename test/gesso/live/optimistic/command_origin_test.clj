@@ -7,13 +7,17 @@
   (let [seen (atom nil)
         origin (atom nil)
         prepared (fixture/base-server
-                  (fn [invocation]
+                  (fn selected [invocation]
                     (reset! seen invocation)
                     (reset! origin (server/current-command-origin invocation))
+                    (is (= @origin (server/current-command-origin invocation selected)))
+                    (is (nil? (server/current-command-origin invocation (fn [_]))))
+                    (is (nil? (server/current-command-origin invocation nil)))
                     (let [copy (into {} invocation)]
                       (is (= invocation copy))
                       (is (not (identical? invocation copy)))
-                      (is (nil? (server/current-command-origin copy))))
+                      (is (nil? (server/current-command-origin copy)))
+                      (is (nil? (server/current-command-origin copy selected))))
                     (is (nil? @(future (server/current-command-origin invocation))))
                     (with-redefs [server/operation-context identity]
                       (is (nil? (server/current-command-origin invocation))))

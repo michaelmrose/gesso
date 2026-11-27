@@ -418,6 +418,8 @@
                             (is (= :incorporated (:status result)))
                             (is (= refused (:outcome result)))
                             (is (= 3 @admissions))
+                            (is (= 3 (count @claims)))
+                            (is (every? #(not (contains? % :command-origin)) @claims))
                             (is (= [:manifest :initializer :mapped-operation :mapped-operation :mapped-operation] @policy-events))
                             (is (= 1 @recovered))
                             (is (= [nil :xtdb/assert-failed nil] (mapv :error @attempts)))

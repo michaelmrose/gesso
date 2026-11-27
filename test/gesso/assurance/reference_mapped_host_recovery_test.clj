@@ -559,6 +559,14 @@
                     history (:replay-inputs sample)]
                 (is (= :returned (:outcome capture)))
                 (is (= :matched-local-policy-window (:policy-window capture)))
+                (let [claims (:claims (publication/read-framed-submission-observation! admit observation))
+                      expected (fn [b]
+                                 (assoc b :execution-id (identity/execution-id (str "e-" (resolution/record-id b)))
+                                        :origin :registered-server-invocation
+                                        :authentication :conditional-on-trusted-principal-resolver))]
+                  (is (= (mapv expected [winner loser loser]) (mapv :command-origin claims)))
+                  (is (= (mapv resolution/record-id [winner loser loser])
+                         (mapv #(get-in % [:checked :identity :command-id]) claims))))
                 (is (= :confirmed (:resolution winning)))
                 (is (= :rejected (:resolution losing)))
                 (is (= (:command-id winner) (:command-id winning)))

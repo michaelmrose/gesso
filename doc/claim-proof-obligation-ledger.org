@@ -7472,3 +7472,38 @@ executor to the consumed mapped submission handoff. Reject copied or
 substituted invocation identities while preserving the distinction
 between configured principal resolution and independently authenticated
 command provenance.
+
+* v2810 — bind registered command origin to consumed mapped handoff
+
+Require the exact registry-selected executor in addition to the exact
+active invocation when observing registered command origin. Pass the
+registered publication executor's identity and original invocation
+through the private execution and framed submission path, including
+guarded refusal after an assertion abort. At actual one-use handoff
+consumption, observe through the pinned server origin matcher and require
+the canonical command binding to equal the command record binding of
+the framed plan. Retain only the descriptive origin in the issued local
+observation, not the active invocation or executor capability.
+
+Ordinary direct execution retains its existing transaction behavior but
+does not supply registered command origin. Do not infer provenance from
+a structurally equal invocation, another executor, or a caller-supplied
+origin report. No change to the physical transaction, durable record
+schema, or writer authority. The origin remains conditional on trusted
+configured principal resolution.
+
+Focused JVM: 54 tests / 1140 assertions in the two genuine persistent
+assembled-host recovery fixtures and optimistic server/origin namespaces;
+1 test / 503 assertions in the direct Claim recovery regression. Both
+runs completed with zero failures or errors. Unchanged worker polling,
+older offline dependency bundle; full project gates not run. The
+installed fixtures bind all three consumed handoffs, including the
+aborted candidate and subsequent refusal, to their respective original
+command and execution identities. The direct fixture retains no such
+origin on any of its three handoffs.
+
+Next: independently compare these issued origins with the selected
+retained command bindings and execution trajectory, distinguishing
+conditional local provenance from authenticated identity. Carry the
+result into the historical judgment without silently discharging any
+command authentication, worker provenance, or CLM-R2 premise.

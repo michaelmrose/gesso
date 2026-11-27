@@ -1131,18 +1131,24 @@
   (and (identical? original-begin-command begin-command)
        (identical? original-operation-context operation-context)))
 
-(defn current-command-origin
-  "Describe the exact invocation during its registered synchronous execution.
-   Copies, other threads and completed invocations have no origin here.
-   The configured resolver is trusted, not independently authenticated;
-   this sensitive local observation is neither authority nor a receipt."
-  [invocation]
+(defn- active-command-origin [invocation]
   (let [scope (.get command-origin)]
     (when (and scope (origin-boundaries-current?)
                (identical? invocation (:invocation scope)))
       (assoc (select-keys invocation [:principal :command-id :execution-id :operation :arguments])
              :origin :registered-server-invocation
              :authentication :conditional-on-trusted-principal-resolver))))
+
+(defn current-command-origin
+  "Describe the exact invocation during its registered synchronous execution.
+   Copies, other threads and completed invocations have no origin here.
+   The configured resolver is trusted, not independently authenticated;
+   this sensitive local observation is neither authority nor a receipt.
+   The two-argument form also requires the exact registry-selected executor."
+  ([invocation] (active-command-origin invocation))
+  ([invocation executor]
+   (when (and executor (identical? executor (:executor (.get command-origin))))
+     (active-command-origin invocation))))
 
 (defn run-command
   "Execute one already-decoded protocol-v3 command through the trusted registry.
@@ -1169,7 +1175,7 @@
              invocation (operation-context boundary)
              result (try
                       (when (and original? (origin-boundaries-current?))
-                        (.set command-origin {:invocation invocation}))
+                        (.set command-origin {:invocation invocation :executor execute!}))
                       (execute! invocation)
                       (finally (.remove command-origin)))]
          (prepare-settlement-send boundary result))
