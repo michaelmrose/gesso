@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-installed-writer-classification :as installed]
+            [gesso.assurance.reference-writer-isolation :as isolation]
             [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.live.outbox.writer-policy :as policy]
             [gesso.core :as g]
@@ -94,7 +95,31 @@
                                  adapter (:xtdb/connectable ctx)
                                  observed (publication/read-framed-submission-observation! admission observation)
                                  history (coverage/observe-local-processed-retained-replay-inputs! node)
-                                 qualified (classify! node admission)]
+                                 qualified (classify! node admission)
+                                 isolated (isolation/prepare! node admission source declarations fingerprint cases
+                                                              {:deployment-id :fixture/owner :database-id :fixture/database
+                                                               :isolation-boundary :fixture/deployment})
+                                 isolation-handle (:handle isolated)
+                                 declaration {:scope (:scope isolated) :acceptance :trust-open-premises
+                                              :premises (mapv :assumption (:obligations isolated))}
+                                 accepted (isolation/declare! node admission isolation-handle declaration)]
+                             (is (= :open-isolation-requirements (:status isolated)) (pr-str (dissoc isolated :handle)))
+                             (is (= :conditional-declared-writer-isolation (:status accepted)) (pr-str accepted))
+                             (is (= 5 (count (:trusted-assumptions accepted))))
+                             (is (= :explicit-declaration-only (:premise-acceptance accepted)))
+                             (is (= :not-established (:writer-coverage accepted) (:continuous-mediation accepted)
+                                    (:provider-correspondence accepted) (:deployment-authentication accepted)))
+                             (is (= :not-performed (:proof-discharge accepted)))
+                             (is (every? #(= :open (:discharge-state %)) (:obligations accepted)))
+                             (is (= :unissued-writer-isolation-scope
+                                    (:reason (isolation/declare! (Object.) admission isolation-handle declaration))))
+                             (is (= :unissued-writer-isolation-scope
+                                    (:reason (isolation/declare! node admission (Object.) declaration))))
+                             (is (= :incorrect-isolation-premise-selection
+                                    (:reason (isolation/declare! node admission isolation-handle (update declaration :premises pop)))))
+                             (is (= :incorrect-isolation-premise-selection
+                                    (:reason (isolation/declare! node admission isolation-handle
+                                                                (assoc-in declaration [:scope :database-id] :fixture/other)))))
                              (is (= :conditional-current-installed-writer-classification (:status qualified)) (pr-str qualified))
                              (is (= :complete (:declared-alternative-coverage qualified)))
                              (is (= :open (:owned-policy-phase qualified)))
@@ -133,7 +158,7 @@
                                     (reason #(xtdb/execute-tx! adapter [[:put-docs :requests (assoc request-row :status :claimed)]]))))
                              (is (= [request-row] (xtdb/q adapter "SELECT * FROM requests")))
                              {:node node :worker worker :live (:gesso.live/system started) :handler ring-handler
-                              :adapter adapter :token token :initial initial :observation observation :history history}))
+                              :adapter adapter :token token :isolation-handle isolation-handle :declaration declaration :initial initial :observation observation :history history}))
                 run! (fn []
                        (let [started (host/start! assembly handler config)]
                          (try
@@ -145,6 +170,8 @@
                                  (is (identical? token (xtdb/current-submission-policy-token node)))
                                  (is (= {:phase :fenced :in-flight 1} (xtdb/owned-submission-policy-state node token)))
                                  (is (= :installed-owned-policy-not-open (:reason (classify! node admission))))
+                                 (is (= :writer-isolation-generation-not-open
+                                        (:reason (isolation/declare! node admission (:isolation-handle result) (:declaration result)))))
                                  (is (= [{:x 1}] (xtdb/q node "SELECT 1 AS x")))
                                  (is (= :owned-submission-fenced (reason #(xtdb/execute-tx! adapter ops))))
                                  (is (= 503 (:status ((:biff.ring/handler started) {:uri "/"}))))
@@ -161,6 +188,8 @@
             (is (nil? (correspondence/initialization-observation (:node first-run) admission)))
             (is (= :not-established (:status (classify! (:node first-run) admission))))
             (is (nil? (xtdb/owned-submission-policy-state (:node first-run) (:token first-run))))
+            (is (= :writer-isolation-generation-not-open
+                   (:reason (isolation/declare! (:node first-run) admission (:isolation-handle first-run) (:declaration first-run)))))
             (with-entered-refusal
               (fn [launch! proceed call ops]
                 (let [opened (atom nil)

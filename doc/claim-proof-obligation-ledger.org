@@ -9596,3 +9596,46 @@ to the exact protected database and owner deployment, distinguishing
 locally enforced ingress from raw provider, alternate connection,
 diagnostic and external writer exclusion. Keep the provider semantic
 contract separate and do not turn deployment declarations into proof.
+
+* v2862 — declare the external writer isolation contract
+
+Introduce a separate, explicitly conditional writer-isolation diagnostic
+for one owned mapped policy generation. Re-derive installed classification
+and the general admitted-step argument, bind the same catalog and original
+five writer-mediation condition IDs, and observe the genuine activation
+root and open owned generation. Issue a private weakly registered scope
+handle binding the exact local node, admission, generation and root.
+The named deployment, database and isolation boundary are declarations,
+not authenticated deployment or durable storage identities.
+
+Derive five structural open environment premises: owner/database binding;
+exclusion of unmediated raw, alternate-connectable, Biff and diagnostic
+in-process writers; exclusion of external provider/network writers;
+exclusion of unmediated storage/log/restore mutation; and isolation
+through acquisition, activation, operation, drain and close. The last
+requires all preceding premises. Require exactly the scope and complete
+dependency-closed raw premise declarations for explicit trust selection.
+Recheck the current generation and pinned boundaries before and after
+selection. A different node, unissued handle, changed database scope,
+omitted premise, fenced or retired registration cannot qualify.
+These premises are related to the original conditions, not a sufficient
+logical implication or evidence of their truth. No provider semantic
+contract, admission authority or cross-generation transfer follows.
+Host-configured adoption is not yet implemented; the declaration
+must be supplied by a trusted owner boundary.
+
+Persistent mapped-host lifecycle: 2 tests / 137 assertions, zero
+failures or errors on the corrected candidate. The initial run failed
+because two general coverage conditions were incorrectly sought in the
+installed classification alone; rederive the general argument as well
+and rerun successfully. Exercise explicit scoped declaration, wrong
+node and unissued handle, missing premise, changed database identity,
+fenced shutdown, retired generation and fresh persistent reopen.
+No runtime writer path changed. Full gates, broader assurance and
+worker-interleaved recovery not rerun. Neither historical judgment
+changes; explicit declaration is not proof discharge or verified isolation.
+
+Next: integrate an optional owner-configured isolation declaration
+at the exact mapped host boundary, preserving generation scope,
+startup/cleanup semantics and the separation from storage-lineage
+trust. Then address the versioned provider semantics requirements.
