@@ -92,9 +92,37 @@
         (is (= (t 1) (:system-time (second points))))
         (is (= (t 2) (:valid-time (second points))))
         (is (= matched (run (pop inputs))))
+        (let [derive #( #'invariant/derive-physical-invariants %1 %2 inputs)
+              conclusion (derive checked matched)]
+          (is (= :conditional (:status conclusion)))
+          (is (= :declared-invariants-hold-on-selected-physical-projections (:conclusion conclusion)))
+          (is (= points (:checked-coordinates conclusion)))
+          (is (= (:invariant-ids checked) (:invariant-ids conclusion)))
+          (is (= :not-performed (:proof-discharge conclusion) (:premise-acceptance conclusion)))
+          (is (= :not-established (:physical-invariant-theorem conclusion) (:universal-refinement conclusion)))
+          (is (= #{:faithful-pinned-provider-readbacks :faithful-authoritative-state-projection
+                   :faithful-invariant-expression-semantics} (:conditional-on conclusion)))
+          (doseq [[replay physical] [[(dissoc checked :conclusion) matched]
+                                     [(assoc checked :projection-continuity :unknown) matched]
+                                     [(assoc checked :status :mismatch) matched]
+                                     [checked nil]
+                                     [checked (assoc matched :status :mismatch)]
+                                     [checked (assoc matched :status :unavailable)]
+                                     [checked (assoc matched :profile :other)]
+                                     [checked (assoc matched :invariant-ids #{:fixture/other})]
+                                     [checked (update matched :checked-coordinates pop)]
+                                     [checked (update matched :checked-coordinates #(vec (reverse %)))]
+                                     [checked (assoc-in matched [:checked-coordinates 1 :valid-time] (t 1))]
+                                     [checked (assoc-in matched [:checked-coordinates 1 :system-time] (t 2))]]]
+            (let [failure (derive replay physical)]
+              (is (= :not-established (:status failure)))
+              (is (not (contains? failure :conclusion)))
+              (is (not (contains? failure :checked-coordinates))))))
         (let [mismatch (run (assoc-in inputs [5 :ops] [(put-value 3)]))]
           (is (= :mismatch (:status mismatch)) (pr-str mismatch))
-          (is (not (contains? mismatch :checked-coordinates)))))))
+          (is (not (contains? mismatch :checked-coordinates)))
+          (is (= :not-established
+                 (:status (#'invariant/derive-physical-invariants checked mismatch inputs))))))))
   (with-redefs [xt/q (constantly [])]
     (is (not (invariant/boundaries-current?)))
     (is (= :invariant-boundary-replaced
@@ -116,6 +144,16 @@
       (is (= (mapv :tx-id boundaries) (mapv :tx-id (remove #(= :prestate (:side %)) points))))
       (is (= :not-established (:physical-invariant-theorem physical) (:universal-refinement physical)))
       (is (= :not-performed (:proof-discharge physical))))
+    (let [conclusion (:conditional-physical-invariant checked)]
+      (is (= invariant/conditional-physical-profile (:profile conclusion)))
+      (is (= :conditional (:status conclusion)) (pr-str conclusion))
+      (is (= :declared-invariants-hold-on-selected-physical-projections (:conclusion conclusion)))
+      (is (= (:invariant-ids checked) (:invariant-ids conclusion)))
+      (is (= (get-in checked [:physical-readbacks :checked-coordinates]) (:checked-coordinates conclusion)))
+      (is (= :not-established (:physical-invariant-theorem conclusion) (:universal-refinement conclusion)))
+      (is (= :not-performed (:proof-discharge conclusion) (:premise-acceptance conclusion)))
+      (is (= :none (:authority conclusion)))
+      (is (= :not-issued (:certificate conclusion))))
     (is (= invariant/profile (:profile checked)))
     (is (= :checked (:status checked)) (pr-str checked))
     (is (= :declared-invariants-hold-on-selected-replay-projections (:conclusion checked)))

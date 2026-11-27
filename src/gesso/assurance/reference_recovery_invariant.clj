@@ -207,6 +207,55 @@
         (fail :unsupported (or (:reason (ex-data e)) :unsupported-physical-invariant-projection)))
       (catch Exception _ (fail :unavailable :physical-invariant-readback-failed)))))
 
+(def conditional-physical-profile :selected-conditional-physical-invariants-v1)
+
+(defn- derive-physical-invariants [checked physical inputs]
+  (let [base {:profile conditional-physical-profile
+              :scope :original-selected-invariant-coordinates-only
+              :physical-invariant-theorem :not-established
+              :universal-refinement :not-established :proof-discharge :not-performed
+              :premise-acceptance :not-performed :authority :none :certificate :not-issued}
+        ids (mapv :tx-id (:checked-boundaries checked))
+        selected (when (and (seq ids) (every? integer? ids) (vector? inputs)
+                            (every? #(integer? (:tx-id %)) inputs))
+                   (vec (take-while #(<= (:tx-id %) (peek ids)) inputs)))
+        initial (second selected)
+        expected (when (and (seq ids) (= ids (mapv :tx-id (rest selected)))
+                            (apply < (map :tx-id selected))
+                            (every? #(instance? Instant (:system-time %)) selected))
+                   (into [{:tx-id (:tx-id initial) :side :initial
+                           :system-time (:system-time initial) :valid-time (:system-time initial)}]
+                         (mapcat (fn [[prior tx]]
+                                   [{:tx-id (:tx-id tx) :side :prestate
+                                     :system-time (:system-time prior) :valid-time (:system-time tx)}
+                                    {:tx-id (:tx-id tx) :side :poststate
+                                     :system-time (:system-time tx) :valid-time (:system-time tx)}])
+                                 (partition 2 1 (rest selected)))))
+        invariant-ids (:invariant-ids checked)]
+    (if (and (= profile (:profile checked)) (= :checked (:status checked))
+             (= :original-selected-transaction-boundaries-only (:scope checked))
+             (= :declared-invariants-hold-on-selected-replay-projections (:conclusion checked))
+             (= :direct-on-selected-replay-projections (:invariant-checking checked))
+             (= :checked-at-selected-transaction-boundaries (:projection-continuity checked))
+             (= :finite-direct-evaluation-not-inductive-theorem (:derivation checked))
+             (= physical-profile (:profile physical)) (= :matched (:status physical))
+             (= :original-selected-invariant-coordinates-only (:scope physical))
+             (= :matched-selected-physical-projections (:correspondence physical))
+             (set? invariant-ids) (seq invariant-ids) (= invariant-ids (:invariant-ids physical))
+             (seq expected) (= expected (:checked-coordinates physical)))
+      (assoc base :status :conditional
+             :conclusion :declared-invariants-hold-on-selected-physical-projections
+             :derivation :finite-invariant-evaluation-and-projection-equality
+             :conditional-on #{:faithful-pinned-provider-readbacks
+                               :faithful-authoritative-state-projection
+                               :faithful-invariant-expression-semantics}
+             :invariant-ids invariant-ids :checked-coordinates expected
+             :unestablished-implications #{:coverage-of-unselected-valid-times
+                                           :coverage-of-unselected-transactions
+                                           :universal-writer-coverage
+                                           :universal-physical-refinement})
+      (assoc base :status :not-established :reason :unqualified-physical-invariant-evidence))))
+
 (defn audit-issued-selection!
   "Check finite projected states from the exact issued sample, not caller
    supplied valuations. The caller must have independently matched the
@@ -240,6 +289,8 @@
               (not= :checked (:status r)) r
               :else (assoc r :retained-payload-fingerprint (:payload-fingerprint sample)
                            :catalog-fingerprint (:catalog-fingerprint checked)
-                           :physical-readbacks physical)))))
+                           :physical-readbacks physical
+                           :conditional-physical-invariant
+                           (derive-physical-invariants r physical (:replay-inputs sample)))))))
       (catch clojure.lang.ExceptionInfo e
         (report :unsupported (or (:reason (ex-data e)) :unsupported-invariant-projection))))))

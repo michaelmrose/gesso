@@ -8080,3 +8080,35 @@ Next: derive the selected conditional physical invariant conclusion from
 both checked finite replay invariants and exact physical projection
 agreement. Preserve the original assumptions and reject unmatched or
 unqualified readbacks; distinguish this finite conclusion from CLM-R2.
+
+* v2825 — derive selected conditional physical invariants
+
+Compose the checked finite replay invariant report and the matched physical
+readback report inside the original issued selection audit. Reconstruct the
+complete ordered initial, prestate and poststate coordinate list from the
+original retained inputs; require exact equality with the readback report,
+the same nonempty invariant identifiers, the expected evidence profiles,
+and the checked replay continuity and evaluation classifications. Missing,
+unqualified, reordered or mismatching readbacks cannot produce a positive
+conditional conclusion. Preserve the independent replay result.
+
+The selected physical invariant conclusion is conditional on faithful pinned
+provider readbacks, authoritative-state projection and invariant expression
+semantics. These are descriptive transfer conditions, not newly admitted or
+discharged premises. Retain the separately profiled conclusion within the
+original issued-cut evidence; preserve the v8 historical judgment, abstract
+induction evidence and existing obligation inventory. No authority, certificate,
+unselected-time coverage, universal writer coverage or universal physical
+refinement follows.
+
+Focused JVM: standalone invariant namespace passed 2 tests / 76 assertions.
+Combined assembled-host recovery and invariant namespaces passed 8 tests /
+2489 assertions, zero failures or errors. Exercise actual XTDB readbacks,
+negative evidence classifications, omitted/reordered coordinates, changed
+system/valid instants and original-cut preservation through persistent host
+recovery. Original worker polling and offline dependency bundle retained.
+Full project gates not run. No proof premise discharged.
+
+Next: bind the conditional transfer conditions to the exact original
+judgment's open premise inventory, explicitly distinguishing established
+finite evidence from the remaining CLM-R2 proof obligations.
