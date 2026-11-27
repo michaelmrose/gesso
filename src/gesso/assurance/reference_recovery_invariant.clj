@@ -34,6 +34,7 @@
 (def ^:private original-expression-boundaries expression/boundaries-current?)
 (def ^:private original-independent-project projection/project!)
 (def ^:private original-projection-boundaries projection/boundaries-current?)
+(def ^:private original-projection-catalog projection/check-catalog!)
 
 (defn boundaries-current? []
   (and (identical? original-project poststate/project-visible!)
@@ -54,7 +55,8 @@
        (original-expression-boundaries)
        (identical? original-independent-project projection/project!)
        (identical? original-projection-boundaries projection/boundaries-current?)
-       (original-projection-boundaries)))
+       (original-projection-boundaries)
+       (identical? original-projection-catalog projection/check-catalog!)))
 
 (defn- report [status reason]
   (cond-> {:profile profile :status status
@@ -259,7 +261,7 @@
                         :scope :selected-supplied-visible-rows-only
                         :checking :independent-coordinate-and-closed-outcome-decoding
                         :checked-coordinates points :field-coordinates coordinates
-                        :closed-outcome-case-count (count cases)
+                        :closed-outcome-case-count (count cases) :closed-outcome-cases cases
                         :record-validation :shared-canonical-record-validator
                         :provider-refinement :not-established :universal-projection :not-established
                         :proof-discharge :not-performed :authority :none :certificate :not-issued})
@@ -364,7 +366,9 @@
                 physical (when (= :checked (:status r))
                            (audit-physical! node (:target-map source) cases (:replay-inputs sample) r))
                 catalog-refinement (when (= :checked (:status r))
-                                     (original-expression-catalog catalog (:catalog-fingerprint checked)))]
+                                     (original-expression-catalog catalog (:catalog-fingerprint checked)))
+                catalog-projection (when (= :checked (:status r))
+                                     (original-projection-catalog source declarations (:catalog-fingerprint checked) cases))]
             (cond
               (not (boundaries-current?)) (report :unsupported :invariant-boundary-replaced)
               (not= :checked (:status r)) r
@@ -372,6 +376,7 @@
                            :catalog-fingerprint (:catalog-fingerprint checked)
                            :physical-readbacks physical
                            :catalog-expression-refinement catalog-refinement
+                           :catalog-projection-correspondence catalog-projection
                            :conditional-physical-invariant
                            (derive-physical-invariants r physical (:replay-inputs sample)))))))
       (catch clojure.lang.ExceptionInfo e

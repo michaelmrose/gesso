@@ -8585,3 +8585,53 @@ construction independently against the catalog, and bind the selected
 projection evidence to the exact open authoritative-projection premise.
 Separate shared validator and provider assumptions from checked finite
 correspondence.
+
+* v2838 — qualify original coordinate mapping and outcome construction
+
+Recheck the exact original catalog fingerprint and independently derive
+the complete field coordinate footprint from its state types. Reject
+unsupported coordinate shapes, optional readers, incompatible
+nullability, aliased physical addresses and conflicting document
+presence. For every original alternative derive the read, write,
+frame and physical write-target footprints directly from the declared
+construction and compare the existing checked mapping. Derive the
+journal-writing alternatives from the literal replacements. Require
+exactly the declared concrete argument/outcome keys for those writers
+and compare the complete independently derived case and alternative
+tables with the existing closed derivation and supplied cases.
+Retain the per-alternative mapping fingerprints and exact case map.
+
+During issued-cut capture retain this catalog correspondence and the
+exact closed cases used in the selected physical projection. The v11
+historical judgment binds the original mapping and four-way selected
+projection evidence to the exact open authoritative-projection
+premise and its snapshot-continuity dependency. Require matching cut,
+catalog, induction and invariant identities, selected issued mapping
+fingerprints, identical coordinates and complete case maps, identical
+checked historical points and open unaccepted inventory entries.
+Pin the added catalog-check and premise-binding boundaries. No
+acceptance or discharge is performed.
+
+Focused JVM: projection and invariant suites passed 7 tests /
+189 assertions. Combined projection, invariant, expression, inventory
+and assembled-host recovery suites passed 17 tests / 3157 assertions,
+zero failures or errors. Both genuine persistent fixtures passed,
+including reopened and copied stores. The original Claim catalog has
+seven fields, eight alternatives, four journal writers and four
+closed cases. Exercise incomplete and aliased coordinates, incompatible
+types, missing concrete declarations, changed cases, foreign catalog
+and mapping identities, missing snapshot dependency and false premise
+acceptance/discharge. Corrected an initial delimiter error before the
+passing runs. All five code blobs verified against tested files.
+
+The result is source-relative correspondence plus finite selected
+projection agreement, not a proof of the declared physical field or
+outcome meaning, canonical record validator, loaded implementation or
+provider readbacks. Real-world writer coverage and universal physical
+refinement remain open. Full project gates not run. No premise discharged.
+
+Next: qualify the pinned provider snapshot and valid-time continuity
+boundary, distinguishing a provider contract and independent retained
+replay from an unconditional implementation theorem. Use original
+transaction coordinates and observable snapshot-token behavior rather
+than merely adding a descriptive premise.
