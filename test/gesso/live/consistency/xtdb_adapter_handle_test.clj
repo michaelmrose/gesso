@@ -14,6 +14,7 @@
           bad [[:put-docs :items {:xt/id "bad" :value 2}]]
           seen (atom [])]
       (is (= :missing-adapter-policy (reason #(adapter/adapter-connectable! node))))
+      (is (nil? (adapter/owned-submission-policy-state node nil)))
       (let [release (adapter/register-submission-policy!
                      node (fn [envelope]
                             (swap! seen conj envelope)
@@ -23,6 +24,7 @@
             forged (adapter/->AdapterConnectable)
             deferred (adapter/plan-q handle ["SELECT * FROM items"])]
         (try
+          (is (nil? (adapter/owned-submission-policy-state node (adapter/current-submission-policy-token node))))
           (is (not (identical? node handle)))
           (is (not (map? handle)))
           (is (not (instance? javax.sql.DataSource handle)))
@@ -118,15 +120,18 @@
         owner (adapter/register-owned-submission-policy!
                node (fn [_] (deliver entered true) (true? (deref proceed 10000 false))))
         {:keys [status fence-and-await! release!]} owner
+        token (adapter/current-submission-policy-token node)
         handle (adapter/adapter-connectable! node)
         ops [[:put-docs :ingress_audit {:xt/id "owned" :value 1}]]
         call (future (adapter/execute-tx! handle ops))]
     (try
       (is (= true (deref entered 10000 ::timeout)))
-      (is (= {:phase :open :in-flight 1} (status)))
+      (is (= {:phase :open :in-flight 1} (status) (adapter/owned-submission-policy-state node token)))
+      (is (nil? (adapter/owned-submission-policy-state node (Object.))))
+      (is (nil? (adapter/owned-submission-policy-state (Object.) token)))
       (is (= :owned-submission-not-drained (reason release!)))
       (is (= :owned-submission-drain-timeout (reason #(fence-and-await! 0))))
-      (is (= {:phase :fenced :in-flight 1} (status)))
+      (is (= {:phase :fenced :in-flight 1} (status) (adapter/owned-submission-policy-state node token)))
       (is (= :owned-submission-fenced (reason #(adapter/execute-tx! handle ops))))
       (is (= :owned-submission-fenced (reason #(adapter/submit-tx! node ops))))
       (is (= :owned-submission-not-drained (reason release!)))
@@ -135,13 +140,14 @@
       (is (some? (:tx-result (deref call 20000 ::timeout))))
       (is (= [{:xt/id "owned" :value 1}] (adapter/q handle ["SELECT * FROM ingress_audit"])))
       (is (= :owned-submission-fenced (reason #(adapter/execute-tx! node ops))))
-      (is (= {:phase :fenced :in-flight 0} (fence-and-await! 0)))
+      (is (= {:phase :fenced :in-flight 0} (fence-and-await! 0) (adapter/owned-submission-policy-state node token)))
       (finally
         (deliver proceed false)
         (fence-and-await! 20000)
         (.close ^java.lang.AutoCloseable node)
         (release!)))
     (is (= {:phase :released :in-flight 0} (status)))
+    (is (nil? (adapter/owned-submission-policy-state node token)))
     (is (= :invalid-adapter-connectable (reason #(adapter/execute-tx! handle ops))))
     (is (nil? (release!)))))
 

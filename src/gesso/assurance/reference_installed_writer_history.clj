@@ -20,6 +20,7 @@
 (def ^:private compose-refinement refinement/compose!)
 (def ^:private current-token xtdb/current-submission-policy-token)
 (def ^:private active-root policy/activated-policy-root)
+(def ^:private owned-state xtdb/owned-submission-policy-state)
 (def ^:private read-observation publication/read-framed-submission-observation!)
 (def ^:private qualified-histories (java.util.WeakHashMap.))
 (def ^:private derive-clm-r2 clm-r2/derive!)
@@ -39,6 +40,7 @@
                  (identical? compose-refinement refinement/compose!)
                  (identical? current-token xtdb/current-submission-policy-token)
                  (identical? active-root policy/activated-policy-root)
+                 (identical? owned-state xtdb/owned-submission-policy-state)
                  (identical? read-observation publication/read-framed-submission-observation!))
     (reject! :installed-history-boundary-replaced)))
 
@@ -118,7 +120,9 @@
         (when-not (and root (= root (:activation-root (read-observation admission observation))))
           (reject! :installed-history-root-mismatch))
         (let [classified (classify node admission source declarations fingerprint cases)]
-          (when-not (= :conditional-current-installed-writer-classification (:status classified))
+          (when-not (and (= :conditional-current-installed-writer-classification (:status classified))
+                         (= :open (:owned-policy-phase classified))
+                         (= :open (:phase (owned-state node token))))
             (reject! :unqualified-installed-history-policy))
           (let [compared (capture system tables admission source declarations steps observation acquisition worker-capture)
                 cut (read-cut admission observation (:recovery-cut-observation compared))
@@ -134,9 +138,12 @@
             (when-not (and (identical? token (current-token node))
                            (= root (active-root node admission token)))
               (reject! :installed-history-generation-changed))
+            (when-not (= :open (:phase (owned-state node token)))
+              (reject! :installed-history-owned-policy-not-open))
             (let [result (merge base {:status :conditional-installed-retained-writer-history
                          :scope :selected-issued-post-initialization-transaction-cut
                          :retained-transaction-classification :complete-at-selected-cut
+                         :lifecycle-evidence :open-owned-generation-at-qualification
                          :post-initialization-steps partition
                          :selected-temporal-coverage temporal-report
                          :selected-physical-refinement refinement-report

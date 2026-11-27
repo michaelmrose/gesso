@@ -19,7 +19,7 @@
    "gesso/live/outbox/maintenance_policy.clj" "59e7463ada951a30944d189913f29399fd3217e6676c93b1ac3eb4db8490109b"
    "gesso/live/outbox/initialization.clj" "36aac083e410e05b806137bf4540559f1ef3d77d4284dc6f387604aff3d81de7"
    "gesso/live/outbox/host.clj" "8016696d5f99eb7c7133966d5d8c2aed1938619e38089f0b1926126db04f0b24"
-   "gesso/live/consistency/xtdb.clj" "fe9cef02d31d0df49ffe06669f18116df97157fb55f37eed370d01f326b894a9"})
+   "gesso/live/consistency/xtdb.clj" "2f191e2cdba15d7ce2ce07da02bc35671b44babb713bd85fce01c6d396156697"})
 
 (defn- reject! [reason]
   (throw (ex-info "Unqualified declared writer classification" {:reason reason})))

@@ -97,6 +97,12 @@
                                  qualified (classify! node admission)]
                              (is (= :conditional-current-installed-writer-classification (:status qualified)) (pr-str qualified))
                              (is (= :complete (:declared-alternative-coverage qualified)))
+                             (is (= :open (:owned-policy-phase qualified)))
+                             (is (= :open-owned-generation-at-qualification (:lifecycle-evidence qualified)))
+                             (is (= :not-established (:continuous-mediation qualified)))
+                             (is (= :open (:phase (xtdb/owned-submission-policy-state node token))))
+                             (with-redefs [xtdb/owned-submission-policy-state (constantly {:phase :open :in-flight 0})]
+                               (is (= :installed-classification-boundary-replaced (:reason (classify! node admission)))))
                              (is (= 8 (count (:alternative-identities qualified))))
                              (is (= :not-established (:writer-coverage qualified) (:universal-refinement qualified)))
                              (is (= :not-performed (:proof-discharge qualified)))
@@ -137,6 +143,8 @@
                                  (launch! adapter)
                                  (is (= :owned-submission-drain-timeout (reason #(host/stop! started))))
                                  (is (identical? token (xtdb/current-submission-policy-token node)))
+                                 (is (= {:phase :fenced :in-flight 1} (xtdb/owned-submission-policy-state node token)))
+                                 (is (= :installed-owned-policy-not-open (:reason (classify! node admission))))
                                  (is (= [{:x 1}] (xtdb/q node "SELECT 1 AS x")))
                                  (is (= :owned-submission-fenced (reason #(xtdb/execute-tx! adapter ops))))
                                  (is (= 503 (:status ((:biff.ring/handler started) {:uri "/"}))))
@@ -152,6 +160,7 @@
             (is (= :invalid-adapter-connectable (reason #(xtdb/q (:adapter first-run) "SELECT 1"))))
             (is (nil? (correspondence/initialization-observation (:node first-run) admission)))
             (is (= :not-established (:status (classify! (:node first-run) admission))))
+            (is (nil? (xtdb/owned-submission-policy-state (:node first-run) (:token first-run))))
             (with-entered-refusal
               (fn [launch! proceed call ops]
                 (let [opened (atom nil)

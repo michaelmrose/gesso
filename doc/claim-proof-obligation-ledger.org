@@ -9557,3 +9557,42 @@ bind it to the installed writer classification, keeping fenced
 generations distinct from open ones. Then define the explicit external
 writer isolation boundary without claiming that local mediation is
 database-wide authorization.
+
+* v2861 — bind owned registration lifecycle state to qualification
+
+Add a read-only adapter diagnostic for the exact physical node and
+opaque owned generation. Read the state under the submission registry
+lock. Generic registrations, absent registrations and foreign or
+retired tokens return nil. A fenced registration retains its identity
+and in-flight count until drain and release; mere registration is not
+evidence of open ingress.
+
+Require a genuine activated mapped policy and an open owned generation
+before and after installed classification. Pin the diagnostic function
+boundary. Retained writer-history qualification also rechecks the exact
+generation's openness after the issued recovery and refinement work,
+before issuing its own history diagnostic. Keep activation-root and
+historical observation semantics unchanged, so previously issued
+historical evidence is not converted into a live admission credential
+or invalidated solely by retirement. An open snapshot is not a lease;
+these checks do not establish future openness, continuous mediation
+over the physical history or external writer isolation.
+
+Focused adapter, writer-classification and installed-history regression:
+9 tests / 124 assertions. Persistent mapped-host lifecycle:
+2 tests / 112 assertions. Both passed with zero failures or errors.
+Check generic, absent and foreign generation rejection, open and
+fenced in-flight state, drained state, retired-token rejection,
+replaced diagnostic rejection, and actual mapped classification refusal
+while shutdown is blocked at a fenced generation. Persistent reopen
+qualifies its new open generation. Update the reviewed adapter source
+fingerprint. Full project gates and worker-interleaved historical
+recovery not rerun. The latter's new live-generation check has only
+focused regression coverage in this revision. Neither historical
+judgment changes; no premise accepted or discharged.
+
+Next: define the explicit external writer isolation contract, scoped
+to the exact protected database and owner deployment, distinguishing
+locally enforced ingress from raw provider, alternate connection,
+diagnostic and external writer exclusion. Keep the provider semantic
+contract separate and do not turn deployment declarations into proof.

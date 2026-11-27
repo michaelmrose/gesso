@@ -14,6 +14,7 @@
 (def ^:private original-init induction/check-mapped-initialization!)
 (def ^:private original-token xtdb/current-submission-policy-token)
 (def ^:private original-root policy/activated-policy-root)
+(def ^:private original-owned-state xtdb/owned-submission-policy-state)
 
 (defn- boundaries! []
   (when-not (and (identical? original-classification classification/derive!)
@@ -21,7 +22,8 @@
                  (identical? original-admission induction/require-current-mapped-admission!)
                  (identical? original-init induction/check-mapped-initialization!)
                  (identical? original-token xtdb/current-submission-policy-token)
-                 (identical? original-root policy/activated-policy-root))
+                 (identical? original-root policy/activated-policy-root)
+                 (identical? original-owned-state xtdb/owned-submission-policy-state))
     (throw (ex-info "Substituted installed classification boundary" {:reason :installed-classification-boundary-replaced}))))
 
 (defn- reject! [reason]
@@ -30,7 +32,8 @@
 (defn derive!
   "Recheck the exact issued admission, registered decoder and mapping, then
    match the live policy's captured manifest/initializer cut. Recheck the
-   generation after the derivation. No independent retained-history survey,
+   open owned generation after the derivation. A fenced registration is
+   not an open writer policy. No independent retained-history survey,
    future activation guarantee, or proof of absence of bypass writers."
   [node admission source declarations fingerprint cases]
   (let [base {:profile profile :authority :none :certificate :not-issued
@@ -41,6 +44,8 @@
       (let [token (original-token node)
             {:keys [observation root] :as activation} (when token (original-root node admission token))]
         (when-not activation (reject! :missing-current-mapped-activation))
+        (when-not (= :open (:phase (original-owned-state node token)))
+          (reject! :installed-owned-policy-not-open))
         (let [description (original-admission admission source)
               decoded (original-decoder admission source declarations)
               classified (original-classification source declarations fingerprint cases)
@@ -77,8 +82,13 @@
           (when-not (and (identical? token (original-token node))
                          (= activation (original-root node admission token)))
             (reject! :installed-generation-changed))
+          (when-not (= :open (:phase (original-owned-state node token)))
+            (reject! :installed-owned-policy-not-open))
           (merge base {:status :conditional-current-installed-writer-classification
                        :scope :one-current-local-mapped-policy-generation
+                       :owned-policy-phase :open
+                       :lifecycle-evidence :open-owned-generation-at-qualification
+                       :continuous-mediation :not-established
                        :catalog-fingerprint fingerprint :induction-fingerprint (:induction-fingerprint description)
                        :declared-alternative-coverage :complete
                        :alternative-identities identities :protected-tables (:protected-tables classified)

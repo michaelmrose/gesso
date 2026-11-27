@@ -239,6 +239,16 @@
     (and (some? token)
          (identical? token (:token (.get submission-policies connectable))))))
 
+(defn owned-submission-policy-state
+  "Observe the exact installed owned generation on its physical node.
+   Nil denotes a generic, absent or different generation. An open snapshot
+   is not a lease; a fenced generation remains registered for drainage."
+  [node token]
+  (locking submission-policies
+    (let [entry (.get submission-policies node)]
+      (when (and (some? token) (identical? token (:token entry)))
+        (when-let [state (:owned-state entry)] @state)))))
+
 ;; The public handle contains no node field. The registry is private and a
 ;; handle is valid only for the exact installed policy that issued it.
 (deftype AdapterConnectable [])
