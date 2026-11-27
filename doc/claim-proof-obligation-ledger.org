@@ -9398,3 +9398,37 @@ Next: inspect and classify the remaining general CLM-R2 assumptions by
 their actual discharge or explicit trust boundary, prioritizing the
 universal writer-mediation and provider-semantics gap. Do not confuse
 the combined conditional historical judgment with universal refinement.
+
+* v2857 — classify remaining general CLM-R2 conditions
+
+Re-derive the original issued CLM-R2 binding, preserving its complete
+original operation obligation register and general condition set.
+Require the reviewed inventory to partition all 39 remaining general
+conditions exactly once across seven evidence areas: writer mediation,
+provider effects, read/time correspondence, attribution/admission,
+projection/lowering, loaded-code correspondence and initial root.
+
+Describe the required evidence routes and their limits, not proven
+dependencies or sufficient premises. Responsibilities can be joint:
+an XTDB atomicity contract cannot establish which callers may submit,
+and Gesso adapter admission cannot establish provider atomicity.
+Prioritize closed writer ingress and lifecycle, then the versioned
+provider transaction semantics and exact envelope refinement. The
+adapter's registration documentation explicitly excludes raw XTDB
+callers from its protection. Deployment isolation and runtime integrity
+must be established or explicitly scoped at the appropriate trust
+boundary rather than inferred from source digests or selected history.
+No new trust assumption is accepted by this inventory.
+
+Focused JVM: 2 tests / 21 assertions, zero failures or errors. Check
+genuine issued binding, exact complete disjoint inventory, original
+register preservation, unissued admission and replaced binding rejection,
+missing/extraneous/overlapping conditions and empty evidence requirements.
+Physical host tests, broader regression and full project gates not rerun.
+The combined historical judgment and original v12 remain unchanged.
+No original premise accepted or discharged.
+
+Next: audit concrete writer ingress and lifecycle boundaries, including
+raw XTDB connectable exposure and alternative submission APIs, and
+separate enforceable mediation from explicit deployment isolation.
+Bind any new evidence to the exact original open conditions.
