@@ -192,6 +192,9 @@
     (is (= (:selected-commitments original) (:selected-commitments interface)))
     (is (= :matched-issued-command-bindings (:origin-correspondence interface)))
     (is (= (:selected-command-origins original) (:selected-command-origins command)))
+    (is (= (mapv #'observed-recovery/command-origin-identity (:selected-command-origins original))
+           (:selected-command-origins interface)))
+    (is (= (:abort-recovery-execution original) (:abort-recovery-execution interface)))
     (is (= (:abort-recovery-execution original) (:abort-recovery-execution command)))
     (is (string? (:command-observation-ref interface)))
     (is (= [:reference-command/principal-resolution :reference-command/command-attribution]
@@ -897,7 +900,9 @@
                   (is (= :same-observed-execution (:abort-recovery-execution r)))
                   (is (= :not-established (:command-authentication r)))
                   (is (= (mapv (fn [b step]
-                                 (assoc (select-keys b [:command-id :operation])
+                                 (assoc (select-keys b [:principal :command-id :operation])
+                                        :origin :registered-server-invocation
+                                        :authentication :conditional-on-trusted-principal-resolver
                                         :execution-id (identity/execution-id (str "e-" (resolution/record-id b)))
                                         :selected-tx-id (get-in step [:expectation :tx-id])))
                                [winner loser loser] steps)
@@ -1357,15 +1362,42 @@
 
 (deftest command-authentication-premises-are-exact-and-unaccepted
   (let [describe #'observed-recovery/command-authentication-premises
+        execution (random-uuid)
+        origin (fn [principal command attempt tx]
+                 {:principal (identity/principal principal) :command-id (identity/command-id command)
+                  :execution-id (identity/execution-id attempt) :operation :fixture/claim
+                  :origin :registered-server-invocation
+                  :authentication :conditional-on-trusted-principal-resolver :selected-tx-id tx})
+        origins [(origin "one" "c1" "e1" 1) (origin "two" "c2" execution 2)
+                 (origin "two" "c2" execution 3)]
         entry {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
                :command-observation-ref "original-cut"
                :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
                :original-recovery {:selected-tx-ids [1 2 3] :selected-commitments [:committed :aborted :committed]
                                    :command-origin-correspondence :matched-issued-command-bindings
-                                   :selected-command-origins [{:execution-id "one"} {:execution-id "two"} {:execution-id "two"}]
+                                   :selected-command-origins origins
                                    :abort-recovery-execution :same-observed-execution}}
         r (describe entry)]
     (is (= r (describe (assoc-in entry [:scope :retained-acquisition-ref] "different-target"))))
+    (is (= origins (:selected-command-origins r)))
+    (is (= [:uuid (str execution)]
+           (get-in r [:scope :selected-command-origins 1 :execution-id :gesso.choreo.identity/value])))
+    (is (= :same-observed-execution (get-in r [:scope :abort-recovery-execution])))
+    (let [path [:original-recovery :selected-command-origins 1]]
+      (doseq [changed (concat [(assoc-in entry path nil)
+                               (assoc-in entry [:original-recovery :abort-recovery-execution] :distinct-observed-executions)]
+                              (map (fn [[k v]] (assoc-in entry (conj path k) v))
+                                   {:principal (identity/principal "other")
+                                    :command-id (identity/command-id "other")
+                                    :execution-id (identity/execution-id (str execution))
+                                    :operation :fixture/other :origin :other/origin
+                                    :authentication :authenticated :selected-tx-id 4})
+                              [(assoc-in entry (conj path :execution-id)
+                                         (identity/execution-id [:uuid (str execution)]))])]
+        (let [other (describe changed)]
+          (is (not-any? (:open-premise-fingerprints r) (:open-premise-fingerprints other)))
+          (is (= :not-established (:command-authentication other)))
+          (is (= :not-performed (:premise-acceptance other))))))
     (doseq [changed [(assoc entry :command-observation-ref "different-cut")
                      (assoc-in entry [:scope :publication-source-id] "other-source")
                      (assoc-in entry [:scope :historical-cut :payload-fingerprint] "different-content")
@@ -1382,6 +1414,8 @@
                                    :abort-recovery-execution :not-observed))]
       (is (= :not-observed (get-in absent [:scope :origin-correspondence])))
       (is (= [nil nil nil] (:selected-command-origins absent)))
+      (is (= [nil nil nil] (get-in absent [:scope :selected-command-origins])))
+      (is (= :not-observed (get-in absent [:scope :abort-recovery-execution])))
       (is (= 2 (count (:obligations absent))))
       (is (every? #(= :open (:discharge-state %)) (:obligations absent)))
       (is (= :not-established (:command-authentication absent))))))

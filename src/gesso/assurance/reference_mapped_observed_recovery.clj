@@ -530,12 +530,23 @@
 (def ^:private original-deployment-acceptance storage/describe-deployment-acceptance)
 (def ^:private original-assumption-description assumption/describe-assumption)
 
-(def command-authentication-profile :selected-command-authentication-premises-v1)
+(def command-authentication-profile :selected-command-authentication-premises-v2)
+
+(defn- command-origin-identity [origin]
+  ;; Tag both alternatives: a UUID must not collide with a structural value
+  ;; that happens to contain its printed representation. Unsupported raw
+  ;; values remain unsupported by the structural premise encoder.
+  (when origin
+    (reduce (fn [m k]
+              (update-in m [k :gesso.choreo.identity/value]
+                         #(if (uuid? %) [:uuid (str %)] [:structural %])))
+            origin [:principal :command-id :execution-id])))
 
 (defn- command-authentication-premises
   "Describe outstanding authentication obligations for one issued cut.
    The original-cut reference identifies the local invocation observations;
    the cut and ordered transaction IDs identify the retained command payloads.
+   Bind the observed resolved principal and execution relationship explicitly.
    Neither is a credential or proof of who invoked a command. Keep these
    premises separate from the selected storage-trust obligations."
   [{:keys [scope original-recovery judgment-subject command-observation-ref]}]
@@ -549,7 +560,9 @@
                    :judgment-subject judgment-subject
                    :selected-tx-ids (:selected-tx-ids original-recovery)
                    :selected-commitments (:selected-commitments original-recovery)
-                   :origin-correspondence (:command-origin-correspondence original-recovery)}
+                   :origin-correspondence (:command-origin-correspondence original-recovery)
+                   :selected-command-origins (mapv command-origin-identity (:selected-command-origins original-recovery))
+                   :abort-recovery-execution (:abort-recovery-execution original-recovery)}
         describe (fn [premise proposition boundary dependencies origin]
                    (original-assumption-description
                     {:id premise :subject {:kind :runtime :id id :interface interface}
@@ -771,7 +784,7 @@
        (identical? original-snapshot-binding snapshot/bind-premise)
        (identical? original-support-composition snapshot/compose-support)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v14)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v15)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]

@@ -10666,3 +10666,30 @@ established. All 39 original general CLM-R2 conditions remain open.
 Next: examine command execution authentication and attribution boundaries
 against the original selected cut, retaining the distinction between local
 registered execution, actual principal resolution and environmental trust.
+
+* v2892 — bind resolved command origins to original cut premises
+
+Preserve the checked principal, registered invocation origin and conditional
+resolver authentication marker alongside command, execution, operation and
+selected transaction identity. The comparison already matches the principal
+and arguments against the selected binding; this revision retains the principal
+and attribution markers instead of discarding them. Bind the ordered origins
+and abort/recovery execution relationship explicitly into both original command
+premise fingerprints. Distinguish UUID identity values from all structural
+values using disjoint tags. Unsupported raw identity values remain unsupported
+by the structural encoder. Version the submission comparison, command premise
+and recovery judgment profiles. Supplied observations remain distinct from
+issued observations, and neither authenticates the principal resolver.
+
+Focused JVM: command premise identity, both command-origin tests and physical
+competing Claim abort/recovery, 4 tests / 712 assertions, zero failures or
+errors (exit 0). Includes original and reopened XTDB history, ten origin or
+execution-relationship substitutions and existing supplied-origin rejection
+checks. Canonical assembled-host assertions updated but its full regression
+and full project gates were not rerun. No command execution or authorization
+path changed. Both command authentication premises and all 39 original general
+CLM-R2 conditions remain open.
+
+Next: examine attribution to the exact installed principal resolver and
+registered server boundary, distinguishing its actual local resolution from
+independent authentication of the application's principal/session authority.

@@ -288,6 +288,10 @@
                      (is (= :partial-supplied-command-bindings (:command-origin-correspondence partial)))
                      (is (nil? (first (:selected-command-origins partial))))
                      (is (= :same-observed-execution (:abort-recovery-execution full)))
+                     (is (= (mapv :principal origins) (mapv :principal (:selected-command-origins full))))
+                     (is (= (mapv :origin origins) (mapv :origin (:selected-command-origins full))))
+                     (is (= (mapv :authentication origins) (mapv :authentication (:selected-command-origins full))))
+                     (is (= :not-established (:command-authentication full)))
                      (is (= (mapv #(get-in % [:expectation :tx-id]) steps)
                             (mapv :selected-tx-id (:selected-command-origins full))))
                      (is (= :distinct-observed-executions

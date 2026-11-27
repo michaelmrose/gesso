@@ -8,7 +8,7 @@
             [gesso.model.inductive-plan :as induction])
   (:import [xtdb.api TransactionKey]))
 
-(def profile :selected-mapped-submission-observation-v1)
+(def profile :selected-mapped-submission-observation-v2)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported mapped submission observation." {:reason reason})))
@@ -36,7 +36,7 @@
                       (reject! :mapped-command-origin-mismatch))
                     ;; The execution ID is observed, not a retained XTDB field.
                     ;; In particular, the abort association is not a receipt.
-                    (assoc (select-keys origin [:command-id :execution-id :operation])
+                    (assoc (select-keys origin [:principal :command-id :execution-id :operation :origin :authentication])
                            :selected-tx-id (get-in step [:expectation :tx-id])))))
               steps claims)
         n (count (filter some? selected))
@@ -118,7 +118,7 @@
       (catch clojure.lang.ExceptionInfo e
         (fail :mismatch (or (:reason (ex-data e)) :invalid-mapped-submission-handoff))))))
 
-(def observed-profile :selected-issued-mapped-submission-observation-v1)
+(def observed-profile :selected-issued-mapped-submission-observation-v2)
 
 (def ^:private original-observation-reader publication/read-framed-submission-observation!)
 (def ^:private original-selected-comparison compare-selected!)
