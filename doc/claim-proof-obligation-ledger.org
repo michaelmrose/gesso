@@ -8417,3 +8417,43 @@ binding reviewed evaluator source to the installed execution boundary.
 Preserve the remaining primitive semantics and admission assumptions,
 and avoid promoting source-level correspondence to a universal JVM
 theorem.
+
+* v2834 — qualify process-local evaluator runtime identity
+
+Extend the existing assurance pattern of captured Var identity and raw
+root checks to the five evaluator dependency namespaces: production
+rule evaluation, independent typed-presence and typed-value semantics,
+and production syntax and type validation. Capture the namespace
+objects, complete intern inventories, Var objects and raw roots at
+refinement namespace load. Include private interpreters, helpers and
+constants, rather than only public evaluator functions. Require the
+same namespace and intern identities, bound roots, raw-root identity
+and effective current-thread value, with no thread-bound override.
+Check before and after the source/refinement computation. Preserve the
+reviewed-source evidence separately and return only descriptive
+namespace/intern identities, not the captured JVM objects.
+
+This qualifies ordinary process-local identity continuity relative to
+the capture. It does not authenticate the initial captured roots,
+establish that classpath resources produced the actual loaded bytecode,
+exclude a transient replacement restored between inspections, or attest
+Clojure primitive semantics, the compiler or an instrumented JVM.
+The original loaded-code correspondence condition remains open.
+Admission syntax and typing roots are included in the local inventory;
+their source semantics have not been independently justified.
+
+Focused JVM: standalone source-refinement suite passed 5 tests /
+107 assertions. Combined source-refinement, reduction, coverage,
+congruence, substitution, partition, typed-atom oracle, typed-
+proposition bridge and propositional soundness suites passed 133 tests /
+4430 assertions, zero failures or errors. Exercise behavior-preserving
+private interpreter and helper replacement, admission and observation
+replacement, extra namespace intern, replacement after initial inspection
+and successful restoration. Verified both committed code blobs against
+the tested files. Historical judgment unchanged; host recovery and full
+project gates not rerun. No premise discharged.
+
+Next: qualify admission source and binding correspondence for the
+restricted literal fragment, including the production syntax/type
+handoff and independent observation/type checking. Distinguish the
+remaining trusted execution assumptions from the source-level argument.

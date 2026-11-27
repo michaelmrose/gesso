@@ -29,6 +29,50 @@
 (defn- reject! [reason]
   (throw (ex-info "Unqualified literal evaluator source refinement" {:reason reason})))
 
+(def runtime-profile :literal-evaluator-local-runtime-identity-v1)
+
+(def ^:private runtime-namespaces
+  {:production 'gesso.assurance.rule-eval
+   :independent 'gesso.assurance.proof.typed-presence-semantics
+   :observation 'gesso.assurance.proof.typed-value-semantics
+   :production-syntax 'gesso.assurance.rule
+   :production-typing 'gesso.assurance.rule-type})
+
+(def ^:private original-runtime
+  ;; Capture only after the evaluator dependency namespaces have loaded.
+  ;; Raw roots and Var identities are process-local objects, not portable
+  ;; fingerprints. Include private interpreters, helpers and constants.
+  (into {} (map (fn [[role sym]]
+                  (let [n (the-ns sym)]
+                    [role {:namespace n
+                           :interns (into {} (map (fn [[name ^clojure.lang.Var v]]
+                                                   (when-not (.hasRoot v)
+                                                     (reject! :unbound-evaluator-var))
+                                                   [name {:var v :root (.getRawRoot v)}]))
+                                          (ns-interns n))}]))) runtime-namespaces))
+
+(defn- runtime-identity! []
+  (doseq [[role sym] runtime-namespaces]
+    (let [{:keys [namespace interns]} (original-runtime role)
+          current (find-ns sym)]
+      (when-not (and (identical? namespace current)
+                     (= (set (keys interns)) (set (keys (ns-interns current))))
+                     (every? (fn [[name {:keys [^clojure.lang.Var var root]}]]
+                               (and (identical? var (get (ns-interns current) name))
+                                    (.hasRoot var)
+                                    (identical? root (.getRawRoot var))
+                                    (not (thread-bound? var))
+                                    (identical? root (var-get var)))) interns))
+        (reject! :evaluator-runtime-identity-changed))))
+  {:profile runtime-profile
+   :status :matched-captured-var-identities
+   :scope :process-local-inspection-only
+   :namespace-interns (into {} (map (fn [[role {:keys [interns]}]]
+                                      [role (set (keys interns))])) original-runtime)
+   :capture-origin :namespace-load-time
+   :source-to-loaded-code :not-established
+   :transient-concurrent-substitution-exclusion :not-established})
+
 (defn- digest [source]
   (.formatHex (HexFormat/of)
               (.digest (MessageDigest/getInstance "SHA-256")
@@ -117,13 +161,17 @@
                      (identical? original-production production/evaluate-rule!)
                      (identical? original-independent presence/evaluate-expression!))
         (reject! :source-refinement-boundary-replaced))
-      (let [artifacts (reviewed-artifacts!)
-            r (original-reduction rule state-types)]
+      (let [before (runtime-identity!)
+            artifacts (reviewed-artifacts!)
+            r (original-reduction rule state-types)
+            after (runtime-identity!)]
+        (when-not (= before after) (reject! :evaluator-runtime-identity-changed))
         (when-not (and (= reduction/profile (:profile r)) (= :conditional-abstract-reduction (:status r))
                        (= rule (:rule r)) (= (select-keys state-types (:readers rule)) (:reader-types r)))
           (reject! :unqualified-abstract-reduction))
         (assoc base :status :conditional-source-refinement
                :rule rule :reader-types (:reader-types r) :source-artifacts artifacts
+               :runtime-identity (assoc after :checking :before-and-after-refinement)
                :cases-checked (:cases-checked r)
                :conclusion :reviewed-interpreter-truth-factors-through-abstract-cells
                :argument [:required-read-and-literal-denotation :scalar-comparison-observations
