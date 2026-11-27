@@ -10613,3 +10613,29 @@ Next: examine the exact installed synchronous source execution and its
 acceptance observation, binding any further local correspondence to the
 original delivery handoff without treating an acceptance report as external
 authentication or durable delivery.
+
+* v2890 — observe the original synchronous source return
+
+Require the synchronous dispatch callback to execute exactly once on its
+calling thread and return the identical source result. Check original live
+and source function boundaries before and after execution, runtime source ID,
+ordered expanded invalidations, count, and emitted/queued statuses. A
+plausible fabricated report or a copied return cannot authorize an
+acknowledgment. Preserve emission uncertainty and lease state on rejection.
+Record a local source-acceptance observation only for the original synchronous
+runner, consuming it with the exact delivery acknowledgment handoff and
+attaching its intent, lease, worker and receipt identities to writer capture.
+Pin the additionally reviewed live/source/dispatch implementation digests.
+
+Focused JVM: delivery, reclaim/send race, initialization and reference writer
+classification, 54 tests / 1241 assertions, zero failures or errors (exit 0).
+The initial fixture used a timed dereference that left a pending stream take;
+replace it with try-take! and rerun the complete focused gate. The assembled
+host variants and full project gates were not rerun. This is local observed
+source execution within a trusted process, not authentication against arbitrary
+code or transient function substitution, durable external delivery, or browser
+receipt. All 39 original general CLM-R2 conditions remain open.
+
+Next: check source-acceptance attribution against the selected retained
+acknowledgment and carry the exact observation into the original-cut premise
+subject without discharging external authentication or durability premises.

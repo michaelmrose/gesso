@@ -160,9 +160,11 @@
                                              :dispatch-accepted (original-acknowledgment-handoff node ops)
                                              nil)
           phase (if (= :dispatch-acknowledgment maintenance) :delivery :acquisition)
+          delivery-call (when (= :delivery phase)
+                          (original-acknowledgment-call node submission))
           input (when maintenance
                   (if (= :delivery phase)
-                    (original-acknowledgment-call node submission)
+                    (:acquisition delivery-call)
                     (original-acquisition-call node maintenance submission)))
           cycle-opts (when input (original-cycle-call node phase input))
           origin (when cycle-opts (original-worker-origin node source-id worker-id cycle-opts))]
@@ -173,7 +175,11 @@
         (assoc :local-dispatch-receipt
                (merge (select-keys submission [:intent-id :lease-id :worker-id])
                       (select-keys (:receipt submission) [:receipt-id :adapter :result])
-                      {:evidence :matched-local-delivery-handoff}))))
+                      {:evidence :matched-local-delivery-handoff})
+               :local-source-acceptance
+               (merge (:source-acceptance delivery-call)
+                      (select-keys submission [:intent-id :lease-id :worker-id])
+                      (select-keys (:receipt submission) [:receipt-id])))))
     kind))
 
 (def ^:private original-observe-maintenance-origin observe-maintenance-origin)

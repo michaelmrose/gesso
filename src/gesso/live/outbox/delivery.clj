@@ -25,6 +25,7 @@
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acknowledgment :as acknowledgment]
             [gesso.live.progression :as progression]
+            [gesso.live.source :as source]
             [gesso.live.outbox.read-frontier :as frontier])
   (:import [java.time Instant ZonedDateTime]))
 
@@ -130,6 +131,49 @@
                 :dispatch-status (:status dispatch-result)}))
     source-result))
 
+(def ^:private original-run-sync dispatch/run-sync!)
+(def ^:private original-live-emit-many live/emit-many!)
+(def ^:private original-source-emit-many source/emit-many!)
+(def ^:private original-source-emit source/emit!)
+
+(defn- run-source! [system expanded intent-id expected-source-id]
+  ;; Verify the actual callback return, not a structurally plausible dispatch
+  ;; report. The source functions are trusted in-process boundaries, not a
+  ;; security sandbox against arbitrary application code or transient Var swaps.
+  (let [run! dispatch/run-sync!
+        emit! live/emit-many!
+        instance (:source system)
+        source-current? #(and (identical? original-live-emit-many emit!)
+                              (identical? original-live-emit-many live/emit-many!)
+                              (identical? original-source-emit-many source/emit-many!)
+                              (identical? original-source-emit source/emit!))
+        current-before? (source-current?)
+        owner (Thread/currentThread)
+        invocations (atom 0)
+        returned (atom nil)
+        result (run! {:run (fn []
+                             (when-not (and (= 1 (swap! invocations inc))
+                                            (identical? owner (Thread/currentThread)))
+                               (reject! :unverified-dispatch-acceptance {:intent-id intent-id}))
+                             (let [accepted (emit! system expanded)]
+                               (reset! returned accepted)
+                               accepted))})
+        accepted (verify-source-acceptance! result (count expanded) intent-id)]
+    (when-not (and (= 1 @invocations) (identical? @returned accepted)
+                   current-before? (source-current?)
+                   (= (:id instance) (:source/id accepted))
+                   (every? #(= (:id instance) (:source/id %)) (:results accepted))
+                   (= (vec expanded) (mapv :invalidation (:results accepted))))
+      (reject! :unverified-dispatch-acceptance {:intent-id intent-id}))
+    {:result accepted
+     :observation (when (and (identical? original-run-sync run!)
+                             (identical? original-run-sync dispatch/run-sync!))
+                    {:source-id expected-source-id
+                     :source-instance-id (:id instance)
+                     :count (:count accepted)
+                     :statuses (mapv :status (:results accepted))
+                     :evidence :matched-synchronous-source-return})}))
+
 (defn- committed-acknowledgment-evidence?
   "A status label is not an XTDB commit receipt. Check the complete returned
    transaction coordinates and that the receipt follows the acquired lease.
@@ -199,22 +243,24 @@
 (def ^:private original-acknowledge acknowledgment/acknowledge-dispatch!)
 
 (defn claim-acknowledgment-call!
-  "Consume the exact delivery-to-acknowledgment call; return its acquisition."
+  "Consume the exact delivery-to-acknowledgment call and its observed source return."
   [node submission]
   (let [scope (.get acknowledgment-call)]
     (when (and scope (identical? node (:node scope))
                (identical? submission (:submission scope))
                (identical? original-acknowledge acknowledgment/acknowledge-dispatch!))
       (.remove acknowledgment-call)
-      (:acquisition scope))))
+      (when (:source-acceptance scope)
+        (select-keys scope [:acquisition :source-acceptance])))))
 
-(defn- acknowledge-for-delivery! [node acquisition submission]
+(defn- acknowledge-for-delivery! [node acquisition submission source-acceptance]
   (let [prior (.get acknowledgment-call)
         execute! acknowledgment/acknowledge-dispatch!]
     (.remove acknowledgment-call)
     (try
       (when (identical? original-acknowledge execute!)
-        (.set acknowledgment-call {:node node :acquisition acquisition :submission submission}))
+        (.set acknowledgment-call {:node node :acquisition acquisition :submission submission
+                                    :source-acceptance source-acceptance}))
       (execute! node submission)
       (finally
         (if prior (.set acknowledgment-call prior) (.remove acknowledgment-call))))))
@@ -248,11 +294,9 @@
       (reject! :no-invalidations {:intent-id intent-id}))
     ;; This execution cannot disappear from an async queue after an ack. Still,
     ;; source acceptance is not proof that a browser actually got the event.
-    (let [source-result
+    (let [{source-result :result source-acceptance :observation}
           (try
-            (let [result (dispatch/run-sync!
-                          {:run #(live/emit-many! system expanded)})]
-              (verify-source-acceptance! result (count expanded) intent-id))
+            (run-source! system expanded intent-id expected-source-id)
             (catch Throwable cause
               ;; Source/emit-many! is not atomic with close! or a mid-batch
               ;; failure. The source may already have accepted a prefix even
@@ -282,7 +326,7 @@
                   :worker-id (:worker-id acquisition)
                   :receipt receipt}
           ack (try
-                (acknowledge-for-delivery! node acquisition fenced)
+                (acknowledge-for-delivery! node acquisition fenced source-acceptance)
                 (catch Throwable e
                   ;; An interrupted physical acknowledgment has no known
                   ;; terminal outcome. Preserve JVM cancellation while

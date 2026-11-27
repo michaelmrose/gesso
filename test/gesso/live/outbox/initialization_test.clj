@@ -1212,6 +1212,18 @@
                     (is (= :matched-local-handoff-retained-acknowledgments
                            (:dispatch-receipt-correspondence checked)))
                     (is (= :not-established (:dispatch-authentication checked)))
+                    (let [observations (mapv #(get-in % [:admission :local-source-acceptance]) calls)]
+                      (is (= [nil "w" nil "successor"] (mapv :worker-id observations)))
+                      (doseq [i [1 3]]
+                        (let [observation (nth observations i)
+                              receipt (get-in calls [i :admission :local-dispatch-receipt])]
+                          (is (= (select-keys receipt [:intent-id :lease-id :worker-id :receipt-id])
+                                 (select-keys observation [:intent-id :lease-id :worker-id :receipt-id])))
+                          (is (= "s" (:source-id observation)))
+                          (is (= (get-in sys [:source :id]) (:source-instance-id observation)))
+                          (is (= 1 (:count observation)))
+                          (is (= [:emitted] (:statuses observation)))
+                          (is (= :matched-synchronous-source-return (:evidence observation))))))
                     (let [receipts (mapv #(get-in % [:admission :local-dispatch-receipt]) calls)
                           sample (retained/read-acquisition! node acquisition)
                           compare-calls! #'worker-envelope/compare-calls!]

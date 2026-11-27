@@ -785,6 +785,34 @@
           (Thread/interrupted)
           (live/close! system))))))
 
+(deftest plausible-source-report-without-exact-callback-return-is-not-acknowledged
+  (with-open [node (xtn/start-node {})]
+    (let [system (create-system)
+          id (random-uuid)]
+      (try
+        (seed! node id)
+        (let [lease (acquire! node id)
+              tap (source/subscribe (:source system) {:topic :request :id subject-id})
+              source-id' (get-in system [:source :id])
+              real-run dispatch/run-sync!]
+          (try
+            (doseq [[runner emitted?]
+                    [[(fn [_] {:status :ran
+                               :result {:status :emitted-many :source/id source-id'
+                                        :count 1 :results [{:status :emitted :source/id source-id'}]}}) false]
+                     [(fn [job] (update (real-run job) :result #(into {} %))) true]]]
+              (let [data (with-redefs [dispatch/run-sync! runner]
+                           (rejection #(delivery/dispatch-acquired! node system {} lease source-id)))]
+                (is (= :gesso.live.outbox/source-emission-unknown (:error/type data)))
+                (is (= :unverified-dispatch-acceptance (:reason data)))
+                (is (= :not-attempted (:acknowledgment/status data)))
+                (is (= :leased (:gesso.live.outbox/status (row node id))))
+                (is (nil? (:gesso.live.outbox/dispatch-receipt-id (row node id))))
+                (let [notice @(s/try-take! tap ::timeout (if emitted? 1500 100) ::timeout)]
+                  (is (if emitted? (= subject-id (:id notice)) (= ::timeout notice))))))
+            (finally (s/close! tap))))
+        (finally (live/close! system))))))
+
 (deftest inconsistent-synchronous-emission-report-is-uncertain-after-acceptance-test
   ;; A trusted dispatch adapter may report an incomplete/contradictory
   ;; :emitted-many outcome after actual physical source acceptance. It cannot
