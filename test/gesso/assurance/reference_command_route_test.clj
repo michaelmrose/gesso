@@ -140,7 +140,32 @@
                                               :selected-commitments [:committed :aborted :committed])}))
         problem (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
         contract (authority/describe! (describe claims) policy)
-        qualified (#'owner/match-contract! binding (assoc contract :subject-provenance :matched-original-issued-cut))]
+        qualified (#'owner/match-contract! binding (assoc contract :subject-provenance :matched-original-issued-cut))
+        declaration {:acceptance :trust-open-premises
+                     :premise-ids #{:reference-command-authority/request-gate :reference-command-authority/principal-session}}
+        selected (assoc (authority/select! (describe claims) policy (mapv :assumption (:obligations contract)))
+                        :subject-provenance :matched-original-issued-cut)
+        adopted (#'owner/adopt-selected! qualified declaration selected)]
+    (is (= :conditional-configured-command-authority (:status adopted)))
+    (is (= :configured-local-host (:deployment-adoption adopted)))
+    (is (= :explicit-declaration-only (:premise-acceptance adopted)))
+    (is (= (:obligations qualified) (:obligations adopted)))
+    (is (= (:open-premise-fingerprints qualified) (:trusted-assumptions adopted)))
+    (is (= (:scope qualified) (:scope adopted)))
+    (is (= :not-established (:command-authentication adopted)))
+    (is (= :not-performed (:proof-discharge adopted)))
+    (is (= :none (:authority adopted)))
+    (is (= :not-issued (:certificate adopted)))
+    (doseq [bad [nil {} (assoc declaration :acceptance :prove-premises)
+                 (update declaration :premise-ids disj :reference-command-authority/request-gate)
+                 (update declaration :premise-ids conj :reference-command/principal-resolution)]]
+      (is (= :command-authority-selection-mismatch
+             (problem #(#'owner/adopt-selected! qualified bad selected)))))
+    (doseq [bad [contract (assoc selected :subject-provenance :supplied)
+                 (assoc selected :open-premise-fingerprints #{})
+                 (assoc selected :proof-discharge :performed)]]
+      (is (= :command-authority-selection-mismatch
+             (problem #(#'owner/adopt-selected! qualified declaration bad)))))
     (is (= :matched-current-local-installation (:configured-authority qualified)))
     (is (= :not-performed (:premise-acceptance qualified) (:proof-discharge qualified)))
     (is (= :not-established (:command-authentication qualified)))

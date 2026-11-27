@@ -174,7 +174,7 @@
         [#'selected-routes! #'application/application-assembly? #'route/matching-route
          #'route/captured-arguments #'read-form #'server/decode-command
          #'choreo/require-operation #'run-command-or-deny #'server/run-command
-         #'server/current-command-boundary-matches? #'route/authority-policy?]))
+         #'server/current-command-boundary-matches? #'route/authority-policy? #'route/authority-acceptance?]))
 
 (defn- route-boundaries-current? []
   (every? (fn [[v original]] (identical? original @v)) route-boundaries))
@@ -204,7 +204,8 @@
                (identical? prepared (:prepared entry))
                (identical? (:principal-fn prepared) (:principal-fn entry))
                (identical? (:authorize-request? options) (:authorize? entry))
-               (= (:authority-policy options) (get-in entry [:binding :policy])))
+               (= (:authority-policy options) (get-in entry [:binding :policy]))
+               (= (:authority-acceptance options) (:acceptance entry)))
       (:binding entry))))
 
 (defn- run-selected! [original? assembly prepared route context command bind-publication authority-binding]
@@ -250,10 +251,13 @@
   ([assembly fallback options] (wrap-handler assembly fallback options nil))
   ([assembly fallback options bind-publication]
   (when-not (and (map? options) (not (record? options)) (nil? (meta options))
-                 (contains? #{#{:authorize-request?} #{:authorize-request? :authority-policy}} (set (keys options)))
+                 (contains? #{#{:authorize-request?} #{:authorize-request? :authority-policy}
+                              #{:authorize-request? :authority-policy :authority-acceptance}} (set (keys options)))
                  (fn? (:authorize-request? options))
                  (or (not (contains? options :authority-policy))
-                     (route/authority-policy? (:authority-policy options))))
+                     (route/authority-policy? (:authority-policy options)))
+                 (or (not (contains? options :authority-acceptance))
+                     (route/authority-acceptance? (:authority-acceptance options))))
     (reject! :invalid-command-options {}))
   (when-not (and (fn? fallback) (application/application-assembly? assembly))
     (reject! :invalid-command-assembly {}))
@@ -299,5 +303,5 @@
       (locking authority-installations
         (.put authority-installations handler
               {:assembly assembly :prepared prepared :principal-fn (:principal-fn prepared)
-               :authorize? authorize? :binding binding})))
+               :authorize? authorize? :binding binding :acceptance (:authority-acceptance options)})))
     handler)))

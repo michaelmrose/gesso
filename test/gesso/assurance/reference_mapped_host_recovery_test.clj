@@ -377,7 +377,9 @@
         (is (not= (:installation-ref original-binding) (:installation-ref binding)))
         (doseq [foreign foreign-comparisons]
           (is (= :command-authority-original-installation-mismatch
-                 (trust-problem #(host/qualify-command-authority! started foreign))))))
+                 (trust-problem #(host/qualify-command-authority! started foreign))))
+          (is (= :command-authority-original-installation-mismatch
+                 (trust-problem #(host/adopt-command-authority! started foreign))))))
       ;; Identical history and policy do not transfer a target capability.
       (doseq [foreign foreign-comparisons]
         (is (= :storage-trust-target-mismatch
@@ -834,7 +836,10 @@
                      :assembled-operations (cond-> {:authorize-request? #(and (= "yes" (get-in % [:headers "fixture-gate"])) (some? (principal-fn %)))}
                                              interleaved? (assoc :authority-policy {:deployment-id :fixture/deployment
                                                                                   :request-gate-policy :fixture/request-gate
-                                                                                  :principal-session-policy :fixture/principal-session}))
+                                                                                  :principal-session-policy :fixture/principal-session}
+                                                                 :authority-acceptance {:acceptance :trust-open-premises
+                                                                                        :premise-ids #{:reference-command-authority/request-gate
+                                                                                                       :reference-command-authority/principal-session}}))
                      :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                                    :require-derived-model? true :operation-model-entities {:request/claim #{:requests :request_assignments}})
                      :mapped-writer-policy {:admission admit :initializer seed
@@ -1134,6 +1139,23 @@
                             (is (= :not-issued (:certificate contract)))
                             (is (not (contains? contract :trusted-assumptions)))
                             (is (= contract (host/qualify-command-authority! started (second foreign))))
+                            (let [adopted (host/adopt-command-authority! started comparison)]
+                              (is (= :conditional-configured-command-authority (:status adopted)))
+                              (is (= :configured-local-host (:deployment-adoption adopted)))
+                              (is (= :explicit-declaration-only (:premise-acceptance adopted)))
+                              (is (= (:open-premise-fingerprints contract) (:trusted-assumptions adopted)))
+                              (is (= (:obligations contract) (:obligations adopted)))
+                              (is (= (:scope contract) (:scope adopted)))
+                              (is (= :not-performed (:proof-discharge adopted)))
+                              (is (= :not-established (:command-authentication adopted)))
+                              (is (= :none (:authority adopted)))
+                              (is (= :not-issued (:certificate adopted)))
+                              (is (= adopted (host/adopt-command-authority! started (second foreign))))
+                              (is (= :unissued-command-authority-host
+                                     (trust-problem #(host/adopt-command-authority! (into {} started) comparison))))
+                              (with-redefs [observed-recovery/select-command-authority-contract! (constantly adopted)]
+                                (is (= :command-authority-owner-boundary-replaced
+                                       (trust-problem #(host/adopt-command-authority! started comparison))))))
                             (is (= :unissued-command-authority-host
                                    (trust-problem #(host/qualify-command-authority! (into {} started) comparison))))
                             (is (= :command-authority-original-installation-mismatch
@@ -1406,7 +1428,9 @@
                 (is (= :storage-trust-host-retired
                        (trust-problem #(host/adopt-storage-trust! started foreign))))
                 (is (= :command-authority-host-retired
-                       (trust-problem #(host/qualify-command-authority! started foreign)))))
+                       (trust-problem #(host/qualify-command-authority! started foreign))))
+                (is (= :command-authority-host-retired
+                       (trust-problem #(host/adopt-command-authority! started foreign)))))
               (let [reopen-config (assoc-in host-config [:storage-trust :policy :relation]
                                             :same-store-incarnation)
                     reopened-handle (check-reopened-recovery!

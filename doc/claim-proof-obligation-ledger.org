@@ -10837,3 +10837,34 @@ remain open.
 Next: support explicit configured adoption of the exact two environmental
 command authority premises under the qualified original owner, keeping local
 attribution, environmental trust and implementation proof discharge distinct.
+
+* v2898 — adopt configured command authority premises
+
+Accept an optional startup authority-acceptance declaration only alongside
+an installed authority policy, selecting exactly the two environmental
+request-gate and principal/session premise IDs with trust-open-premises.
+Retain this selection with the exact wrapper configuration and reject
+substituted acceptance options. Re-derive and structurally select both
+premises under the original installed owner's retirement lock, matching the
+original cut and configured callback identities before recording explicit
+local adoption. Do not accept supplied comparison reports or caller-selected
+premises. Policy-only hosts still qualify but cannot adopt. Keep the adopted
+premise descriptions open, authentication unestablished and proof discharge
+unperformed; the existing consolidated inventory is not extended here.
+Update the reviewed host digest.
+
+Focused JVM: command route/authority and HTTP operation, 14 tests / 284
+assertions; canonical worker-interleaved assembled recovery and reviewed
+writer classification, 3 tests / 1503 assertions. Both exited 0; total
+17 tests / 1787 assertions, zero failures or errors. Includes invalid startup
+selection, exact original-cut adoption, copied owner, replaced selection
+boundary, retired owner, same-store reopening and independent byte-copy
+rejection. Other assembled variants and full project gates were not rerun.
+Both original command authentication premises and all 39 general CLM-R2
+conditions remain open. No runtime authorization or settlement changes.
+
+Next: compose the two adopted command authority premises into the configured
+recovery inventory alongside the existing 16 environmental assumptions,
+without discharging original conditions or treating related conditions as
+entailed. Keep the host namespace within the size limit by extracting the
+composition boundary as needed.

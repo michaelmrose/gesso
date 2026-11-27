@@ -210,6 +210,8 @@
               (is (= :fixture/host (get-in binding [:policy :deployment-id])))
               (is (= :unissued-command-authority-host
                      (reason #(host/read-command-authority-binding! (into {} started)))))
+              (is (= :command-authority-adoption-not-selected
+                     (reason #(host/adopt-command-authority! started (Object.)))))
               (is (= :command-authority-requires-mapped-admission
                      (reason #(host/qualify-command-authority! started (Object.))))))
             (is (= :conditional-on-trusted-principal-resolver (:authentication @origin*)))
@@ -477,6 +479,8 @@
         (let [policy {:deployment-id :fixture/host :request-gate-policy :fixture/gate
                       :principal-session-policy :fixture/session}
               options {:authorize-request? (constantly true) :authority-policy policy}
+              acceptance {:acceptance :trust-open-premises
+                          :premise-ids #{:reference-command-authority/request-gate :reference-command-authority/principal-session}}
               h1 (transport/wrap-handler assembly identity options)
               h2 (transport/wrap-handler assembly identity options)
               read! #(transport/read-command-authority-binding! % assembly options)
@@ -485,6 +489,16 @@
           (is (= policy (:policy b1) (:policy b2)))
           (is (not= (:installation-ref b1) (:installation-ref b2)))
           (is (nil? (read! (fn [r] (h1 r)))))
+          (let [trusted-options (assoc options :authority-acceptance acceptance)
+                h3 (transport/wrap-handler assembly identity trusted-options)]
+            (is (some? (transport/read-command-authority-binding! h3 assembly trusted-options)))
+            (is (nil? (read! h3)))
+            (is (nil? (transport/read-command-authority-binding! h1 assembly trusted-options))))
+          (doseq [bad [(assoc options :authority-acceptance nil)
+                       (assoc options :authority-acceptance (assoc acceptance :acceptance :prove-premises))
+                       (assoc options :authority-acceptance (assoc acceptance :premise-ids #{}))
+                       (-> options (dissoc :authority-policy) (assoc :authority-acceptance acceptance))]]
+            (is (= :invalid-command-options (reason #(transport/wrap-handler assembly identity bad)))))
           (is (nil? (transport/read-command-authority-binding! h1 (into {} assembly) options)))
           (is (nil? (transport/read-command-authority-binding! h1 assembly
                                                                (assoc options :authorize-request? (constantly true)))))

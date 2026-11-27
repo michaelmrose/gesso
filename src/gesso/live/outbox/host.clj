@@ -176,6 +176,7 @@
 (def ^:private register-command-authority! @#'command-authority/register!)
 (def read-command-authority-binding! command-authority/read-binding!)
 (def qualify-command-authority! command-authority/qualify!)
+(def adopt-command-authority! command-authority/adopt!)
 (def capture-worker-outcomes! worker-capture/capture-worker-outcomes!)
 (def worker-outcome-capture-matches? worker-capture/worker-outcome-capture-matches?)
 

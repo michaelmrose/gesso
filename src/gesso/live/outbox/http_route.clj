@@ -23,6 +23,16 @@
        (= #{:deployment-id :request-gate-policy :principal-session-policy} (set (keys policy)))
        (every? #(and (keyword? %) (namespace %)) (vals policy))))
 
+(defn authority-acceptance?
+  "Explicit environmental trust selection, not authentication."
+  [declaration]
+  (and (map? declaration) (not (record? declaration)) (nil? (meta declaration))
+       (= #{:acceptance :premise-ids} (set (keys declaration)))
+       (= :trust-open-premises (:acceptance declaration))
+       (set? (:premise-ids declaration)) (nil? (meta (:premise-ids declaration)))
+       (= #{:reference-command-authority/request-gate :reference-command-authority/principal-session}
+          (:premise-ids declaration))))
+
 (defn authority-binding? [binding]
   (and (map? binding) (not (record? binding)) (nil? (meta binding))
        (= #{:installation-ref :policy} (set (keys binding)))
