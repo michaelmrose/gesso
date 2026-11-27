@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is]]
             [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-mapped-poststate :as poststate]
+            [gesso.assurance.rule-eval :as production]
             [xtdb.api :as xt]
             [xtdb.node :as xtn]
             [xtdb.db-catalog :as db])
@@ -50,6 +51,15 @@
     (is (= [:checked-initial-projection :committed-abstract-transition :maintenance-stutter
             :aborted-stutter :committed-abstract-transition] (mapv :relation (:checked-boundaries r))))
     (is (= #{:fixture/nonnegative} (:invariant-ids r)))
+    (let [evidence (:expression-correspondence r)]
+      (is (= invariant/expression-profile (:profile evidence)))
+      (is (= :matched (:status evidence)))
+      (is (= #{:fixture/nonnegative} (:invariant-ids evidence)))
+      (is (= [[1 :initial] [2 :prestate] [2 :poststate] [3 :prestate] [3 :poststate]
+              [4 :prestate] [4 :poststate] [5 :prestate] [5 :poststate]]
+             (mapv (juxt :tx-id :side) (:checked-points evidence))))
+      (is (= :not-established (:universal-evaluator-correspondence evidence)))
+      (is (= :not-performed (:proof-discharge evidence))))
     (is (= :not-established (:physical-invariant-theorem r) (:universal-refinement r)))
     (is (= r (run catalog (pop inputs) steps))) ;; suffix deliberately excluded
     (let [bad-refuse (construction :fixture/refuse 1 -1)
@@ -71,6 +81,36 @@
         (is (= reason (:reason bad)) (pr-str bad))
         (is (not (contains? bad :conclusion)))))
     (with-redefs [poststate/project-visible! (constantly {:fixture/value 0})]
+      (is (not (invariant/boundaries-current?)))
+      (is (= :invariant-boundary-replaced
+             (:reason (invariant/audit-issued-selection! nil nil nil nil nil nil nil nil)))))))
+
+(deftest original-expression-evaluators-agree-on-selected-values
+  (let [evaluate #'invariant/corresponding-value!
+        rule (get-in catalog [:invariants :fixture/nonnegative])
+        original production/evaluate-rule!
+        candidate (fn [alter]
+                    (with-redefs-fn {#'invariant/original-production-evaluate
+                                     (fn [& args] (alter (apply original args)))}
+                      #(try (evaluate types {:fixture/value 0} rule)
+                            (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))]
+    (is (true? (evaluate types {:fixture/value 0} rule)))
+    (is (false? (evaluate types {:fixture/value -1} rule)))
+    (doseq [alter [#(assoc % :value false)
+                   #(assoc % :value :truthy)
+                   #(assoc % :expression [:literal true])
+                   #(assoc % :readers #{})
+                   #(assoc % :proof-status :proved)]]
+      (is (= :invariant-expression-correspondence-mismatch (candidate alter))))
+    (let [optional {:fixture/value {:type :integer :optional? true :nullable? true}}
+          guarded {:readers #{:fixture/value}
+                   :expression [:and [:present [:read :fixture/value]]
+                                [:not= [:read :fixture/value] [:literal nil]]
+                                [:>= [:read :fixture/value] [:literal 0]]]}]
+      (doseq [[state expected] [[{} false] [{:fixture/value nil} false]
+                               [{:fixture/value -1} false] [{:fixture/value 0} true]]]
+        (is (= expected (evaluate optional state guarded)))))
+    (with-redefs [production/evaluate-rule! (constantly {:value true})]
       (is (not (invariant/boundaries-current?)))
       (is (= :invariant-boundary-replaced
              (:reason (invariant/audit-issued-selection! nil nil nil nil nil nil nil nil)))))))
@@ -154,6 +194,15 @@
       (is (= :not-performed (:proof-discharge conclusion) (:premise-acceptance conclusion)))
       (is (= :none (:authority conclusion)))
       (is (= :not-issued (:certificate conclusion))))
+    (let [evidence (:expression-correspondence checked)]
+      (is (= invariant/expression-profile (:profile evidence)))
+      (is (= :matched (:status evidence)))
+      (is (= (:invariant-ids checked) (:invariant-ids evidence)))
+      (is (= :matched-true-at-initial-projection (:initial-condition evidence)))
+      (is (= (mapv #(select-keys % [:tx-id :side]) (get-in checked [:physical-readbacks :checked-coordinates]))
+             (:checked-points evidence)))
+      (is (= :not-established (:universal-evaluator-correspondence evidence)))
+      (is (= :not-performed (:proof-discharge evidence))))
     (is (= invariant/profile (:profile checked)))
     (is (= :checked (:status checked)) (pr-str checked))
     (is (= :declared-invariants-hold-on-selected-replay-projections (:conclusion checked)))

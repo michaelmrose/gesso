@@ -8149,3 +8149,35 @@ Next: qualify invariant-expression correspondence against the original
 declared invariant source, reusing existing independent typed-rule
 semantics and proof machinery. Distinguish selected executable agreement
 from a universally justified evaluator theorem. No premise is discharged.
+
+* v2827 — qualify selected invariant expression correspondence
+
+Evaluate the original declared Init and invariant expressions with both
+the production rule evaluator and independent typed-presence semantics,
+using their exact typed reader footprints and selected replay bindings.
+Require the original source expression and reader identities, the expected
+evaluator versions and result classifications, and exact Boolean agreement.
+Pin the production evaluator alongside the existing independent boundary.
+Check Init at initialization and every invariant at initialization and both
+prestate and poststate of each subsequent selected transaction.
+
+Retain the matched expression correspondence report, declared invariant IDs
+and ordered transaction-side points inside the original issued historical
+cut. This is finite source-relative evaluator agreement, not an independent
+universal evaluator theorem. Preserve the v9 historical judgment, existing
+transfer binding and all open premises. Disagreement cannot yield a checked
+invariant conclusion; agreement on false is not invariant preservation.
+
+Focused JVM: standalone selected invariant namespace passed 3 tests /
+95 assertions. Combined assembled-host recovery, invariant and inventory
+namespaces passed 11 tests / 2793 assertions, zero failures or errors.
+Exercise true and false agreement, absent and present-nil guarded reads,
+wrong results and source identities, false proof classifications, substituted
+evaluator rejection, and agreement across the genuine selected histories.
+Original polling and offline dependencies retained. Full project gates
+not run. No proof premise discharged.
+
+Next: inspect the existing source-derived expression and proposition
+semantics proof machinery for a reusable correspondence derivation over the
+Claim invariant expression fragment; distinguish universally justified
+expression semantics from selected execution agreement.

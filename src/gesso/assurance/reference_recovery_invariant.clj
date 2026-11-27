@@ -7,6 +7,7 @@
             [gesso.assurance.reference-mapped-poststate :as poststate]
             [gesso.assurance.reference-retained-acquisition :as acquisition]
             [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.rule-eval :as production]
             [gesso.assurance.transition :as construction]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.model.inductive-plan :as induction]
@@ -19,6 +20,7 @@
 (def ^:private original-visible temporal/visible-at)
 (def ^:private original-observe-state values/observe-state!)
 (def ^:private original-evaluate presence/evaluate-expression!)
+(def ^:private original-production-evaluate production/evaluate-rule!)
 (def ^:private original-construction construction/build-guarded-replacement!)
 (def ^:private original-transition transition/observe-transition!)
 (def ^:private original-cases outcome/derive-cases!)
@@ -33,6 +35,7 @@
        (identical? original-visible temporal/visible-at)
        (identical? original-observe-state values/observe-state!)
        (identical? original-evaluate presence/evaluate-expression!)
+       (identical? original-production-evaluate production/evaluate-rule!)
        (identical? original-construction construction/build-guarded-replacement!)
        (identical? original-transition transition/observe-transition!)
        (identical? original-cases outcome/derive-cases!)
@@ -49,9 +52,49 @@
            :proof-discharge :not-performed :authority :none :certificate :not-issued}
     reason (assoc :reason reason)))
 
-(defn- holds? [types state {:keys [readers expression]}]
-  (true? (:value (original-evaluate expression (select-keys types readers)
-                                    (select-keys state readers)))))
+(def expression-profile :selected-invariant-expression-correspondence-v1)
+
+(defn- corresponding-value! [types state {:keys [readers expression] :as declaration}]
+  (let [reader-types (select-keys types readers)
+        bindings (select-keys state readers)
+        independent (original-evaluate expression reader-types bindings)
+        evaluated (original-production-evaluate declaration reader-types bindings)]
+    (when-not (and (= readers (set (keys reader-types)))
+                   (= expression (:expression independent) (:expression evaluated))
+                   (= readers (:source-readers independent) (:readers evaluated))
+                   (= presence/result-type (:type independent))
+                   (= presence/semantics-version (:version independent))
+                   (= production/evaluated-type (:type evaluated))
+                   (= production/evaluator-version (:version evaluated))
+                   (= :independent-short-circuit-semantics (:evaluation independent))
+                   (= :pure-interpreted (:evaluation evaluated))
+                   (= :not-proved (:proof-status independent) (:proof-status evaluated))
+                   (= :not-admitted (:admission independent) (:admission evaluated))
+                   (= :none (:authority independent) (:authority evaluated))
+                   (instance? Boolean (:value independent))
+                   (instance? Boolean (:value evaluated))
+                   (= (:value independent) (:value evaluated)))
+      (throw (ex-info "Original invariant expression evaluators disagree"
+                      {:reason :invariant-expression-correspondence-mismatch})))
+    (:value independent)))
+
+(defn- holds? [types state declaration]
+  (true? (corresponding-value! types state declaration)))
+
+(defn- expression-correspondence [invariants checked]
+  {:profile expression-profile
+   :status :matched
+   :scope :selected-replay-projections-only
+   :checking :original-declarations-production-vs-independent
+   :initial-condition :matched-true-at-initial-projection
+   :invariant-ids (set (keys invariants))
+   :checked-points (into [{:tx-id (:tx-id (first checked)) :side :initial}]
+                         (mapcat (fn [{:keys [tx-id]}]
+                                   [{:tx-id tx-id :side :prestate}
+                                    {:tx-id tx-id :side :poststate}]))
+                         (rest checked))
+   :universal-evaluator-correspondence :not-established
+   :proof-discharge :not-performed :authority :none :certificate :not-issued})
 
 (defn- check-state? [types state invariants]
   (and (= (set (keys types)) (set (keys state)))
@@ -112,6 +155,7 @@
                          :prestate-coordinate :preceding-system-current-transaction-valid-time
                          :conclusion :declared-invariants-hold-on-selected-replay-projections
                          :invariant-ids (set (keys invariants))
+                         :expression-correspondence (expression-correspondence invariants checked)
                          :selected-tx-ids ids :checked-boundaries checked
                          :unestablished-implications #{:projection-to-authoritative-physical-state
                                                       :coverage-of-unselected-valid-times
@@ -139,7 +183,8 @@
                                                     (:transition (original-construction original))
                                                     before (get-in step [:spec :inputs]) after))))))
                       (report :mismatch :selected-invariant-transition-mismatch)
-                      (not (check-state? types after invariants))
+                      (not (and (check-state? types before invariants)
+                                (check-state? types after invariants)))
                       (report :mismatch :selected-projection-invariant-violation)
                       :else (recur (inc i) after
                                    (conj checked (cond-> {:tx-id id :relation relation}
