@@ -4,6 +4,8 @@
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-installed-writer-classification :as installed]
             [gesso.assurance.reference-writer-isolation :as isolation]
+            [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
+            [gesso.assurance.reference-xtdb-provider-trust :as provider-trust]
             [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.live.outbox.writer-policy :as policy]
             [gesso.core :as g]
@@ -66,6 +68,12 @@
                               :storage [:local {:path (str root "/storage")}]}
                 :source-id source-id :rules-context {} :live-options {}
                 :stop-timeout-ms 500
+                :provider-trust {:provider provider-contract/reviewed-provider
+                                 :acceptance :trust-open-premises
+                                 :premise-ids #{::provider-contract/decoded-assertions ::provider-contract/ordered-transaction-basis
+                                                ::provider-contract/put-replacement ::provider-contract/commit-abort
+                                                ::provider-contract/worker-clock ::provider-contract/pinned-read
+                                                ::provider-contract/retained-history ::provider-contract/valid-time-boundaries}}
                 :writer-isolation {:deployment-id :fixture/configured-owner
                                    :database-id :fixture/configured-database
                                    :isolation-boundary :fixture/configured-boundary
@@ -110,7 +118,23 @@
                                  declaration {:scope (:scope isolated) :acceptance :trust-open-premises
                                               :premises (mapv :assumption (:obligations isolated))}
                                  accepted (isolation/declare! node admission isolation-handle declaration)
-                                 configured (host/adopt-writer-isolation! started source declarations)]
+                                 configured (host/adopt-writer-isolation! started source declarations)
+                                 provider (host/adopt-provider-trust! started source declarations)]
+                             (is (= :conditional-declared-provider-trust (:status provider)) (pr-str (dissoc provider :origin-report)))
+                             (is (= :configured-local-host (:deployment-adoption provider)))
+                             (is (= :open-owned-generation-at-adoption (:lifecycle-evidence provider)))
+                             (is (= provider-contract/reviewed-provider (get-in provider [:scope :contract-scope :provider])))
+                             (is (= 8 (count (:trusted-assumptions provider))))
+                             (is (= :not-established (:provider-correspondence provider) (:loaded-provider-identity provider)
+                                    (:deployment-isolation provider) (:writer-coverage provider)))
+                             (is (= :not-performed (:proof-discharge provider)))
+                             (is (= :unissued-provider-trust-host
+                                    (reason #(host/adopt-provider-trust! (assoc started :forged true) source declarations))))
+                             (is (= :unissued-provider-trust-host
+                                    (reason #(host/adopt-provider-trust! ctx source declarations))))
+                             (with-redefs [provider-trust/prepare! (constantly {})]
+                               (is (= :provider-trust-host-boundary-replaced
+                                      (reason #(host/adopt-provider-trust! started source declarations)))))
                              (is (= :conditional-declared-writer-isolation (:status configured)) (pr-str configured))
                              (is (= :configured-local-host (:deployment-adoption configured)))
                              (is (= :fixture/configured-owner (get-in configured [:scope :deployment-id])))
@@ -185,6 +209,7 @@
                              (is (= [request-row] (xtdb/q adapter "SELECT * FROM requests")))
                              {:node node :worker worker :live (:gesso.live/system started) :handler ring-handler
                               :configured-scope (:scope configured) :configured-assumptions (:trusted-assumptions configured)
+                              :provider-scope (:scope provider) :provider-assumptions (:trusted-assumptions provider)
                               :adapter adapter :token token :isolation-handle isolation-handle :declaration declaration :initial initial :observation observation :history history}))
                 run! (fn []
                        (let [started (host/start! assembly handler config)]
@@ -197,6 +222,8 @@
                                  (is (identical? token (xtdb/current-submission-policy-token node)))
                                  (is (= {:phase :fenced :in-flight 1} (xtdb/owned-submission-policy-state node token)))
                                  (is (= :installed-owned-policy-not-open (:reason (classify! node admission))))
+                                 (is (= :provider-trust-host-retired
+                                        (reason #(host/adopt-provider-trust! started source declarations))))
                                  (is (= :writer-isolation-host-retired
                                         (reason #(host/adopt-writer-isolation! started source declarations))))
                                  (is (= :writer-isolation-generation-not-open
@@ -249,6 +276,8 @@
             (let [second-run (run!)]
               (is (= [:manifest :initializer] @policy-events))
               (is (not (identical? (:token first-run) (:token second-run))))
+              (is (not= (:provider-scope first-run) (:provider-scope second-run)))
+              (is (= (:provider-assumptions first-run) (:provider-assumptions second-run)))
               (is (not= (:configured-scope first-run) (:configured-scope second-run)))
               (is (not= (:configured-assumptions first-run) (:configured-assumptions second-run)))
               (is (= (:history first-run) (:history second-run)))

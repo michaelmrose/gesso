@@ -9852,3 +9852,49 @@ at the mapped host boundary, requiring the exact reviewed provider
 target and premise selection, and preserving separation from storage
 lineage and writer isolation. Then compose the separate contracts
 without treating declared assumptions as implementation proofs.
+
+* v2867 — adopt owner-configured provider trust
+
+Add optional :provider-trust configuration requiring the mapped writer
+profile, the exact reviewed provider descriptor, explicit
+:trust-open-premises acceptance and all eight provider premise IDs.
+Validate the selection before provider acquisition. Startup records the
+exact returned owner system in a separate weak registry, sharing the
+existing stop lock and retirement flag; it does not automatically accept
+or verify provider semantics.
+
+The owner-only adopt-provider-trust! entry point rechecks the original
+issued admission and derives the closed outcome cases. Prepare a fresh
+provider scope, match the configured target and exact premise IDs, then
+submit the original structural premises to the v2866 declaration
+boundary. Pin the preparation, declaration, admission, outcome and
+generation-observation functions. Check the exact open owned generation
+before and after rederivation. Reject copied systems, request contexts
+and retired hosts. Restart creates a fresh declaration scope, preserving
+the stable provider premise fingerprints for an unchanged contract;
+these fingerprints are not transferable owner credentials.
+
+Three-namespace regression: 27 tests / 454 assertions, zero failures
+or errors, including the actual persistent mapped-host lifecycle,
+writer classification and complete generic host-test namespace.
+Exercise configured provider trust alongside writer-isolation adoption,
+the exact artifact target and eight selected premises, substituted
+preparation boundary, copied owner and request contexts, blocked-stop
+retirement, persistent restart with fresh scope and unchanged premise
+fingerprints, invalid or incomplete startup selection, and refusal
+without mapped ownership or configuration. Update the reviewed host
+source fingerprint. Final four source/test blobs match the tested
+local files. Full project gates and worker-interleaved historical
+recovery not rerun.
+
+Provider trust remains an explicit conditional declaration rather
+than evidence of provider truth, runtime attestation, writer isolation
+or storage lineage. No physical writer behavior changed. Neither
+historical judgment changes and no original premise is discharged.
+
+Next: compose the separately configured writer-isolation and provider
+trust declarations with the original general CLM-R2 argument at the
+exact owner boundary. Preserve distinct premise scopes, original open
+obligations and the remaining implementation and universal coverage
+conditions; do not infer continuous mediation or universal refinement
+from the declarations alone.

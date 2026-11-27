@@ -6,6 +6,7 @@
             [clojure.test :refer [deftest is testing]]
             [com.biffweb.core :as biff]
             [gesso.live.consistency.xtdb :as live.xtdb]
+            [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
             [gesso.core :as g]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.fixture
@@ -81,6 +82,20 @@
            [{:xtdb-submission-policy! nil} :invalid-xtdb-submission-policy]
            [{:history-audit {}} :history-audit-requires-mapped-writer]
            [{:storage-trust {}} :invalid-storage-trust]
+           [{:provider-trust {}} :invalid-provider-trust]
+           [{:provider-trust {:provider (assoc provider-contract/reviewed-provider :version "foreign")
+                              :acceptance :trust-open-premises :premise-ids #{::provider-contract/decoded-assertions ::provider-contract/ordered-transaction-basis
+    ::provider-contract/put-replacement ::provider-contract/commit-abort
+    ::provider-contract/worker-clock ::provider-contract/pinned-read
+    ::provider-contract/retained-history ::provider-contract/valid-time-boundaries}}} :invalid-provider-trust]
+           [{:provider-trust {:provider provider-contract/reviewed-provider
+                              :acceptance :trust-open-premises :premise-ids #{}}} :invalid-provider-trust]
+           [{:provider-trust {:provider provider-contract/reviewed-provider
+                              :acceptance :trust-open-premises :premise-ids #{::provider-contract/decoded-assertions ::provider-contract/ordered-transaction-basis
+    ::provider-contract/put-replacement ::provider-contract/commit-abort
+    ::provider-contract/worker-clock ::provider-contract/pinned-read
+    ::provider-contract/retained-history ::provider-contract/valid-time-boundaries}}}
+            :provider-trust-requires-mapped-writer]
            [{:writer-isolation {}} :invalid-writer-isolation]
            [{:writer-isolation {:deployment-id :fixture/owner :database-id :fixture/database
                                 :isolation-boundary :fixture/boundary :acceptance :trust-open-premises
@@ -132,6 +147,8 @@
                 (:reason (problem #(host/adopt-storage-trust! started nil)))))
          (is (= :unissued-writer-isolation-host
                 (:reason (problem #(host/adopt-writer-isolation! started nil nil)))))
+         (is (= :unissued-provider-trust-host
+                (:reason (problem #(host/adopt-provider-trust! started nil nil)))))
          (is (= :not-selected (:status (host/assurance-status started))))
          (is (= :history-audit-not-selected (:reason (problem #(host/audit-history! started)))))
          (is (some? node))

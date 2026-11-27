@@ -22,6 +22,8 @@
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.assurance.reference-writer-isolation :as isolation]
+            [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
+            [gesso.assurance.reference-xtdb-provider-trust :as provider-trust]
             [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.affordance :as affordance]
@@ -64,7 +66,7 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :xtdb-submission-policy! :mapped-writer-policy :history-audit :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication :storage-trust :writer-isolation})
+    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication :storage-trust :writer-isolation :provider-trust})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
 
@@ -115,6 +117,38 @@
 (defn- register-writer-isolation! [system token lock active trust]
   (locking writer-isolation-hosts
     (.put writer-isolation-hosts token
+          {:system (java.lang.ref.WeakReference. system)
+           :lock lock :active active :trust trust})))
+
+(def ^:private provider-premise-ids
+  #{::provider-contract/decoded-assertions ::provider-contract/ordered-transaction-basis
+    ::provider-contract/put-replacement ::provider-contract/commit-abort
+    ::provider-contract/worker-clock ::provider-contract/pinned-read
+    ::provider-contract/retained-history ::provider-contract/valid-time-boundaries})
+(def ^:private reviewed-provider-target provider-contract/reviewed-provider)
+
+(defn- validate-provider-trust! [config]
+  (when (contains? config :provider-trust)
+    (let [{:keys [provider acceptance premise-ids] :as trust} (:provider-trust config)]
+      (when-not (and (map? trust) (not (record? trust)) (nil? (meta trust))
+                     (= #{:provider :acceptance :premise-ids} (set (keys trust)))
+                     (= reviewed-provider-target provider)
+                     (= :trust-open-premises acceptance)
+                     (set? premise-ids) (nil? (meta premise-ids))
+                     (= provider-premise-ids premise-ids))
+        (reject! :invalid-provider-trust {}))
+      (when-not (:mapped-writer-policy config)
+        (reject! :provider-trust-requires-mapped-writer {})))))
+
+(def ^:private provider-trust-hosts (java.util.WeakHashMap.))
+(def ^:private original-provider-prepare provider-trust/prepare!)
+(def ^:private original-provider-declare provider-trust/declare!)
+(def ^:private original-provider-token xtdb/current-submission-policy-token)
+(def ^:private original-provider-state xtdb/owned-submission-policy-state)
+
+(defn- register-provider-trust! [system token lock active trust]
+  (locking provider-trust-hosts
+    (.put provider-trust-hosts token
           {:system (java.lang.ref.WeakReference. system)
            :lock lock :active active :trust trust})))
 
@@ -170,6 +204,7 @@
     (history-controller/validate-options! (:history-audit config)))
   (validate-storage-trust! config)
   (validate-writer-isolation! config)
+  (validate-provider-trust! config)
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -434,6 +469,9 @@
    Optional :writer-isolation selects an explicit deployment/database boundary
    and exact open environment premise IDs. Adoption is a separate owner-only
    diagnostic on the running mapped generation, not verified writer exclusion.
+   Optional :provider-trust selects the exact reviewed provider target and
+   all open semantic premise IDs. Explicit owner adoption is separate from
+   startup, storage trust and writer isolation.
    Optional :history-audit requires the mapped profile and trusted owner
    :load!, :save!, :key, :deployment-id and :max-steps options. Restore and
    persist a first bounded chunk before request admission. Further chunks
@@ -547,6 +585,7 @@
           stop-lock (Object.)
           trust-token (Object.)
           isolation-token (Object.)
+          provider-trust-token (Object.)
           worker-capture-token (Object.)
           trust-active (atom true)
           stop-owned! (fn []
@@ -581,11 +620,14 @@
                             (select-keys @recovery* [:status :stats :drained?]))
                        (:storage-trust config) (assoc ::storage-trust-token trust-token)
                        (:writer-isolation config) (assoc ::writer-isolation-token isolation-token)
+                       (:provider-trust config) (assoc ::provider-trust-token provider-trust-token)
                        (::mapped-policy-token started) (assoc ::worker-capture-token worker-capture-token))]
           (when (::worker-capture-token system)
             (register-worker-capture-host! system worker-capture-token trust-active))
           (when-let [trust (:writer-isolation config)]
             (register-writer-isolation! system isolation-token stop-lock trust-active trust))
+          (when-let [trust (:provider-trust config)]
+            (register-provider-trust! system provider-trust-token stop-lock trust-active trust))
           (if-let [trust (:storage-trust config)]
             (register-storage-trust! system trust-token stop-lock trust-active trust)
             system))
@@ -715,4 +757,57 @@
                                                  :premises (mapv :assumption (:obligations prepared))})]
           (if (= :conditional-declared-writer-isolation (:status result))
             (assoc result :deployment-adoption :configured-local-host)
+            result))))))
+
+
+(defn- provider-adoption-boundaries! []
+  (when-not (and (= reviewed-provider-target provider-contract/reviewed-provider)
+                 (identical? original-provider-prepare provider-trust/prepare!)
+                 (identical? original-provider-declare provider-trust/declare!)
+                 (identical? original-provider-token xtdb/current-submission-policy-token)
+                 (identical? original-provider-state xtdb/owned-submission-policy-state)
+                 (identical? original-isolation-cases outcome/derive-cases!)
+                 (identical? original-isolation-admission inductive/require-current-mapped-admission!))
+    (reject! :provider-trust-host-boundary-replaced {})))
+
+(defn- require-open-provider-generation! [system]
+  (let [node (:xtdb/connectable system) token (::mapped-policy-token system)]
+    (when-not (and token (identical? token (original-provider-token node))
+                   (= :open (:phase (original-provider-state node token))))
+      (reject! :provider-trust-generation-not-open {}))))
+
+(defn adopt-provider-trust!
+  "Apply the startup-selected provider contract to the original source
+   on the exact running mapped owner. Each adoption prepares a fresh scope.
+   Contract fingerprints are stable across equivalent generations, not a
+   transferable host credential. This is explicit conditional trust, not
+   provider attestation, writer isolation or storage-lineage evidence."
+  [system source declarations]
+  (let [entry (locking provider-trust-hosts
+                (.get provider-trust-hosts (::provider-trust-token system)))]
+    (when-not (and entry (identical? system (.get ^java.lang.ref.WeakReference (:system entry))))
+      (reject! :unissued-provider-trust-host {}))
+    (locking (:lock entry)
+      (when-not @(:active entry)
+        (reject! :provider-trust-host-retired {}))
+      (provider-adoption-boundaries!)
+      (require-open-provider-generation! system)
+      (let [{:keys [provider acceptance premise-ids]} (:trust entry)
+            admission (::mapped-admission system)
+            description (original-isolation-admission admission source)
+            cases (:cases (original-isolation-cases source declarations))
+            prepared (original-provider-prepare admission source declarations
+                                                (:catalog-fingerprint description) cases)]
+        (when-not (and (= :open-provider-trust-requirements (:status prepared))
+                       (= provider (get-in prepared [:scope :contract-scope :provider]))
+                       (= premise-ids (set (keys (:premises prepared)))))
+          (reject! :provider-trust-host-scope-mismatch {:reason/detail (:reason prepared)}))
+        (let [result (original-provider-declare admission (:handle prepared)
+                                               {:scope (:scope prepared) :acceptance acceptance
+                                                :premises (mapv :assumption (vals (:premises prepared)))})]
+          (provider-adoption-boundaries!)
+          (require-open-provider-generation! system)
+          (if (= :conditional-declared-provider-trust (:status result))
+            (assoc result :deployment-adoption :configured-local-host
+                   :lifecycle-evidence :open-owned-generation-at-adoption)
             result))))))
