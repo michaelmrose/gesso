@@ -15,10 +15,10 @@
 (def ^:private derive-replay replay/derive!)
 (def ^:private derive-transition transition/derive!)
 (def ^:private reviewed-sources
-  {"gesso/live/outbox/writer_policy.clj" "841615e768af140e13ad9ba09a9176325aadb41cd7d6082a27f8123af212f97c"
+  {"gesso/live/outbox/writer_policy.clj" "08d5c47f103562ccc2c874cbaea88d2f808d85b4dad455019d45f1c71fd9169c"
    "gesso/live/outbox/maintenance_policy.clj" "59e7463ada951a30944d189913f29399fd3217e6676c93b1ac3eb4db8490109b"
    "gesso/live/outbox/initialization.clj" "36aac083e410e05b806137bf4540559f1ef3d77d4284dc6f387604aff3d81de7"
-   "gesso/live/outbox/host.clj" "1afcaa1b852c8ff206d8963c3eea1f833351a702a5160beda177a1283a03ebd0"
+   "gesso/live/outbox/host.clj" "5a54dc5a7c95fb41acf7fe6ff3a6895beb33b48b72f7f13bd9495cf3b6e62c9f"
    "gesso/live/consistency/xtdb.clj" "2f191e2cdba15d7ce2ce07da02bc35671b44babb713bd85fce01c6d396156697"})
 
 (defn- reject! [reason]
@@ -59,11 +59,11 @@
      :manifest {:policy-kind :manifest :effect :infrastructure-establishment
                 :write-tables manifest :requires :exact-source-manifest-establishment}
      :lease-acquisition {:policy-kind :worker :effect :conditional-mapped-stutter
-                         :write-tables worker :activation :current-activated-generation :requires :pending-row-cas-and-clock}
+                         :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :requires :pending-row-cas-and-clock}
      :lease-reclaim {:policy-kind :worker :effect :conditional-mapped-stutter
-                     :write-tables worker :activation :current-activated-generation :requires :expired-lease-cas-and-clock}
+                     :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :requires :expired-lease-cas-and-clock}
      :dispatch-acknowledgment {:policy-kind :worker :effect :conditional-mapped-stutter
-                               :write-tables worker :activation :current-activated-generation :requires :current-lease-cas-and-receipt}}))
+                               :write-tables worker :activation :current-activated-generation :installed-origin :matched-scheduled-maintenance :requires :current-lease-cas-and-receipt}}))
 
 (defn- classify! [checked writes reads generic]
   (let [mappings (:operation-mappings checked)

@@ -301,6 +301,7 @@
                    (writer-policy/build-policy!
                     node mapped {:source-id (:source-id config)
                                  :worker-id (get-in config [:worker-options :worker-id])
+                                 :require-worker-call-chain? true
                                  :descriptor (::publication-manifest system)})
                    (:xtdb-submission-policy! config))]
       (when policy

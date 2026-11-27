@@ -169,10 +169,13 @@
                                                        :call-chain :matched-scheduled-maintenance))))
     kind))
 
+(def ^:private original-observe-maintenance-origin observe-maintenance-origin)
+
 (defn build-policy!
   "Bind admission to the owned connectable. Return the literal-boolean
    predicate expected by the XTDB adapter. Maintenance is bound to the
-   host-owned source, worker and descriptor. Observer failure refuses
+   host-owned source, worker and descriptor. Installed hosts require the
+   original scheduled maintenance call chain. Observer failure refuses
    submission. Initialization is consumed locally on admission and
    durably on commit of the seed and its marker. Mapped operations
    and worker maintenance remain disabled until activate-policy! checks the captured initializer."
@@ -214,7 +217,12 @@
                             (when (or (= :manifest (:kind maintenance-kind))
                                       (and (= :worker (:kind maintenance-kind))
                                            (xtdb/submission-policy-current? connectable (:registration @phase))))
-                              (observe-maintenance-origin connectable infrastructure tx-ops maintenance-kind)))))]
+                              (when (identical? original-observe-maintenance-origin observe-maintenance-origin)
+                                (let [observed (original-observe-maintenance-origin connectable infrastructure tx-ops maintenance-kind)]
+                                  (when (or (= :manifest (:kind observed))
+                                            (not (:require-worker-call-chain? infrastructure))
+                                            (= :matched-scheduled-maintenance (get-in observed [:worker-origin :call-chain])))
+                                    observed)))))))]
            (when kind
              (observe! kind)
              (when (:worker-origin kind)

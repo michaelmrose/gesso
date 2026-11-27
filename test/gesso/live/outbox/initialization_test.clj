@@ -9,6 +9,9 @@
             [gesso.live.outbox.initialization :as init]
             [gesso.live.outbox :as outbox]
             [gesso.live.outbox.acquisition :as acquisition]
+            [gesso.live.outbox.lifecycle :as lifecycle]
+            [gesso.live.outbox.discovery :as discovery]
+            [gesso.live.core :as live]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.history-coverage :as history]
             [gesso.live.outbox.history-controller :as controller]
@@ -1086,3 +1089,57 @@
             (is (= :leased (:gesso.live.outbox/status (read-row))))
             (is (= [:initializer :worker] @events))
             (finally (release))))))))
+
+
+(deftest installed-profile-requires-original-worker-call-chain
+  (let [admission (admission!)
+        seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
+        seen (atom [])
+        id (random-uuid)
+        plan (outbox/prepare! {:intent-ids [id] :source-id "s" :operation :example/update
+                               :purpose :gesso.live/refresh}
+                              [{:topic :request :id "r1" :change/kind :updated}])
+        config {:admission admission :initializer seed :observe! #(swap! seen conj %)}
+        scope {:source-id "s" :worker-id "w" :require-worker-call-chain? true}
+        sys (live/create {:rules [{:when-topic :request
+                                  :expand (fn [_ change] [(select-keys change [:topic :id :change/kind])])}]})]
+    (try
+      (with-open [node (xtn/start-node {})]
+        (let [writer (policy/build-policy! node config scope)
+              release (xtdb/register-submission-policy! node writer)
+              acquire! #(let [now (java.time.Instant/now)]
+                          (acquisition/acquire-pending! node {:intent-id id :source-id "s" :worker-id "w"
+                                                              :lease-id (random-uuid) :now now
+                                                              :lease-until (.plusSeconds now 60)}))
+              row #(first (xt/q node ["SELECT * FROM gesso_live_outbox WHERE _id = ?" id]))
+              original discovery/discover-eligible!
+              callback-result (promise)]
+          (try
+            (policy/activate-policy! writer)
+            ;; Fixture-only bypass to seed valid pending work.
+            (xt/execute-tx node (conj (vec (:guard-ops plan)) (:tx-op plan)))
+            (is (= :submission-policy-refused (reason acquire!)))
+            (is (= :pending (:gesso.live.outbox/status (row))))
+            (is (= [:initializer] (mapv :kind @seen)))
+            (with-redefs [discovery/discover-eligible!
+                          (fn [n opts]
+                            ;; Genuine constructor, scheduler thread, but not the
+                            ;; scheduled acquisition call chain.
+                            (when-not (realized? callback-result)
+                              (deliver callback-result (reason acquire!)))
+                            (original n opts))]
+              (let [handle (lifecycle/start! node sys {} "s" {:worker-id "w" :poll-ms 30})]
+                (try
+                  (is (= :submission-policy-refused (deref callback-result 10000 :timeout)))
+                  (is (loop [n 0]
+                        (cond (= :dispatch-accepted (:gesso.live.outbox/status (row))) true
+                              (= :failed (:status (lifecycle/status handle))) false
+                              (>= n 200) false
+                              :else (do (Thread/sleep 25) (recur (inc n))))))
+                  (finally (is (= :drained (:outcome (lifecycle/stop! handle 10000))))))))
+            (let [worker-events (filterv #(= :worker (:kind %)) @seen)]
+              (is (= [:lease-acquisition :dispatch-acknowledgment]
+                     (mapv #(get-in % [:worker-origin :maintenance]) worker-events)))
+              (is (every? #(= :matched-scheduled-maintenance (get-in % [:worker-origin :call-chain])) worker-events)))
+            (finally (release)))))
+      (finally (live/close! sys)))))

@@ -10439,3 +10439,30 @@ project gates and installed-host interleaved regression not rerun.
 Next: enforce and qualify original worker call-chain attribution at the
 selected installed owner boundary, preserving the distinction between an
 exact maintenance envelope and an authenticated external dispatch receipt.
+
+* v2884 — enforce scheduled maintenance call-chain attribution
+
+Require the original matched scheduled maintenance chain on the canonical
+installed mapped host, before observing or submitting any worker envelope.
+The existing one-use constructor, acquisition/delivery, cycle and
+scheduler handoffs now participate in admission instead of merely annotating
+an otherwise accepted envelope. Pin the original origin observer and
+preserve standalone policy compatibility and the manifest/initializer
+paths. Record the installed-only requirement on each reviewed worker
+branch. This does not yet bind the precise managed lifecycle instance;
+an independently started real scheduler with the same scope is not excluded.
+External receipt authentication and raw physical writer closure remain open.
+
+Focused JVM: 4 tests / 58 assertions, zero failures or errors (exit 0),
+covering the new strict-policy physical regression, the v2883 activation
+regression and both writer-classification tests. A disposable XTDB node
+with fixture-only pending work refuses direct acquisition and an actual
+constructor call from a discovery callback on the scheduler thread;
+the genuine scheduled acquisition and acknowledgment commit and carry the
+matched call chain. Update both reviewed source digests. The complete
+installed-host and full project gates were not rerun. All 39 original
+general conditions remain open; no authority or proof discharge is issued.
+
+Next: bind the strict scheduled origin to the exact managed lifecycle
+and its explicitly authorized successor lineage before the first cycle,
+without introducing a startup race or breaking worker recovery.

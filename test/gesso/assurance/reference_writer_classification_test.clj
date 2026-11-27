@@ -36,6 +36,7 @@
     (doseq [k [:lease-acquisition :lease-reclaim :dispatch-acknowledgment]]
       (is (= :conditional-mapped-stutter (get-in branches [k :effect])))
       (is (= :current-activated-generation (get-in branches [k :activation])))
+      (is (= :matched-scheduled-maintenance (get-in branches [k :installed-origin])))
       (is (= #{} (set/intersection (:protected-tables report) (get-in branches [k :write-tables])))))
     (is (= :conditional-stutter (get-in report [:physical-step-classes :aborted-attempt])))
     (is (= #{:read-only-replay :locally-refused-submission} (:nontransaction-observations report)))
