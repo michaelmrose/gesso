@@ -81,6 +81,18 @@
            [{:xtdb-submission-policy! nil} :invalid-xtdb-submission-policy]
            [{:history-audit {}} :history-audit-requires-mapped-writer]
            [{:storage-trust {}} :invalid-storage-trust]
+           [{:writer-isolation {}} :invalid-writer-isolation]
+           [{:writer-isolation {:deployment-id :fixture/owner :database-id :fixture/database
+                                :isolation-boundary :fixture/boundary :acceptance :trust-open-premises
+                                :premise-ids #{}}} :invalid-writer-isolation]
+           [{:writer-isolation {:deployment-id :fixture/owner :database-id :fixture/database
+                                :isolation-boundary :fixture/boundary :acceptance :trust-open-premises
+                                :premise-ids #{:gesso.assurance.reference-writer-isolation/database-owner-binding
+                                               :gesso.assurance.reference-writer-isolation/in-process-writer-exclusion
+                                               :gesso.assurance.reference-writer-isolation/external-writer-exclusion
+                                               :gesso.assurance.reference-writer-isolation/storage-and-log-writer-exclusion
+                                               :gesso.assurance.reference-writer-isolation/lifecycle-isolation}}}
+            :writer-isolation-requires-mapped-writer]
            [{:storage-trust {:deployment-id :fixture/deployment :acceptance :trust-open-premises
                             :policy {:comparison-id :fixture/recovery :relation :same-store-incarnation
                                      :identity-policy :fixture/custody :origin-boundary :fixture/origin
@@ -118,6 +130,8 @@
          (is (nil? (host/history-status started)))
          (is (= :unissued-storage-trust-host
                 (:reason (problem #(host/adopt-storage-trust! started nil)))))
+         (is (= :unissued-writer-isolation-host
+                (:reason (problem #(host/adopt-writer-isolation! started nil nil)))))
          (is (= :not-selected (:status (host/assurance-status started))))
          (is (= :history-audit-not-selected (:reason (problem #(host/audit-history! started)))))
          (is (some? node))

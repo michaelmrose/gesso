@@ -9639,3 +9639,48 @@ Next: integrate an optional owner-configured isolation declaration
 at the exact mapped host boundary, preserving generation scope,
 startup/cleanup semantics and the separation from storage-lineage
 trust. Then address the versioned provider semantics requirements.
+
+* v2863 — adopt owner-configured writer isolation
+
+Add the optional :writer-isolation host configuration, requiring the
+mapped writer profile, qualified deployment/database/boundary labels,
+explicit :trust-open-premises acceptance and the exact five environment
+premise IDs from v2862. Validate this selection before provider
+acquisition. Startup registers the exact returned owner system in a
+separate weak registry using the existing stop lock and active flag.
+It does not automatically declare or verify isolation.
+
+The owner-only adopt-writer-isolation! entry point accepts the exact
+running host and original mapped source and outcome declarations.
+Recheck the issued admission, derive the closed cases and catalog
+fingerprint, prepare a fresh isolation scope and require that its
+derived premise IDs exactly match the startup selection. Submit the
+full structural premises to the existing v2862 declaration boundary.
+Pin the derivation and declaration functions. Return the diagnostic
+with configured-local-host adoption only on successful declaration.
+Synchronize adoption with host retirement, rejecting a retired host
+even if its provider has not yet closed. Copied systems and request
+contexts are not owner credentials. Restart requires fresh scope
+and premise fingerprints, not transfer of a previous declaration.
+Storage-lineage trust and historical judgment APIs remain unchanged.
+
+Three-namespace regression: 27 tests / 425 assertions, zero failures
+or errors, including actual persistent mapped-host lifecycle,
+writer classification and the full generic host-test namespace.
+Check exact configured scope labels and five accepted open premises,
+copied system and request-context rejection, substituted boundary,
+retirement on blocked stop, new generation scope after persistent
+reopen, invalid or incomplete configuration, and refusal without the
+mapped profile or startup selection. Update the reviewed host pin.
+No full project gates or worker-interleaved historical recovery run.
+
+This is configured conditional adoption, not authenticated deployment
+identity, actual writer exclusion, continuous historical mediation,
+provider correspondence or proof discharge. No production writer
+admission behavior changed. Both historical judgments remain unchanged.
+
+Next: specify the versioned XTDB provider semantic contract for the
+supported exact transaction and read fragments, separating provider
+assumptions from checked lowering and deployment isolation. Bind
+the contract to the original open provider-effect and read/time
+conditions without treating selected experiments as universal proof.

@@ -21,6 +21,8 @@
             [gesso.assurance.operational-report :as operational-report]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-storage-identity :as storage]
+            [gesso.assurance.reference-writer-isolation :as isolation]
+            [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.affordance :as affordance]
             [gesso.live.core :as live]
@@ -62,7 +64,7 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :xtdb-submission-policy! :mapped-writer-policy :history-audit :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication :storage-trust})
+    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication :storage-trust :writer-isolation})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
 
@@ -84,6 +86,37 @@
         (reject! :invalid-storage-trust {}))
       (when-not (:mapped-writer-policy config)
         (reject! :storage-trust-requires-mapped-writer {})))))
+
+(def ^:private isolation-premise-ids
+  #{::isolation/database-owner-binding ::isolation/in-process-writer-exclusion
+    ::isolation/external-writer-exclusion ::isolation/storage-and-log-writer-exclusion
+    ::isolation/lifecycle-isolation})
+
+(defn- validate-writer-isolation! [config]
+  (when (contains? config :writer-isolation)
+    (let [{:keys [acceptance premise-ids] :as trust} (:writer-isolation config)]
+      (when-not (and (map? trust) (not (record? trust)) (nil? (meta trust))
+                     (= #{:deployment-id :database-id :isolation-boundary :acceptance :premise-ids}
+                        (set (keys trust)))
+                     (every? qualified-keyword? (map trust [:deployment-id :database-id :isolation-boundary]))
+                     (= :trust-open-premises acceptance)
+                     (set? premise-ids) (nil? (meta premise-ids))
+                     (= isolation-premise-ids premise-ids))
+        (reject! :invalid-writer-isolation {}))
+      (when-not (:mapped-writer-policy config)
+        (reject! :writer-isolation-requires-mapped-writer {})))))
+
+(def ^:private writer-isolation-hosts (java.util.WeakHashMap.))
+(def ^:private original-isolation-prepare isolation/prepare!)
+(def ^:private original-isolation-declare isolation/declare!)
+(def ^:private original-isolation-cases outcome/derive-cases!)
+(def ^:private original-isolation-admission inductive/require-current-mapped-admission!)
+
+(defn- register-writer-isolation! [system token lock active trust]
+  (locking writer-isolation-hosts
+    (.put writer-isolation-hosts token
+          {:system (java.lang.ref.WeakReference. system)
+           :lock lock :active active :trust trust})))
 
 (def ^:private storage-trust-hosts (java.util.WeakHashMap.))
 (def ^:private original-target-match observed-recovery/conditional-recovery-target-matches?)
@@ -136,6 +169,7 @@
       (reject! :history-audit-requires-mapped-writer {}))
     (history-controller/validate-options! (:history-audit config)))
   (validate-storage-trust! config)
+  (validate-writer-isolation! config)
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -397,6 +431,9 @@
    Optional :storage-trust selects one exact recovery policy and deployment
    name, explicitly trusting its open premises. Adoption is owner-only on
    the exact running host, not authentication of external lifecycle events.
+   Optional :writer-isolation selects an explicit deployment/database boundary
+   and exact open environment premise IDs. Adoption is a separate owner-only
+   diagnostic on the running mapped generation, not verified writer exclusion.
    Optional :history-audit requires the mapped profile and trusted owner
    :load!, :save!, :key, :deployment-id and :max-steps options. Restore and
    persist a first bounded chunk before request admission. Further chunks
@@ -509,6 +546,7 @@
           native-stop (:biff.core/stop-system started)
           stop-lock (Object.)
           trust-token (Object.)
+          isolation-token (Object.)
           worker-capture-token (Object.)
           trust-active (atom true)
           stop-owned! (fn []
@@ -542,9 +580,12 @@
           @recovery* (assoc recovery-status-key
                             (select-keys @recovery* [:status :stats :drained?]))
                        (:storage-trust config) (assoc ::storage-trust-token trust-token)
+                       (:writer-isolation config) (assoc ::writer-isolation-token isolation-token)
                        (::mapped-policy-token started) (assoc ::worker-capture-token worker-capture-token))]
           (when (::worker-capture-token system)
             (register-worker-capture-host! system worker-capture-token trust-active))
+          (when-let [trust (:writer-isolation config)]
+            (register-writer-isolation! system isolation-token stop-lock trust-active trust))
           (if-let [trust (:storage-trust config)]
             (register-storage-trust! system trust-token stop-lock trust-active trust)
             system))
@@ -635,5 +676,43 @@
                                                   :identity-policy (:identity-policy policy)
                                                   :acceptance acceptance :premises premises})]
           (if (= :conditional (:status result))
+            (assoc result :deployment-adoption :configured-local-host)
+            result))))))
+
+
+(defn adopt-writer-isolation!
+  "Apply the startup-selected isolation declaration to the exact running
+   owner system and original mapped source. Recheck source and closed outcome
+   cases, and issue a fresh generation-scoped diagnostic. No request context,
+   caller-supplied deployment or copied host is accepted. The configured
+   trust is not actual exclusion, continuous mediation or storage lineage."
+  [system source declarations]
+  (let [entry (locking writer-isolation-hosts
+                (.get writer-isolation-hosts (::writer-isolation-token system)))]
+    (when-not (and entry (identical? system (.get ^java.lang.ref.WeakReference (:system entry))))
+      (reject! :unissued-writer-isolation-host {}))
+    (locking (:lock entry)
+      (when-not @(:active entry)
+        (reject! :writer-isolation-host-retired {}))
+      (when-not (and (identical? original-isolation-prepare isolation/prepare!)
+                     (identical? original-isolation-declare isolation/declare!)
+                     (identical? original-isolation-cases outcome/derive-cases!)
+                     (identical? original-isolation-admission inductive/require-current-mapped-admission!))
+        (reject! :writer-isolation-host-boundary-replaced {}))
+      (let [{:keys [acceptance premise-ids] :as trust} (:trust entry)
+            node (:xtdb/connectable system)
+            admission (::mapped-admission system)
+            description (original-isolation-admission admission source)
+            cases (:cases (original-isolation-cases source declarations))
+            prepared (original-isolation-prepare node admission source declarations
+                                                 (:catalog-fingerprint description) cases
+                                                 (dissoc trust :acceptance :premise-ids))]
+        (when-not (and (= :open-isolation-requirements (:status prepared))
+                       (= premise-ids (set (map #(get-in % [:assumption :id]) (:obligations prepared)))))
+          (reject! :writer-isolation-host-scope-mismatch {:reason/detail (:reason prepared)}))
+        (let [result (original-isolation-declare node admission (:handle prepared)
+                                                {:scope (:scope prepared) :acceptance acceptance
+                                                 :premises (mapv :assumption (:obligations prepared))})]
+          (if (= :conditional-declared-writer-isolation (:status result))
             (assoc result :deployment-adoption :configured-local-host)
             result))))))

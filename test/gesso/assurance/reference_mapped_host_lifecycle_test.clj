@@ -66,6 +66,13 @@
                               :storage [:local {:path (str root "/storage")}]}
                 :source-id source-id :rules-context {} :live-options {}
                 :stop-timeout-ms 500
+                :writer-isolation {:deployment-id :fixture/configured-owner
+                                   :database-id :fixture/configured-database
+                                   :isolation-boundary :fixture/configured-boundary
+                                   :acceptance :trust-open-premises
+                                   :premise-ids #{::isolation/database-owner-binding ::isolation/in-process-writer-exclusion
+                                                  ::isolation/external-writer-exclusion ::isolation/storage-and-log-writer-exclusion
+                                                  ::isolation/lifecycle-isolation}}
                 :worker-options {:worker-id "mapped-host-root" :poll-ms 60000}
                 :assembled-publication mapping
                 :mapped-writer-policy {:admission admission :initializer seed
@@ -102,7 +109,26 @@
                                  isolation-handle (:handle isolated)
                                  declaration {:scope (:scope isolated) :acceptance :trust-open-premises
                                               :premises (mapv :assumption (:obligations isolated))}
-                                 accepted (isolation/declare! node admission isolation-handle declaration)]
+                                 accepted (isolation/declare! node admission isolation-handle declaration)
+                                 configured (host/adopt-writer-isolation! started source declarations)]
+                             (is (= :conditional-declared-writer-isolation (:status configured)) (pr-str configured))
+                             (is (= :configured-local-host (:deployment-adoption configured)))
+                             (is (= :fixture/configured-owner (get-in configured [:scope :deployment-id])))
+                             (is (= :fixture/configured-database (get-in configured [:scope :database-id])))
+                             (is (= :fixture/configured-boundary (get-in configured [:scope :isolation-boundary])))
+                             (is (= 5 (count (:trusted-assumptions configured))))
+                             (is (= :not-established (:writer-coverage configured) (:continuous-mediation configured)
+                                    (:provider-correspondence configured)))
+                             (is (= :not-performed (:proof-discharge configured)))
+                             (is (= :unissued-writer-isolation-host
+                                    (reason #(host/adopt-writer-isolation! (assoc started :forged true) source declarations))))
+                             (is (= :unissued-writer-isolation-host
+                                    (reason #(host/adopt-writer-isolation! ctx source declarations))))
+                             (is (= :unissued-storage-trust-host
+                                    (reason #(host/adopt-storage-trust! started nil))))
+                             (with-redefs [isolation/prepare! (constantly {})]
+                               (is (= :writer-isolation-host-boundary-replaced
+                                      (reason #(host/adopt-writer-isolation! started source declarations)))))
                              (is (= :open-isolation-requirements (:status isolated)) (pr-str (dissoc isolated :handle)))
                              (is (= :conditional-declared-writer-isolation (:status accepted)) (pr-str accepted))
                              (is (= 5 (count (:trusted-assumptions accepted))))
@@ -158,6 +184,7 @@
                                     (reason #(xtdb/execute-tx! adapter [[:put-docs :requests (assoc request-row :status :claimed)]]))))
                              (is (= [request-row] (xtdb/q adapter "SELECT * FROM requests")))
                              {:node node :worker worker :live (:gesso.live/system started) :handler ring-handler
+                              :configured-scope (:scope configured) :configured-assumptions (:trusted-assumptions configured)
                               :adapter adapter :token token :isolation-handle isolation-handle :declaration declaration :initial initial :observation observation :history history}))
                 run! (fn []
                        (let [started (host/start! assembly handler config)]
@@ -170,6 +197,8 @@
                                  (is (identical? token (xtdb/current-submission-policy-token node)))
                                  (is (= {:phase :fenced :in-flight 1} (xtdb/owned-submission-policy-state node token)))
                                  (is (= :installed-owned-policy-not-open (:reason (classify! node admission))))
+                                 (is (= :writer-isolation-host-retired
+                                        (reason #(host/adopt-writer-isolation! started source declarations))))
                                  (is (= :writer-isolation-generation-not-open
                                         (:reason (isolation/declare! node admission (:isolation-handle result) (:declaration result)))))
                                  (is (= [{:x 1}] (xtdb/q node "SELECT 1 AS x")))
@@ -220,6 +249,8 @@
             (let [second-run (run!)]
               (is (= [:manifest :initializer] @policy-events))
               (is (not (identical? (:token first-run) (:token second-run))))
+              (is (not= (:configured-scope first-run) (:configured-scope second-run)))
+              (is (not= (:configured-assumptions first-run) (:configured-assumptions second-run)))
               (is (= (:history first-run) (:history second-run)))
               (is (= (:initial first-run) (:initial second-run)))
               (is (= (:initial first-run)
