@@ -9983,3 +9983,40 @@ Next: exercise the final envelope check at actual one-use handoff
 consumption, including changed envelope bindings and rejection before
 physical execution. Then continue the exact source-to-admitted-envelope
 correspondence argument, retaining provider and projection assumptions.
+
+* v2870 — exercise exact final envelope at handoff consumption
+
+Extend the Claim production-frame fixture to execute deliberately
+corrupted private frame handoffs through the unchanged synchronous
+execute-resolved-plan! wrapper and actual XTDB adapter against an
+isolated real node. A selected generic test policy uses the actual
+claim-framed-submission! boundary and refuses all calls, including
+the valid control after checking its one-use claim. This is not a
+test of the full installed mapped writer predicate.
+
+Check a vector mismatching the original handoff, then change both
+the outgoing vector and its expected handoff vector together while
+retaining the original unbound vector. Rebind altered guard values,
+missing operations, altered witness fields and altered request puts
+to create internally valid but wrong digests. Reject a corrupt digest
+and a substituted verifier. Require the precise refusal reason,
+no second claim after the attempted consumption, cleared scope
+outside execution, empty adapter API invocation capture, and unchanged
+physical xt.txs ledger for each of eight calls. The valid control
+consumes the expected checked candidate exactly once; the fixture
+policy intentionally refuses its physical invocation.
+
+Run this extended production-frame test alongside the existing
+selected-publication-executor-submits-the-framed-canonical-plan
+physical positive and negative regression, including the actual
+commit and historical readback path. Focused result: 2 tests /
+236 assertions, zero failures or errors. The latter unchanged test
+file has local blob f650527ea01cbf788a925013edf0c09991572c29.
+The modified test blob matches the locally tested file. No production
+code changes; complete fixture namespaces, installed mapped-host
+recovery and full project gates not run. No universal provider
+correspondence or original proof premise discharge claimed.
+
+Next: derive the exact source-to-admitted-envelope argument with
+the final witness extension and one-use consumption checks explicitly
+bound to the source-side symbolic write and guard arguments.

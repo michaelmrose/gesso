@@ -16,7 +16,10 @@
             [gesso.assurance.xtdb-envelope :as envelope]
             [gesso.assurance.proof.guarded-substitution :as guarded]
             [gesso.assurance.proof.unified-preservation :as unified]
-            [gesso.assurance.proof.finite-model-oracle :as oracle]))
+            [gesso.assurance.proof.finite-model-oracle :as oracle]
+            [gesso.live.consistency.xtdb :as xtdb]
+            [xtdb.api :as xt]
+            [xtdb.node :as xtn]))
 
 (defn- eq [field value] [:= [:read field] [:literal value]])
 (defn- conjunction [fields]
@@ -357,6 +360,62 @@
                  (assoc-in declarations [accept :purpose] :unqualified)]]
       (is (thrown? clojure.lang.ExceptionInfo (issue (assoc source* :publication-derivations bad)))))))
 
+(defn- exercise-envelope-consumption! [admission framed]
+  ;; Deliberately corrupt the private handoff at the assembly/execute seam.
+  ;; The real synchronous execution wrapper and adapter policy boundary run
+  ;; unchanged. The selected policy records claims but refuses every call,
+  ;; including the valid control, so no provider transaction should begin.
+  (with-open [node (xtn/start-node {})]
+    (let [ctx {:xtdb/connectable node}
+          attempts (atom [])
+          original (:ops framed)
+          unbound (get-in framed [:frame-handoff :unbound-ops])
+          policy (fn [submission]
+                   (let [claim! #(publication/claim-framed-submission! admission node submission)
+                         result (try {:checked (claim!)}
+                                     (catch clojure.lang.ExceptionInfo e {:reason (:reason (ex-data e))}))]
+                     (swap! attempts conj (assoc result :second (claim!)))
+                     ;; Propagate a failed structural check just as the mapped
+                     ;; writer policy does, rather than admitting the payload.
+                     (when-let [reason (:reason result)]
+                       (throw (ex-info "Rejected framed submission" {:reason reason})))
+                     false))
+          release (xtdb/register-submission-policy! node policy)
+          ledger #(xt/q node "SELECT _id, committed FROM xt.txs ORDER BY _id")
+          prior (ledger)
+          run! (fn [plan expected reason]
+                 (let [capture (xtdb/capture-tx-api-calls!
+                                #(#'publication/execute-resolved-plan! ctx plan))]
+                   (is (= :threw (:outcome capture)))
+                   (is (= reason (:reason (ex-data (:error capture)))))
+                   (is (empty? (:events capture)))
+                   (is (= expected (peek @attempts)))
+                   (is (= prior (ledger)))
+                   (is (nil? (publication/claim-framed-submission!
+                              admission node (get-in plan [:frame-handoff :submission]))))))]
+      (try
+        (run! framed {:checked (get-in framed [:frame-handoff :checked]) :second nil}
+              :submission-policy-refused)
+        ;; A mismatched submitted vector cannot claim the original scope.
+        (run! (update framed :ops pop) {:checked nil :second nil} :submission-policy-refused)
+        ;; Even if the submitted vector equals a corrupted private handoff,
+        ;; the retained original unbound vector must still reject it.
+        (doseq [changed [(assoc-in unbound [0 1] "other")
+                         (subvec unbound 1)
+                         (assoc-in unbound [(dec (count unbound)) 2 :guard-prefix-fingerprint] "foreign")
+                         (mapv (fn [op] (if (= :requests (second op)) (assoc-in op [2 :revision] 9) op)) unbound)]
+                :let [bound (envelope/bind-transition-envelope! changed)]]
+          (is (envelope/bound-transition-envelope? bound))
+          (run! (-> framed (assoc :ops bound) (assoc-in [:frame-handoff :submission :tx-ops] bound))
+                {:reason :mapped-final-envelope-mismatch :second nil} :mapped-final-envelope-mismatch))
+        (let [bad (assoc-in original [(dec (count original)) 2 :envelope-fingerprint] "foreign")]
+          (run! (-> framed (assoc :ops bad) (assoc-in [:frame-handoff :submission :tx-ops] bad))
+                {:reason :mapped-final-envelope-mismatch :second nil} :mapped-final-envelope-mismatch))
+        (with-redefs [envelope/bound-transition-envelope? (constantly true)]
+          (run! framed {:reason :mapped-envelope-boundary-replaced :second nil} :mapped-envelope-boundary-replaced))
+        (is (= 8 (count @attempts)))
+        (finally (release))))))
+
 (deftest declared-publication-is-checked-at-production-frame-boundary
   (let [accept (claim/alternative-id "helper-1" :accept)
         source (assoc (claim/publication-mapped-admission-source (claim/bound-inductive-source!))
@@ -408,6 +467,7 @@
       (is (= :matched (marker framed)))
       (is (= bound (get-in framed [:frame-handoff :submission :tx-ops])))
       (is (true? (check! bound)))
+      (exercise-envelope-consumption! admission framed)
       (is (= unbound (update-in bound [(dec (count bound)) 2] #(apply dissoc % envelope/binding-keys))))
       ;; A freshly bound digest does not establish equality to the admitted
       ;; prefix, write suffix or original transition witness.
