@@ -54,3 +54,60 @@
             (is (= :invalid-adapter-connectable (reason #(adapter/execute-tx! handle bad))))
             (is (adapter/same-connectable? node (adapter/adapter-connectable! node)))
             (finally (release-new))))))))
+
+(deftest node-registration-is-not-database-wide-writer-isolation
+  ;; Deliberate negative witnesses on a disposable database. None of these
+  ;; direct/alternate paths should be used by a mapped application.
+  (with-open [node (xtn/start-node {})]
+    (let [seen (atom [])
+          release (adapter/register-submission-policy!
+                   node (fn [envelope] (swap! seen conj envelope) false))
+          handle (adapter/adapter-connectable! node)
+          ops (fn [id] [[:put-docs :ingress_audit {:xt/id id :value 1}]])]
+      (try
+        (is (= :submission-policy-refused
+               (reason #(adapter/execute-tx! handle (ops "refused")))))
+        (is (= :submission-policy-refused
+               (reason #(adapter/execute-tx! node (ops "refused")))))
+        (is (= :submission-policy-refused
+               (reason #(adapter/submit-tx! handle (ops "refused")))))
+        (is (= 3 (count @seen)))
+        (is (empty? (adapter/q handle ["SELECT * FROM ingress_audit"])))
+        ;; Raw XTDB does not consult the adapter registration.
+        (is (some? (xt/execute-tx node (ops "raw"))))
+        ;; A second connectable reaches the SAME database, but the adapter
+        ;; registry is keyed by object identity, not database identity.
+        (with-open [conn (.getConnection ^javax.sql.DataSource node)]
+          (is (not (identical? node conn)))
+          (is (nil? (adapter/current-submission-policy-token conn)))
+          (is (some? (:tx-result (adapter/execute-tx! conn (ops "connection")))))
+          (is (= #{{:xt/id "raw" :value 1} {:xt/id "connection" :value 1}}
+                 (set (xt/q conn ["SELECT * FROM ingress_audit"])))))
+        (is (= 3 (count @seen)))
+        (finally (release))))))
+
+(deftest policy-release-is-not-an-in-flight-drain
+  ;; Intentionally violate the release-after-close owner contract, on a
+  ;; disposable node, to show why the independent lifecycle fence matters.
+  (with-open [node (xtn/start-node {})]
+    (let [entered (promise) proceed (promise)
+          release (adapter/register-submission-policy!
+                   node (fn [_] (deliver entered true)
+                          (true? (deref proceed 10000 false))))
+          handle (adapter/adapter-connectable! node)
+          ops [[:put-docs :ingress_audit {:xt/id "in-flight" :value 1}]]
+          call (future (adapter/execute-tx! handle ops))]
+      (try
+        (is (= true (deref entered 10000 ::timeout)))
+        (release)
+        (is (not (realized? call)))
+        (is (= :invalid-adapter-connectable
+               (reason #(adapter/execute-tx! handle ops))))
+        (deliver proceed true)
+        (is (some? (:tx-result (deref call 20000 ::timeout))))
+        (is (= [{:xt/id "in-flight" :value 1}]
+               (xt/q node ["SELECT * FROM ingress_audit"])))
+        (finally
+          (deliver proceed false)
+          (deref call 20000 ::timeout)
+          (release))))))

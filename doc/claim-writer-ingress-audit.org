@@ -1,0 +1,177 @@
+#+TITLE: Claim writer ingress and lifecycle audit
+#+OPTIONS: toc:2 num:nil
+
+* Scope and result
+
+This v2858 review concerns the single-node mapped Claim fixture and its
+reviewed adapter, host and writer-policy sources at v2857
+(0f585d27def0bb9f132b75a6035f3daee1a2dc49). It does not establish
+closure over every application, dependency, dynamically resolved call,
+network client, storage writer or possible JVM execution. Source search,
+manual inspection and disposable-node negative witnesses are distinct
+forms of evidence. No writer-closure premise is accepted or discharged.
+
+The relevant unit of isolation is the protected physical database and
+its admitted history, not the Java object identity of a connectable.
+An opaque adapter handle limits accidental capability exposure. It is
+not a hostile-code sandbox or a database-wide authorization mechanism.
+
+* Reviewed ingress
+
+** Canonical adapter path
+
+In gesso.live.consistency.xtdb, submit-tx! and execute-tx! reach
+invoke-xtdb-api!. The context, task and one-document wrappers delegate
+to these APIs. invoke-xtdb-api! resolves a valid AdapterConnectable to
+its original physical node under the submission-policies lock, selects
+that node's identity-keyed registration and requires literal true from
+the predicate before the bound provider function is invoked. Options
+are filtered before construction of the envelope. Without a registered
+predicate, the generic adapter retains its unrestricted behavior.
+
+The mapped writer predicate itself admits only execute-tx with empty
+provider options and a nonempty vector of operations, with the existing
+framed handoff, initializer and restricted maintenance distinctions.
+The ordinary model transaction path delegates through Live. Mapped
+publication, manifest establishment, initialization, lease acquisition
+and acknowledgment use the adapter. These observations identify the
+canonical path; they are not a transitive call-graph proof.
+
+** Raw provider and alternate-connectable paths
+
+The node returned to the host owner is a raw XTDB connectable.
+xtdb.api/execute-tx and submit-tx do not consult Gesso's registry.
+A JDBC connection derived from the node is a different identity and
+the adapter has no registration for it, although it can address the
+same database. The two newly added negative witnesses use only
+disposable databases, not an installed application or production data.
+
+The pinned com.xtdb/xtdb-api 2.2.0-beta1 API source uses with-conn
+and submits through the provider connection; execute-tx accepts
+a JDBC connection or DataSource. The pinned com.biffweb/xtdb 2.0.0
+source, com/biffweb/xtdb/impl/tx.clj, selects the connection pool or
+node from the context. execute-tx invokes xtdb.api/execute-tx;
+submit-tx uses submit-tx-for-token, a direct JDBC read-write transaction.
+Neither is intercepted by the Gesso adapter. These Biff paths are
+source-reviewed, not newly exercised by the v2858 tests.
+
+Review of the local source tree identified these additional raw or
+diagnostic submission sites:
+
+- gesso.model.resolution-observation/execute-physical! (called by
+  observe-and-check!): directly invokes xtdb.api/execute-tx.
+- gesso.model.tx-refinement-xtdb/execute-definitively! (used by the
+  physical comparison APIs): directly invokes xtdb.api/execute-tx.
+- gesso.assurance.proof.xtdb-restricted-submission-gateway/
+  prepare-one-shot!: captures the original XTDB execute function and
+  invokes it directly through its independently controlled gateway.
+- gesso.assurance.proof.issued-executor-ledger-join/
+  observe-issued-ledger-join!: temporarily binds the adapter execution
+  seam to a controlled function which invokes the original XTDB API.
+  This is a diagnostic forwarder, not evidence of independent
+  installed-policy admission or deployment-wide closure.
+
+These diagnostic entry points must not be treated as ordinary
+read-only assurance functions, nor given access to a live protected
+database merely because their namespaces are under assurance. Their
+callers and downstream reachability still need qualification. The
+source search for explicit provider/JDBC/adapter names does not cover
+all dynamically constructed calls, dependency effects or native paths.
+
+* Lifecycle boundary
+
+In gesso.live.outbox.host/start-xtdb!, the node is acquired before
+registration; registration precedes manifest establishment, activation,
+history audit and exposure of the started host. Mapped operation
+admission requires the activated generation. The host then starts the
+remaining owned modules before opening request admission. The request
+wrapper removes recognized alternate provider aliases and supplies the
+opaque handle under the owned context keys. The returned owner system
+still contains the physical node.
+
+The host's stop-owned! closes and drains synchronous request admission,
+retires recovery and routes and drains audit work before native Biff
+stop. The owned reverse module order stops the worker (and owned
+listener when present) before Live and the provider. Provider close
+precedes release of the policy registration. A timed-out drain is not
+permission to close the provider; returned asynchronous Ring bodies
+are outside the synchronous request drain. These are selected reviewed
+owner guarantees, not guarantees about arbitrary tasks or raw clients.
+
+The registry lock protects registration lookup and handle resolution,
+not the whole submission lifetime. invoke-xtdb-api! retains the
+selected entry beyond the lock. The release function removes the
+registration but does not join already entered invocations. New
+opaque-handle calls then fail, while an invocation already in its
+admission predicate can proceed. The new regression deliberately
+violates the documented release-after-close contract with a disposable
+node and observes this behavior. It does not demonstrate a failure of
+normal host stop ordering. Generation tokens do not replace admission
+fences and draining.
+
+* Exact open condition links
+
+The following are precisely the five writer-mediation condition IDs
+reviewed by v2857. Each remains open.
+
+- :all-physical-writers-mediated-by-exact-installed-policy — require
+  control of all raw, alternate-connectable, diagnostic and external
+  write capabilities, not just registration for one object.
+- :continuous-exact-installed-policy-mediation — require an owner
+  lifecycle argument covering acquisition, activation, admission,
+  outstanding calls, asynchronous tasks, shutdown, failed cleanup and
+  restart. External writer isolation is required throughout.
+- :complete-admitted-writer-and-temporal-boundary-coverage — require
+  writer ingress closure together with complete temporal transitions
+  and attributed observations.
+- :every-physical-step-instantiates-qualified-schema — require
+  exact attribution, operation and provider effect correspondence for
+  each admitted instance; entry-point inspection alone is insufficient.
+- :complete-committed-aborted-and-temporal-boundary-classification —
+  require complete retained provider history and boundary semantics,
+  beyond classification of the selected finite cut.
+
+Next work should develop an explicitly owned ingress/lifecycle
+qualification and a deployment isolation boundary. Preserve the
+generic unregistered adapter contract outside that qualification.
+Do not claim a process-local registry can secure a shared database
+against arbitrary authenticated SQL clients or hostile in-process code.
+Provider authentication, privileges and external deployment assumptions
+must be verified or explicitly scoped, not presumed. The provider
+atomicity contract remains a separate obligation.
+
+* Reviewed source identities
+
+The following Git blob IDs were checked against v2857:
+
+| Source | Blob |
+|-
+| src/gesso/live/consistency/xtdb.clj | f8f4c9cbe19fa9fe13dedb05fe8c1c457d21da01 |
+| src/gesso/live/outbox/host.clj | 30ce80cc346c28e5b1790ec49bc0f6351093964f |
+| src/gesso/live/outbox/writer_policy.clj | 1743eb5fc1978da63449f184d296d602ca4ae339 |
+| src/gesso/model/resolution_observation.clj | f01974780602c10401306a74513cce6ba10a6ec5 |
+| src/gesso/model/tx_refinement_xtdb.clj | 29b23a7c2027b4628ab8970a67cff420ca829730 |
+| src/gesso/assurance/proof/issued_executor_ledger_join.clj | a958c17802d2c51951dd4082d3eaaa2389b14aff |
+| src/gesso/assurance/proof/xtdb_restricted_submission_gateway.clj | 01767e4ff564900a0c93e324397d9ef9efb80aaf |
+
+Locally inspected dependency jar SHA-256 identities:
+
+- com.xtdb/xtdb-api 2.2.0-beta1:
+  0d9a36af73d52041fdf182d9d1da6bf5369cc954b58000c8c77f63cbc58775b9
+- com.biffweb/xtdb 2.0.0:
+  2e494a62b6a32787a07522e72058286cec0960050e6dc545157fa6e8c59b3c53
+
+These are reviewed artifact identities, not runtime attestation.
+
+* Validation
+
+gesso.live.consistency.xtdb-adapter-handle-test: 3 tests / 42
+assertions, zero failures or errors, real disposable XTDB nodes.
+The new tests confirm both raw-provider and alternate JDBC-identity
+writes despite a rejecting node policy, and confirm an in-flight call
+can finish after early registration release while subsequent handle
+calls fail. The old issued-handle regression remains green.
+
+No production execution path changed. Full project gates, host lifecycle
+and assurance suites were not rerun. Historical judgments remain
+unchanged; all original premises remain open.

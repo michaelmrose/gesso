@@ -9432,3 +9432,36 @@ Next: audit concrete writer ingress and lifecycle boundaries, including
 raw XTDB connectable exposure and alternative submission APIs, and
 separate enforceable mediation from explicit deployment isolation.
 Bind any new evidence to the exact original open conditions.
+
+* v2858 — audit concrete writer ingress and lifecycle
+
+Record the source review in doc/claim-writer-ingress-audit.org, bound
+to reviewed v2857 Git blobs, inspected provider and Biff dependency
+artifacts, and the exact five open writer-mediation condition IDs.
+Distinguish canonical adapter calls from raw provider, alternate JDBC
+connectable, Biff wrapper and diagnostic submission paths. The mapped
+request handle restricts accidental capability exposure; the owner
+system retains the raw node. The generic registry is keyed by object
+identity, not physical database identity.
+
+Add two real disposable-node negative witnesses. A rejecting node
+registration blocks raw-node and opaque-handle adapter submissions,
+but not direct XTDB execution or adapter execution through a separate
+JDBC connection to the same database. Neither bypass is observed by
+the rejecting predicate. A deliberately early registration release
+revokes subsequent opaque-handle calls but does not drain an invocation
+already inside admission. That invocation can commit on the still-open
+test node. This violates the documented release-after-close owner
+contract deliberately; it is not evidence of faulty normal host stop
+ordering.
+
+Focused actual XTDB adapter-handle namespace: 3 tests / 42 assertions,
+zero failures or errors. No production runtime behavior changed. The
+review is not an exhaustive call-graph or deployment audit. Full gates,
+broader assurance and persistent host tests not rerun. Both historical
+judgments unchanged; no original premise accepted or discharged.
+
+Next: define a narrowly owned ingress/lifecycle qualification which
+separates runtime admission fencing and drainage from external writer
+isolation. Do not impose restrictions on generic unregistered adapter
+users or treat the process-local registry as database authorization.
