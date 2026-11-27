@@ -9326,3 +9326,40 @@ Next: bind the general conditional schema to the exact original CLM-R2
 obligation, preserving the separate selected physical evidence and
 universal premise scopes. Do not elevate conditional proof structure
 to discharged physical assumptions.
+
+* v2855 — bind the conditional argument to original CLM-R2 obligations
+
+Retain the original CLM-R2 ledger statement and its physical transaction
+isolation, model lowering and HumanHelp callback scope. The new diagnostic
+qualifies only the issued closed reference Claim fixture, not the full
+original target or an independently checked HumanHelp implementation.
+
+Recheck the original mapped admission, exact source, live abstract
+induction handles, closed decoder and concrete Claim outcome cases.
+Re-derive the original catalog, the six-class general conditional
+argument and every operation's original obligation ledger. Match all
+original open obligation IDs against the issued admission, checked
+catalog and induction report. Bind each alternative to its original
+subject/transition, mapping and obligation fingerprints. Preserve the
+complete original obligation descriptions and abstract open assumptions.
+
+Describe related catalog-level conditions for production transition
+correspondence, current runtime authorization, atomic transaction
+enforcement, physical effect containment, runtime type correspondence
+and state projection coverage. These links are relevance descriptions,
+not sufficient premise sets or logical implications. Retain unlinked
+obligations, including integer semantics correspondence, and all
+unlinked general conditions explicitly. No finite physical execution
+report is consumed by this binding.
+
+Focused JVM: 1 test / 71 assertions, zero failures or errors. Reject
+unissued admission, foreign catalog fingerprint, changed outcome cases
+or mapping, omitted original obligation, omitted general condition,
+changed alternative mapping fingerprint and substituted argument
+boundary. Prior assurance and physical host suites and full project
+gates not rerun. Historical judgment v12 unchanged; CLM-R2 remains open;
+no original premise accepted or discharged.
+
+Next: bind the original conditional CLM-R2 argument and separately
+qualified selected physical refinement to the same issued historical
+judgment, preserving all original premise fingerprints and scope.
