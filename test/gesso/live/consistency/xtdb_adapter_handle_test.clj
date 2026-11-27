@@ -111,3 +111,52 @@
           (deliver proceed false)
           (deref call 20000 ::timeout)
           (release))))))
+
+(deftest owned-policy-fences-and-drains-entered-submissions
+  (let [node (xtn/start-node {})
+        entered (promise) proceed (promise)
+        owner (adapter/register-owned-submission-policy!
+               node (fn [_] (deliver entered true) (true? (deref proceed 10000 false))))
+        {:keys [status fence-and-await! release!]} owner
+        handle (adapter/adapter-connectable! node)
+        ops [[:put-docs :ingress_audit {:xt/id "owned" :value 1}]]
+        call (future (adapter/execute-tx! handle ops))]
+    (try
+      (is (= true (deref entered 10000 ::timeout)))
+      (is (= {:phase :open :in-flight 1} (status)))
+      (is (= :owned-submission-not-drained (reason release!)))
+      (is (= :owned-submission-drain-timeout (reason #(fence-and-await! 0))))
+      (is (= {:phase :fenced :in-flight 1} (status)))
+      (is (= :owned-submission-fenced (reason #(adapter/execute-tx! handle ops))))
+      (is (= :owned-submission-fenced (reason #(adapter/submit-tx! node ops))))
+      (is (= :owned-submission-not-drained (reason release!)))
+      (deliver proceed true)
+      (is (= {:phase :fenced :in-flight 0} (fence-and-await! 20000)))
+      (is (some? (:tx-result (deref call 20000 ::timeout))))
+      (is (= [{:xt/id "owned" :value 1}] (adapter/q handle ["SELECT * FROM ingress_audit"])))
+      (is (= :owned-submission-fenced (reason #(adapter/execute-tx! node ops))))
+      (is (= {:phase :fenced :in-flight 0} (fence-and-await! 0)))
+      (finally
+        (deliver proceed false)
+        (fence-and-await! 20000)
+        (.close ^java.lang.AutoCloseable node)
+        (release!)))
+    (is (= {:phase :released :in-flight 0} (status)))
+    (is (= :invalid-adapter-connectable (reason #(adapter/execute-tx! handle ops))))
+    (is (nil? (release!)))))
+
+(deftest owned-policy-drains-refusals-and-exceptions
+  (let [node (Object.)
+        owner (adapter/register-owned-submission-policy!
+               node (fn [{:keys [tx-ops]}]
+                      (if (= "throw" (get-in tx-ops [0 2 :xt/id]))
+                        (throw (ex-info "Admission failed" {:reason :test-exception})) false)))
+        {:keys [status fence-and-await! release!]} owner
+        ops (fn [id] [[:put-docs :items {:xt/id id}]])]
+    (try
+      (is (= :submission-policy-refused (reason #(adapter/execute-tx! node (ops "refuse")))))
+      (is (= :test-exception (reason #(adapter/execute-tx! node (ops "throw")))))
+      (is (= {:phase :open :in-flight 0} (status)))
+      (is (= :invalid-drain-timeout (reason #(fence-and-await! -1))))
+      (is (= {:phase :fenced :in-flight 0} (fence-and-await! 0)))
+      (finally (fence-and-await! 0) (release!)))))

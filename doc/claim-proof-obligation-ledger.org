@@ -9465,3 +9465,45 @@ Next: define a narrowly owned ingress/lifecycle qualification which
 separates runtime admission fencing and drainage from external writer
 isolation. Do not impose restrictions on generic unregistered adapter
 users or treat the process-local registry as database authorization.
+
+* v2859 — implement opt-in owned adapter submission fencing
+
+Add register-owned-submission-policy! alongside the unchanged generic
+registration contract. The owned registration has an irreversible
+open-to-fenced transition and tracks synchronous adapter submissions
+from entry under the registration lock through admission and the
+provider invocation, with finally-based accounting. Both submit and
+execute use the same entry boundary. Fence and entry are ordered under
+the same lock. The drain wait happens outside that lock, and a timeout
+keeps the registration fenced. Early release is rejected unless the
+registration is fenced and the in-flight count is zero. The owner
+must still close the provider before release; the API does not prove
+that close occurred. Retain the opaque generation and handle rules.
+Update the reviewed adapter source fingerprint.
+
+Real disposable-node tests exercise the new owned fence against an
+entered invocation, both submission APIs after fencing, timeout,
+refusal of early release, successful drain and handle revocation.
+Additional checks exercise refusal, admission exception and invalid
+timeout. The v2858 generic early-release and bypass counterexamples
+remain valid and unchanged.
+
+Adapter-handle namespace: 5 tests / 63 assertions. Submission-boundary
+and writer-classification regression: 32 tests / 373 assertions.
+Both passed with zero failures or errors. Full project gates and
+persistent mapped-host lifecycle not rerun.
+
+This is a local synchronous adapter submission boundary, not a
+database-wide authorization mechanism, provider completion guarantee
+for asynchronous submit, query drain, or current host qualification.
+The mapped host does not yet adopt the new registration. External
+and raw writer isolation, startup/cleanup/restart correspondence and
+provider semantics remain open. Neither historical judgment changes;
+no original premise accepted or discharged.
+
+Next: integrate owned submission fencing into mapped host startup
+and provider close, respecting existing request, worker and audit
+drain ordering. Exercise timeout, blocked cleanup and retry without
+closing an undrained provider. Preserve generic registration behavior
+and explicitly separate local lifecycle enforcement from deployment
+isolation.

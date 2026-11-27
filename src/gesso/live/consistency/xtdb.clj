@@ -171,6 +171,59 @@
           (.remove submission-policies connectable)))
       nil)))
 
+(defn register-owned-submission-policy!
+  "Install an opt-in owner-fenced policy for this exact physical connectable.
+   Fence is irreversible; timeout retains the registration and rejects new
+   submissions. Drain covers synchronous adapter invocations, including
+   admission and provider execution, not asynchronous provider completion,
+   raw callers, queries or other connectable identities. The owner must
+   close the provider AFTER drainage and BEFORE release."
+  [connectable admit?]
+  (when-not (and connectable (fn? admit?))
+    (throw (ex-info "Invalid owned submission policy." {:reason :invalid-submission-policy})))
+  (let [state (atom {:phase :open :in-flight 0})
+        drained (promise)
+        entry {:admit? admit? :token (Object.) :owned-state state :drained drained}]
+    (locking submission-policies
+      (when (.containsKey submission-policies connectable)
+        (throw (ex-info "XTDB submission policy already registered." {:reason :duplicate-submission-policy})))
+      (.put submission-policies connectable entry))
+    {:status (fn [] @state)
+     :fence-and-await!
+     (fn [timeout-ms]
+       (when-not (and (integer? timeout-ms) (<= 0 timeout-ms Long/MAX_VALUE))
+         (throw (ex-info "Invalid owned drain timeout." {:reason :invalid-drain-timeout})))
+       (locking submission-policies
+         (when (= :open (:phase @state)) (swap! state assoc :phase :fenced))
+         (when (zero? (:in-flight @state)) (deliver drained true)))
+       (when-not (true? (deref drained (long timeout-ms) false))
+         (throw (ex-info "Owned submission drain timed out." {:reason :owned-submission-drain-timeout})))
+       @state)
+     :release!
+     (fn []
+       (locking submission-policies
+         (when (identical? entry (.get submission-policies connectable))
+           (when-not (= {:phase :fenced :in-flight 0} @state)
+             (throw (ex-info "Owned submission policy not fenced and drained."
+                             {:reason :owned-submission-not-drained})))
+           (.remove submission-policies connectable)
+           (swap! state assoc :phase :released)))
+       nil)}))
+
+(defn- enter-owned-submission! [entry]
+  ;; Called under the registration lock: fencing cannot race admission.
+  (when-let [state (:owned-state entry)]
+    (when-not (= :open (:phase @state))
+      (throw (ex-info "Owned submission ingress fenced." {:reason :owned-submission-fenced})))
+    (swap! state update :in-flight inc)))
+
+(defn- leave-owned-submission! [entry]
+  (when-let [state (:owned-state entry)]
+    (locking submission-policies
+      (let [{:keys [phase in-flight]} (swap! state update :in-flight dec)]
+        (when (and (= :fenced phase) (zero? in-flight))
+          (deliver (:drained entry) true))))))
+
 (defn submission-policy-token
   "Return an opaque generation identity only for the exact registered policy."
   [connectable admit?]
@@ -416,10 +469,7 @@
       (finally
         (if prior (.set policy-admission-scope prior) (.remove policy-admission-scope))))))
 
-(defn- invoke-xtdb-api! [api operation connectable tx-ops tx-options]
-  (let [[connectable entry] (locking submission-policies
-                              (let [node (physical-connectable! connectable)]
-                                [node (.get submission-policies node)]))]
+(defn- invoke-admitted-xtdb-api! [api operation connectable entry tx-ops tx-options]
     (when-let [{:keys [node token thread valid?]} *policy-capture*]
       (when-not (and (identical? node connectable)
                      (identical? token (:token entry))
@@ -458,7 +508,17 @@
           (finish-policy-outcome! scope @admitted?
                                   {:outcome (if @admitted? :threw :not-invoked)
                                    :exception-class (.getName (class e))})
-          (throw e))))))
+          (throw e)))))
+
+(defn- invoke-xtdb-api! [api operation connectable tx-ops tx-options]
+  (let [[node entry] (locking submission-policies
+                       (let [node (physical-connectable! connectable)
+                             entry (.get submission-policies node)]
+                         (enter-owned-submission! entry)
+                         [node entry]))]
+    (try
+      (invoke-admitted-xtdb-api! api operation node entry tx-ops tx-options)
+      (finally (leave-owned-submission! entry)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Debug
