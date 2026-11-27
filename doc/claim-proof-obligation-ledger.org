@@ -8881,3 +8881,47 @@ behavior on the closed guard fragment, using the independent exact
 prefix and retained execution semantics. Distinguish selected
 transaction-internal basis and atomicity witnesses from a universal
 provider contract or implementation proof.
+
+* v2844 — observe ordered mapped guard execution and atomic rollback
+
+Add permanent live embedded XTDB experiments using the genuine Claim
+catalog, independently checked exact guard prefixes and source-derived
+put suffixes. Exercise both competing-helper orderings in isolated
+nodes. For every nonempty prefix of the three winning-command puts,
+derive the complete intermediate row image and independently check its
+guard prefix. A positive control checks the original prestate, applies
+those puts and checks the intermediate state before committing. After
+restoring the original rows, a negative control repeats those operations
+and appends the stale original prestate prefix. Require assertion failure
+and complete rollback of the tentative row changes.
+
+Execute the canonical winning command, reject the stale competing
+command, and verify rollback of the refusal journal write after a late
+assertion failure before committing the canonical refusal. Reuse the
+closed mapped transition diagnostic for the canonical commit/abort
+relations. At each experiment compare the exact appended transaction
+ledger row, commitment, complete pinned before and after mapped row
+images and preservation of the older pinned snapshot and ledger.
+Positive controls and restoration transactions are deliberate test
+probes, not newly admitted application commands.
+
+Focused JVM: new mapped guard atomicity experiment passed 1 test /
+248 assertions. Combined mapped guard atomicity, independent formatter,
+transaction-internal prestate experiment, journal predicate partition,
+retained execution, selected transition refinement and mapped projection
+suites passed 35 tests / 2061 assertions, zero failures or errors.
+The committed test blob was verified against the tested file.
+
+These finite observations support ordered assertion visibility and
+abort atomicity for the tested closed fragment. They do not establish
+a universal provider contract, an authenticated transaction-internal
+basis, arbitrary valid-time behavior or complete writer coverage.
+No production execution path, historical judgment or premise state
+changed. Assembled-host recovery and full project gates not rerun.
+No premise accepted or discharged.
+
+Next: formulate and check the conditional general transition argument
+over the closed admitted guard-and-put fragment, identifying precisely
+which provider semantics must be assumed rather than proved by the
+selected execution probes. Connect those conditions to the original
+physical obligation inventory without changing discharge status.
