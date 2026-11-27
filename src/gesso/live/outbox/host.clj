@@ -920,6 +920,7 @@
 (def ^:private original-recovery-acquisition retained-acquisition/read-acquisition!)
 (def ^:private original-qualified-history writer-history/read-qualified-history!)
 (def ^:private original-history-join writer-history/join-configured-envelope!)
+(def ^:private original-refined-judgment writer-history/declare-refined-recovery-trust!)
 (def ^:private original-recovery-worker-match worker-capture/worker-outcome-capture-matches?)
 (def ^:private original-framed-observation publication/read-framed-submission-observation!)
 
@@ -933,9 +934,44 @@
                  (identical? original-recovery-acquisition retained-acquisition/read-acquisition!)
                  (identical? original-qualified-history writer-history/read-qualified-history!)
                  (identical? original-history-join writer-history/join-configured-envelope!)
+                 (identical? original-refined-judgment writer-history/declare-refined-recovery-trust!)
                  (identical? original-recovery-worker-match worker-capture/worker-outcome-capture-matches?)
                  (identical? original-framed-observation publication/read-framed-submission-observation!))
     (reject! :configured-recovery-boundary-replaced {})))
+
+(defn- join-historical-judgment! [history configured physical refined]
+  (let [original (:historical-judgment refined)
+        scope (:judgment-scope original)
+        binding (:original-clm-r2-binding configured)]
+    (when-not (and (= :conditional (:status refined) (:status original))
+                   (= writer-history/refined-judgment-profile (:judgment-profile refined))
+                   (= observed-recovery/judgment-profile (:judgment-profile original))
+                   (= binding (:original-clm-r2-binding refined))
+                   (= (:historical-cut history) (:historical-cut refined) (:historical-cut scope))
+                   (= (get-in configured [:activation-root :source-id]) (:publication-source-id scope))
+                   (= (:subject configured) (select-keys (:judgment-subject refined) (keys (:subject configured))))
+                   (= (:selected-tx-ids physical) (get-in original [:original-recovery :selected-tx-ids]))
+                   (= (:selected-physical-refinement history) (:selected-physical-refinement refined))
+                   (= (:selected-temporal-coverage history) (:selected-temporal-coverage refined))
+                   (= (:remaining-conditions history) (:selected-remaining-conditions refined))
+                   (= (:remaining-conditions binding) (:general-remaining-conditions refined))
+                   (= (:obligation-inventory original) (:obligation-inventory refined))
+                   (= :explicit-declaration-only (:premise-acceptance original))
+                   (= :not-performed (:new-premise-acceptance refined) (:proof-discharge refined) (:proof-discharge original))
+                   (= :not-established (:universal-refinement refined) (:writer-coverage refined)
+                      (:temporal-coverage refined) (:observation-storage-identity original)
+                      (:authorized-historical-lineage original))
+                   (seq (:trusted-assumptions original))
+                   (= (:trusted-assumptions original) (:open-premise-fingerprints original)))
+      (reject! :configured-historical-judgment-mismatch {}))
+    {:status :conditional-configured-historical-judgment-binding
+     :refined-judgment refined
+     :storage-declaration-scope scope
+     :storage-trusted-assumptions (:trusted-assumptions original)
+     :storage-trust-adoption :explicit-historical-declaration-only
+     :current-owner-trust-scope :separate-current-exact-owner-only
+     :historical-mediation :not-established :storage-lineage :not-established
+     :proof-discharge :not-performed :authority :none :certificate :not-issued}))
 
 (defn- compare-configured-envelope-recovery*
   [system tables source declarations steps observation worker-scope]
@@ -963,6 +999,12 @@
         (let [history-cut (:history-cut worker-scope)
               read-history #(original-qualified-history system tables admission source declarations steps observation acquisition capture history-cut)
               qualified (when (contains? worker-scope :history-cut) (read-history))
+              historical (:historical worker-scope)
+              refined (when historical
+                        (original-refined-judgment admission observation history-cut
+                                                   (:comparison historical) (:declaration historical)))
+              _ (when (and historical (not (= :conditional (:status refined))))
+                  (reject! :configured-historical-judgment-mismatch {:historical-reason (:reason refined)}))
               configured (original-configured-adopt system source declarations)
               retained (if worker-scope
                          (original-local-activated-recovery node tables admission source declarations steps observation acquisition true)
@@ -1014,7 +1056,8 @@
           (when (and worker-scope (not (and (= sample (original-recovery-acquisition node acquisition))
                                             (original-recovery-worker-match system capture))))
             (reject! :configured-recovery-worker-origin-mismatch {}))
-          (let [history (when qualified (original-history-join qualified physical root sample))]
+          (let [history (when qualified (original-history-join qualified physical root sample))
+                historical-binding (when historical (join-historical-judgment! history configured physical refined))]
             (when (and qualified (not= qualified (read-history)))
               (reject! :configured-writer-history-changed {}))
             (configured-recovery-boundaries!)
@@ -1041,7 +1084,8 @@
            :premise-acceptance :explicit-declarations-only :proof-discharge :not-performed
            :authority :none :certificate :not-issued}
               history (assoc :qualified-writer-history history
-                             :remaining-conditions (into (:remaining-conditions physical) (:remaining-conditions history))))))))))
+                             :remaining-conditions (into (:remaining-conditions physical) (:remaining-conditions history)))
+              historical-binding (assoc :historical-judgment-binding historical-binding))))))))
 
 
 (defn compare-configured-envelope-recovery!
@@ -1068,3 +1112,13 @@
   [system tables source declarations steps observation acquisition capture history-cut]
   (compare-configured-envelope-recovery* system tables source declarations steps observation
                                         {:acquisition acquisition :capture capture :history-cut history-cut}))
+
+
+(defn compare-configured-worker-historical-recovery!
+  "Join the exact configured owner and issued prefix to a separately
+   declared historical storage judgment. The declaration is not configured
+   owner adoption of storage trust and does not establish lineage."
+  [system tables source declarations steps observation acquisition capture history-cut comparison declaration]
+  (compare-configured-envelope-recovery* system tables source declarations steps observation
+                                        {:acquisition acquisition :capture capture :history-cut history-cut
+                                         :historical {:comparison comparison :declaration declaration}}))

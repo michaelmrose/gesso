@@ -1037,12 +1037,34 @@
                                          started tables admit mapped-source outcome-declarations steps observation %1 %2)
                               configured! #(host/compare-configured-worker-envelope-recovery!
                                             %1 tables mapped-source outcome-declarations steps observation %2 %3)
-                              joined (host/compare-configured-worker-history-recovery!
-                                      started tables mapped-source outcome-declarations steps observation handle worker-capture enhanced-cut)
+                              comparison (first foreign)
+                              scope (observed-recovery/read-conditional-recovery-scope! comparison)
+                              declaration {:deployment-id :fixture/refinement
+                                           :identity-policy (:identity-policy scope)
+                                           :acceptance :trust-open-premises
+                                           :premises (mapv :assumption (:obligations (storage/describe-obligations scope)))}
+                              historical! #(host/compare-configured-worker-historical-recovery!
+                                             started tables mapped-source outcome-declarations steps observation
+                                             handle worker-capture enhanced-cut %1 %2)
+                              joined (historical! comparison declaration)
                               result (:physical-correspondence joined)
                               maintenance-result (:maintenance-correspondence result)]
                           (is (= :conditional-configured-envelope-recovery (:status joined)))
                           (is (= :worker-interleaved (:recovery-scope joined)))
+                          (let [j (:historical-judgment-binding joined)
+                                refined (:refined-judgment j)]
+                            (is (= :conditional-configured-historical-judgment-binding (:status j)))
+                            (is (= required (:historical-cut refined)))
+                            (is (= scope (:storage-declaration-scope j)))
+                            (is (= 3 (count (:storage-trusted-assumptions j))))
+                            (is (= :explicit-historical-declaration-only (:storage-trust-adoption j)))
+                            (is (= :separate-current-exact-owner-only (:current-owner-trust-scope j)))
+                            (is (= :not-established (:historical-mediation j) (:storage-lineage j)))
+                            (is (= :not-performed (:proof-discharge j)))
+                            (is (= (:remaining-general-conditions joined) (:general-remaining-conditions refined))))
+                          (is (= :configured-historical-judgment-mismatch (trust-problem #(historical! (Object.) declaration))))
+                          (with-redefs [writer-history/declare-refined-recovery-trust! (constantly {})]
+                            (is (= :configured-recovery-boundary-replaced (trust-problem #(historical! comparison declaration)))))
                           (is (= :matched-current-owner-and-issued-retained-root (:activation-root-binding joined)))
                           (is (= (:selected-tx-ids r) (:selected-tx-ids joined)))
                           (is (= (:activation-root joined) (get-in joined [:adoption-scopes :writer-isolation :activation-root])))

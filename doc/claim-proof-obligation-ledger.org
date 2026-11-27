@@ -10317,3 +10317,31 @@ Next: join the configured selected prefix qualification to the original
 issued conditional historical recovery judgment at the same cut,
 retaining distinct storage-lineage and current-owner trust scopes and
 all original open conditions.
+
+* v2880 — bind configured recovery to the historical judgment
+
+Within the exact current-owner retirement boundary, rederive the original
+issued conditional historical recovery judgment for the qualified history
+cut and explicit storage declaration. Match the complete original CLM-R2
+binding, selected physical and temporal arguments, transaction identities,
+publication source, historical cut, original obligation inventory and
+selected/general remaining conditions. Preserve the historical judgment
+in full, with its three open storage premises and explicit declaration
+scope separate from the current owner's configured writer-isolation and
+provider trust scopes. This is not configured storage-trust adoption,
+authenticated historical mediation or established storage lineage.
+All 39 original general CLM-R2 conditions remain open.
+
+Focused installed-host JVM regression: 1 test / 1360 assertions, zero
+failures or errors (exit 0), in assembled-command-transport-worker-
+interleaved-recovery. Check the original issued judgment, exact cut,
+storage scope and premise inventory, and rejection of an unissued
+comparison and substituted judgment derivation. Existing retained storage
+reopening and substitution checks passed. An initial load caught an extra
+closing delimiter; correct it and update the reviewed host digest before
+the successful final run. No production submission behavior changed.
+Adjacent variant and full project gates not rerun.
+
+Next: bind the historical storage declaration to the actual startup-selected
+storage trust policy at the configured owner boundary, preserving the
+distinction between local adoption and authenticated lineage evidence.

@@ -18,7 +18,7 @@
   {"gesso/live/outbox/writer_policy.clj" "1c9554c6860f7b88477190fda6bab0b332150383377c55f943325da8c8a2c593"
    "gesso/live/outbox/maintenance_policy.clj" "59e7463ada951a30944d189913f29399fd3217e6676c93b1ac3eb4db8490109b"
    "gesso/live/outbox/initialization.clj" "36aac083e410e05b806137bf4540559f1ef3d77d4284dc6f387604aff3d81de7"
-   "gesso/live/outbox/host.clj" "579ed229855e2b29a28e45661be5ff04ab00724de0f10152273dcc64e46c132e"
+   "gesso/live/outbox/host.clj" "a25df14ba57384b9a341a0edc3e0faec08bf460e9c2c9f47ec5bb6b943602979"
    "gesso/live/consistency/xtdb.clj" "2f191e2cdba15d7ce2ce07da02bc35671b44babb713bd85fce01c6d396156697"})
 
 (defn- reject! [reason]
