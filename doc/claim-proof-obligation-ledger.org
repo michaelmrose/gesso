@@ -9113,3 +9113,39 @@ full project gates not run; no premise accepted or discharged.
 Next: compose journal-writing and replay catalog coverage with complete
 admitted-writer classification. Replay is not a physical writer; keep
 abort, maintenance, initialization and temporal coverage distinct.
+
+* v2849 — classify declared alternatives and reviewed writer branches
+
+Re-derive the checked projection and both conditional catalog arguments.
+Require a complete disjoint partition of the original alternatives,
+exact journal-writing case correspondence, and matching catalog and
+mapping identities. Bind read-only alternatives to their exact originating
+writer identity, case, empty write footprint and complete frame. All eight
+original Claim alternatives are now classified without treating replay as
+a physical writer. Preserve the earlier argument conditions.
+
+Review and pin the selected mapped host, submission adapter, writer
+policy, initialization and maintenance source. Inventory the mapped
+operation, initializer, manifest, acquisition, reclaim and acknowledgment
+branches. Check that the protected projected tables cannot overlap the
+reserved infrastructure tables. Keep initial-root establishment and
+manifest establishment distinct from post-initialization stutter. Abort
+is an attempted transaction with a conditional stutter effect, not another
+committed writer. Read-only replay and local refusal are not transaction
+classes. The branch inventory is a source review, not extracted program
+proof, runtime host survey, or proof that every admitted or raw physical
+writer uses the reviewed policy. Actual effect correspondence, installation,
+provenance, initialization and temporal coverage remain open.
+
+Focused classification: 2 tests / 35 assertions. Eight-namespace
+assurance regression: 49 tests / 7568 assertions, zero failures or errors.
+Reject incomplete/overlapping partitions, substituted catalog or origin,
+replay write or frame corruption, foreign journal case, infrastructure
+overlap, replaced checker and changed reviewed source. No physical host
+or full project gates rerun. Historical v12 unchanged; no premise accepted
+or discharged.
+
+Next: connect the reviewed policy branch classification to genuine issued
+admission and installed-policy/activation evidence, including initialization,
+maintenance and temporal cut boundaries. Keep completeness over external
+and bypass writers an explicit condition until separately justified.
