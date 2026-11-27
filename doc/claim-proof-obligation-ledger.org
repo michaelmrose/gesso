@@ -7351,3 +7351,32 @@ Next: connect configured conditional storage trust to the composed Claim
 assurance judgment, preserving the exact open premise fingerprints and
 separating configured acceptance from authenticated evidence and proof.
 Authenticated command and worker provenance remain open.
+
+* v2806 — compose conditional activated recovery judgment
+
+Retain a selected summary of the original checked activated recovery in
+the issued cut registry, and carry it through the exact prepared historical
+comparison. Compose explicit deployment trust with that original trajectory,
+the comparison scope and its canonical open premise fingerprints. No
+caller-supplied recovery report becomes evidence. Configured host adoption
+marks the resulting judgment at the existing local host boundary; a
+standalone declaration remains unauthenticated and unadopted. Preserve
+the original local acquisition, selected transaction identities, outcomes,
+activation root and submission linkage, including unresolved provenance
+and provider refinement. An extended acquisition does not replace the
+original trajectory. Reject a replaced original recovery comparison boundary
+and mismatched selections without exposing a positive judgment.
+
+Focused JVM: 2 tests / 631 assertions, zero failures or errors, using
+genuine persistent XTDB assembled hosts, unchanged worker polling and
+the older offline dependency bundle. Includes both adjacent and
+worker-interleaved trajectories, exact and extended comparisons, reopened
+and copied stores. Full project gates not run. Storage premises remain
+open; proof discharge is not performed. No Claim invariant theorem,
+authenticated command or worker provenance, universal refinement, writer
+authority, certificate or CLM-R2 discharge follows.
+
+Next: qualify the connection from this selected historical judgment to
+the Claim assurance subject, preserving exact original operation and
+admission identities, and reject attempted cross-subject composition.
+Authenticated command and worker provenance remain open.

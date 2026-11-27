@@ -202,6 +202,13 @@
        (identical? original-local-comparison compare-local-activated!)
        (identical? original-cut-derivation cut/derive-cut!)))
 
+(def ^:private original-recovery-keys
+  [:activated-recovery-profile :observed-recovery-profile :local-acquisition-profile
+   :local-acquisition-binding :activation-root-binding :submission-recovery-linkage
+   :manifest-tx-id :initialization-tx-id :selected-tx-ids :selected-commitments
+   :recovery-linkage :provider-refinement :source-provenance :outcome-provenance
+   :submission-provenance :aborted-receipt-identity :worker-observation-provenance])
+
 (defn capture-local-recovery-cut!
   "Issue a historical cut only after the exact observation and acquisition
    match through the independent local recovery comparison. Derive the cut
@@ -236,6 +243,7 @@
                 (locking recovery-cuts
                   (.put recovery-cuts handle {:admission admission :observation observation
                                               :historical-cut (:historical-cut derived)
+                                              :original-recovery (select-keys r original-recovery-keys)
                                               :publication-source-id (:source-id (first steps))}))
                 (merge r base {:recovery-cut-observation handle
                                :recovery-cut-binding :matched-local-recovery-cut})))))))))
@@ -313,6 +321,7 @@
                   (.put conditional-recoveries handle
                         {:scope scope :cut-correspondence (:cut-correspondence r)
                          :original-cut original-cut :target target
+                         :original-recovery (:original-recovery origin)
                          :target-node (java.lang.ref.WeakReference. node)
                          :admission admission}))
                 (assoc (conditional-report :prepared) :conditional-recovery handle))))
@@ -353,27 +362,39 @@
 (def ^:private original-deployment-acceptance storage/describe-deployment-acceptance)
 
 (defn- acceptance-boundaries-current? []
-  (and (conditional-boundaries-current?)
+  (and (cut-boundaries-current?)
+       (conditional-boundaries-current?)
        (identical? original-deployment-acceptance storage/describe-deployment-acceptance)))
+
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v1)
 
 (defn declare-conditional-recovery-trust!
   "Compose an explicit deployment trust declaration with an issued historical
    comparison, rederiving the exact selected premises from its registry.
    This is an unauthenticated declaration, not an assertion that a controller
-   has actually authorized the lifecycle. Open premises remain open. The
-   result is sensitive internal material, not a public receipt or credential."
+   has actually authorized the lifecycle. Compose the selected original
+   activated trajectory with its issued historical comparison and exact
+   declared trust. Host adoption, when present, is recorded by the host
+   boundary, not by this declaration. Open premises remain open. No
+   Claim invariant theorem or universal refinement is established.
+   The result is sensitive internal material, not a receipt or credential."
   [handle declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
     (if-not (acceptance-boundaries-current?)
       (fail :conditional-recovery-boundary-replaced)
-      (if-let [{:keys [scope cut-correspondence]} (conditional-entry handle)]
+      (if-let [{:keys [scope cut-correspondence original-recovery]} (conditional-entry handle)]
         (try
           (let [r (original-deployment-acceptance scope declaration)]
             (if-not (acceptance-boundaries-current?)
               (fail :conditional-recovery-boundary-replaced)
               (merge r (conditional-report :conditional)
-                     {:cut-correspondence cut-correspondence
-                      :historical-assurance :conditional-on-declared-trust})))
+                     {:judgment-profile judgment-profile
+                      :judgment-scope scope
+                      :original-recovery original-recovery
+                      :cut-correspondence cut-correspondence
+                      :historical-assurance :conditional-on-declared-trust
+                      :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))
+                      :proof-discharge :not-performed})))
           (catch clojure.lang.ExceptionInfo e
             (fail (or (:reason (ex-data e)) :invalid-deployment-acceptance))))
         (fail :unissued-conditional-recovery)))))

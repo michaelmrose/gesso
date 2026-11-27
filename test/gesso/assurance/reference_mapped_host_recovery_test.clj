@@ -68,6 +68,27 @@
 (defn- trust-problem [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
 
+(defn- check-recovery-judgment! [result scope original]
+  (is (= observed-recovery/judgment-profile (:judgment-profile result)))
+  (is (= scope (:judgment-scope result)))
+  (let [trajectory (:original-recovery result)]
+    (is (= :matched-issued-origin-and-retained-sample (:local-acquisition-binding trajectory)))
+    (is (= :matched-local-activated-retained-root (:activation-root-binding trajectory)))
+    (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage trajectory)))
+    (is (= [:committed :aborted :committed] (:selected-commitments trajectory)))
+    (is (= (:selected-tx-ids original) (:selected-tx-ids trajectory)))
+    (is (= (:activated-recovery-profile original) (:activated-recovery-profile trajectory)))
+    (is (= (:manifest-tx-id original) (:manifest-tx-id trajectory)))
+    (is (= (:initialization-tx-id original) (:initialization-tx-id trajectory)))
+    (is (= :not-established (:submission-provenance trajectory) (:provider-refinement trajectory)))
+    (is (= (:worker-observation-provenance original) (:worker-observation-provenance trajectory))))
+  (is (= (set (map :premise-fingerprint (:obligations result)))
+         (:open-premise-fingerprints result) (:trusted-assumptions result)))
+  (is (every? #(= :open (:discharge-state %)) (:obligations result)))
+  (is (= :not-performed (:proof-discharge result)))
+  (is (= :none (:authority result)))
+  (is (= :not-issued (:certificate result))))
+
 (defn- check-reopened-recovery!
   [assembly handler config tables admit mapped-source outcome-declarations
    policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle cut-handle foreign-comparisons]}]
@@ -129,6 +150,13 @@
               (is (= (:relation policy) (:relation adopted)))
               (is (= :conditional-on-declared-trust (:historical-assurance adopted)))
               (is (= (assoc trusted :deployment-adoption :configured-local-host) adopted))
+              (check-recovery-judgment! adopted scope comparison)
+              (is (not (contains? selected :judgment-profile)))
+              (is (not (contains? trusted :deployment-adoption)))
+              (with-redefs [observed-recovery/compare-local-activated! (constantly comparison)]
+                (let [r (host/adopt-storage-trust! started handle)]
+                  (is (= :conditional-recovery-boundary-replaced (:reason r)))
+                  (is (not (contains? r :judgment-profile)))))
               (is (= (:obligations selected) (:obligations adopted)))
               (is (every? #(= :open (:discharge-state %)) (:obligations adopted)))
               (is (= :not-established (:observation-storage-identity adopted)
@@ -215,7 +243,7 @@
                                   outcome-declarations policy-events original))
       (finally (doseq [f (reverse (file-seq (.toFile copy-root)))] (io/delete-file f true))))))
 
-(defn- check-conditional-extension! [started node admit observation cut-handle earlier target]
+(defn- check-conditional-extension! [started node admit observation cut-handle earlier target original]
   (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)
         extended (:historical-cut (cut/derive-cut! node target))
         prepare! (fn [relation acquisition]
@@ -252,6 +280,9 @@
                                     (:authorized-historical-lineage selected)))
                              (is (= :conditional (:status trusted)))
                              (is (= :conditional-on-declared-trust (:historical-assurance trusted)))
+                             (check-recovery-judgment! trusted scope original)
+                             (is (not (contains? trusted :deployment-adoption)))
+                             (is (not (contains? selected :judgment-profile)))
                              (is (= :explicit-declaration-only (:premise-acceptance trusted)))
                              (is (= :not-established (get-in trusted [:deployment-acceptance :authentication])))
                              (is (= (:obligations selected) (:obligations trusted)))
@@ -293,7 +324,8 @@
           (is (= :unsupported (:status result)))
           (is (= (if (= relation other-relation) :subject-mismatch :incorrect-premise-set) (:reason result)))
           (is (not (contains? result :historical-assurance)))
-          (is (not (contains? result :trusted-assumptions))))))
+          (is (not (contains? result :trusted-assumptions)))
+          (is (not (contains? result :judgment-profile))))))
     (get-in selections [[:authorized-historical-lineage :prefix-content] :handle])))
 
 (defn- check-assembled-recovery! [interleaved?]
@@ -516,7 +548,7 @@
                   (is (= :none (:authority r)))
                   (is (= :not-issued (:certificate r)))
                   (when-not interleaved?
-                    (reset! restart* {:retained-handle handle :cut-handle cut-handle}))
+                    (reset! restart* {:retained-handle handle :cut-handle cut-handle :comparison r}))
                   (when interleaved?
                     (let [{:keys [before after pending done]} @gap*
                           ids (set (map :xt/id pending))
@@ -620,7 +652,7 @@
                         target (:acquisition (acquisition/capture! node))]
                     (is (= sample2 (acquisition/read-acquisition! node target)))
                     (swap! restart* assoc :trust-handle
-                           (check-conditional-extension! started node admit observation cut-handle retained-handle target))))))
+                           (check-conditional-extension! started node admit observation cut-handle retained-handle target (:comparison @restart*)))))))
               (finally (host/stop! started)))
             (when-not interleaved?
               (is (= :storage-trust-host-retired
