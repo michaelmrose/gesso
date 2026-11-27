@@ -20,6 +20,7 @@
             [com.biffweb.core :as biff]
             [gesso.assurance.operational-report :as operational-report]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
+            [gesso.assurance.reference-physical-envelope-argument :as physical-envelope]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.assurance.reference-writer-isolation :as isolation]
             [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
@@ -908,3 +909,90 @@
           (when-not (= activation (original-combined-root node admission token))
             (reject! :combined-trust-activation-changed {}))
           result)))))
+
+(def ^:private original-configured-adopt adopt-implementation-trust!)
+(def ^:private original-physical-envelope physical-envelope/compare-recovery!)
+(def ^:private original-activated-recovery observed-recovery/compare-activated!)
+(def ^:private original-framed-observation publication/read-framed-submission-observation!)
+
+(defn- configured-recovery-boundaries! []
+  (combined-boundaries!)
+  (when-not (and (identical? original-configured-adopt adopt-implementation-trust!)
+                 (identical? original-physical-envelope physical-envelope/compare-recovery!)
+                 (identical? original-activated-recovery observed-recovery/compare-activated!)
+                 (identical? original-framed-observation publication/read-framed-submission-observation!))
+    (reject! :configured-recovery-boundary-replaced {})))
+
+(defn compare-configured-envelope-recovery!
+  "Compare adjacent recovery on the exact currently configured owner.
+   Reacquire both declarations under its retirement lock and match the
+   issued and retained activation root. Not historical mediation evidence."
+  [system tables source declarations steps observation]
+  (let [i (locking writer-isolation-hosts (.get writer-isolation-hosts (::writer-isolation-token system)))
+        p (locking provider-trust-hosts (.get provider-trust-hosts (::provider-trust-token system)))]
+    (when-not (and i p (identical? system (.get ^java.lang.ref.WeakReference (:system i)))
+                   (identical? system (.get ^java.lang.ref.WeakReference (:system p)))
+                   (identical? (:lock i) (:lock p)) (identical? (:active i) (:active p)))
+      (reject! :unissued-combined-trust-host {}))
+    (locking (:lock i)
+      (when-not @(:active i) (reject! :combined-trust-host-retired {}))
+      (configured-recovery-boundaries!)
+      (require-open-provider-generation! system)
+      (let [node (:xtdb/connectable system) admission (::mapped-admission system)
+            token (::mapped-policy-token system)
+            activation (original-combined-root node admission token)
+            observed (original-framed-observation admission observation)]
+        (when-not (and activation (= activation (:activation-root observed)))
+          (reject! :configured-recovery-activation-mismatch {}))
+        (let [configured (original-configured-adopt system source declarations)
+              retained (original-activated-recovery node tables admission source declarations steps observation)
+              physical (original-physical-envelope node tables admission source declarations steps observation)
+              general (:general-argument physical)
+              binding (:original-clm-r2-binding configured)
+              root (:activation-root configured)]
+          (when-not (and (= :conditional-configured-implementation-argument (:status configured))
+                         (= :matched (:status retained))
+                         (= :matched-local-activated-retained-root (:activation-root-binding retained))
+                         (= :conditional-physical-source-envelope-recovery (:status physical))
+                         (= :conditional-selected-general-argument-binding (:status general))
+                         (= (:subject configured) (select-keys (:induction-identity physical) (keys (:subject configured))))
+                         (= root (-> activation :observation
+                                     (select-keys [:source-id :manifest-tx-id :initialization-tx-id :system-time :initialization-fingerprint])
+                                     (update :system-time str)))
+                         (= (select-keys root [:manifest-tx-id :initialization-tx-id])
+                            (select-keys retained [:manifest-tx-id :initialization-tx-id]))
+                         (= (:selected-tx-ids retained) (:selected-tx-ids physical))
+                         (= (:abstract-report-fingerprint binding) (:abstract-report-fingerprint general))
+                         (= (:original-open-obligation-ids-by-operation binding) (:original-open-obligations general))
+                         (= (:remaining-conditions configured) (:general-conditions general))
+                         (every? (:remaining-conditions physical) (:general-conditions general))
+                         (= (:condition-links-by-contract configured)
+                            {:writer-isolation (:related-writer-isolation-conditions general)
+                             :provider-trust (:related-provider-conditions general)})
+                         (= :related-not-entailing (:condition-link-semantics configured) (:condition-link-semantics general))
+                         (= :not-performed (:proof-discharge configured) (:proof-discharge physical) (:proof-discharge general)))
+            (reject! :configured-recovery-correspondence-mismatch {:physical-reason (:reason physical) :retained-reason (:reason retained)}))
+          (configured-recovery-boundaries!)
+          (require-open-provider-generation! system)
+          (when-not (= activation (original-combined-root node admission token))
+            (reject! :combined-trust-activation-changed {}))
+          {:status :conditional-configured-envelope-recovery
+           :profile :configured-clm-r2-envelope-recovery-v1
+           :subject (:subject configured) :activation-root root
+           :activation-root-binding :matched-current-owner-and-issued-retained-root
+           :selected-tx-ids (:selected-tx-ids physical)
+           :physical-correspondence physical
+           :adoption-scopes {:writer-isolation (get-in configured [:writer-isolation :scope])
+                             :provider-trust (get-in configured [:provider-trust :scope])}
+           :trusted-assumptions-by-contract (:trusted-assumptions-by-contract configured)
+           :condition-links-by-contract (:condition-links-by-contract configured)
+           :original-open-obligations (:original-open-obligations general)
+           :remaining-general-conditions (:general-conditions general)
+           :remaining-conditions (:remaining-conditions physical)
+           :condition-link-semantics :related-not-entailing
+           :configured-trust-adoption :current-exact-owner-only
+           :historical-mediation :not-established :continuous-mediation :not-established
+           :storage-lineage :not-established :writer-coverage :not-established
+           :provider-refinement :not-established :universal-refinement :not-established
+           :premise-acceptance :explicit-declarations-only :proof-discharge :not-performed
+           :authority :none :certificate :not-issued})))))

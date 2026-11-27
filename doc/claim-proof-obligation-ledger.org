@@ -10194,3 +10194,36 @@ Next: integrate the selected envelope correspondence at the configured
 owner boundary with the exact adoption scopes, activation root and
 original condition register, without treating a current declaration as
 proof of historical mediation.
+
+* v2876 — bind selected recovery to the exact configured owner
+
+Reacquire both configured implementation trust declarations under the
+shared owner retirement lock. Require the original owner identity and
+live provider generation, matching issued and retained activation root,
+original subject, abstract report fingerprint, open operation register,
+selected transaction IDs and all 39 general conditions. Preserve the
+exact adoption scopes, five writer isolation premises and eight provider
+premises, with relevance links rather than implication or discharge.
+This compares current configured adoption with selected historical
+correspondence; it establishes neither historical nor continuous writer
+mediation, storage lineage, nor universal provider refinement. No new
+authority or certificate is issued.
+
+Focused installed-host JVM regression: 1 test / 1716 assertions, zero
+failures or errors (exit 0), in assembled-command-transport-observed-
+recovery. Exercise the assembled HTTP command path and actual embedded
+XTDB, adjacent recovery after scheduled maintenance, and copied owner,
+copied observation and substituted trust checker rejection. An initial
+run correctly rejected the changed reviewed host digest; update the
+reviewed writer-classification digest for the diagnostic-only change.
+A subsequent run exposed timing interference with pre-existing worker
+quiescence checks; move the new diagnostic after intentional maintenance
+without weakening those checks. The final reordered run passed. No
+production submission behavior changed. The worker-interleaved variant
+and full project gates were not rerun. All 39 original conditions remain
+open.
+
+Next: qualify intervening worker maintenance in the selected physical
+envelope argument, using independently checked issued worker outcomes
+and retained maintenance transitions rather than assuming adjacent
+command transactions or treating intervening writes as invisible.

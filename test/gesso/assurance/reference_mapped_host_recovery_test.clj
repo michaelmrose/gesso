@@ -5,6 +5,8 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
+            [gesso.assurance.reference-writer-isolation :as isolation]
+            [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
             [gesso.assurance.reference-installed-writer-history :as writer-history]
             [gesso.assurance.reference-recovery-inventory :as inventory]
             [gesso.assurance.reference-recovery-invariant :as invariant]
@@ -729,6 +731,16 @@
                                      :policy {:comparison-id :fixture/recovery :relation :authorized-historical-lineage
                                               :identity-policy :fixture/custody :origin-boundary :fixture/origin
                                               :acquisition-boundary :fixture/acquisition :identity-boundary :fixture/controller}}
+                     :writer-isolation {:deployment-id :fixture/deployment :database-id :fixture/database
+                                        :isolation-boundary :fixture/boundary :acceptance :trust-open-premises
+                                        :premise-ids #{::isolation/database-owner-binding ::isolation/in-process-writer-exclusion
+                                                       ::isolation/external-writer-exclusion ::isolation/storage-and-log-writer-exclusion
+                                                       ::isolation/lifecycle-isolation}}
+                     :provider-trust {:provider provider-contract/reviewed-provider :acceptance :trust-open-premises
+                                      :premise-ids #{::provider-contract/decoded-assertions ::provider-contract/ordered-transaction-basis
+                                                     ::provider-contract/put-replacement ::provider-contract/commit-abort
+                                                     ::provider-contract/worker-clock ::provider-contract/pinned-read
+                                                     ::provider-contract/retained-history ::provider-contract/valid-time-boundaries}}
                      :assembled-operations {:authorize-request? #(and (= "yes" (get-in % [:headers "fixture-gate"])) (some? (principal-fn %)))}
                      :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                                    :require-derived-model? true :operation-model-entities {:request/claim #{:requests :request_assignments}})
@@ -1101,6 +1113,21 @@
                   (is (= :matched-local-observed-retained-steps (:submission-recovery-linkage r)))
                   (is (= :not-established (:provider-refinement r)))
                   (is (= sample2 (coverage/observe-local-processed-retained-replay-inputs! node)))
+                  (let [compare! #(host/compare-configured-envelope-recovery! %1 tables mapped-source outcome-declarations (recovery-steps history) %2)
+                        joined (compare! started observation)]
+                    (is (= :conditional-configured-envelope-recovery (:status joined)))
+                    (is (= :matched-current-owner-and-issued-retained-root (:activation-root-binding joined)))
+                    (is (= (:selected-tx-ids r) (:selected-tx-ids joined)))
+                    (is (= 39 (count (:remaining-general-conditions joined))))
+                    (is (every? (:remaining-conditions joined) (:remaining-general-conditions joined)))
+                    (is (= (:activation-root joined) (get-in joined [:adoption-scopes :writer-isolation :activation-root])))
+                    (is (= [5 8] (mapv #(count (get-in joined [:trusted-assumptions-by-contract %])) [:writer-isolation :provider-trust])))
+                    (is (= :not-established (:historical-mediation joined) (:continuous-mediation joined) (:storage-lineage joined)))
+                    (is (= :not-performed (:proof-discharge joined)))
+                    (is (= :unissued-combined-trust-host (trust-problem #(compare! (into {} started) observation))))
+                    (is (= :configured-recovery-activation-mismatch (trust-problem #(compare! started capture))))
+                    (with-redefs [host/adopt-implementation-trust! (constantly {})]
+                      (is (= :configured-recovery-boundary-replaced (trust-problem #(compare! started observation))))))
                   (let [{:keys [retained-handle cut-handle]} @restart*
                         target (:acquisition (acquisition/capture! node))]
                     (is (= sample2 (acquisition/read-acquisition! node target)))
