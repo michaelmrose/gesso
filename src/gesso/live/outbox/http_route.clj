@@ -16,6 +16,21 @@
   (and (re-matches #"[A-Za-z0-9._~-]+" segment)
        (not (#{"." ".."} segment))))
 
+(defn authority-policy?
+  "The declared policy names, not authentication credentials."
+  [policy]
+  (and (map? policy) (not (record? policy)) (nil? (meta policy))
+       (= #{:deployment-id :request-gate-policy :principal-session-policy} (set (keys policy)))
+       (every? #(and (keyword? %) (namespace %)) (vals policy))))
+
+(defn authority-binding? [binding]
+  (and (map? binding) (not (record? binding)) (nil? (meta binding))
+       (= #{:installation-ref :policy} (set (keys binding)))
+       (string? (:installation-ref binding))
+       (boolean (re-matches #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                            (:installation-ref binding)))
+       (authority-policy? (:policy binding))))
+
 (defn route-segments [path]
   (when (and (string? path) (str/starts-with? path "/"))
     (let [parts (subvec (vec (segments path)) 1)

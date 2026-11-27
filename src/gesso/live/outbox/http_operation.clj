@@ -174,7 +174,7 @@
         [#'selected-routes! #'application/application-assembly? #'route/matching-route
          #'route/captured-arguments #'read-form #'server/decode-command
          #'choreo/require-operation #'run-command-or-deny #'server/run-command
-         #'server/current-command-boundary-matches?]))
+         #'server/current-command-boundary-matches? #'route/authority-policy?]))
 
 (defn- route-boundaries-current? []
   (every? (fn [[v original]] (identical? original @v)) route-boundaries))
@@ -190,14 +190,32 @@
                (server/current-command-boundary-matches? invocation @boundary))
       evidence)))
 
-(defn- run-selected! [original? assembly prepared route context command bind-publication]
+(def ^:private authority-installations (java.util.WeakHashMap.))
+
+(defn read-command-authority-binding!
+  "Read the local installation identity for the exact wrapper, assembly and
+   configured callbacks. Not a host lifecycle credential or an attestation."
+  [handler assembly options]
+  (let [entry (locking authority-installations (.get authority-installations handler))
+        prepared (get-in assembly [:operation-acquisition-assembly :execution-assembly :server])]
+    (when (and entry (route-boundaries-current?)
+               (application/application-assembly? assembly)
+               (identical? assembly (:assembly entry))
+               (identical? prepared (:prepared entry))
+               (identical? (:principal-fn prepared) (:principal-fn entry))
+               (identical? (:authorize-request? options) (:authorize? entry))
+               (= (:authority-policy options) (get-in entry [:binding :policy])))
+      (:binding entry))))
+
+(defn- run-selected! [original? assembly prepared route context command bind-publication authority-binding]
   (let [current? #(and original? (route-boundaries-current?)
                        (identical? prepared (get-in assembly [:operation-acquisition-assembly
                                                              :execution-assembly :server])))
-        evidence (assoc (select-keys route [:route-id :path :method :operation :required-transport])
+        evidence (cond-> (assoc (select-keys route [:route-id :path :method :operation :required-transport])
                         :uri (:uri context) :path-arguments (:path-params context)
                         :request-gate :locally-accepted
                         :evidence :matched-canonical-htmx-handoff)
+                   authority-binding (assoc :authority-binding authority-binding))
         boundary* (volatile! nil)
         prior (.get active-route)]
     (try
@@ -231,8 +249,11 @@
    marker is a settlement handoff, not evidence of browser receipt."
   ([assembly fallback options] (wrap-handler assembly fallback options nil))
   ([assembly fallback options bind-publication]
-  (when-not (and (map? options) (= #{:authorize-request?} (set (keys options)))
-                 (fn? (:authorize-request? options)))
+  (when-not (and (map? options) (not (record? options)) (nil? (meta options))
+                 (contains? #{#{:authorize-request?} #{:authorize-request? :authority-policy}} (set (keys options)))
+                 (fn? (:authorize-request? options))
+                 (or (not (contains? options :authority-policy))
+                     (route/authority-policy? (:authority-policy options))))
     (reject! :invalid-command-options {}))
   (when-not (and (fn? fallback) (application/application-assembly? assembly))
     (reject! :invalid-command-assembly {}))
@@ -240,8 +261,10 @@
         execution (get-in assembly [:operation-acquisition-assembly :execution-assembly])
         prepared (:server execution)
         routes (selected-routes! assembly prepared (get-in execution [:route-assembly :routes]))
-        authorize? (:authorize-request? options)]
-    (fn [request]
+        authorize? (:authorize-request? options)
+        binding (when-let [policy (:authority-policy options)]
+                  {:installation-ref (str (random-uuid)) :policy policy})
+        handler (fn [request]
       (let [original? (and original? (route-boundaries-current?))]
        (if-let [route (route/matching-route routes (:uri request))]
         (cond
@@ -262,7 +285,7 @@
                                   (assoc :form-params form :path-params captured))]
                   (if-not (true? (authorize? context))
                     (response 403)
-                    (if-let [send (run-selected! original? assembly prepared route context command bind-publication)]
+                    (if-let [send (run-selected! original? assembly prepared route context command bind-publication binding)]
                       (let [result (http/html-response (ui/optimistic-settlement-marker (:settlement send)))]
                         ;; Serialize before recording handoff. No exception from
                         ;; execution or serialization becomes a fabricated rejection.
@@ -271,4 +294,10 @@
                                 "HX-Reswap" "none"))
                       (response 403))))))
             (response 400)))
-        (fallback (dissoc request outbox/preparation-key))))))))
+        (fallback (dissoc request outbox/preparation-key)))))]
+    (when (and binding original? (route-boundaries-current?))
+      (locking authority-installations
+        (.put authority-installations handler
+              {:assembly assembly :prepared prepared :principal-fn (:principal-fn prepared)
+               :authorize? authorize? :binding binding})))
+    handler)))

@@ -4,7 +4,8 @@
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.choreo.identity :as identity]
-            [gesso.model.command-resolution :as resolution]))
+            [gesso.model.command-resolution :as resolution]
+            [gesso.live.outbox.command-authority-owner :as owner]))
 
 (def ^:private route
   {:route-id :request/claim :path "/operations/request/:request-id/claim"
@@ -117,3 +118,44 @@
     (with-redefs [authority/describe! (constantly contract)]
       (is (= :command-authority-boundary-replaced
              (:reason (recovery/describe-command-authority-contract! (Object.) (Object.) policy)))))))
+
+(deftest installed-policy-must-match-every-selected-origin
+  (let [policy {:deployment-id :fixture/host :request-gate-policy :fixture/gate
+                :principal-session-policy :fixture/session}
+        binding {:installation-ref (str (random-uuid)) :policy policy}
+        origins (mapv #(assoc-in % [:http-route :authority-binding] binding)
+                      [(origin "one" "e1") (origin "two" "e2") (origin "two" "e2")])
+        steps (mapv (fn [tx o] {:spec {:binding (select-keys o resolution/binding-keys)}
+                                :expectation {:tx-id tx}}) [1 2 3] origins)
+        claims (mapv #(hash-map :command-origin %) origins)
+        compare! #'submission/compare-command-origins!
+        describe (fn [claims]
+                   (#'recovery/command-authentication-premises
+                    {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
+                     :command-observation-ref "original-cut"
+                     :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
+                     :original-recovery (assoc (compare! steps claims)
+                                              :command-origin-correspondence :matched-issued-command-bindings
+                                              :selected-tx-ids [1 2 3]
+                                              :selected-commitments [:committed :aborted :committed])}))
+        problem (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
+        contract (authority/describe! (describe claims) policy)
+        qualified (#'owner/match-contract! binding (assoc contract :subject-provenance :matched-original-issued-cut))]
+    (is (= :matched-current-local-installation (:configured-authority qualified)))
+    (is (= :not-performed (:premise-acceptance qualified) (:proof-discharge qualified)))
+    (is (= :not-established (:command-authentication qualified)))
+    (is (= binding (:installation-binding qualified)))
+    (is (= :command-authority-installation-mismatch
+           (problem #(authority/describe! (describe claims) (assoc policy :deployment-id :other/host)))))
+    (doseq [changed [(update-in claims [1 :command-origin :http-route] dissoc :authority-binding)
+                     (assoc-in claims [1 :command-origin :http-route :authority-binding :installation-ref] (str (random-uuid)))]]
+      (is (= :command-authority-installation-mismatch
+             (problem #(authority/describe! (describe changed) policy)))))
+    (doseq [bad [nil {} (assoc binding :installation-ref "fake") (assoc binding :policy {})]]
+      (is (= :mapped-command-origin-mismatch
+             (problem #(describe (assoc-in claims [0 :command-origin :http-route :authority-binding] bad))))))
+    (is (= :command-authority-original-installation-mismatch
+           (problem #(#'owner/match-contract! (assoc binding :installation-ref (str (random-uuid)))
+                      (assoc contract :subject-provenance :matched-original-issued-cut)))))
+    (is (= :command-authority-original-installation-mismatch
+           (problem #(#'owner/match-contract! binding contract))))))

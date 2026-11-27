@@ -10782,3 +10782,32 @@ general CLM-R2 conditions and both original command premises remain open.
 Next: bind the declared application authority policies to the actual host's
 installed request gate and prepared principal resolver, with local owner and
 lifecycle qualification before considering explicit environmental adoption.
+
+* v2896 — bind declared command authority to installed callbacks
+
+Allow an optional authority-policy in the assembled HTTP operation options.
+Issue a fresh structural installation reference for each actual wrapper and
+bind it to the exact assembly, prepared server, principal resolver and request
+gate. Carry the reference and policy through the original route observation;
+reject malformed, mixed-installation and cross-policy selected origins. Keep
+unconfigured route observations supported without configured qualification.
+The host privately registers its wrapper with an exact owner token and the
+existing retirement lock. Qualify the original issued cut only under this
+owner, using its mapped admission and startup-selected policy. Match all three
+original route installation bindings; no caller-selected declaration, copied
+owner or retired host qualifies. The reference is descriptive, not a credential.
+Version the affected comparison, premise and contract profiles; update the
+reviewed host digest. Do not adopt environmental premises or change settlement.
+
+Focused JVM: command route/authority and HTTP operation tests, 14 tests / 257
+assertions; reviewed writer classification, 2 tests / 44 assertions. Both
+exited 0; total 16 tests / 301 assertions, zero failures or errors. Real Biff,
+JDK HTTP and XTDB execution checks the installed binding and retirement.
+The positive selected-cut contract match is exercised structurally, not yet
+through a complete configured mapped host recovery. Full assembled-host and
+project gates were not rerun. All 39 general CLM-R2 conditions remain open.
+
+Next: exercise positive and negative installed authority qualification through
+the canonical assembled mapped host and its issued original recovery cut,
+including distinct installations, retirement and unchanged premise inventory,
+before explicit environmental adoption.

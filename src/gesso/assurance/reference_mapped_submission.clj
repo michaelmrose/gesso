@@ -9,7 +9,7 @@
             [gesso.model.inductive-plan :as induction])
   (:import [xtdb.api TransactionKey]))
 
-(def profile :selected-mapped-submission-observation-v3)
+(def profile :selected-mapped-submission-observation-v4)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported mapped submission observation." {:reason reason})))
@@ -33,7 +33,9 @@
                          (route/captured-arguments candidate (:uri observed)))))]
       (and (map? observed) (not (record? observed)) (nil? (meta observed))
            (= #{:route-id :path :method :operation :required-transport :uri :path-arguments
-                :request-gate :evidence} (set (keys observed)))
+                :request-gate :evidence} (disj (set (keys observed)) :authority-binding))
+           (or (not (contains? observed :authority-binding))
+               (route/authority-binding? (:authority-binding observed)))
            (keyword? (:route-id observed))
            (= :post (:method observed)) (= :htmx (:required-transport observed))
            (= (:operation origin) (:operation observed))
@@ -140,7 +142,7 @@
       (catch clojure.lang.ExceptionInfo e
         (fail :mismatch (or (:reason (ex-data e)) :invalid-mapped-submission-handoff))))))
 
-(def observed-profile :selected-issued-mapped-submission-observation-v3)
+(def observed-profile :selected-issued-mapped-submission-observation-v4)
 
 (def ^:private original-observation-reader publication/read-framed-submission-observation!)
 (def ^:private original-selected-comparison compare-selected!)

@@ -34,6 +34,7 @@
             [gesso.live.core :as live]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.biff :as managed]
+            [gesso.live.outbox.command-authority-owner :as command-authority]
             [gesso.live.outbox.http :as http]
             [gesso.live.outbox.history-controller :as history-controller]
             [gesso.live.outbox.http-jdk :as jdk]
@@ -172,6 +173,9 @@
 ;; Registration is internal to the installed host startup path, not an
 ;; application-facing method for minting host ownership.
 (def ^:private register-worker-capture-host! @#'worker-capture/register-worker-capture-host!)
+(def ^:private register-command-authority! @#'command-authority/register!)
+(def read-command-authority-binding! command-authority/read-binding!)
+(def qualify-command-authority! command-authority/qualify!)
 (def capture-worker-outcomes! worker-capture/capture-worker-outcomes!)
 (def worker-outcome-capture-matches? worker-capture/worker-outcome-capture-matches?)
 
@@ -633,7 +637,10 @@
                        (:storage-trust config) (assoc ::storage-trust-token trust-token)
                        (:writer-isolation config) (assoc ::writer-isolation-token isolation-token)
                        (:provider-trust config) (assoc ::provider-trust-token provider-trust-token)
+                       (get-in config [:assembled-operations :authority-policy]) (assoc command-authority/token-key (Object.))
                        (::mapped-policy-token started) (assoc ::worker-capture-token worker-capture-token))]
+          (when (get system command-authority/token-key)
+            (register-command-authority! system stop-lock trust-active handler assembly (:assembled-operations config)))
           (when (::worker-capture-token system)
             (register-worker-capture-host! system worker-capture-token trust-active))
           (when-let [trust (:writer-isolation config)]

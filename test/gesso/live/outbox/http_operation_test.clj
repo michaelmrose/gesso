@@ -124,7 +124,9 @@
                                     :live-options {:rules [{:when-topic :request
                                                            :expand (fn [_ change] [(select-keys change [:topic :id])])}]}
                                     :http-jdk {} :assembled-operations
-                                    {:authorize-request? (fn [ctx]
+                                    {:authority-policy {:deployment-id :fixture/host :request-gate-policy :fixture/csrf
+                                                        :principal-session-policy :fixture/session}
+                                     :authorize-request? (fn [ctx]
                                                            (swap! gates inc)
                                                            (= "valid" (get-in ctx [:form-params "csrf"])))}})
               listener (get started host/listener-key)
@@ -202,11 +204,20 @@
                     :method :post :operation :request/claim :required-transport :htmx
                     :uri path :path-arguments {:request-id "r1"}
                     :request-gate :locally-accepted :evidence :matched-canonical-htmx-handoff}
-                   (:http-route @origin*)))
+                   (dissoc (:http-route @origin*) :authority-binding)))
+            (let [binding (host/read-command-authority-binding! started)]
+              (is (= binding (get-in @origin* [:http-route :authority-binding])))
+              (is (= :fixture/host (get-in binding [:policy :deployment-id])))
+              (is (= :unissued-command-authority-host
+                     (reason #(host/read-command-authority-binding! (into {} started)))))
+              (is (= :command-authority-requires-mapped-admission
+                     (reason #(host/qualify-command-authority! started (Object.))))))
             (is (= :conditional-on-trusted-principal-resolver (:authentication @origin*)))
             (is (nil? (server/current-command-origin (first @calls))))
             (is (nil? (transport/current-command-route (first @calls))))
-            (finally (host/stop! started) (.close client))))))))
+            (finally (host/stop! started) (.close client)))
+          (is (= :command-authority-host-retired
+                 (reason #(host/read-command-authority-binding! started)))))))))
 
 (deftest parameter-route-binds-command-arguments-before-authority
   (let [calls (atom []) gates (atom []) fallbacks (atom [])]
@@ -455,3 +466,34 @@
           (is (= :matched-canonical-htmx-handoff (:evidence (first @observed))))
           (is (nil? (second @observed)))
           (is (= (first @observed) (last @observed))))))))
+
+(deftest authority-installation-identity-is-wrapper-and-callback-specific
+  (let [observed (atom [])]
+    (with-assembly
+      (fn [invocation]
+        (swap! observed conj (transport/current-command-route invocation))
+        {:resolution :rejected :reason :test-only})
+      (fn [assembly]
+        (let [policy {:deployment-id :fixture/host :request-gate-policy :fixture/gate
+                      :principal-session-policy :fixture/session}
+              options {:authorize-request? (constantly true) :authority-policy policy}
+              h1 (transport/wrap-handler assembly identity options)
+              h2 (transport/wrap-handler assembly identity options)
+              read! #(transport/read-command-authority-binding! % assembly options)
+              b1 (read! h1) b2 (read! h2)
+              req (request (form :request/claim "valid"))]
+          (is (= policy (:policy b1) (:policy b2)))
+          (is (not= (:installation-ref b1) (:installation-ref b2)))
+          (is (nil? (read! (fn [r] (h1 r)))))
+          (is (nil? (transport/read-command-authority-binding! h1 (into {} assembly) options)))
+          (is (nil? (transport/read-command-authority-binding! h1 assembly
+                                                               (assoc options :authorize-request? (constantly true)))))
+          (is (nil? (transport/read-command-authority-binding! h1 assembly
+                                                               (assoc-in options [:authority-policy :deployment-id] :other/host))))
+          (is (= 200 (:status (h1 (assoc req :authority-binding b2)))))
+          (is (= 200 (:status (h2 req))))
+          (is (= [b1 b2] (mapv :authority-binding @observed)))
+          (is (= :invalid-command-options
+                 (reason #(transport/wrap-handler assembly identity (assoc options :authority-policy {})))))
+          (with-redefs [server/run-command (fn [& _] (throw (AssertionError. "not called")))]
+            (is (nil? (read! h1)))))))))
