@@ -7646,3 +7646,42 @@ or delivery call chain. Establish that call-chain distinction before
 claiming stronger provenance; bind issued observations to actual
 adapter outcomes and retained transactions. No authentication or
 CLM-R2 premise is discharged.
+
+* v2815 — qualify original worker maintenance call chains
+
+Require exact one-use constructor handoffs to retain their original
+submission arguments. At maintenance admission consume the matching
+sweep-to-acquisition or delivery-to-acknowledgment scope, then the
+cycle-to-sweep or cycle-to-delivery scope, and check the exact cycle
+options against the scheduler scope. Pin the relevant original call
+boundaries. Restore prior scopes on every exit. The resulting local
+worker-origin observation records matched scheduled maintenance only
+when the complete call chain matches. Valid independently admitted
+transactions are not refused merely because provenance is absent.
+
+The physical lifecycle regression injects raw writes, direct calls to
+the real acquisition and acknowledgment constructors, and an entire
+nested processing cycle on the same scheduler thread. None inherits
+the original scheduled cycle's provenance. Genuine scheduled acquisition
+and acknowledgment retain it. The installed mapped host regression
+observes four maintenance admissions from the actual production writer
+policy and compares their ordered intent identities and maintenance
+phases to the retained worker-interleaved Claim history, checking the
+configured source, worker, cycle number and common lifecycle reference.
+The observer is still a local admission-time observation, not an
+authenticated worker identity or returned transaction receipt.
+
+Focused JVM: 128 tests / 2031 assertions across the worker, lifecycle,
+cycle, delivery, acquisition, acknowledgment and worker-origin suites;
+1 test / 336 assertions in the persistent installed worker-interleaved
+Claim recovery fixture, including reopened and independently copied
+stores. Both runs completed with zero failures or errors. Older offline
+dependency bundle and unchanged worker polling; adjacent assembled-host
+fixture and full project gates not rerun. No storage, authentication,
+provider-refinement or CLM-R2 premise is discharged.
+
+Next: bind the local admission-time worker observations to the exact
+adapter submission outcomes and returned transaction keys in an issued
+capture, and establish its owning lifecycle and host association.
+Retain explicit limits on raw writer closure and external dispatch
+authentication before composing worker provenance with retained history.

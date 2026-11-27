@@ -190,8 +190,35 @@
     {:receipt-id (:receipt-id report)
      :receipt-evidence :unverified-post-dispatch-receipt}))
 
+(def ^:private ^ThreadLocal maintenance-call (ThreadLocal.))
+(def ^:private original-sweep worker/acquire-sweep!)
+(def ^:private original-dispatch delivery/dispatch-acquired!)
+
+(defn claim-maintenance-call!
+  "Consume the exact cycle-to-sweep or cycle-to-delivery call; return
+   the original cycle options for the scheduler's identity check."
+  [node phase input]
+  (let [scope (.get maintenance-call)]
+    (when (and scope (identical? node (:node scope))
+               (= phase (:phase scope)) (identical? input (:input scope))
+               (identical? original-sweep worker/acquire-sweep!)
+               (identical? original-dispatch delivery/dispatch-acquired!))
+      (.remove maintenance-call)
+      (:cycle-opts scope))))
+
+(defn- call-maintenance! [node cycle-opts phase input f]
+  (let [prior (.get maintenance-call)]
+    (.remove maintenance-call)
+    (try
+      (when (and (identical? original-sweep worker/acquire-sweep!)
+                 (identical? original-dispatch delivery/dispatch-acquired!))
+        (.set maintenance-call {:node node :cycle-opts cycle-opts :phase phase :input input}))
+      (f)
+      (finally
+        (if prior (.set maintenance-call prior) (.remove maintenance-call))))))
+
 (defn- attempt-result!
-  [node system ctx expected-source-id acquired completed cursor]
+  [node system ctx expected-source-id cycle-opts acquired completed cursor]
   (let [{:keys [intent-id lease-id status]} acquired
         in-flight {:intent-id intent-id
                    :lease-id lease-id
@@ -204,8 +231,9 @@
 
       (#{:acquired :reclaimed} status)
       (let [delivered (try
-                        (delivery/dispatch-acquired!
-                         node system ctx acquired expected-source-id)
+                        (call-maintenance! node cycle-opts :delivery acquired
+                                           #(delivery/dispatch-acquired!
+                                             node system ctx acquired expected-source-id))
                         (catch Throwable e
                           (let [data (ex-data e)
                                 post-ack? (= :gesso.live.outbox/post-dispatch-ack-unknown
@@ -321,7 +349,8 @@
             ;; adapter reports acquiring one, in which case retain its
             ;; unverified identity as recovery evidence instead of dropping it.
             raw-page (try
-                       (worker/acquire-sweep! node work-opts)
+                       (call-maintenance! node opts :acquisition work-opts
+                                          #(worker/acquire-sweep! node work-opts))
                        (catch Throwable e
                          (interrupted! :acquisition :acquisition-exception
                                        completed cursor
@@ -340,7 +369,7 @@
           (summary worker-id completed :observed-end nil)
           (let [acquired (first (:results page))
                 result (attempt-result! node system ctx expected-source-id
-                                        acquired completed cursor)
+                                        opts acquired completed cursor)
                 done (conj completed result)
                 more? (= :page-budget (:halt-reason page))
                 next-after (:next-after page)]

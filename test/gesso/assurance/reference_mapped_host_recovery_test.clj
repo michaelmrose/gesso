@@ -464,6 +464,7 @@
                                                                    :execution-id (identity/execution-id (str "e-" (resolution/record-id b)))
                                                                    :observed-basis fixture/rendered-basis))))})}))
         policy-events (atom [])
+        policy-maintenance (atom [])
         actor #(identity/raw-value (:principal %))
         mapped-source (claim/physical-mapped-admission-source (claim/bound-inductive-source!))
         admit (induction/build-inductive-mapped-admission! mapped-source)
@@ -571,7 +572,11 @@
                      :assembled-operations {:authorize-request? #(and (= "yes" (get-in % [:headers "fixture-gate"])) (some? (principal-fn %)))}
                      :assembled-publication (assoc mapping :model-entity-topics {:requests #{:request} :request_assignments #{:request-assignment}}
                                                    :require-derived-model? true :operation-model-entities {:request/claim #{:requests :request_assignments}})
-                     :mapped-writer-policy {:admission admit :initializer seed :observe! #(swap! policy-events conj (:kind %))}}]
+                     :mapped-writer-policy {:admission admit :initializer seed
+                                            :observe! (fn [event]
+                                                        (swap! policy-events conj (:kind event))
+                                                        (when (= :worker (:kind event))
+                                                          (swap! policy-maintenance conj event)))}}]
     (try
       (fixture/with-surfaced-application
         {:operations assembled-operations :route-capabilities (fixture/route-capabilities assembled-operations)
@@ -678,6 +683,20 @@
                       (is (= 9 (:replayed-transaction-count r)))
                       (is (= (mapv :tx-id (map #(nth history %) [2 7 8])) (:selected-tx-ids r)))
                       (is (= (mapv :tx-id (subvec history 3 7)) (mapv :tx-id maintenance)))
+                      ;; These are actual installed writer-policy observations,
+                      ;; not a test policy calling the provenance helper.
+                      (let [origins (mapv :worker-origin @policy-maintenance)]
+                        (is (= (mapv :intent-id maintenance) (mapv :intent-id @policy-maintenance)))
+                        (is (= (mapv :maintenance maintenance) (mapv :maintenance origins)))
+                        (is (= 4 (count origins)))
+                        (is (every? #(and (= :matched-scheduled-maintenance (:call-chain %))
+                                          (= :scheduled-local-cycle (:origin %))
+                                          (= :not-established (:authentication %))
+                                          (= source-id (:source-id %))
+                                          (= "assembled-recovery" (:worker-id %))
+                                          (= 2 (:cycle-number %))
+                                          (uuid? (:lifecycle-ref %))) origins))
+                        (is (apply = (map :lifecycle-ref origins))))
                       (is (= [:lease-acquisition :dispatch-acknowledgment :lease-acquisition :dispatch-acknowledgment]
                              (mapv :maintenance maintenance)))
                       (is (= 2 (count pending) (count ids)))

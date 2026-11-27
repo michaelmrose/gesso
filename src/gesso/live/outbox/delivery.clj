@@ -195,6 +195,30 @@
              :reported-acknowledgment-status (:status ack)})))
   ack))
 
+(def ^:private ^ThreadLocal acknowledgment-call (ThreadLocal.))
+(def ^:private original-acknowledge acknowledgment/acknowledge-dispatch!)
+
+(defn claim-acknowledgment-call!
+  "Consume the exact delivery-to-acknowledgment call; return its acquisition."
+  [node submission]
+  (let [scope (.get acknowledgment-call)]
+    (when (and scope (identical? node (:node scope))
+               (identical? submission (:submission scope))
+               (identical? original-acknowledge acknowledgment/acknowledge-dispatch!))
+      (.remove acknowledgment-call)
+      (:acquisition scope))))
+
+(defn- acknowledge-for-delivery! [node acquisition submission]
+  (let [prior (.get acknowledgment-call)
+        execute! acknowledgment/acknowledge-dispatch!]
+    (.remove acknowledgment-call)
+    (try
+      (when (identical? original-acknowledge execute!)
+        (.set acknowledgment-call {:node node :acquisition acquisition :submission submission}))
+      (execute! node submission)
+      (finally
+        (if prior (.set acknowledgment-call prior) (.remove acknowledgment-call))))))
+
 (defn dispatch-acquired!
   "Synchronously emit one acquired/reclaimed intent, then acknowledge it.
 
@@ -258,7 +282,7 @@
                   :worker-id (:worker-id acquisition)
                   :receipt receipt}
           ack (try
-                (acknowledgment/acknowledge-dispatch! node fenced)
+                (acknowledge-for-delivery! node acquisition fenced)
                 (catch Throwable e
                   ;; An interrupted physical acknowledgment has no known
                   ;; terminal outcome. Preserve JVM cancellation while

@@ -899,6 +899,8 @@
           direct-id (intent-id 811)
           scheduled-id (intent-id 812)
           raw-id (intent-id 813)
+          callback-id (intent-id 814)
+          nested-id (intent-id 815)
           worker-id "handoff-worker"
           scope {:source-id source-id :worker-id worker-id}
           seen (atom [])
@@ -925,6 +927,8 @@
         (is (every? #(not (contains? % :worker-origin)) @seen))
         (seed! node scheduled-id)
         (seed! node raw-id)
+        (seed! node callback-id)
+        (seed! node nested-id)
         (with-redefs [discovery/discover-eligible!
                       (fn [n opts]
                         (when (compare-and-set! raw-once? false true)
@@ -936,18 +940,38 @@
                                        :lease-id (random-uuid) :now now :lease-until (.plusSeconds now 60)}
                                 current (first (xt/q n ["SELECT *, _system_from FROM gesso_live_outbox WHERE _id = ?" raw-id]))
                                 ops (#'acquisition/acquire-ops current claim)]
-                            (xtdb/execute-tx! n ops)))
+                            (xtdb/execute-tx! n ops)
+                            ;; A real constructor (and fenced acknowledgment) called by
+                            ;; discovery still lacks the original sweep/delivery chain.
+                            (let [claim (assoc claim :intent-id callback-id :lease-id (random-uuid))
+                                  acquired (acquisition/acquire-pending! n claim)]
+                              (is (= :acquired (:status acquired)))
+                              (is (= :acknowledged
+                                     (:status (acknowledgment/acknowledge-dispatch!
+                                               n {:intent-id callback-id :lease-id (:lease-id claim)
+                                                  :worker-id worker-id
+                                                  :receipt {:receipt-id (random-uuid)
+                                                            :adapter :fixture/callback :result :accepted}})))))
+                            ;; Even an entire nested cycle is not the scheduler's
+                            ;; exact invocation, despite identical node and names.
+                            (is (= 1 (:dispatch-accepted
+                                      (cycle/process-cycle! n sys {} source-id
+                                                            {:worker-id worker-id :after callback-id :max-items 1}))))))
                         (discover n opts))]
           (let [handle (lifecycle/start! node sys {} source-id
                                          {:worker-id worker-id :poll-ms 30 :max-items 4})]
             (try
               (is (eventually #(>= (:total-dispatch-accepted (lifecycle/status handle)) 1)))
               (finally (is (= :drained (:outcome (lifecycle/stop! handle 10000))))))))
-        (let [[raw acquired acknowledged :as scheduled] (subvec @seen 2)
+        (let [[raw callback-acquired callback-ack nested-acquired nested-ack acquired acknowledged :as scheduled]
+              (subvec @seen 2)
               origins (mapv :worker-origin [acquired acknowledged])]
-          (is (= 3 (count scheduled)))
-          (is (= raw-id (:intent-id raw)))
-          (is (not (contains? raw :worker-origin)))
+          (is (= 7 (count scheduled)))
+          (is (= [raw-id callback-id callback-id nested-id nested-id]
+                 (mapv :intent-id [raw callback-acquired callback-ack nested-acquired nested-ack])))
+          (is (every? #(not (contains? % :worker-origin))
+                      [raw callback-acquired callback-ack nested-acquired nested-ack]))
+          (is (every? #(= :matched-scheduled-maintenance (:call-chain %)) origins))
           (is (= [scheduled-id scheduled-id] (mapv :intent-id [acquired acknowledged])))
           (is (= [:lease-acquisition :dispatch-acknowledgment] (mapv :maintenance origins)))
           (is (= [1 1] (mapv :cycle-number origins)))

@@ -10,6 +10,9 @@
             [gesso.live.outbox.acquisition :as acquisition]
             [gesso.live.outbox.acknowledgment :as acknowledgment]
             [gesso.live.outbox.lifecycle :as lifecycle]
+            [gesso.live.outbox.cycle :as cycle]
+            [gesso.live.outbox.worker :as worker]
+            [gesso.live.outbox.delivery :as delivery]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.physical-correspondence :as correspondence]
@@ -136,6 +139,10 @@
 (def ^:private original-acquisition-handoff acquisition/claim-maintenance-handoff!)
 (def ^:private original-acknowledgment-handoff acknowledgment/claim-maintenance-handoff!)
 
+(def ^:private original-acquisition-call worker/claim-acquisition-call!)
+(def ^:private original-acknowledgment-call delivery/claim-acknowledgment-call!)
+(def ^:private original-cycle-call cycle/claim-maintenance-call!)
+
 (defn- observe-maintenance-origin
   "Add local provenance only after independent exact maintenance admission.
    Scope does not establish the installed host owner or dispatch provenance."
@@ -143,13 +150,23 @@
   (if (and (= :worker (:kind kind))
            (identical? original-worker-origin lifecycle/current-worker-origin)
            (identical? original-acquisition-handoff acquisition/claim-maintenance-handoff!)
-           (identical? original-acknowledgment-handoff acknowledgment/claim-maintenance-handoff!))
-    (let [phase (case (:status kind)
-                  :leased (original-acquisition-handoff node ops)
-                  :dispatch-accepted (original-acknowledgment-handoff node ops)
-                  nil)
-          origin (when phase (original-worker-origin node source-id worker-id))]
-      (cond-> kind origin (assoc :worker-origin (assoc origin :maintenance phase))))
+           (identical? original-acknowledgment-handoff acknowledgment/claim-maintenance-handoff!)
+           (identical? original-acquisition-call worker/claim-acquisition-call!)
+           (identical? original-acknowledgment-call delivery/claim-acknowledgment-call!)
+           (identical? original-cycle-call cycle/claim-maintenance-call!))
+    (let [{:keys [maintenance submission]} (case (:status kind)
+                                             :leased (original-acquisition-handoff node ops)
+                                             :dispatch-accepted (original-acknowledgment-handoff node ops)
+                                             nil)
+          phase (if (= :dispatch-acknowledgment maintenance) :delivery :acquisition)
+          input (when maintenance
+                  (if (= :delivery phase)
+                    (original-acknowledgment-call node submission)
+                    (original-acquisition-call node maintenance submission)))
+          cycle-opts (when input (original-cycle-call node phase input))
+          origin (when cycle-opts (original-worker-origin node source-id worker-id cycle-opts))]
+      (cond-> kind origin (assoc :worker-origin (assoc origin :maintenance maintenance
+                                                       :call-chain :matched-scheduled-maintenance))))
     kind))
 
 (defn build-policy!

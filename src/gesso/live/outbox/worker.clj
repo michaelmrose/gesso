@@ -131,8 +131,38 @@
                {:intent-id intent-id :action action :status status}))
     outcome))
 
+(def ^:private ^ThreadLocal acquisition-call (ThreadLocal.))
+(def ^:private original-acquire acquisition/acquire-pending!)
+(def ^:private original-reclaim acquisition/reclaim-expired!)
+
+(defn claim-acquisition-call!
+  "Consume the exact sweep-to-constructor call; return its sweep input."
+  [node phase claim]
+  (let [scope (.get acquisition-call)]
+    (when (and scope (identical? node (:node scope))
+               (identical? claim (:claim scope)) (= phase (:phase scope))
+               (identical? original-acquire acquisition/acquire-pending!)
+               (identical? original-reclaim acquisition/reclaim-expired!))
+      (.remove acquisition-call)
+      (:opts scope))))
+
+(defn- acquire-for-sweep! [node opts action claim]
+  (let [prior (.get acquisition-call)
+        [phase execute!] (case action
+                          :acquire-pending [:lease-acquisition acquisition/acquire-pending!]
+                          :reclaim-expired [:expired-lease-reclamation acquisition/reclaim-expired!]
+                          (reject! :unknown-action {:action action :intent-id (:intent-id claim)}))]
+    (.remove acquisition-call)
+    (try
+      (when (and (identical? original-acquire acquisition/acquire-pending!)
+                 (identical? original-reclaim acquisition/reclaim-expired!))
+        (.set acquisition-call {:node node :opts opts :claim claim :phase phase}))
+      (execute! node claim)
+      (finally
+        (if prior (.set acquisition-call prior) (.remove acquisition-call))))))
+
 (defn- attempt!
-  [node worker-id source-id lease-millis {:keys [intent-id action]}]
+  [node opts worker-id source-id lease-millis {:keys [intent-id action]}]
   (let [now (Instant/now)
         claim {:intent-id intent-id
                :source-id source-id
@@ -148,10 +178,7 @@
                   :acquisition-action action
                   :evidence :unverified-acquisition-attempt}]
     (try
-      (let [outcome (case action
-                      :acquire-pending (acquisition/acquire-pending! node claim)
-                      :reclaim-expired (acquisition/reclaim-expired! node claim)
-                      (reject! :unknown-action {:action action :intent-id intent-id}))
+      (let [outcome (acquire-for-sweep! node opts action claim)
             verified (validate-acquisition-result! claim action outcome)]
         (assoc verified :action action))
       (catch Throwable cause
@@ -235,7 +262,7 @@
             results' (reduce
                       (fn [verified candidate]
                         (let [outcome (try
-                                        (attempt! node worker-id source-id
+                                        (attempt! node opts worker-id source-id
                                                   lease-millis candidate)
                                         (catch Throwable cause
                                           (propagate-sweep-failure! cause verified)))]

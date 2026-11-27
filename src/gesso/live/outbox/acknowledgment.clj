@@ -114,15 +114,15 @@
     (when (and scope (identical? original-execute live.xtdb/execute-tx!)
                (identical? node (:node scope)) (identical? ops (:ops scope)))
       (.remove maintenance-handoff)
-      (:maintenance scope))))
+      (select-keys scope [:maintenance :submission]))))
 
-(defn- execute-maintenance! [node maintenance ops]
+(defn- execute-maintenance! [node maintenance ops submission]
   (let [prior (.get maintenance-handoff)
         execute! live.xtdb/execute-tx!]
     (.remove maintenance-handoff)
     (try
       (when (identical? original-execute execute!)
-        (.set maintenance-handoff {:node node :ops ops :maintenance maintenance}))
+        (.set maintenance-handoff {:node node :ops ops :maintenance maintenance :submission submission}))
       (execute! node ops)
       (finally
         (if prior (.set maintenance-handoff prior) (.remove maintenance-handoff))))))
@@ -177,7 +177,7 @@
                         (:gesso.live.outbox/lease-until intent)]
                        [:put-docs outbox/intent-table updated]]]
               (try
-                (merge (execute-maintenance! node :dispatch-acknowledgment ops)
+                (merge (execute-maintenance! node :dispatch-acknowledgment ops submission)
                        {:status :acknowledged
                         :intent-id intent-id
                         :lease-id lease-id

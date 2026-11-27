@@ -150,15 +150,15 @@
     (when (and scope (identical? original-execute live.xtdb/execute-tx!)
                (identical? node (:node scope)) (identical? ops (:ops scope)))
       (.remove maintenance-handoff)
-      (:maintenance scope))))
+      (select-keys scope [:maintenance :submission]))))
 
-(defn- execute-maintenance! [node maintenance ops]
+(defn- execute-maintenance! [node maintenance ops submission]
   (let [prior (.get maintenance-handoff)
         execute! live.xtdb/execute-tx!]
     (.remove maintenance-handoff)
     (try
       (when (identical? original-execute execute!)
-        (.set maintenance-handoff {:node node :ops ops :maintenance maintenance}))
+        (.set maintenance-handoff {:node node :ops ops :maintenance maintenance :submission submission}))
       (execute! node ops)
       (finally
         (if prior (.set maintenance-handoff prior) (.remove maintenance-handoff))))))
@@ -204,7 +204,7 @@
           :else
           (let [tx-ops (acquire-ops intent claim)]
             (try
-              (let [result (execute-maintenance! node :lease-acquisition tx-ops)]
+              (let [result (execute-maintenance! node :lease-acquisition tx-ops claim)]
                 (merge result
                        {:status :acquired
                         :intent-id intent-id
@@ -332,7 +332,7 @@
                        [guard-max-new-deadline-sql lease-until]
                        [:put-docs outbox/intent-table new-intent]]]
               (try
-                (merge (execute-maintenance! node :expired-lease-reclamation ops)
+                (merge (execute-maintenance! node :expired-lease-reclamation ops claim)
                        {:status :reclaimed
                         :intent-id intent-id
                         :lease-id lease-id

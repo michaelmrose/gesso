@@ -196,14 +196,17 @@
    lifecycle reference is process-local; it is not a credential. This
    describes the active cycle, not the origin of an individual write,
    delivery, installed host, or independently authenticated worker."
-  [node source-id worker-id]
-  (let [scope (.get worker-origin)]
+  ([node source-id worker-id]
+   (let [scope (.get worker-origin)]
     (when (and scope
                (identical? original-process-cycle cycle/process-cycle!)
                (identical? node (:node scope))
                (= source-id (:source-id scope))
                (= worker-id (:worker-id scope)))
-      (dissoc scope :node))))
+      (dissoc scope :node :cycle-opts))))
+  ([node source-id worker-id cycle-opts]
+   (when (and cycle-opts (identical? cycle-opts (:cycle-opts (.get worker-origin))))
+     (current-worker-origin node source-id worker-id))))
 
 (defn- process-scheduled-cycle!
   [node system ctx source-id opts lifecycle-ref cycle-number]
@@ -212,7 +215,7 @@
     (.remove worker-origin)
     (try
       (when (identical? original-process-cycle process!)
-        (.set worker-origin {:node node :source-id source-id
+        (.set worker-origin {:node node :source-id source-id :cycle-opts opts
                              :worker-id (:worker-id opts)
                              :lifecycle-ref lifecycle-ref :cycle-number cycle-number
                              :origin :scheduled-local-cycle
