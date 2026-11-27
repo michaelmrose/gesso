@@ -1214,6 +1214,25 @@
                     (is (= :not-established (:dispatch-authentication checked)))
                     (let [observations (mapv #(get-in % [:admission :local-source-acceptance]) calls)]
                       (is (= [nil "w" nil "successor"] (mapv :worker-id observations)))
+                      (is (= observations (mapv :local-source-acceptance (:selected-maintenance checked))))
+                      (is (= :matched-local-source-return-retained-acknowledgments
+                             (:source-acceptance-correspondence checked)))
+                      (let [path [1 :admission :local-source-acceptance]
+                            sample (retained/read-acquisition! node acquisition)
+                            compare-calls! #'worker-envelope/compare-calls!]
+                        (doseq [changed (concat [(update-in calls (pop path) dissoc :local-source-acceptance)
+                                                 (assoc-in calls [0 :admission :local-source-acceptance] (nth observations 1))
+                                                 (assoc-in calls [3 :admission :local-source-acceptance] (nth observations 1))]
+                                                (map (fn [[k v]] (assoc-in calls (conj path k) v))
+                                                     {:intent-id (random-uuid) :lease-id (random-uuid)
+                                                      :worker-id "other" :receipt-id (random-uuid)
+                                                      :source-id "other" :source-instance-id (random-uuid)
+                                                      :count 2 :statuses [:rejected] :evidence :fabricated
+                                                      :extra true}))]
+                          (let [bad (compare-calls! node "s" (get-in sys [:source :id]) sample selected changed)]
+                            (is (= :mismatch (:status bad)))
+                            (is (not (contains? bad :selected-maintenance)))
+                            (is (not (contains? bad :source-acceptance-correspondence))))))
                       (doseq [i [1 3]]
                         (let [observation (nth observations i)
                               receipt (get-in calls [i :admission :local-dispatch-receipt])]
@@ -1242,7 +1261,7 @@
                                        (assoc-in calls [1 :admission :local-dispatch-receipt :adapter] :other/source)
                                        (assoc-in calls [0 :admission :local-dispatch-receipt] (nth receipts 1))
                                        (assoc-in calls [3 :admission :local-dispatch-receipt] (nth receipts 1))]]
-                        (let [bad (compare-calls! node "s" sample selected changed)]
+                        (let [bad (compare-calls! node "s" (get-in sys [:source :id]) sample selected changed)]
                           (is (= :mismatch (:status bad)))
                           (is (not (contains? bad :selected-maintenance)))
                           (is (not (contains? bad :dispatch-receipt-correspondence))))))

@@ -572,7 +572,7 @@
      :command-authentication :not-established
      :authority :none :certificate :not-issued}))
 
-(def worker-authentication-profile :selected-worker-authentication-premises-v2)
+(def worker-authentication-profile :selected-worker-authentication-premises-v3)
 
 (defn- maintenance-identity [selected]
   ;; The assumption encoder admits pure structural values, not UUID or
@@ -588,19 +588,30 @@
       (update :lease-id str)
       (update :receipt-id str)))
 
+(defn- local-source-identity [observation]
+  (-> observation
+      (select-keys [:intent-id :lease-id :worker-id :receipt-id :source-id
+                    :source-instance-id :count :statuses :evidence])
+      (update :intent-id str)
+      (update :lease-id str)
+      (update :receipt-id str)
+      (update :source-instance-id #(if (uuid? %) [:uuid (str %)] %))))
+
 (defn- worker-origin-identity [selected]
   (cond-> (assoc (maintenance-identity selected)
                  :system-time (str (:system-time selected))
                  :committed? (:committed? selected)
                  :worker-origin (update (:worker-origin selected) :lifecycle-ref str))
     (contains? selected :local-dispatch-receipt)
-    (assoc :local-dispatch-receipt (local-receipt-identity (:local-dispatch-receipt selected)))))
+    (assoc :local-dispatch-receipt (local-receipt-identity (:local-dispatch-receipt selected)))
+    (contains? selected :local-source-acceptance)
+    (assoc :local-source-acceptance (local-source-identity (:local-source-acceptance selected)))))
 
 (defn- worker-authentication-premises
   "Describe, never accept or discharge, the worker and dispatch premises of
    the original issued cut. The cut fingerprint binds the full retained
    envelopes, including acknowledgment receipts. Bind the checked local
-   receipt attribution explicitly as well. Local origin does not authenticate
+   receipt and source-return attribution explicitly as well. Local origin does not authenticate
    the configured worker or establish genuine source acceptance.
    No browser delivery or durable external delivery proposition is implied."
   [{:keys [scope original-recovery judgment-subject command-observation-ref]}]
@@ -624,6 +635,8 @@
                                                       :not-established)
                    :dispatch-receipt-correspondence (or (get-in original-recovery [:worker-correspondence :dispatch-receipt-correspondence])
                                                         :not-established)
+                   :source-acceptance-correspondence (or (get-in original-recovery [:worker-correspondence :source-acceptance-correspondence])
+                                                         :not-established)
                    :observed-maintenance observed}
         describe (fn [premise proposition boundary dependencies origin]
                    (original-assumption-description
@@ -758,7 +771,7 @@
        (identical? original-snapshot-binding snapshot/bind-premise)
        (identical? original-support-composition snapshot/compose-support)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v13)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v14)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]

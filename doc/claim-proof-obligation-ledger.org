@@ -10639,3 +10639,30 @@ receipt. All 39 original general CLM-R2 conditions remain open.
 Next: check source-acceptance attribution against the selected retained
 acknowledgment and carry the exact observation into the original-cut premise
 subject without discharging external authentication or durability premises.
+
+* v2891 — bind observed source acceptance to the original retained cut
+
+Require the captured local source-return observation for every selected
+acknowledgment. Check its exact field set, receipt/lease/intent/worker
+identities, configured source and the runtime source ID independently read
+from the issued owner's managed root, positive count, and ordered accepted
+status vector. Reject source observations on non-acknowledgment maintenance.
+Restrict comparison to losslessly encodable scalar runtime IDs; this does
+not change the public source creation contract. Preserve the checked local
+observation in the selected maintenance report and original premise subject,
+including correspondence status. Encode UUID source IDs with an explicit tag
+so an equal-looking string remains distinguishable. Version the affected
+worker comparison, premise and judgment profiles. The count and statuses
+are observed locally, not independently derived from the XTDB log.
+
+Focused JVM: original worker premise binding and installed managed-lineage
+physical fixture, 2 tests / 230 assertions, zero failures or errors (exit 0).
+Thirteen invalid source-observation mutations and eleven premise substitutions
+were exercised. Update the canonical assembled-host comparison and premise
+assertions; its full execution and the full project gates were not rerun.
+No external source authentication, downstream delivery or proof discharge is
+established. All 39 original general CLM-R2 conditions remain open.
+
+Next: examine command execution authentication and attribution boundaries
+against the original selected cut, retaining the distinction between local
+registered execution, actual principal resolution and environmental trust.

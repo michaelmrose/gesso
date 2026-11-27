@@ -234,6 +234,15 @@
                      (-> receipt (update :intent-id str) (update :lease-id str) (update :receipt-id str))))
                  observed)
            (mapv :local-dispatch-receipt (:observed-maintenance interface))))
+    (is (= (or (get-in original [:worker-correspondence :source-acceptance-correspondence])
+               :not-established)
+           (:source-acceptance-correspondence interface)))
+    (is (= (mapv (fn [step]
+                   (when-let [acceptance (:local-source-acceptance step)]
+                     (-> acceptance (update :intent-id str) (update :lease-id str) (update :receipt-id str)
+                         (update :source-instance-id #(if (uuid? %) [:uuid (str %)] %)))))
+                 observed)
+           (mapv :local-source-acceptance (:observed-maintenance interface))))
     (is (= (or (:worker-observation-provenance original) :not-established)
            (:worker-observation-provenance interface)))
     (is (= (:open-premise-fingerprints worker) (set (map :premise-fingerprint (:obligations worker)))))
@@ -962,7 +971,7 @@
                                                               changed (.plusSeconds ^java.time.Instant (get-in ops path) 1)]
                                                           (-> ops (assoc-in path changed)
                                                               (assoc-in [1 1] changed) (assoc-in [2 1] changed)))))]]
-                            (let [bad (compare-calls node source-id sample maintenance changed)]
+                            (let [bad (compare-calls node source-id (get-in started [:gesso.live.outbox/managed-handle :system :source :id]) sample maintenance changed)]
                               (is (= :mismatch (:status bad)) (pr-str bad))
                               (is (not (contains? bad :selected-maintenance)))))
                           (with-redefs [host/worker-outcome-capture-matches? (constantly true)]
@@ -1043,6 +1052,10 @@
                                              [nil "assembled-recovery" nil "assembled-recovery"])
                                (mapv #(get-in % [:local-dispatch-receipt :worker-id])
                                      (:selected-maintenance worker-evidence))))
+                        (is (= :matched-local-source-return-retained-acknowledgments
+                               (:source-acceptance-correspondence worker-evidence)))
+                        (is (= (mapv :local-source-acceptance @policy-maintenance)
+                               (mapv :local-source-acceptance (:selected-maintenance worker-evidence))))
                         (is (= (mapv :worker-origin @policy-maintenance)
                                (mapv :worker-origin (:selected-maintenance worker-evidence))))
                         (let [comparison (first foreign)
@@ -1405,7 +1418,11 @@
         receipt {:intent-id intent :lease-id (random-uuid) :worker-id "worker"
                  :receipt-id (random-uuid) :adapter :gesso.live/synchronous-source
                  :result :accepted :evidence :matched-local-delivery-handoff}
-        observed (assoc-in observed [1 :local-dispatch-receipt] receipt)
+        acceptance (merge (select-keys receipt [:intent-id :lease-id :worker-id :receipt-id])
+                          {:source-id "claim" :source-instance-id (random-uuid) :count 1
+                           :statuses [:emitted] :evidence :matched-synchronous-source-return})
+        observed (-> observed (assoc-in [1 :local-dispatch-receipt] receipt)
+                     (assoc-in [1 :local-source-acceptance] acceptance))
         entry {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
                :command-observation-ref "original-cut"
                :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
@@ -1413,11 +1430,17 @@
                                    :intervening-maintenance selected
                                    :worker-observation-provenance :matched-local-issued-host-capture
                                    :worker-correspondence {:selected-maintenance observed
-                                                           :dispatch-receipt-correspondence :matched-local-handoff-retained-acknowledgments}}}
+                                                           :dispatch-receipt-correspondence :matched-local-handoff-retained-acknowledgments
+                                                           :source-acceptance-correspondence :matched-local-source-return-retained-acknowledgments}}}
         r (describe entry)
         fingerprints (:open-premise-fingerprints r)]
     (is (= r (describe (assoc-in entry [:scope :retained-acquisition-ref] "new-target"))))
     (is (= 3 (count fingerprints)))
+    (is (= :matched-local-source-return-retained-acknowledgments
+           (get-in r [:scope :source-acceptance-correspondence])))
+    (is (= [nil (-> acceptance (update :intent-id str) (update :lease-id str) (update :receipt-id str)
+                    (update :source-instance-id #(vector :uuid (str %))))]
+           (mapv :local-source-acceptance (get-in r [:scope :observed-maintenance]))))
     (is (= :matched-local-handoff-retained-acknowledgments (get-in r [:scope :dispatch-receipt-correspondence])))
     (is (= [nil (-> receipt (update :intent-id str) (update :lease-id str) (update :receipt-id str))]
            (mapv :local-dispatch-receipt (get-in r [:scope :observed-maintenance]))))
@@ -1448,6 +1471,17 @@
           (is (not-any? fingerprints (:open-premise-fingerprints other)))
           (is (= :not-established (:worker-authentication other) (:dispatch-authentication other)))
           (is (= :not-performed (:premise-acceptance other))))))
+    (let [path [:original-recovery :worker-correspondence :selected-maintenance 1 :local-source-acceptance]]
+      (doseq [changed (concat [(update-in entry (pop path) dissoc :local-source-acceptance)
+                               (assoc-in entry [:original-recovery :worker-correspondence :source-acceptance-correspondence] :not-established)]
+                              (map (fn [[k v]] (assoc-in entry (conj path k) v))
+                                   {:intent-id (random-uuid) :lease-id (random-uuid) :receipt-id (random-uuid)
+                                    :worker-id "other" :source-id "other" :source-instance-id (str (:source-instance-id acceptance))
+                                    :count 2 :statuses [:queued] :evidence :other/evidence}))]
+        (let [other (describe changed)]
+          (is (not-any? fingerprints (:open-premise-fingerprints other)))
+          (is (= :not-established (:worker-authentication other) (:dispatch-authentication other)))
+          (is (= :not-performed (:premise-acceptance other))))))
     (let [absent (describe (update entry :original-recovery #(-> % (dissoc :worker-correspondence)
                                                                   (assoc :worker-observation-provenance :not-established))))
           acquisition-only (describe (update entry :original-recovery assoc :intervening-maintenance [(first selected)]
@@ -1457,6 +1491,7 @@
       (is (= 3 (count (:obligations absent))))
       (is (empty? (get-in absent [:scope :observed-maintenance])))
       (is (= :not-established (get-in absent [:scope :dispatch-receipt-correspondence])))
+      (is (= :not-established (get-in absent [:scope :source-acceptance-correspondence])))
       (is (= :not-established (get-in absent [:scope :worker-observation-provenance])))
       (is (= :not-established (:worker-authentication absent) (:dispatch-authentication absent)))
       (is (not-any? fingerprints (:open-premise-fingerprints absent)))

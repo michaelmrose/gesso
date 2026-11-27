@@ -7,7 +7,7 @@
            [java.time.temporal ChronoUnit]
            [xtdb.api TransactionKey]))
 
-(def profile :selected-issued-worker-submission-correspondence-v1)
+(def profile :selected-issued-worker-submission-correspondence-v2)
 (def ^:private original-host-matcher capture/worker-outcome-capture-matches?)
 (def ^:private original-acquisition-reader acquisition/read-acquisition!)
 (def ^:private original-envelope-check envelope/check-worker-attempt-envelope!)
@@ -38,7 +38,29 @@
             (:local-dispatch-receipt admission)))
     (not (contains? admission :local-dispatch-receipt))))
 
-(defn- match-call? [source-id expected retained call]
+(defn- match-source-acceptance? [source-id instance-id maintenance admission]
+  (if (= :dispatch-acknowledgment maintenance)
+    (let [observation (:local-source-acceptance admission)
+          receipt (:local-dispatch-receipt admission)
+          identities [:intent-id :lease-id :worker-id :receipt-id]]
+      (and (map? observation)
+           (= #{:source-id :source-instance-id :count :statuses :evidence
+                :intent-id :lease-id :worker-id :receipt-id} (set (keys observation)))
+           (= (select-keys receipt identities) (select-keys observation identities))
+           (= source-id (:source-id observation))
+           ;; The installed lineage supplies the runtime ID independently of
+           ;; the captured call. Limit evidence to losslessly encodable IDs.
+           (or (uuid? instance-id) (string? instance-id) (keyword? instance-id)
+               (integer? instance-id) (boolean? instance-id))
+           (= instance-id (:source-instance-id observation))
+           (= :matched-synchronous-source-return (:evidence observation))
+           (pos-int? (:count observation))
+           (vector? (:statuses observation))
+           (= (:count observation) (count (:statuses observation)))
+           (every? #{:emitted :queued} (:statuses observation))))
+    (not (contains? admission :local-source-acceptance))))
+
+(defn- match-call? [source-id instance-id expected retained call]
   (let [{:keys [tx-ops tx-result admission]} call
         origin (:worker-origin admission)
         put (when (vector? tx-ops) (peek tx-ops))
@@ -66,7 +88,8 @@
          (= :not-established (:authentication origin))
          (uuid? (:lifecycle-ref origin))
          (pos-int? (:cycle-number origin))
-         (match-local-receipt? (:maintenance expected) admission row))))
+         (match-local-receipt? (:maintenance expected) admission row)
+         (match-source-acceptance? source-id instance-id (:maintenance expected) admission))))
 
 (defn- provider-worker-ops [maintenance ops]
   ;; XTDB 2.2.0-beta1 encodes the new Instant deadline in microseconds,
@@ -85,14 +108,14 @@
               (assoc-in path encoded)))))
     ops))
 
-(defn- compare-calls! [node source-id sample selected calls]
+(defn- compare-calls! [node source-id instance-id sample selected calls]
   (let [by-id (into {} (map (juxt :tx-id identity)) (:replay-inputs sample))]
     (if-not (and (vector? selected) (seq selected) (vector? calls)
                  (= (count selected) (count calls)))
       (report :mismatch :worker-capture-selection-mismatch)
       (loop [pairs (seq (map vector selected calls)) matched []]
         (if-let [[expected call] (first pairs)]
-          (if-not (match-call? source-id expected (get by-id (:tx-id expected)) call)
+          (if-not (match-call? source-id instance-id expected (get by-id (:tx-id expected)) call)
             (report :mismatch :worker-capture-call-mismatch)
             (let [projected (provider-worker-ops (:maintenance expected) (:tx-ops call))
                   checked (if projected
@@ -108,13 +131,17 @@
                                                     :system-time (get-in by-id [(:tx-id expected) :system-time])
                                                     :worker-origin (get-in call [:admission :worker-origin]))
                                        (= :dispatch-acknowledgment (:maintenance expected))
-                                       (assoc :local-dispatch-receipt (get-in call [:admission :local-dispatch-receipt]))))))))
+                                       (assoc :local-dispatch-receipt (get-in call [:admission :local-dispatch-receipt])
+                                              :local-source-acceptance (get-in call [:admission :local-source-acceptance]))))))))
           (assoc (report :matched nil)
                  :maintenance-correspondence :matched-issued-worker-retained-transactions
                  :payload-correspondence :matched-xtdb-microsecond-worker-envelope
                  :dispatch-receipt-correspondence (if (some :local-dispatch-receipt matched)
                                                     :matched-local-handoff-retained-acknowledgments
                                                     :not-applicable)
+                 :source-acceptance-correspondence (if (some :local-source-acceptance matched)
+                                                     :matched-local-source-return-retained-acknowledgments
+                                                     :not-applicable)
                  :selected-maintenance matched))))))
 
 (defn compare-issued-selection!
@@ -129,7 +156,9 @@
       (not (original-host-matcher system worker-capture)) (report :unsupported :unissued-worker-capture)
       :else
       (if-let [sample (original-acquisition-reader node retained-acquisition)]
-        (let [checked (compare-calls! node source-id sample selected (:calls worker-capture))]
+        (let [checked (compare-calls! node source-id
+                                      (get-in system [:gesso.live.outbox/managed-handle :system :source :id])
+                                      sample selected (:calls worker-capture))]
           (cond
             (not (boundaries-current?)) (report :unsupported :worker-comparison-boundary-replaced)
             (not (original-host-matcher system worker-capture)) (report :unsupported :unissued-worker-capture)

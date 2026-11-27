@@ -5,7 +5,7 @@
             [gesso.assurance.reference-mapped-worker-envelope :as envelope]
             [gesso.live.outbox.host :as host]))
 
-(def profile :selected-issued-worker-submission-correspondence-v1)
+(def profile :selected-issued-worker-submission-correspondence-v2)
 
 (def ^:private original-host-matcher host/worker-outcome-capture-matches?)
 (def ^:private original-recovery-comparison recovery/compare-local-activated!)
