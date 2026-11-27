@@ -1,0 +1,177 @@
+(ns gesso.assurance.reference-recovery-invariant
+  "Finite selected replay checks, not a universal physical invariant theorem."
+  (:require [gesso.assurance.proof.independent-transition-semantics :as transition]
+            [gesso.assurance.proof.typed-presence-semantics :as presence]
+            [gesso.assurance.proof.typed-value-semantics :as values]
+            [gesso.assurance.reference-mapped-outcome :as outcome]
+            [gesso.assurance.reference-mapped-poststate :as poststate]
+            [gesso.assurance.reference-retained-acquisition :as acquisition]
+            [gesso.assurance.reference-temporal :as temporal]
+            [gesso.assurance.transition :as construction]
+            [gesso.live.outbox.model-publication :as publication]
+            [gesso.model.inductive-plan :as induction]))
+
+(def profile :selected-retained-invariant-boundaries-v1)
+(def ^:private original-project poststate/project-visible!)
+(def ^:private original-replay temporal/replay)
+(def ^:private original-visible temporal/visible-at)
+(def ^:private original-observe-state values/observe-state!)
+(def ^:private original-evaluate presence/evaluate-expression!)
+(def ^:private original-construction construction/build-guarded-replacement!)
+(def ^:private original-transition transition/observe-transition!)
+(def ^:private original-cases outcome/derive-cases!)
+(def ^:private original-reader acquisition/read-acquisition!)
+(def ^:private original-observation publication/read-framed-submission-observation!)
+(def ^:private original-initialization induction/check-mapped-initialization!)
+
+(defn boundaries-current? []
+  (and (identical? original-project poststate/project-visible!)
+       (identical? original-replay temporal/replay)
+       (identical? original-visible temporal/visible-at)
+       (identical? original-observe-state values/observe-state!)
+       (identical? original-evaluate presence/evaluate-expression!)
+       (identical? original-construction construction/build-guarded-replacement!)
+       (identical? original-transition transition/observe-transition!)
+       (identical? original-cases outcome/derive-cases!)
+       (identical? original-reader acquisition/read-acquisition!)
+       (identical? original-observation publication/read-framed-submission-observation!)
+       (identical? original-initialization induction/check-mapped-initialization!)))
+
+(defn- report [status reason]
+  (cond-> {:profile profile :status status
+           :scope :original-selected-transaction-boundaries-only
+           :physical-invariant-theorem :not-established
+           :universal-refinement :not-established
+           :proof-discharge :not-performed :authority :none :certificate :not-issued}
+    reason (assoc :reason reason)))
+
+(defn- holds? [types state {:keys [readers expression]}]
+  (true? (:value (original-evaluate expression (select-keys types readers)
+                                    (select-keys state readers)))))
+
+(defn- check-state? [types state invariants]
+  (and (= (set (keys types)) (set (keys state)))
+       (= (set (keys types)) (:present-readers (original-observe-state types state)))
+       (every? #(holds? types state %) (vals invariants))))
+
+(defn- audit-replay!
+  [catalog coordinates cases seed-state inputs comparison steps]
+  (let [{:keys [initial-condition invariants operations]} catalog
+        types (get-in operations [0 :construction :state-types])
+        [winner abort recovery :as ids] (:selected-tx-ids comparison)
+        manifest (:manifest-tx-id comparison)
+        initial (:initialization-tx-id comparison)
+        maintenance (mapv :tx-id (:intervening-maintenance comparison))
+        expected (when (and (vector? ids) (every? integer? (concat ids maintenance)))
+                   (into [manifest initial] (sort (into ids maintenance))))
+        selected (when (and (integer? recovery) (vector? inputs)
+                            (every? #(integer? (:tx-id %)) inputs))
+                   (vec (take-while #(<= (:tx-id %) recovery) inputs)))
+        steps-by-id (zipmap ids steps)
+        by-operation (into {} (map (juxt :id :construction)) operations)
+        project (fn [replay system valid]
+                  (original-project coordinates (original-visible replay system valid)
+                                    {:outcome-cases cases}))]
+    (if-not (and (vector? ids) (= 3 (count ids))
+                 (seq expected) (every? integer? expected) (apply < manifest initial ids)
+                 (= [:committed :aborted :committed] (:selected-commitments comparison))
+                 (= expected (mapv :tx-id selected))
+                 (= (count expected) (count (distinct expected)))
+                 (= 3 (count steps))
+                 (= ids (mapv #(get-in % [:expectation :tx-id]) steps))
+                 (every? #(and (< winner % recovery) (not= abort %)) maintenance)
+                 (seq invariants) (map? types)
+                 (every? #(= types (:state-types %)) (vals by-operation)))
+      (report :unsupported :invalid-selected-invariant-sequence)
+      (let [replay (original-replay (mapv #(dissoc % :tx-id) selected))
+            history (:history replay)
+            initial-time (:system-time (second selected))]
+        (cond
+          (not= :predicted (:status replay)) (report :unsupported :unsupported-invariant-replay)
+          (not (every? true? (map :committed? (take 2 history))))
+          (report :mismatch :uncommitted-invariant-initialization)
+          :else
+          (let [initial-state (project replay initial-time initial-time)]
+            (if-not (and (= seed-state initial-state)
+                         (check-state? types initial-state invariants)
+                         (holds? types initial-state initial-condition))
+              (report :mismatch :initial-projection-invariant-mismatch)
+              (loop [i 2 prior initial-state
+                     checked [{:tx-id initial :relation :checked-initial-projection}]]
+                (if (= i (count selected))
+                  (assoc (report :checked nil)
+                         :initial-condition :checked-on-projected-initial-state
+                         :projection-continuity :checked-at-selected-transaction-boundaries
+                         :invariant-checking :direct-on-selected-replay-projections
+                         :derivation :finite-direct-evaluation-not-inductive-theorem
+                         :poststate-coordinate :transaction-system-and-valid-time
+                         :prestate-coordinate :preceding-system-current-transaction-valid-time
+                         :conclusion :declared-invariants-hold-on-selected-replay-projections
+                         :invariant-ids (set (keys invariants))
+                         :selected-tx-ids ids :checked-boundaries checked
+                         :unestablished-implications #{:projection-to-authoritative-physical-state
+                                                      :coverage-of-unselected-valid-times
+                                                      :coverage-of-unselected-transactions
+                                                      :universal-physical-refinement})
+                  (let [tx (nth selected i) id (:tx-id tx) t (:system-time tx)
+                        prior-t (:system-time (nth selected (dec i)))
+                        before (project replay prior-t t)
+                        after (project replay t t)
+                        committed? (:committed? (nth history i))
+                        step (get steps-by-id id)
+                        operation-id (get-in step [:spec :alternative])
+                        original (get by-operation operation-id)
+                        relation (cond (= id abort) :aborted-stutter
+                                       (#{winner recovery} id) :committed-abstract-transition
+                                       :else :maintenance-stutter)]
+                    (cond
+                      (not= prior before) (report :mismatch :selected-projection-continuity-mismatch)
+                      (not (case relation
+                             :aborted-stutter (and (false? committed?) (= before after))
+                             :maintenance-stutter (and (true? committed?) (= before after))
+                             :committed-abstract-transition
+                             (and (true? committed?) original (= original (:original step))
+                                  (true? (:matches? (original-transition
+                                                    (:transition (original-construction original))
+                                                    before (get-in step [:spec :inputs]) after))))))
+                      (report :mismatch :selected-invariant-transition-mismatch)
+                      (not (check-state? types after invariants))
+                      (report :mismatch :selected-projection-invariant-violation)
+                      :else (recur (inc i) after
+                                   (conj checked (cond-> {:tx-id id :relation relation}
+                                                   (= :committed-abstract-transition relation)
+                                                   (assoc :alternative-id operation-id)))))))))))))))
+
+(defn audit-issued-selection!
+  "Check finite projected states from the exact issued sample, not caller
+   supplied valuations. The caller must have independently matched the
+   activation root, issued catalog/decoder and selected physical trajectory.
+   Only that caller may retain this descriptive report in an issued cut.
+   Check Init, continuity, committed abstract transitions, abort/maintenance
+   stuttering and each declared invariant. No assertion about later suffix,
+   arbitrary valid instants, physical provider truth or all executions."
+  [node retained admission source declarations steps observation comparison]
+  (if-not (boundaries-current?)
+    (report :unsupported :invariant-boundary-replaced)
+    (try
+      (let [sample (original-reader node retained)
+            root (:activation-root (original-observation admission observation))
+            initializer (get-in root [:root :initializer])
+            catalog (get-in source [:inductive-source :catalog])]
+        (if-not (and sample (vector? initializer)
+                     (= :matched (:status comparison))
+                     (= :matched-issued-declarations (:issued-admission-binding comparison))
+                     (= :matched-issued-closed-construction (:closed-decoder-binding comparison))
+                     (= :matched-local-activated-retained-root (:activation-root-binding comparison)))
+          (report :unsupported :unqualified-invariant-source)
+          (let [checked (original-initialization admission initializer)
+                cases (:cases (original-cases source declarations))
+                r (audit-replay! catalog (:target-map source) cases (:state checked)
+                                 (:replay-inputs sample) comparison steps)]
+            (cond
+              (not (boundaries-current?)) (report :unsupported :invariant-boundary-replaced)
+              (not= :checked (:status r)) r
+              :else (assoc r :retained-payload-fingerprint (:payload-fingerprint sample)
+                           :catalog-fingerprint (:catalog-fingerprint checked))))))
+      (catch clojure.lang.ExceptionInfo e
+        (report :unsupported (or (:reason (ex-data e)) :unsupported-invariant-projection))))))

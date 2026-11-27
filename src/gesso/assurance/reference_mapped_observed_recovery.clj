@@ -8,6 +8,7 @@
             [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-recovery-inventory :as inventory]
+            [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-storage-identity :as storage]
             [gesso.live.outbox.initialization :as initialization]
             [gesso.live.outbox.model-publication :as publication]
@@ -215,12 +216,18 @@
        (identical? original-worker-boundaries worker-envelope/boundaries-current?)
        (original-worker-boundaries)))
 
+(def ^:private original-invariant-audit invariant/audit-issued-selection!)
+(def ^:private original-invariant-boundaries invariant/boundaries-current?)
+
 (defn- cut-boundaries-current? []
   (and (local-boundaries-current?)
        (identical? original-local-comparison compare-local-activated!)
        (identical? original-cut-derivation cut/derive-cut!)
        (identical? original-admission-description induction/describe-mapped-admission)
-       (identical? original-induction-recheck induction/recheck-mapped-induction!)))
+       (identical? original-induction-recheck induction/recheck-mapped-induction!)
+       (identical? original-invariant-audit invariant/audit-issued-selection!)
+       (identical? original-invariant-boundaries invariant/boundaries-current?)
+       (original-invariant-boundaries)))
 
 (def ^:private original-recovery-keys
   [:activated-recovery-profile :observed-recovery-profile :local-acquisition-profile
@@ -335,17 +342,42 @@
               (not (original-origin-matcher admission observation node))
               (fail :unsupported :submission-origin-mismatch)
               :else
-              (let [handle (RecoveryCutObservation.)]
-                (locking recovery-cuts
-                  (.put recovery-cuts handle {:admission admission :observation observation
-                                              :historical-cut (:historical-cut derived)
-                                              :original-recovery (select-keys r original-recovery-keys)
-                                              :judgment-subject subject
-                                              :command-observation-ref (str (random-uuid))
-                                              :abstract-induction abstract
-                                              :publication-source-id (:source-id (first steps))}))
-                (merge r base {:recovery-cut-observation handle
-                               :recovery-cut-binding :matched-local-recovery-cut})))))))))
+              (let [checked (original-invariant-audit node acquisition admission source outcome-declarations
+                                                      steps observation r)
+                    cut-ref (str (random-uuid))]
+                (cond
+                  (not (and (cut-boundaries-current?) (or (not worker?) (worker-boundaries-current?))))
+                  (fail :unsupported :recovery-cut-boundary-replaced)
+                  (and worker? (not (original-worker-capture-match system worker-capture)))
+                  (fail :unsupported :unissued-worker-capture)
+                  (not (original-origin-matcher admission observation node))
+                  (fail :unsupported :submission-origin-mismatch)
+                  (and (= :checked (:status checked))
+                       (not (and (= invariant/profile (:profile checked))
+                                 (= :declared-invariants-hold-on-selected-replay-projections (:conclusion checked))
+                                 (= :original-selected-transaction-boundaries-only (:scope checked))
+                                 (= (:declared-invariant-ids abstract) (:invariant-ids checked))
+                                 (= (:catalog-fingerprint subject) (:catalog-fingerprint checked))
+                                 (= (:selected-tx-ids r) (:selected-tx-ids checked))
+                                 (= (get-in derived [:historical-cut :payload-fingerprint])
+                                    (:retained-payload-fingerprint checked)))))
+                  (fail :unsupported :invalid-selected-invariant-binding)
+                  :else
+                  (let [handle (RecoveryCutObservation.)]
+                    (locking recovery-cuts
+                      (.put recovery-cuts handle {:admission admission :observation observation
+                                                  :historical-cut (:historical-cut derived)
+                                                  :original-recovery (select-keys r original-recovery-keys)
+                                                  :judgment-subject subject
+                                                  :command-observation-ref cut-ref
+                                                  :abstract-induction abstract
+                                                  :selected-invariant-evidence (assoc checked
+                                                                                      :recovery-cut-ref cut-ref
+                                                                                      :judgment-subject subject
+                                                                                      :historical-cut (:historical-cut derived))
+                                                  :publication-source-id (:source-id (first steps))}))
+                    (merge r base {:recovery-cut-observation handle
+                                   :recovery-cut-binding :matched-local-recovery-cut})))))))))))
 
 (defn capture-local-recovery-cut!
   "Issue a historical cut only after the exact observation and acquisition
@@ -444,6 +476,7 @@
                          :judgment-subject (:judgment-subject origin)
                          :command-observation-ref (:command-observation-ref origin)
                          :abstract-induction (:abstract-induction origin)
+                         :selected-invariant-evidence (:selected-invariant-evidence origin)
                          :target-node (java.lang.ref.WeakReference. node)
                          :admission admission}))
                 (assoc (conditional-report :prepared) :conditional-recovery handle))))
@@ -682,7 +715,7 @@
        (identical? original-assumption-description assumption/describe-assumption)
        (identical? original-inventory inventory/describe-inventory)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v7)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v8)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
@@ -712,6 +745,7 @@
                       :judgment-subject judgment-subject
                       :abstract-induction-binding :matched-original-issued-induction
                       :abstract-induction abstract-induction
+                      :selected-invariant-evidence (:selected-invariant-evidence entry)
                       :original-recovery original-recovery
                       :command-authentication-premises command-premises
                       :worker-authentication-premises worker-premises
@@ -732,7 +766,9 @@
    has actually authorized the lifecycle. Compose the selected original
    activated trajectory with its issued historical comparison and exact
    declared trust. Recheck the original issued abstract induction and
-   retain its entire report, including all open obligations. Describe the
+   retain its entire report, including all open obligations. Retain the
+   original selected replay invariant check separately from abstract
+   induction; neither establishes a physical invariant theorem. Describe the
    original command, worker, source-acceptance and selected physical
    refinement premises separately: storage trust neither accepts nor
    discharges them. Host adoption is recorded by the host

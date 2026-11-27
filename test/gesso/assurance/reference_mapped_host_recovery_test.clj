@@ -6,6 +6,8 @@
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-recovery-inventory :as inventory]
+            [gesso.assurance.reference-recovery-invariant :as invariant]
+            [gesso.assurance.reference-recovery-invariant-test :as invariant-test]
             [gesso.assurance.reference-mapped-worker-submission :as worker-submission]
             [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.assurance.reference-source-coverage :as coverage]
@@ -90,6 +92,7 @@
                  [["helper-1" :accept] ["helper-2" :accept] ["helper-2" :refuse]]))))
 
 (defn- check-recovery-judgment! [result scope original admit]
+  (invariant-test/check-judgment! result scope original)
   (is (= observed-recovery/judgment-profile (:judgment-profile result)))
   (is (= scope (:judgment-scope result)))
   (is (= (expected-recovery-subject admit) (:judgment-subject result)))
@@ -487,7 +490,7 @@
                                  (is (not-any? #(contains? failure %)
                                                [:judgment-subject :judgment-profile :trusted-assumptions :original-recovery
                                                 :abstract-induction :abstract-induction-binding :command-authentication-premises
-                                                :worker-authentication-premises :physical-refinement-premises :obligation-inventory]))))
+                                                :worker-authentication-premises :physical-refinement-premises :obligation-inventory :selected-invariant-evidence]))))
                              (is (not (contains? trusted :deployment-adoption)))
                              (is (not (contains? selected :judgment-profile)))
                              (is (= :explicit-declaration-only (:premise-acceptance trusted)))
@@ -512,6 +515,10 @@
                                  (is (not (contains? failure :command-authentication-premises)))
                                  (is (not (contains? failure :worker-authentication-premises)))
                                  (is (not (contains? failure :physical-refinement-premises)))))
+                             (with-redefs [invariant/audit-issued-selection! (constantly (:selected-invariant-evidence trusted))]
+                               (let [failure (observed-recovery/declare-conditional-recovery-trust! handle declaration)]
+                                 (is (= :conditional-recovery-boundary-replaced (:reason failure)))
+                                 (is (not (contains? failure :selected-invariant-evidence)))))
                              (with-redefs [storage/describe-deployment-acceptance (constantly trusted)]
                                (is (= :conditional-recovery-boundary-replaced
                                       (:reason (observed-recovery/declare-conditional-recovery-trust! handle declaration)))))

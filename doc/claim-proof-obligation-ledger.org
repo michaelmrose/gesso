@@ -7978,3 +7978,62 @@ and selected historical correspondence to a conditional invariant
 conclusion. Distinguish checked selected-state evidence from a theorem
 over all physical executions; identify any missing composition premises
 before issuing such a conclusion.
+
+* v2823 — check finite selected invariant boundaries
+
+Add an explicit direct invariant audit of the original activated
+recovery's selected replay projections. Independently project the
+issued retained prefix from its manifest and initialization through
+the recovery commit. Check the initialized valuation against the
+original issued constructor, Init and every declared invariant.
+Require the exact ordered selected command and intervening maintenance
+transaction identities, committed initialization, and equality of each
+previous projected state with the next transaction's projected prestate.
+Re-evaluate the original guarded relation for both committed command
+steps; require the selected abort and maintenance steps to stutter in
+the complete declared projection. Directly evaluate every declared
+invariant at each resulting transaction boundary.
+
+Use the exact transaction system/valid instant for each poststate and
+the preceding system instant/current transaction valid instant for its
+prestate. Reject discontinuity rather than assuming that adjacent
+transactions imply unchanged valid-time state. The selected prefix
+ends at the recovery commit, even when the issued sample has a suffix.
+The shared retained projection helper remains descriptive; no
+caller-supplied invariant report can issue historical evidence.
+
+Retain the original selected-invariant-evidence report in the issued
+cut and v8 conditional judgment. Bind positive material to the
+original catalog, checked invariant IDs, semantic subject, selected
+transaction IDs and historical payload fingerprint. Pin the audit and
+its implementation boundaries. A negative or unsupported audit has
+no positive invariant conclusion and does not convert the ordinary
+historical correspondence into a physical theorem. Preserve the
+entire original abstract induction and declared obligation inventory,
+including all open and unaccepted premises.
+
+Focused JVM: 7 tests / 2317 assertions in the assembled-host recovery
+and selected invariant namespaces, including genuine persistent
+adjacent and worker-interleaved histories, reopened and independently
+copied stores, and historical extensions. Standalone mapped-poststate
+regressions passed 2 tests / 29 assertions. Both final runs completed
+with zero failures or errors. Initial standalone invariant regression
+also passed 1 test / 23 assertions (included in the combined count).
+Exercise invariant violation, incorrect initialization, committed
+abort, nonstuttering maintenance, incorrect committed relation,
+missing intervening transaction, valid-time discontinuity, suffix
+exclusion and substituted checker rejection. Original worker polling
+and existing offline dependency bundle retained. Full project gates
+not run.
+
+The conclusion is direct finite evaluation over the selected replay
+projections, not an induction theorem over physical executions.
+The implication to authoritative physical-state invariants, coverage
+of other valid instants and unselected transactions, provider truth,
+and universal CLM-R2 refinement remain open. No premise is discharged.
+
+Next: independently qualify the physical projected readbacks at the
+exact selected invariant coordinates and compose their correspondence
+with the finite invariant result. Preserve the outstanding provider,
+projection and writer coverage assumptions; do not promote it into
+a universal physical invariant theorem.

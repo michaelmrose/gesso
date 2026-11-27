@@ -31,7 +31,10 @@
     (when-not (keyword? value) (reject! :unmapped-retained-outcome))
     value))
 
-(defn- project! [coordinates visible spec]
+(defn project-visible!
+  "Project supplied retained visible rows through a checked coordinate map.
+   This is descriptive decoding, not an acquisition or source admission."
+  [coordinates visible spec]
   (when-not (map? visible) (reject! :invalid-retained-visible-state))
   (let [slots (when (some #(= :journal-slot (first %)) (vals coordinates))
                 (journal-index! visible))]
@@ -87,10 +90,10 @@
               (fail :mismatch :selected-abstract-transaction-not-committed)
               :else
               (let [coordinates (:target-map (plan/check-target-mapping! original targets))
-                    before (project! coordinates (if (seq prior)
+                    before (project-visible! coordinates (if (seq prior)
                                                    (temporal/visible-at prediction (:system-time (peek prior)) instant)
                                                    {}) spec)
-                    after (project! coordinates (temporal/visible-at prediction instant instant) spec)
+                    after (project-visible! coordinates (temporal/visible-at prediction instant instant) spec)
                     checked (independent/observe-transition!
                              (:transition (construction/build-guarded-replacement! original))
                              before (:inputs spec) after)]
