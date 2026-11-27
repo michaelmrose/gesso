@@ -8,6 +8,7 @@
             [gesso.assurance.reference-retained-acquisition :as acquisition]
             [gesso.assurance.reference-recovery-expression :as expression]
             [gesso.assurance.reference-recovery-projection :as projection]
+            [gesso.assurance.reference-transition-refinement :as refinement]
             [gesso.assurance.reference-temporal :as temporal]
             [gesso.assurance.rule-eval :as production]
             [gesso.assurance.transition :as construction]
@@ -37,6 +38,7 @@
 (def ^:private original-independent-project projection/project!)
 (def ^:private original-projection-boundaries projection/boundaries-current?)
 (def ^:private original-projection-catalog projection/check-catalog!)
+(def ^:private original-selected-transition refinement/check-selected!)
 
 (defn boundaries-current? []
   (and (identical? original-project poststate/project-visible!)
@@ -59,7 +61,8 @@
        (identical? original-independent-project projection/project!)
        (identical? original-projection-boundaries projection/boundaries-current?)
        (original-projection-boundaries)
-       (identical? original-projection-catalog projection/check-catalog!)))
+       (identical? original-projection-catalog projection/check-catalog!)
+       (identical? original-selected-transition refinement/check-selected!)))
 
 (defn- report [status reason]
   (cond-> {:profile profile :status status
@@ -264,7 +267,10 @@
                       (throw (ex-info "Invalid historical physical rows" {:reason :invalid-physical-invariant-rows})))
                     [table (into {} (map (juxt :xt/id identity)) rows)]))) tables))
 
-(defn- audit-physical! [node coordinates cases inputs checked]
+(defn- audit-physical!
+  ([node coordinates cases inputs checked]
+   (audit-physical! node coordinates cases inputs checked nil))
+  ([node coordinates cases inputs checked transition-context]
   (let [base {:profile physical-profile :scope :original-selected-invariant-coordinates-only
               :provider-refinement :not-established :physical-invariant-theorem :not-established
               :universal-refinement :not-established :proof-discharge :not-performed
@@ -297,10 +303,10 @@
                                          :system-time (:system-time tx) :valid-time (:system-time tx)}])
                                      (partition 2 1 (rest selected))))
                 project #(original-project coordinates % {:outcome-cases cases})]
-            (loop [[point & remaining] points prior nil]
+            (loop [[point & remaining] points prior nil images {}]
               (if-not point
                 (do (confirm-basis! node basis)
-                    (assoc base :status :matched :correspondence :matched-selected-physical-projections
+                    (cond-> (assoc base :status :matched :correspondence :matched-selected-physical-projections
                        :checked-coordinates points :invariant-ids (:invariant-ids checked)
                        :snapshot-correspondence
                        {:profile snapshot-profile :status :matched
@@ -319,7 +325,12 @@
                         :closed-outcome-case-count (count cases) :closed-outcome-cases cases
                         :record-validation :shared-canonical-record-validator
                         :provider-refinement :not-established :universal-projection :not-established
-                        :proof-discharge :not-performed :authority :none :certificate :not-issued}))
+                        :proof-discharge :not-performed :authority :none :certificate :not-issued})
+                      transition-context
+                      (assoc :transition-correspondence
+                             (original-selected-transition
+                              (assoc transition-context :coordinates coordinates :cases cases
+                                     :inputs selected :checked checked :ledger ledger :points points :images images)))))
                 (let [{:keys [system-time valid-time side]} point
                       retained-rows (original-visible replay system-time valid-time)
                       physical-rows (read-physical-visible! node basis tables system-time valid-time)
@@ -334,13 +345,15 @@
                     (fail :mismatch :physical-invariant-projection-mismatch)
                     (and (= :prestate side) (not= prior physical-state))
                     (fail :mismatch :selected-physical-valid-time-continuity-mismatch)
-                    :else (recur remaining physical-state))))))))
+                    :else (recur remaining physical-state
+                                 (cond-> images transition-context
+                                   (assoc point {:retained retained-rows :physical physical-rows}))))))))))
       (catch InterruptedException e
         (.interrupt (Thread/currentThread))
         (throw e))
       (catch clojure.lang.ExceptionInfo e
         (fail :unsupported (or (:reason (ex-data e)) :unsupported-physical-invariant-projection)))
-      (catch Exception _ (fail :unavailable :physical-invariant-readback-failed)))))
+      (catch Exception _ (fail :unavailable :physical-invariant-readback-failed))))))
 
 (def conditional-physical-profile :selected-conditional-physical-invariants-v1)
 
@@ -435,7 +448,8 @@
                 r (audit-replay! catalog (:target-map source) cases (:state checked)
                                  (:replay-inputs sample) comparison steps)
                 physical (when (= :checked (:status r))
-                           (audit-physical! node (:target-map source) cases (:replay-inputs sample) r))
+                           (audit-physical! node (:target-map source) cases (:replay-inputs sample) r
+                                            {:catalog catalog :steps steps :comparison comparison}))
                 catalog-refinement (when (= :checked (:status r))
                                      (original-expression-catalog catalog (:catalog-fingerprint checked)))
                 catalog-projection (when (= :checked (:status r))

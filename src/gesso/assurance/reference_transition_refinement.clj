@@ -131,3 +131,135 @@
                              :complete-admitted-writer-and-temporal-boundary-coverage}))
       (catch clojure.lang.ExceptionInfo e
         (assoc base :status :not-established :reason (or (:reason (ex-data e)) :unqualified-transition))))))
+
+(def selected-profile :selected-retained-mapped-transition-refinement-v1)
+(def ^:private original-step check-step!)
+
+(defn- mapped-tables [coordinates]
+  (set (map (fn [[kind table]] (if (= :journal-slot kind) :gesso_commands table))
+            (vals coordinates))))
+
+(defn- mapped-image [tables rows]
+  ;; Replay omits empty tables; provider queries include them. Normalize
+  ;; only that distinction, never missing fields or supplemental values.
+  (when-not (map? rows) (reject! :invalid-selected-row-image))
+  (into {} (map (fn [table] [table (get rows table {})])) tables))
+
+(defn- selected-points [ledger]
+  (let [{:keys [tx-id system-time]} (second ledger)]
+    (into [{:tx-id tx-id :side :initial :system-time system-time :valid-time system-time}]
+          (mapcat (fn [[prior tx]]
+                    [{:tx-id (:tx-id tx) :side :prestate :system-time (:system-time prior)
+                      :valid-time (:system-time tx)}
+                     {:tx-id (:tx-id tx) :side :poststate :system-time (:system-time tx)
+                      :valid-time (:system-time tx)}]))
+          (partition 2 1 (rest ledger)))))
+
+(defn check-selected!
+  "Check the original selected mapped transaction sequence over independently
+   acquired row images. The caller must already have qualified the entire
+   issued envelope, selected maintenance linkage, and pinned ledger. Exact
+   equality with the retained expectation binds the mapped suffix; this
+   function does not itself validate publication or residual assertions.
+   Row observations and comparison reports are premises, not authenticated
+   capabilities. Only the issued-cut capture may retain the result."
+  [{:keys [catalog coordinates cases inputs checked comparison steps ledger points images]}]
+  (let [base {:profile selected-profile :scope :original-selected-mapped-row-boundaries-only
+              :provider-refinement :not-established :writer-coverage :not-established
+              :universal-refinement :not-established :proof-discharge :not-performed
+              :authority :none :certificate :not-issued}]
+    (try
+      (when-not (and (boundaries-current?) (identical? original-step check-step!)
+                     (= :checked (:status checked)) (= :matched (:status comparison))
+                     (= :matched-issued-declarations (:issued-admission-binding comparison))
+                     (= :matched-issued-closed-construction (:closed-decoder-binding comparison))
+                     (= :matched-local-activated-retained-root (:activation-root-binding comparison))
+                     (= :matched-local-observed-retained-steps (:submission-recovery-linkage comparison))
+                     (= [:matched-source-relative-record :matched-uncommitted-record :matched-source-relative-record]
+                        (:executor-envelopes comparison))
+                     (map? cases) (seq cases) (vector? steps) (= 3 (count steps))
+                     (vector? ledger) (<= 5 (count ledger)) (vector? inputs)
+                     (= (mapv #(select-keys % [:tx-id :system-time]) inputs)
+                        (mapv #(select-keys % [:tx-id :system-time]) ledger))
+                     (= (mapv :tx-id (rest ledger)) (mapv :tx-id (:checked-boundaries checked)))
+                     (every? integer? (map :tx-id ledger))
+                     (apply < (map :tx-id ledger))
+                     (= [(:manifest-tx-id comparison) (:initialization-tx-id comparison)]
+                        (mapv :tx-id (take 2 ledger)))
+                     (every? true? (map :committed? (take 2 ledger)))
+                     (= :checked-initial-projection (get-in checked [:checked-boundaries 0 :relation]))
+                     (= [true false true]
+                        (mapv (into {} (map (juxt :tx-id :committed?)) ledger) (:selected-tx-ids comparison)))
+                     (= (:selected-tx-ids comparison) (:selected-tx-ids checked)
+                        (mapv #(get-in % [:expectation :tx-id]) steps))
+                     (= [:committed :aborted :committed] (:selected-commitments comparison))
+                     (= (mapv :tx-id (:intervening-maintenance comparison))
+                        (mapv :tx-id (filter #(= :maintenance-stutter (:relation %)) (:checked-boundaries checked))))
+                     (= points (selected-points ledger))
+                     (map? images) (= (count points) (count images)) (= (set points) (set (keys images))))
+        (reject! :unqualified-selected-transition-sequence))
+      (let [tables (mapped-tables coordinates)
+            by-id (into {} (map (juxt :tx-id identity)) inputs)
+            by-step (into {} (map (juxt #(get-in % [:expectation :tx-id]) identity)) steps)
+            by-operation (into {} (map (juxt :id :construction)) (:operations catalog))
+            types (get-in catalog [:operations 0 :construction :state-types])
+            original (get-in catalog [:operations 0 :construction])
+            row-images (mapv (fn [point]
+                               (let [{:keys [retained physical]} (images point)
+                                     retained (mapped-image tables retained)
+                                     physical (mapped-image tables physical)]
+                                 (when-not (= retained physical)
+                                   (reject! :selected-complete-mapped-row-mismatch))
+                                 (supplied-image! original coordinates physical))) points)
+            reports
+            (loop [prior (first row-images) i 0 reports []]
+              (if (= i (- (count ledger) 2)) reports
+                  (let [{:keys [tx-id relation alternative-id]} (nth (:checked-boundaries checked) (inc i))
+                        tx (by-id tx-id)
+                        entry (nth ledger (+ i 2))
+                        before (nth row-images (inc (* 2 i)))
+                        after (nth row-images (+ 2 (* 2 i)))
+                        step (by-step tx-id)
+                        committed? (:committed? entry)]
+                    (when-not (and (= prior before) (= tx-id (:tx-id entry))
+                                   (instance? Boolean committed?))
+                      (reject! :selected-complete-row-continuity-mismatch))
+                    (let [r (if (= :maintenance-stutter relation)
+                              (do (when-not (and (nil? step) committed? (= before after))
+                                    (reject! :selected-maintenance-row-stutter-mismatch))
+                                  {:relation relation :checked-row-effect :exact-mapped-row-stutter})
+                              (let [{:keys [original targets docs journal spec expectation]} step
+                                    id (:alternative spec)
+                                    ops (:ops tx)
+                                    suffix (filterv #(and (vector? %) (= :put-docs (first %))
+                                                          (contains? tables (second %))) ops)]
+                                (when-not (and step (= tx expectation) (= coordinates targets)
+                                               (= cases (:outcome-cases spec)) (= original (by-operation id))
+                                               (= types (:state-types original))
+                                               (vector? ops) (every? vector? ops)
+                                               (every? #(or (not= :put-docs (first %)) (simple-keyword? (second %))) ops)
+                                               (= relation (if committed? :committed-abstract-transition :aborted-stutter))
+                                               (or (not committed?) (= alternative-id id)))
+                                  (reject! :selected-retained-command-envelope-mismatch))
+                                (let [r (original-step original coordinates docs journal spec suffix
+                                                       (if committed? :committed :aborted) before after)]
+                                  (when-not (and (= profile (:profile r)) (= :conditional-step-correspondence (:status r))
+                                                 (= id (:alternative-id r)) (= relation (:relation r)))
+                                    (reject! (or (:reason r) :selected-command-simulation-mismatch)))
+                                  (select-keys r [:relation :alternative-id :checked-row-effect :conditions]))))]
+                      (recur after (inc i) (conj reports (assoc r :tx-id tx-id)))))))]
+        (when-not (and (boundaries-current?) (identical? original-step check-step!))
+          (reject! :transition-boundary-replaced))
+        (assoc base :status :conditional-selected-transition-correspondence
+               :selected-tx-ids (:selected-tx-ids checked) :checked-coordinates points
+               :steps reports :field-coordinates coordinates
+               :row-correspondence :exact-complete-mapped-tables
+               :envelope-binding :exact-retained-expectation-with-qualified-issued-envelope-premise
+               :maintenance-scope :mapped-tables-only
+               :conditions (into #{:faithful-pinned-provider-readbacks
+                                   :faithful-issued-envelope-and-maintenance-correspondence}
+                                 (mapcat :conditions) reports)))
+      (catch clojure.lang.ExceptionInfo e
+        (assoc base :status :not-established :reason (or (:reason (ex-data e)) :unqualified-selected-transition)))
+      (catch Exception _
+        (assoc base :status :not-established :reason :invalid-selected-transition-input)))))

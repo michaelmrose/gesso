@@ -8783,3 +8783,59 @@ Next: bind the local transition simulation to the original retained
 selected command envelopes and independently acquired pre/post row
 images, explicitly separating command writes, abort and maintenance
 stuttering and their respective provider assumptions.
+
+* v2842 — bind selected mapped simulation to retained execution
+
+During the existing original issued-cut physical readback audit,
+retain the selected replay and pinned provider row images temporarily
+and run the closed mapped transition simulation on those exact images.
+Independently reconstruct the initial/pre/post coordinate sequence
+from the selected ledger. Require exact transaction identities,
+commitments, issued declaration and decoder binding, executor envelope
+and local submission/root correspondence, and original maintenance
+linkage. Match the selected command expectations to the exact retained
+operation vectors, original catalog alternatives, coordinate mapping
+and closed outcome cases. Extract ordinary mapped-table puts from the
+already qualified full envelopes. The prior executor envelope checker
+remains a prerequisite for publication and residual assertion validation.
+
+Require exact equality of complete mapped-table replay and provider
+rows at each selected coordinate, normalizing only omitted empty
+tables. Revalidate closed row images and require complete mapped-row
+continuity between successive selected boundaries. Apply the v2841
+simulation to committed and aborted command attempts, and require
+complete mapped-row stuttering at each qualified committed maintenance
+transaction. Outbox and other unmapped effects are not included in
+this stutter conclusion. Retain only descriptive per-step relations,
+identities, checked coordinates and remaining conditions; do not
+retain the raw row images in the new report.
+
+The new transition report is captured under the original readback
+evidence, not recalculated on recovery. Its positive result is
+separate from the existing conditional invariant conclusion, whose
+evidence and premise classifications are unchanged. Pin the new
+checker boundary. The v12 historical judgment remains in use.
+
+Focused JVM: transition refinement suite passed 3 tests /
+79 assertions. Combined transition refinement, recovery invariant,
+projection, expression, inventory, snapshot and assembled-host
+recovery suites passed 23 tests / 3565 assertions, zero failures
+or errors. Both persistent recovery fixtures passed, including
+reopened and copied storage, with unchanged polling. Exercise
+mismatched complete row images, supplemental fields changed during
+maintenance or abort, changed retained command expectations,
+changed decoder cases, missing envelope correspondence, changed
+ledger outcome and incomplete coordinates. All four code blobs
+verified against tested files.
+
+Provider guard semantics, atomicity, command/envelope attribution,
+authoritative projection, full writer and temporal-boundary coverage
+remain conditional. No universal provider refinement, certificate,
+authority, premise acceptance or discharge is established. Full
+project gates not run.
+
+Next: qualify the mapped prestate guard lowering and provider
+transaction atomicity interface explicitly, checking the source
+relationship between the issued exact-row predicates and their SQL
+assertions. Preserve the distinction between source-level semantics,
+selected observed effects and universal provider correctness.

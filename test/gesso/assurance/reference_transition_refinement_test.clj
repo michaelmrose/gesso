@@ -88,3 +88,67 @@
     (with-redefs [writes/derive-transition! (constantly {})]
       (is (= :unqualified-transition-boundary (:reason (run won)))))
     (is (= :conditional-step-correspondence (:status (run won))))))
+
+(defn- selection-fixture []
+  (let [cases (cases) initial (seed)
+        winner (prepare initial "helper-1" :accept cases)
+        loser (prepare initial "helper-2" :accept cases)
+        won (apply-puts initial (:suffix winner))
+        recovery (prepare won "helper-2" :refuse cases)
+        recovered (apply-puts won (:suffix recovery))
+        tx (fn [id ops] {:tx-id id :system-time (.plusSeconds java.time.Instant/EPOCH id) :ops ops})
+        envelope (fn [id step] (tx id (into [["ASSERT TRUE"]] (:suffix step))))
+        inputs [(tx 0 []) (tx 1 []) (envelope 2 winner)
+                (tx 3 [[:put-docs :gesso_live_outbox {:xt/id "worker" :status :ready}]])
+                (envelope 4 loser) (envelope 5 recovery)]
+        steps (mapv (fn [step id] (assoc step :targets claim/target-map :expectation (inputs id)))
+                    [winner loser recovery] [2 4 5])
+        ledger (mapv #(assoc (dissoc % :ops) :committed? (not= 4 (:tx-id %))) inputs)
+        points (#'refinement/selected-points ledger)
+        images (zipmap points (map #(hash-map :retained % :physical %) [initial initial won won won won won won recovered]))
+        comparison {:status :matched :manifest-tx-id 0 :initialization-tx-id 1
+                    :selected-tx-ids [2 4 5] :selected-commitments [:committed :aborted :committed]
+                    :issued-admission-binding :matched-issued-declarations
+                    :closed-decoder-binding :matched-issued-closed-construction
+                    :activation-root-binding :matched-local-activated-retained-root
+                    :submission-recovery-linkage :matched-local-observed-retained-steps
+                    :executor-envelopes [:matched-source-relative-record :matched-uncommitted-record :matched-source-relative-record]
+                    :intervening-maintenance [{:tx-id 3}]}
+        checked {:status :checked :selected-tx-ids [2 4 5]
+                 :checked-boundaries [{:tx-id 1 :relation :checked-initial-projection}
+                                      {:tx-id 2 :relation :committed-abstract-transition :alternative-id (get-in winner [:spec :alternative])}
+                                      {:tx-id 3 :relation :maintenance-stutter}
+                                      {:tx-id 4 :relation :aborted-stutter}
+                                      {:tx-id 5 :relation :committed-abstract-transition :alternative-id (get-in recovery [:spec :alternative])}]}]
+    {:catalog (claim/catalog) :coordinates claim/target-map :cases cases :inputs inputs
+     :checked checked :comparison comparison :steps steps :ledger ledger :points points :images images}))
+
+(deftest selected-envelope-and-full-row-refinement
+  (let [f (selection-fixture) r (refinement/check-selected! f) points (:points f)
+        maintenance-post (points 4) abort-post (points 6)]
+    (is (= :conditional-selected-transition-correspondence (:status r)) (pr-str r))
+    (is (= [2 3 4 5] (mapv :tx-id (:steps r))))
+    (is (= [:committed-abstract-transition :maintenance-stutter :aborted-stutter :committed-abstract-transition]
+           (mapv :relation (:steps r))))
+    (is (= [:exact-source-derived-puts :exact-mapped-row-stutter :exact-row-stutter :exact-source-derived-puts]
+           (mapv :checked-row-effect (:steps r))))
+    (is (= points (:checked-coordinates r)))
+    (is (= :not-established (:provider-refinement r) (:universal-refinement r) (:writer-coverage r)))
+    (is (= :not-performed (:proof-discharge r)))
+    (is (not (contains? r :images)))
+    (doseq [[bad reason]
+            [[(assoc-in f [:images (points 2) :physical :requests "r1" :extra] "foreign")
+              :selected-complete-mapped-row-mismatch]
+             [(reduce #(assoc-in %1 [:images maintenance-post %2 :requests "r1" :extra] "foreign") f [:retained :physical])
+              :selected-maintenance-row-stutter-mismatch]
+             [(reduce #(assoc-in %1 [:images abort-post %2 :requests "r1" :extra] "partial") f [:retained :physical])
+              :aborted-row-effect-mismatch]
+             [(update-in f [:steps 0 :expectation :ops] pop) :selected-retained-command-envelope-mismatch]
+             [(assoc-in f [:steps 1 :spec :outcome-cases] {}) :selected-retained-command-envelope-mismatch]
+             [(assoc-in f [:comparison :executor-envelopes] []) :unqualified-selected-transition-sequence]
+             [(assoc-in f [:ledger 4 :committed?] true) :unqualified-selected-transition-sequence]
+             [(update f :images dissoc (points 1)) :unqualified-selected-transition-sequence]]]
+      (let [bad (refinement/check-selected! bad)]
+        (is (= :not-established (:status bad)))
+        (is (= reason (:reason bad)) (pr-str bad))
+        (is (not (contains? bad :steps)))))))

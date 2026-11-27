@@ -3,6 +3,7 @@
             [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-recovery-expression :as expression]
             [gesso.assurance.reference-recovery-projection :as projection]
+            [gesso.assurance.reference-transition-refinement :as refinement]
             [gesso.assurance.reference-recovery-snapshot :as snapshot]
             [gesso.assurance.reference-mapped-poststate :as poststate]
             [gesso.assurance.rule-eval :as production]
@@ -260,6 +261,17 @@
         (is (= (into [(:manifest-tx-id original)] (map :tx-id boundaries)) (mapv :tx-id (:ledger snapshot))))
         (is (= (into [true] (map #(not= :aborted-stutter (:relation %)) boundaries)) (mapv :committed? (:ledger snapshot))))
         (is (= :not-established (:provider-refinement snapshot))))
+      (let [simulation (:transition-correspondence physical)]
+        (is (= refinement/selected-profile (:profile simulation)))
+        (is (= :conditional-selected-transition-correspondence (:status simulation)) (pr-str simulation))
+        (is (= points (:checked-coordinates simulation)))
+        (is (= ids (:selected-tx-ids simulation)))
+        (is (= (mapv #(select-keys % [:tx-id :relation]) (rest boundaries))
+               (mapv #(select-keys % [:tx-id :relation]) (:steps simulation))))
+        (is (= :exact-complete-mapped-tables (:row-correspondence simulation)))
+        (is (= :not-established (:provider-refinement simulation) (:writer-coverage simulation)
+               (:universal-refinement simulation)))
+        (is (= :not-performed (:proof-discharge simulation))))
       (let [evidence (:projection-correspondence physical)]
         (is (= projection/profile (:profile evidence)))
         (is (= :matched (:status evidence)))
