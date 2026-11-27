@@ -8365,3 +8365,55 @@ strategy for the admitted fragment. Prefer independently checked
 semantic rules and exact executable correspondence over further
 descriptive report layers; do not infer universal JVM refinement
 from the complete abstract truth table alone.
+
+* v2833 — qualify conditional evaluator source refinement
+
+Review the production rule evaluator, independent typed-presence evaluator,
+and independent typed-value observation source at v2832. Bind their exact
+UTF-8 source digests and check both actual interpreter definitions against
+structural clause templates for literal, read, Not, And, Or, implication
+and all six comparison operators. Verify argument lists, interpreter
+dispatch, recursive operands and the independent trace update. Read only
+the reviewed source, with read-time evaluation disabled. Reject missing
+or changed source, changed clauses and replaced public checker boundaries.
+
+The source-level argument is by structural induction on the admitted
+expression. A literal returns its denotation; a required reader retrieves
+the same scalar from the checked binding or present field observation.
+Under faithful scalar equality and mathematical integer compare, the
+six comparison clauses return exactly the corresponding abstract truth.
+Negation and implication preserve truth by the induction hypothesis.
+For the And/Or loops use the number of remaining operands as the decreasing
+measure: the empty suffix returns true/false respectively; a decisive
+child returns false/true, otherwise the next suffix is evaluated. Since
+all operands of this restricted fragment are total Boolean expressions
+on admitted valuations, short-circuiting preserves abstract truth.
+Compose with the original rule's checked abstract finite reduction.
+Both genuine Claim invariants and Init qualify; all 819 representative
+valuations are rechecked.
+
+The source argument assumes admission preserves the exact expression and
+bindings, the reviewed required-reader observation semantics, faithful
+Clojure scalar equality and integer compare, standard control flow and
+termination, and that the loaded code implements the reviewed source
+without substitution. Resource bounds are those of the existing
+admission paths; no arbitrary JVM value or unsupported expression is
+admitted by this diagnostic. Source fingerprints and syntactic clause
+matching are not a compiler/bytecode attestation or a kernel proof of
+Clojure semantics. Changes to reviewed source require requalification.
+Universal loaded evaluator correspondence remains unestablished.
+
+Focused JVM: initial standalone suite passed 3 tests / 41 assertions.
+Final nine-namespace regression (source refinement, reduction, coverage,
+congruence, substitution, partition, typed-atom oracle, typed-proposition
+bridge and propositional soundness) passed 131 tests / 4376 assertions,
+zero failures or errors. Added mutations of literal, comparison sign
+and loop clauses, rejected even with a changed candidate digest.
+Historical judgment unchanged; host recovery and full project gates
+not rerun. No premise discharged.
+
+Next: examine the existing runtime artifact identity machinery for
+binding reviewed evaluator source to the installed execution boundary.
+Preserve the remaining primitive semantics and admission assumptions,
+and avoid promoting source-level correspondence to a universal JVM
+theorem.
