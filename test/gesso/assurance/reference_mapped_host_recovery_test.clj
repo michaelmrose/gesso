@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
+            [gesso.assurance.reference-installed-writer-history :as writer-history]
             [gesso.assurance.reference-recovery-inventory :as inventory]
             [gesso.assurance.reference-recovery-invariant :as invariant]
             [gesso.assurance.reference-recovery-invariant-test :as invariant-test]
@@ -948,7 +949,9 @@
                         (is (#{:idle :running} (:status status))))
                       (let [capture! #(observed-recovery/capture-local-worker-recovery-cut!
                                        %1 tables admit mapped-source outcome-declarations steps observation %2 %3)
-                            worker-bound (capture! started handle worker-capture)
+                            qualified (writer-history/derive! started tables admit mapped-source outcome-declarations
+                                                              (:catalog-fingerprint catalog) cases steps observation handle worker-capture)
+                            worker-bound (:recovery qualified)
                             enhanced-cut (:recovery-cut-observation worker-bound)
                             worker-evidence (:worker-correspondence worker-bound)
                             enhanced (assoc r :worker-observation-provenance (:worker-observation-provenance worker-bound)
@@ -961,6 +964,13 @@
                                               (is (= :prepared (:status prepared)))
                                               (:conditional-recovery prepared)))
                                           [:authorized-historical-lineage :same-store-incarnation])]
+                        (is (= :conditional-installed-retained-writer-history (:status qualified)) (pr-str (dissoc qualified :recovery)))
+                        (is (= :complete-at-selected-cut (:retained-transaction-classification qualified)))
+                        (is (= (mapv :tx-id (subvec history 2)) (mapv :tx-id (:post-initialization-steps qualified))))
+                        (is (= [:committed-mapped :committed-worker :committed-worker :committed-worker :committed-worker :aborted-attempt :committed-mapped]
+                               (mapv :class (:post-initialization-steps qualified))))
+                        (is (= :not-established (:writer-coverage qualified) (:universal-refinement qualified) (:temporal-coverage qualified)))
+                        (is (= :not-performed (:proof-discharge qualified)))
                         (is (= :matched (:status worker-bound)) (pr-str worker-bound))
                         (is (= :matched-local-issued-host-capture (:worker-observation-provenance worker-bound)))
                         (is (= maintenance (mapv #(select-keys % [:tx-id :intent-id :maintenance])

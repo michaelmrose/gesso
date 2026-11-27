@@ -9185,3 +9185,38 @@ unchanged; no premise accepted or discharged.
 Next: bind the installed classification to actual admitted operation and
 maintenance outcomes and retained post-initialization temporal coverage.
 Do not infer writer completeness from a live activation alone.
+
+* v2851 — classify the selected issued retained writer history
+
+Recheck the current installed mapped policy and captured activation root
+against the exact issued local command observation. Independently rederive
+the worker-interleaved recovery cut from the original admission, source,
+issued acquisition and host-issued worker capture. Bind the selected
+command and maintenance transaction identities to the same retained
+payload fingerprint and root. Classify each command attempt by its exact
+original alternative and committed or aborted outcome, and each committed
+worker by its reviewed maintenance branch. Map the physical expired lease
+reclamation name to the reviewed lease-reclaim branch.
+
+Require the sorted disjoint transaction classification to equal the
+entire retained transaction-ID suffix after the manifest and initializer,
+not merely the selected IDs to belong to that suffix. Reject omitted or
+unexpected transactions, including suffixes. Recheck the live generation
+at the end. This is selected retained transaction completeness only. It
+does not establish continuous historical generation mediation, external
+writer exclusion, provider completeness, all valid-time boundaries, or
+read-only observation coverage. Preserve all earlier open conditions.
+The existing issued recovery handle remains diagnostic, not authority.
+
+Focused partition: 1 test / 16 assertions. Nine-namespace assurance
+regression (including focused partition): 50 tests / 7584 assertions.
+Actual worker-interleaved assembled persistent host recovery: 1 test /
+1291 assertions. Both regression runs passed without failures or errors.
+The latter checks the exact seven post-initialization transaction classes
+and existing restart/recovery behavior. Full project gates not run.
+Historical v12 unchanged; no premise accepted or discharged.
+
+Next: qualify temporal boundary coverage and compose the selected history
+classification with the general conditional transition and replay schemas.
+Preserve the distinction between selected transaction exhaustiveness and
+universal admitted-writer refinement.
