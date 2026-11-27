@@ -10720,3 +10720,37 @@ and all 39 original general CLM-R2 conditions remain open.
 Next: bind the actual canonical HTTP route and installed prepared server to
 issued command-origin observation, preserving the independent application
 request-gate and principal/session authentication obligations.
+
+* v2894 — bind canonical HTTP route to issued command origin
+
+Keep the canonical route observation in the HTTP wrapper's private dynamic
+extent. Bind it to the exact prepared server, sanitized context and original
+pre-enrichment command boundary, then read it only for the corresponding active
+registered invocation. Retain the selected route ID, template, concrete URI,
+method, transport, operation, captured path arguments and local gate acceptance
+in the consumed framed command origin. Never accept route evidence from Ring
+metadata or publication enrichment. Nested, copied, cross-thread and completed
+invocations cannot inherit the route. Replaced reviewed boundaries suppress
+route attribution without changing settlement semantics. Preserve the historical
+publication preparation key via its existing alias; pin the changed publication
+source in the reviewed envelope and replay arguments.
+
+Match the optional route's exact structural shape and captured argument binding
+in the selected-origin comparison; retain it in the original command premise
+subject and version the affected profiles. Supplied observations remain supplied.
+Neither local request-gate acceptance nor resolver attribution authenticates the
+application's session authority, deployment, or arbitrary in-process code.
+
+Final JVM gates: server, command origin, HTTP operation and resolved operation,
+77 tests / 574 assertions; additional route, premise, reviewed source-envelope
+and replay tests plus the full adjacent canonical assembled-host regression,
+9 tests / 1969 assertions. Both gates exited 0; total 86 tests / 2543 assertions,
+zero failures or errors. Fourteen malformed route substitutions and three
+premise substitutions were exercised. Other assembled variants and full project
+gates were not rerun. Both command authentication premises and all 39 original
+general CLM-R2 conditions remain open. Server is 1206 lines; decompose the
+origin observation boundary before further substantial expansion.
+
+Next: qualify the configured application request-gate and principal/session
+authority contract against the original issued command subject, without
+promoting local acceptance into independently authenticated authority.

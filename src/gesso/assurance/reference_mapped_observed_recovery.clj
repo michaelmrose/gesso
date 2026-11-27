@@ -530,7 +530,7 @@
 (def ^:private original-deployment-acceptance storage/describe-deployment-acceptance)
 (def ^:private original-assumption-description assumption/describe-assumption)
 
-(def command-authentication-profile :selected-command-authentication-premises-v2)
+(def command-authentication-profile :selected-command-authentication-premises-v3)
 
 (defn- command-origin-identity [origin]
   ;; Tag both alternatives: a UUID must not collide with a structural value
@@ -784,7 +784,7 @@
        (identical? original-snapshot-binding snapshot/bind-premise)
        (identical? original-support-composition snapshot/compose-support)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v15)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v16)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]

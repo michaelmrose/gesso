@@ -7,7 +7,7 @@
             [gesso.http :as http]
             [gesso.live.application-preflight :as application]
             [gesso.live.outbox.http-route :as route]
-            [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox :as outbox]
             [gesso.live.optimistic.choreo :as choreo]
             [gesso.live.optimistic.server :as server]
             [gesso.live.ui :as ui])
@@ -47,15 +47,9 @@
                             "content-type" "text/plain; charset=utf-8"}
    :body "Command request not admitted."})
 
-(defn- run-command-or-deny [prepared context command bind-publication]
+(defn- run-command-or-deny [prepared context command bind-context]
   (try
-    (if bind-publication
-      (server/run-command
-       prepared context command
-       (fn [boundary]
-         (assoc (:ctx boundary) publication/preparation-key
-                (bind-publication boundary))))
-      (server/run-command prepared context command))
+    (server/run-command prepared context command bind-context)
     (catch clojure.lang.ExceptionInfo failure
       (let [{:keys [error/type error/kind error/details]} (ex-data failure)]
         ;; Both denial classes have the same public response. Neither is a
@@ -175,6 +169,54 @@
       (when (or (string? body) (instance? InputStream body))
         (parse-body (read-body body))))))
 
+(def ^:private route-boundaries
+  (into {} (map (juxt identity deref))
+        [#'selected-routes! #'application/application-assembly? #'route/matching-route
+         #'route/captured-arguments #'read-form #'server/decode-command
+         #'choreo/require-operation #'run-command-or-deny #'server/run-command
+         #'server/current-command-boundary-matches?]))
+
+(defn- route-boundaries-current? []
+  (every? (fn [[v original]] (identical? original @v)) route-boundaries))
+
+(def ^:private ^ThreadLocal active-route (ThreadLocal.))
+
+(defn current-command-route
+  "Describe the canonical request handoff only for its exact active invocation.
+   The configured request gate is trusted, not independently authenticated."
+  [invocation]
+  (let [{:keys [boundary evidence current?]} (.get active-route)]
+    (when (and boundary (current?)
+               (server/current-command-boundary-matches? invocation @boundary))
+      evidence)))
+
+(defn- run-selected! [original? assembly prepared route context command bind-publication]
+  (let [current? #(and original? (route-boundaries-current?)
+                       (identical? prepared (get-in assembly [:operation-acquisition-assembly
+                                                             :execution-assembly :server])))
+        evidence (assoc (select-keys route [:route-id :path :method :operation :required-transport])
+                        :uri (:uri context) :path-arguments (:path-params context)
+                        :request-gate :locally-accepted
+                        :evidence :matched-canonical-htmx-handoff)
+        boundary* (volatile! nil)
+        prior (.get active-route)]
+    (try
+      ;; Only this wrapper owns the observation. Never read route evidence
+      ;; from the request or from the publication enrichment callback.
+      (.set active-route {:boundary boundary* :evidence evidence :current? current?})
+      (run-command-or-deny prepared context command
+                           (fn [boundary]
+                             (if (and (nil? @boundary*) (current?)
+                                      (identical? prepared (:server boundary))
+                                      (identical? context (:ctx boundary)))
+                               (vreset! boundary* boundary)
+                               (vreset! boundary* ::unmatched))
+                             (if bind-publication
+                               (assoc (:ctx boundary) outbox/preparation-key (bind-publication boundary))
+                               (:ctx boundary))))
+      (finally
+        (if prior (.set active-route prior) (.remove active-route))))))
+
 (defn wrap-handler
   "Own all methods on every admitted HTMX POST operation path.
    Simple :parameter segments bind exact same-named string command arguments.
@@ -194,12 +236,14 @@
     (reject! :invalid-command-options {}))
   (when-not (and (fn? fallback) (application/application-assembly? assembly))
     (reject! :invalid-command-assembly {}))
-  (let [execution (get-in assembly [:operation-acquisition-assembly :execution-assembly])
+  (let [original? (route-boundaries-current?)
+        execution (get-in assembly [:operation-acquisition-assembly :execution-assembly])
         prepared (:server execution)
         routes (selected-routes! assembly prepared (get-in execution [:route-assembly :routes]))
         authorize? (:authorize-request? options)]
     (fn [request]
-      (if-let [route (route/matching-route routes (:uri request))]
+      (let [original? (and original? (route-boundaries-current?))]
+       (if-let [route (route/matching-route routes (:uri request))]
         (cond
           (not= :post (:request-method request)) (response 405)
           (not (application/application-assembly? assembly))
@@ -214,11 +258,11 @@
                 (response 400)
                 (let [context (-> request
                                   (dissoc :params :query-params :route-params :path-params
-                                          publication/preparation-key)
+                                          outbox/preparation-key)
                                   (assoc :form-params form :path-params captured))]
                   (if-not (true? (authorize? context))
                     (response 403)
-                    (if-let [send (run-command-or-deny prepared context command bind-publication)]
+                    (if-let [send (run-selected! original? assembly prepared route context command bind-publication)]
                       (let [result (http/html-response (ui/optimistic-settlement-marker (:settlement send)))]
                         ;; Serialize before recording handoff. No exception from
                         ;; execution or serialization becomes a fabricated rejection.
@@ -227,4 +271,4 @@
                                 "HX-Reswap" "none"))
                       (response 403))))))
             (response 400)))
-        (fallback (dissoc request publication/preparation-key)))))))
+        (fallback (dissoc request outbox/preparation-key))))))))

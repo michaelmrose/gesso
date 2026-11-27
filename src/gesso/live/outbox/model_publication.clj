@@ -7,6 +7,7 @@
             [gesso.live.model :as model]
             [gesso.choreo.identity :as identity]
             [gesso.live.outbox :as outbox]
+            [gesso.live.outbox.http-operation :as http-operation]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.read-frontier :as frontier]
             [gesso.live.outbox.physical-correspondence :as correspondence]
@@ -71,7 +72,7 @@
         {:outcome :prior-intent-present :intent-id id
          :publication-status (:intent-status row)}))))
 
-(def preparation-key :gesso.live.outbox.model-publication/prepare!)
+(def preparation-key outbox/preparation-key)
 
 (defn observe-command!
   "Read the current slot-zero intent for the installed derived-ID command.
@@ -296,6 +297,7 @@
 (def ^:private original-policy-capture xtdb/capture-policy-tx-api-calls!)
 (def ^:private original-origin-matcher xtdb/policy-capture-origin-matches?)
 (def ^:private original-command-origin server/current-command-origin)
+(def ^:private original-command-route http-operation/current-command-route)
 
 (defn- consumed-command-origin [{:keys [origin-invocation origin-executor command-binding]}]
   ;; The frame retains live references, not an origin report supplied by a
@@ -303,7 +305,9 @@
   (when (and origin-executor (identical? original-command-origin server/current-command-origin))
     (when-let [origin (original-command-origin origin-invocation origin-executor)]
       (when (= command-binding (select-keys origin resolution/binding-keys))
-        origin))))
+        (let [route (when (identical? original-command-route http-operation/current-command-route)
+                      (original-command-route origin-invocation))]
+          (cond-> origin route (assoc :http-route route)))))))
 
 (defn capture-framed-submissions!
   "Observe consumed handoffs during one synchronous installed policy window.

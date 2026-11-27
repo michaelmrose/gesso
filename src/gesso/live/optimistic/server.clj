@@ -1152,6 +1152,12 @@
    (when (and executor (identical? executor (:executor (.get command-origin))))
      (active-command-origin invocation))))
 
+(defn current-command-boundary-matches?
+  "Read-only identity check for a transport's original pre-enrichment boundary."
+  [invocation boundary]
+  (and (some? boundary) (some? (active-command-origin invocation))
+       (identical? boundary (:boundary (.get command-origin)))))
+
 (defn run-command
   "Execute one already-decoded protocol-v3 command through the trusted registry.
 
@@ -1177,13 +1183,14 @@
                             (identical? (:operation-entry boundary)
                                         (get-in prepared-server [:operations (get-in boundary [:command protocol/operation-key])])))
              ;; Transport enrichment may supply context, not command identity.
+             initial-boundary boundary
              boundary (if bind-context (assoc boundary :ctx (bind-context boundary)) boundary)
              execute! (get-in boundary [:operation-entry :execute!])
              invocation (operation-context boundary)
              result (try
                       (when (and original? (origin-boundaries-current?)
                                  (identical? (:principal boundary) (:principal invocation)))
-                        (.set command-origin {:invocation invocation :executor execute!}))
+                        (.set command-origin {:invocation invocation :executor execute! :boundary initial-boundary}))
                       (execute! invocation)
                       (finally (.remove command-origin)))]
          (prepare-settlement-send boundary result))

@@ -18,6 +18,9 @@
            [java.security MessageDigest]
            [java.util UUID]))
 
+;; Shared transport/publication context coordinate; retain the historical key.
+(def preparation-key :gesso.live.outbox.model-publication/prepare!)
+
 (def intent-table :gesso_live_outbox)
 (def intent-version 1)
 (def intent-type :gesso.live.outbox/publication-intent)

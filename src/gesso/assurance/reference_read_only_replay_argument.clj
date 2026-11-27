@@ -22,7 +22,7 @@
 (def ^:private original-reconcile resolution/reconcile)
 (def ^:private reviewed-sources
   {"gesso/model/command_resolution.clj" "ff05e0e2962155e3f44fe5284971915ee3b48a508a69d0f6ec85f38582e820c4"
-   "gesso/live/outbox/model_publication.clj" "fee1ccde4a0d4ca1dbee249bf55e5dcb27f85052ace536f8d3bde52cb7b00878"})
+   "gesso/live/outbox/model_publication.clj" "dc7555035723c7e866b1f6760cdbf42addf7f36e6cd40d1031f1a4411cebdef5"})
 
 (def ^:private base
   {:profile profile :authority :none :certificate :not-issued

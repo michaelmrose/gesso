@@ -4,11 +4,12 @@
             [gesso.choreo.identity :as identity]
             [gesso.live.consistency.xtdb :as live]
             [gesso.live.outbox.model-publication :as publication]
+            [gesso.live.outbox.http-route :as route]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.inductive-plan :as induction])
   (:import [xtdb.api TransactionKey]))
 
-(def profile :selected-mapped-submission-observation-v2)
+(def profile :selected-mapped-submission-observation-v3)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported mapped submission observation." {:reason reason})))
@@ -21,6 +22,26 @@
 (def ^:private origin-keys
   (into resolution/binding-keys [:execution-id :origin :authentication]))
 
+(defn- route-matches? [origin]
+  (if-not (contains? origin :http-route)
+    true
+    (let [observed (:http-route origin)
+          segments (when (string? (:path observed)) (route/route-segments (:path observed)))
+          captures (when (and segments (string? (:uri observed)))
+                     (let [candidate (assoc observed :transport-segments segments)]
+                       (when (route/matching-route [candidate] (:uri observed))
+                         (route/captured-arguments candidate (:uri observed)))))]
+      (and (map? observed) (not (record? observed)) (nil? (meta observed))
+           (= #{:route-id :path :method :operation :required-transport :uri :path-arguments
+                :request-gate :evidence} (set (keys observed)))
+           (keyword? (:route-id observed))
+           (= :post (:method observed)) (= :htmx (:required-transport observed))
+           (= (:operation origin) (:operation observed))
+           (= :locally-accepted (:request-gate observed))
+           (= :matched-canonical-htmx-handoff (:evidence observed))
+           (some? captures) (= captures (:path-arguments observed))
+           (every? (fn [[k v]] (= v (get (:arguments origin) k))) captures)))))
+
 (defn- compare-command-origins! [steps claims]
   (let [selected
         (mapv (fn [step claim]
@@ -28,7 +49,8 @@
                   (let [origin (:command-origin claim)
                         binding (get-in step [:spec :binding])]
                     (when-not (and (map? origin) (not (record? origin)) (nil? (meta origin))
-                                   (= origin-keys (set (keys origin)))
+                                   (= origin-keys (disj (set (keys origin)) :http-route))
+                                   (route-matches? origin)
                                    (= :registered-server-invocation (:origin origin))
                                    (= :conditional-on-trusted-principal-resolver (:authentication origin))
                                    (identity/execution-id? (:execution-id origin))
@@ -36,7 +58,7 @@
                       (reject! :mapped-command-origin-mismatch))
                     ;; The execution ID is observed, not a retained XTDB field.
                     ;; In particular, the abort association is not a receipt.
-                    (assoc (select-keys origin [:principal :command-id :execution-id :operation :origin :authentication])
+                    (assoc (select-keys origin [:principal :command-id :execution-id :operation :origin :authentication :http-route])
                            :selected-tx-id (get-in step [:expectation :tx-id])))))
               steps claims)
         n (count (filter some? selected))
@@ -118,7 +140,7 @@
       (catch clojure.lang.ExceptionInfo e
         (fail :mismatch (or (:reason (ex-data e)) :invalid-mapped-submission-handoff))))))
 
-(def observed-profile :selected-issued-mapped-submission-observation-v2)
+(def observed-profile :selected-issued-mapped-submission-observation-v3)
 
 (def ^:private original-observation-reader publication/read-framed-submission-observation!)
 (def ^:private original-selected-comparison compare-selected!)

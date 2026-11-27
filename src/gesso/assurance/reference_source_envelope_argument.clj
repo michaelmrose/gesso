@@ -32,7 +32,7 @@
 (def ^:private binding-fields [:envelope-profile :envelope-fingerprint])
 
 (def ^:private reviewed-sources
-  {"gesso/live/outbox/model_publication.clj" "fee1ccde4a0d4ca1dbee249bf55e5dcb27f85052ace536f8d3bde52cb7b00878"
+  {"gesso/live/outbox/model_publication.clj" "dc7555035723c7e866b1f6760cdbf42addf7f36e6cd40d1031f1a4411cebdef5"
    "gesso/assurance/xtdb_envelope.clj" "71f672cb580dcc420e0817cefd47f83a2746280b2f51e281d5de59ef560ad2f0"
    "gesso/assurance/proof/mapped_prestate_lowering.clj" "70ded1919b2373a0226e36429c8f028b77dffc1148c8d5487d58a750f8fd315b"
    "gesso/assurance/reference_mapped_evidence.clj" "9ed58db54fe1ac980cd68c03774f04465e3aa0a2f519fa748489ef1fd4da54df"

@@ -843,7 +843,11 @@
                       expected (fn [b]
                                  (assoc b :execution-id (identity/execution-id (str "e-" (resolution/record-id b)))
                                         :origin :registered-server-invocation
-                                        :authentication :conditional-on-trusted-principal-resolver))]
+                                        :authentication :conditional-on-trusted-principal-resolver
+                                        :http-route {:route-id :request/claim :path "/operations/request/claim"
+                                                     :method :post :operation :request/claim :required-transport :htmx
+                                                     :uri "/operations/request/claim" :path-arguments {}
+                                                     :request-gate :locally-accepted :evidence :matched-canonical-htmx-handoff}))]
                   (is (= (mapv expected [winner loser loser]) (mapv :command-origin claims)))
                   (is (= (mapv resolution/record-id [winner loser loser])
                          (mapv #(get-in % [:checked :identity :command-id]) claims))))
@@ -904,7 +908,11 @@
                                         :origin :registered-server-invocation
                                         :authentication :conditional-on-trusted-principal-resolver
                                         :execution-id (identity/execution-id (str "e-" (resolution/record-id b)))
-                                        :selected-tx-id (get-in step [:expectation :tx-id])))
+                                        :selected-tx-id (get-in step [:expectation :tx-id])
+                                        :http-route {:route-id :request/claim :path "/operations/request/claim"
+                                                     :method :post :operation :request/claim :required-transport :htmx
+                                                     :uri "/operations/request/claim" :path-arguments {}
+                                                     :request-gate :locally-accepted :evidence :matched-canonical-htmx-handoff}))
                                [winner loser loser] steps)
                          (:selected-command-origins r)))
                   (is (= :not-established (:submission-provenance r)))

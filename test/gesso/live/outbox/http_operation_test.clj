@@ -10,6 +10,7 @@
             [gesso.live.outbox.host :as host]
             [gesso.live.outbox.http-operation :as transport]
             [gesso.live.optimistic.protocol :as protocol]
+            [gesso.live.optimistic.server :as server]
             [ring.util.codec :as codec]
             [xtdb.api :as xt])
   (:import [java.io ByteArrayInputStream IOException InputStream InterruptedIOException]
@@ -93,10 +94,12 @@
 
 (deftest assembled-operation-over-owned-http-commits-and-returns-correlated-settlement
   (let [intent-id (random-uuid) calls (atom []) gates (atom 0)
-        result* (atom nil)]
+        origin* (atom nil) result* (atom nil)]
     (with-routes
       (fn [{:keys [ctx arguments principal] :as invocation}]
         (swap! calls conj invocation)
+        (reset! origin* (assoc (server/current-command-origin invocation)
+                               :http-route (transport/current-command-route invocation)))
         (let [node (:xtdb/connectable ctx)
               id (:request-id arguments)
               plan (outbox/prepare! {:intent-ids [intent-id]
@@ -195,6 +198,14 @@
             (is (identical? node (get-in (first @calls) [:ctx :xtdb/connectable])))
             (is (= fixture/trusted-principal (:principal (first @calls))))
             (is (= {:request-id "r1"} (get-in (first @calls) [:ctx :path-params])))
+            (is (= {:route-id :request/claim :path "/operations/request/:request-id/claim"
+                    :method :post :operation :request/claim :required-transport :htmx
+                    :uri path :path-arguments {:request-id "r1"}
+                    :request-gate :locally-accepted :evidence :matched-canonical-htmx-handoff}
+                   (:http-route @origin*)))
+            (is (= :conditional-on-trusted-principal-resolver (:authentication @origin*)))
+            (is (nil? (server/current-command-origin (first @calls))))
+            (is (nil? (transport/current-command-route (first @calls))))
             (finally (host/stop! started) (.close client))))))))
 
 (deftest parameter-route-binds-command-arguments-before-authority
@@ -387,3 +398,60 @@
             (is (= 403 (:status (handler (assoc (request valid) :headers headers)))) headers))
           (is (= 4 (count @gates)))
           (is (empty? @calls)))))))
+
+(deftest canonical-route-origin-is-not-request-metadata-or-a-reusable-handoff
+  (let [origins (atom [])]
+    (with-assembly
+      (fn [invocation]
+        (let [origin (server/current-command-origin invocation)
+              route (transport/current-command-route invocation)]
+          (swap! origins conj (cond-> origin route (assoc :http-route route))))
+        {:resolution :rejected :reason :test-only})
+      (fn [assembly]
+        (let [prepared (get-in assembly [:operation-acquisition-assembly :execution-assembly :server])
+              gate (atom true)
+              handler (transport/wrap-handler assembly identity {:authorize-request? (fn [_] @gate)})
+              valid (request (form :request/claim "valid"))
+              runner server/run-command]
+          (is (= 200 (:status (handler (assoc valid :http-route {:request-gate :forged})))))
+          (is (= :locally-accepted (get-in (peek @origins) [:http-route :request-gate])))
+          (is (= :request/claim (get-in (peek @origins) [:http-route :route-id])))
+          (is (= {} (get-in (peek @origins) [:http-route :path-arguments])))
+          (reset! gate false)
+          (is (= 403 (:status (handler valid))))
+          (is (= 1 (count @origins)))
+          (reset! gate true)
+          ;; A direct call with look-alike context cannot consume a route.
+          (runner prepared (assoc valid :http-route (:http-route (peek @origins))) (command :request/claim) nil)
+          (is (some? (peek @origins)))
+          (is (not (contains? (peek @origins) :http-route)))
+          (with-redefs [server/run-command (fn [p c cmd & [bind]] (runner p c cmd bind))]
+            (is (= 200 (:status (handler valid)))))
+          (is (some? (peek @origins)))
+          (is (not (contains? (peek @origins) :http-route)))
+          (is (= 200 (:status (handler valid))))
+          (is (= :matched-canonical-htmx-handoff (get-in (peek @origins) [:http-route :evidence]))))))))
+
+(deftest nested-command-cannot-inherit-the-outer-http-boundary
+  (let [prepared* (atom nil) nested? (atom false) observed (atom [])]
+    (with-assembly
+      (fn [invocation]
+        (if @nested?
+          (swap! observed conj (transport/current-command-route invocation))
+          (do
+            (swap! observed conj (transport/current-command-route invocation))
+            (is (nil? (transport/current-command-route (into {} invocation))))
+            (is (nil? @(future (transport/current-command-route invocation))))
+            (reset! nested? true)
+            (try (server/run-command @prepared* (:ctx invocation) (:command invocation))
+                 (finally (reset! nested? false)))
+            (swap! observed conj (transport/current-command-route invocation))))
+        {:resolution :rejected :reason :test-only})
+      (fn [assembly]
+        (reset! prepared* (get-in assembly [:operation-acquisition-assembly :execution-assembly :server]))
+        (let [handler (transport/wrap-handler assembly identity {:authorize-request? (constantly true)})]
+          (is (= 200 (:status (handler (request (form :request/claim "valid"))))))
+          (is (= 3 (count @observed)))
+          (is (= :matched-canonical-htmx-handoff (:evidence (first @observed))))
+          (is (nil? (second @observed)))
+          (is (= (first @observed) (last @observed))))))))
