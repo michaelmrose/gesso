@@ -7541,3 +7541,39 @@ Next: make the remaining configured principal-resolution and command
 authentication premises explicit and subject-bound, separating local
 issued command-binding correspondence from authentication and worker
 provenance. Preserve all outstanding CLM-R2 obligations.
+
+* v2812 — describe subject-bound command authentication premises
+
+Allocate a local command-observation reference once at original cut
+issuance and retain it through every prepared comparison. The v3
+conditional historical judgment describes two separate open command
+authentication premises: authenticity of the configured principal
+resolution and attribution of the selected command executions, with
+the latter depending on the former. Their canonical subjects bind the
+original local reference, publication source, exact cut, ordered
+semantic subject, selected transaction identities and commitments,
+and origin correspondence classification. Retain the original
+observed command/execution summaries alongside those premises.
+The reference is a local label, not a durable credential; absent or
+partial origin evidence is not promoted to authentication.
+
+Use the pinned assumption-description boundary. Keep the command
+premise fingerprints, acceptance status and obligations separate
+from the existing storage-trust selection and abstract induction
+register. Configured storage trust cannot implicitly accept command
+premises. Changed cut, source, semantic subject, selected transaction
+identities or origin classification require distinct premises.
+
+Focused JVM: 4 tests / 1074 assertions, zero failures or errors,
+including both genuine persistent assembled-host recovery fixtures,
+the command premise regression and submission-origin regression.
+The new premise regression also passed independently (1 test /
+24 assertions, included in the full focused count). Existing worker
+polling and older offline dependency bundle; full project gates not
+run. No authentication, writer authority, certificate, provider
+refinement or CLM-R2 premise discharge is established.
+
+Next: trace installed worker maintenance execution and determine
+which actual worker-origin observations can be bound to the selected
+retained maintenance transactions. Preserve the distinction between
+local worker identity and independent authentication.

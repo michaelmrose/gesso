@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-mapped-observed-recovery
   "Compose local issued submission observation and retained recovery correspondence."
-  (:require [gesso.assurance.inductive-report :as inductive-report]
+  (:require [gesso.assurance.assumption :as assumption]
+            [gesso.assurance.inductive-report :as inductive-report]
             [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-submission :as submission]
@@ -302,6 +303,7 @@
                                               :historical-cut (:historical-cut derived)
                                               :original-recovery (select-keys r original-recovery-keys)
                                               :judgment-subject subject
+                                              :command-observation-ref (str (random-uuid))
                                               :abstract-induction abstract
                                               :publication-source-id (:source-id (first steps))}))
                 (merge r base {:recovery-cut-observation handle
@@ -382,6 +384,7 @@
                          :original-cut original-cut :target target
                          :original-recovery (:original-recovery origin)
                          :judgment-subject (:judgment-subject origin)
+                         :command-observation-ref (:command-observation-ref origin)
                          :abstract-induction (:abstract-induction origin)
                          :target-node (java.lang.ref.WeakReference. node)
                          :admission admission}))
@@ -421,13 +424,57 @@
         (fail :unissued-conditional-recovery)))))
 
 (def ^:private original-deployment-acceptance storage/describe-deployment-acceptance)
+(def ^:private original-assumption-description assumption/describe-assumption)
+
+(def command-authentication-profile :selected-command-authentication-premises-v1)
+
+(defn- command-authentication-premises
+  "Describe outstanding authentication obligations for one issued cut.
+   The original-cut reference identifies the local invocation observations;
+   the cut and ordered transaction IDs identify the retained command payloads.
+   Neither is a credential or proof of who invoked a command. Keep these
+   premises separate from the selected storage-trust obligations."
+  [{:keys [scope original-recovery judgment-subject command-observation-ref]}]
+  (let [id :reference-command/selected-execution
+        principal-id :reference-command/principal-resolution
+        attribution-id :reference-command/command-attribution
+        interface {:profile command-authentication-profile
+                   :publication-source-id (:publication-source-id scope)
+                   :historical-cut (:historical-cut scope)
+                   :command-observation-ref command-observation-ref
+                   :judgment-subject judgment-subject
+                   :selected-tx-ids (:selected-tx-ids original-recovery)
+                   :selected-commitments (:selected-commitments original-recovery)
+                   :origin-correspondence (:command-origin-correspondence original-recovery)}
+        describe (fn [premise proposition boundary dependencies origin]
+                   (original-assumption-description
+                    {:id premise :subject {:kind :runtime :id id :interface interface}
+                     :scope {:kind :runtime :id id} :proposition [proposition]
+                     :parameters {} :semantic-context {:profile command-authentication-profile}
+                     :dependencies dependencies :origin origin
+                     :implementation-boundary boundary}))
+        obligations [(describe principal-id :reference-command/authenticate-resolved-principals
+                               :gesso.live.optimistic.server/principal-fn #{} :environment)
+                     (describe attribution-id :reference-command/authenticate-selected-command-executions
+                               :gesso.live.optimistic.server/registered-execution
+                               #{principal-id} :implementation-correspondence)]]
+    {:profile command-authentication-profile
+     :scope interface
+     :selected-command-origins (:selected-command-origins original-recovery)
+     :abort-recovery-execution (:abort-recovery-execution original-recovery)
+     :obligations obligations
+     :open-premise-fingerprints (set (map :premise-fingerprint obligations))
+     :premise-acceptance :not-performed
+     :command-authentication :not-established
+     :authority :none :certificate :not-issued}))
 
 (defn- acceptance-boundaries-current? []
   (and (cut-boundaries-current?)
        (conditional-boundaries-current?)
-       (identical? original-deployment-acceptance storage/describe-deployment-acceptance)))
+       (identical? original-deployment-acceptance storage/describe-deployment-acceptance)
+       (identical? original-assumption-description assumption/describe-assumption)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v2)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v3)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
@@ -437,7 +484,8 @@
                        admission abstract-induction]} entry]
         (try
           (let [r (original-deployment-acceptance scope declaration)
-                fresh (checked-abstract-induction admission)]
+                fresh (checked-abstract-induction admission)
+                command-premises (command-authentication-premises entry)]
             (cond
               (not (acceptance-boundaries-current?)) (fail :conditional-recovery-boundary-replaced)
               (not (and abstract-induction (= abstract-induction fresh)))
@@ -450,6 +498,7 @@
                       :abstract-induction-binding :matched-original-issued-induction
                       :abstract-induction abstract-induction
                       :original-recovery original-recovery
+                      :command-authentication-premises command-premises
                       :cut-correspondence cut-correspondence
                       :historical-assurance :conditional-on-declared-trust
                       :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))
@@ -465,7 +514,9 @@
    has actually authorized the lifecycle. Compose the selected original
    activated trajectory with its issued historical comparison and exact
    declared trust. Recheck the original issued abstract induction and
-   retain its entire report, including all open obligations. Host adoption, when present, is recorded by the host
+   retain its entire report, including all open obligations. Describe the
+   original command authentication premises separately: storage trust
+   neither accepts nor discharges them. Host adoption is recorded by the host
    boundary, not by this declaration. Open premises remain open. No
    Claim invariant theorem or universal refinement is established.
    The four-argument form additionally requires the exact original issued

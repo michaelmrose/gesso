@@ -3,6 +3,7 @@
             [clojure.edn :as edn]
             [clojure.xml :as xml]
             [clojure.test :refer [deftest is]]
+            [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-source-coverage :as coverage]
             [gesso.assurance.reference-historical-cut :as cut]
@@ -121,6 +122,32 @@
     (is (= (:initialization-tx-id original) (:initialization-tx-id trajectory)))
     (is (= :not-established (:submission-provenance trajectory) (:provider-refinement trajectory)))
     (is (= (:worker-observation-provenance original) (:worker-observation-provenance trajectory))))
+  (let [command (:command-authentication-premises result)
+        original (:original-recovery result)
+        interface (:scope command)
+        [principal attribution] (:obligations command)]
+    (is (= observed-recovery/command-authentication-profile (:profile command)))
+    (is (= (:judgment-subject result) (:judgment-subject interface)))
+    (is (= (:historical-cut scope) (:historical-cut interface)))
+    (is (= (:publication-source-id scope) (:publication-source-id interface)))
+    (is (= (:selected-tx-ids original) (:selected-tx-ids interface)))
+    (is (= (:selected-commitments original) (:selected-commitments interface)))
+    (is (= :matched-issued-command-bindings (:origin-correspondence interface)))
+    (is (= (:selected-command-origins original) (:selected-command-origins command)))
+    (is (= (:abort-recovery-execution original) (:abort-recovery-execution command)))
+    (is (string? (:command-observation-ref interface)))
+    (is (= [:reference-command/principal-resolution :reference-command/command-attribution]
+           (mapv #(get-in % [:assumption :id]) (:obligations command))))
+    (is (= #{} (get-in principal [:assumption :dependencies])))
+    (is (= #{:reference-command/principal-resolution} (get-in attribution [:assumption :dependencies])))
+    (is (every? #(= :open (:discharge-state %)) (:obligations command)))
+    (is (every? #(= interface (get-in % [:assumption :subject :interface])) (:obligations command)))
+    (is (= (:open-premise-fingerprints command) (set (map :premise-fingerprint (:obligations command)))))
+    (is (not-any? (:trusted-assumptions result) (:open-premise-fingerprints command)))
+    (is (= :not-performed (:premise-acceptance command)))
+    (is (= :not-established (:command-authentication command)))
+    (is (= :none (:authority command)))
+    (is (= :not-issued (:certificate command))))
   (is (= (set (map :premise-fingerprint (:obligations result)))
          (:open-premise-fingerprints result) (:trusted-assumptions result)))
   (is (every? #(= :open (:discharge-state %)) (:obligations result)))
@@ -340,7 +367,7 @@
                                  (is (= reason (:reason failure)))
                                  (is (not-any? #(contains? failure %)
                                                [:judgment-subject :judgment-profile :trusted-assumptions :original-recovery
-                                                :abstract-induction :abstract-induction-binding]))))
+                                                :abstract-induction :abstract-induction-binding :command-authentication-premises]))))
                              (is (not (contains? trusted :deployment-adoption)))
                              (is (not (contains? selected :judgment-profile)))
                              (is (= :explicit-declaration-only (:premise-acceptance trusted)))
@@ -359,6 +386,10 @@
                                (let [failure (observed-recovery/declare-conditional-recovery-trust! handle declaration)]
                                  (is (= :conditional-recovery-boundary-replaced (:reason failure)))
                                  (is (not (contains? failure :abstract-induction)))))
+                             (with-redefs [assumption/describe-assumption (constantly nil)]
+                               (let [failure (observed-recovery/declare-conditional-recovery-trust! handle declaration)]
+                                 (is (= :conditional-recovery-boundary-replaced (:reason failure)))
+                                 (is (not (contains? failure :command-authentication-premises)))))
                              (with-redefs [storage/describe-deployment-acceptance (constantly trusted)]
                                (is (= :conditional-recovery-boundary-replaced
                                       (:reason (observed-recovery/declare-conditional-recovery-trust! handle declaration)))))
@@ -763,3 +794,34 @@
 
 (deftest assembled-command-transport-worker-interleaved-recovery
   (check-assembled-recovery! true))
+
+(deftest command-authentication-premises-are-exact-and-unaccepted
+  (let [describe #'observed-recovery/command-authentication-premises
+        entry {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
+               :command-observation-ref "original-cut"
+               :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
+               :original-recovery {:selected-tx-ids [1 2 3] :selected-commitments [:committed :aborted :committed]
+                                   :command-origin-correspondence :matched-issued-command-bindings
+                                   :selected-command-origins [{:execution-id "one"} {:execution-id "two"} {:execution-id "two"}]
+                                   :abort-recovery-execution :same-observed-execution}}
+        r (describe entry)]
+    (is (= r (describe (assoc-in entry [:scope :retained-acquisition-ref] "different-target"))))
+    (doseq [changed [(assoc entry :command-observation-ref "different-cut")
+                     (assoc-in entry [:scope :publication-source-id] "other-source")
+                     (assoc-in entry [:scope :historical-cut :payload-fingerprint] "different-content")
+                     (assoc-in entry [:judgment-subject :catalog-id] :fixture/other)
+                     (assoc-in entry [:original-recovery :selected-tx-ids] [1 2 4])
+                     (assoc-in entry [:original-recovery :command-origin-correspondence] :partial-issued-command-bindings)]]
+      (let [other (describe changed)]
+        (is (not-any? (:open-premise-fingerprints r) (:open-premise-fingerprints other)))
+        (is (= :not-established (:command-authentication other)))
+        (is (= :not-performed (:premise-acceptance other)))))
+    (let [absent (describe (update entry :original-recovery assoc
+                                   :command-origin-correspondence :not-observed
+                                   :selected-command-origins [nil nil nil]
+                                   :abort-recovery-execution :not-observed))]
+      (is (= :not-observed (get-in absent [:scope :origin-correspondence])))
+      (is (= [nil nil nil] (:selected-command-origins absent)))
+      (is (= 2 (count (:obligations absent))))
+      (is (every? #(= :open (:discharge-state %)) (:obligations absent)))
+      (is (= :not-established (:command-authentication absent))))))
