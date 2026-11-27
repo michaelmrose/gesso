@@ -8730,3 +8730,56 @@ checked guarded-write and abort correspondence to formulate the
 explicit provider atomicity and admitted-writer conditions required
 for the general physical-to-abstract transition implication. Keep
 selected witnesses distinct from a universal argument.
+
+* v2841 — check conditional closed mapped transition simulation
+
+Introduce an internal standalone diagnostic for an original guarded
+mapped construction and its closed prepared document/journal rows.
+Independently apply the complete ordinary put-only suffix to a row
+image indexed by physical table and row identity. Require distinct
+physical put targets, exact source-derived row multiplicities and
+agreement between the resulting projection and the existing forward
+write derivation. Revalidate the supplied actual before/after images
+as closed row sets and project them through the independent coordinate
+decoder using the original closed outcome cases.
+
+For a committed attempt require exact equality between the actual
+prestate image and the prepared image, exact complete put effects in
+the actual poststate image, and the original independently interpreted
+abstract guarded transition. For an aborted attempt the proposed
+suffix must still correspond to the prepared image, but the actual
+before and after images must be identical. The actual prestate may
+differ from the prepared state; abort does not imply a false abstract
+guard. Check complete row equality rather than merely mapped values,
+including retained supplemental fields and command journal rows.
+Pin the original checker seams before and after the computation.
+
+The local simulation argument is conditional: if successful ordered
+provider guards establish exact prepared-row equality, and a commit
+atomically applies just the qualified default-valid-time puts, the
+row replacement model supplies the projected abstract transition.
+If an abort preserves the authoritative row image, its projection
+stutters. These implications rely on faithful guard, put, abort,
+projection, expression and command/envelope attribution semantics.
+They do not establish those semantics, cover other writer classes
+or valid-time boundaries, or prove the general transition theorem.
+The input row images are supplied diagnostic values, not issued or
+authenticated provider evidence.
+
+Focused JVM: new suite passed 2 tests / 47 assertions. Combined
+transition refinement, mapped writes, recovery projection, independent
+transition semantics and recovery trajectory suites passed 42 tests /
+7400 assertions, zero failures or errors, including existing live XTDB
+mapped-write tests. Exercise both helper orderings and all four Claim
+journal-writing alternatives, stale abort, committed refusal, abort
+with a true abstract guard, partial and additional puts, duplicate
+physical targets, modified supplemental/framed rows and substituted
+derivation boundary. Both new code blobs verified against tested files.
+
+The historical v12 judgment is unchanged; assembled-host recovery
+and full project gates not rerun. No premise accepted or discharged.
+
+Next: bind the local transition simulation to the original retained
+selected command envelopes and independently acquired pre/post row
+images, explicitly separating command writes, abort and maintenance
+stuttering and their respective provider assumptions.
