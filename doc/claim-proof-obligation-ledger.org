@@ -7443,3 +7443,32 @@ Next: close the authenticated command provenance boundary for the
 selected original Claim execution, distinguishing local submission
 observation from authenticated command identity, and preserve all
 remaining worker and physical refinement obligations.
+
+* v2809 — observe the original registered command invocation
+
+Establish a synchronous thread-local command-origin scope at the
+optimistic server's registered executor boundary, after configured
+principal resolution, authority projection and optional trusted transport
+context enrichment. Observe only the exact active invocation, retaining
+principal, command, execution, operation and arguments; copied maps,
+other threads, completed calls and replaced command/context boundaries
+cannot supply this observation. Suspend the outer scope for nested
+execution and restore it on every exit. Clear the inner scope before
+settlement construction, including exceptional exits.
+
+The origin is local descriptive material, conditional on the trusted
+configured principal resolver. It is not a credential, authorization,
+independent authentication of that resolver, or durable transaction
+receipt. The production HTMX transport already uses run-command; no
+submission or retained judgment consumes the new observation yet.
+
+Focused JVM: 52 tests / 283 assertions, zero failures or errors. The new
+command-origin namespace and existing optimistic server regression suite
+ran on the older offline dependency classpath. Persistent XTDB recovery
+and full project gates were not rerun. No proof premise is discharged.
+
+Next: bind the exact invocation origin at the installed publication
+executor to the consumed mapped submission handoff. Reject copied or
+substituted invocation identities while preserving the distinction
+between configured principal resolution and independently authenticated
+command provenance.

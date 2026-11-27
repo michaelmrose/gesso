@@ -1123,6 +1123,27 @@
 ;; End-to-end trusted helpers
 ;; =============================================================================
 
+(def ^:private ^ThreadLocal command-origin (ThreadLocal.))
+(def ^:private original-begin-command begin-command)
+(def ^:private original-operation-context operation-context)
+
+(defn- origin-boundaries-current? []
+  (and (identical? original-begin-command begin-command)
+       (identical? original-operation-context operation-context)))
+
+(defn current-command-origin
+  "Describe the exact invocation during its registered synchronous execution.
+   Copies, other threads and completed invocations have no origin here.
+   The configured resolver is trusted, not independently authenticated;
+   this sensitive local observation is neither authority nor a receipt."
+  [invocation]
+  (let [scope (.get command-origin)]
+    (when (and scope (origin-boundaries-current?)
+               (identical? invocation (:invocation scope)))
+      (assoc (select-keys invocation [:principal :command-id :execution-id :operation :arguments])
+             :origin :registered-server-invocation
+             :authentication :conditional-on-trusted-principal-resolver))))
+
 (defn run-command
   "Execute one already-decoded protocol-v3 command through the trusted registry.
 
@@ -1137,16 +1158,23 @@
   ([prepared-server ctx command]
    (run-command prepared-server ctx command nil))
   ([prepared-server ctx command bind-context]
-   (let [boundary (begin-command prepared-server ctx command)
-         ;; Optional trusted transport enrichment runs only after principal
-         ;; resolution and the original authority projection. It may supply
-         ;; executor context, not substitute principal, command or executor.
-         boundary (if bind-context
-                    (assoc boundary :ctx (bind-context boundary))
-                    boundary)
-         execute! (get-in boundary [:operation-entry :execute!])
-         result (execute! (operation-context boundary))]
-     (prepare-settlement-send boundary result))))
+   (let [prior (.get command-origin)]
+     (.remove command-origin)
+     (try
+       (let [original? (origin-boundaries-current?)
+             boundary (begin-command prepared-server ctx command)
+             ;; Transport enrichment may supply context, not command identity.
+             boundary (if bind-context (assoc boundary :ctx (bind-context boundary)) boundary)
+             execute! (get-in boundary [:operation-entry :execute!])
+             invocation (operation-context boundary)
+             result (try
+                      (when (and original? (origin-boundaries-current?))
+                        (.set command-origin {:invocation invocation}))
+                      (execute! invocation)
+                      (finally (.remove command-origin)))]
+         (prepare-settlement-send boundary result))
+       (finally
+         (if prior (.set command-origin prior) (.remove command-origin)))))))
 
 (defn run-wire-command
   "Decode one browser wire command and execute it through run-command."
