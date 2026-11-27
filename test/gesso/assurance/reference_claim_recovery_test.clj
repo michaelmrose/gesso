@@ -6,6 +6,7 @@
             [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.assurance.reference-mapped-submission :as submission]
             [gesso.assurance.reference-issued-envelope-argument :as issued-envelope]
+            [gesso.assurance.reference-physical-envelope-argument :as physical-envelope]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
@@ -205,6 +206,24 @@
                      (let [r (issued-envelope/compare-recovery! node admit mapped-source outcome-declarations steps @observation-handle)]
                        (is (= :unissued-envelope-origin (:reason r)))
                        (is (not (contains? r :instances)))))
+                   (let [check-physical! #(physical-envelope/compare-recovery! node %1 admit mapped-source outcome-declarations %2 %3)
+                         r (check-physical! tables steps @observation-handle)]
+                     (if original-node?
+                       (do
+                         (is (= :conditional-physical-source-envelope-recovery (:status r)) (pr-str r))
+                         (is (= [:matched-predecessor :matched-earlier-selected-image :matched-predecessor] (:preparation-images r)))
+                         (is (= :distinct-from-stale-preparation (:aborted-prestate r)))
+                         (is (= :matched-physical-stutter (:aborted-effect r)))
+                         (is (= :matched-independent-retained-replay (:physical-rows r)))
+                         (is (= [true false true] (mapv :committed? (:ledger r))))
+                         (is (= :not-established (:physical-preparation-provenance r) (:provider-refinement r)))
+                         (doseq [bad [(check-physical! (disj tables :memberships) steps @observation-handle)
+                                      (check-physical! tables (assoc-in steps [1 :expectation :tx-id] -1) @observation-handle)
+                                      (with-redefs [xt/q (constantly [])]
+                                        (check-physical! tables steps @observation-handle))]]
+                           (is (= :not-established (:status bad)) (pr-str bad))
+                           (is (not (contains? bad :preparation-images)))))
+                       (is (= :not-established (:status r)))))
                    (is (= :matched (:status issued-observation)) (pr-str issued-observation))
                    (is (= submission/observed-profile (:observed-profile issued-observation)))
                    (is (= :matched-local-issued-policy-window (:observation-origin issued-observation)))

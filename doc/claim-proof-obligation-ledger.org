@@ -10100,3 +10100,40 @@ Next: join the issued source-envelope correspondence to independently
 acquired, pinned physical prestate and retained transaction evidence,
 keeping the aborted attempt's stale preparation separate from the
 actual preceding physical state and preserving the trust boundaries.
+
+* v2873 — bind issued envelopes to selected physical recovery
+
+Compose the issued source-envelope comparison with the independently
+observed processed retained log and selected retained recovery checker.
+Require exactly three consecutive selected transactions and matching
+retained inputs. Decode a single-database snapshot token and use it for
+explicit system-time and valid-time historical reads of the mapped
+physical document and command journal tables. Independently replay the
+retained operations, compare full selected row maps at predecessor and
+post-transaction cuts, and check the pinned transaction ledger identities,
+system times and commitment bits. Require token echo before and after
+readback and an unchanged processed retained-history sample.
+
+For the selected commit/abort/commit trajectory, the winning preparation
+and recovered refusal match their physical predecessors. The losing
+preparation instead matches the earlier selected image, differs from the
+actual predecessor, and the abort leaves that predecessor unchanged at
+the selected physical readback. Matching an earlier image does not prove
+that preparation was acquired from it. Aborted receipt identity, complete
+writer coverage and provider refinement remain open. The original
+39-condition register is unchanged; no authority, certificate or proof
+discharge is issued. This diagnostic is restricted to the original local
+issued observation, not a cross-restart authority or a general replay
+claim.
+
+Focused JVM regression: 1 test / 599 assertions, zero failures or errors,
+in reference-claim-recovery-test. Exercise actual embedded XTDB and
+reopen, the three preparation images, pinned ledger outcomes and abort
+stutter; reject incomplete table scope, wrong transaction identity,
+substituted query boundary and reopened connectable. Full project gates
+not rerun. No production submission behavior changed.
+
+Next: connect the checked selected physical rows to the original abstract
+projection and invariant-preservation equations at the committed cuts,
+including the journal-only refusal and physical abort stutter; distinguish
+selected conditional correspondence from a general CLM-R2 discharge.
