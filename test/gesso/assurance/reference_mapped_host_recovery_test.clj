@@ -966,6 +966,13 @@
                                           [:authorized-historical-lineage :same-store-incarnation])]
                         (is (= :conditional-installed-retained-writer-history (:status qualified)) (pr-str (dissoc qualified :recovery)))
                         (is (= :complete-at-selected-cut (:retained-transaction-classification qualified)))
+                        (let [refinement (:selected-physical-refinement qualified)]
+                          (is (= :conditional-selected-physical-refinement (:status refinement)))
+                          (is (= (mapv :tx-id (subvec history 2)) (mapv :tx-id (:steps refinement))))
+                          (is (= 4 (count (:declared-replay-schemas refinement))))
+                          (is (= :not-established (:replay-observation-coverage refinement)
+                                 (:universal-refinement refinement) (:writer-coverage refinement)))
+                          (is (= :not-performed (:proof-discharge refinement))))
                         (let [temporal (:selected-temporal-coverage qualified)
                               intervals (:intervals temporal)]
                           (is (= :conditional-selected-diagonal-coverage (:status temporal)))

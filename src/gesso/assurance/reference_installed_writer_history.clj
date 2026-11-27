@@ -4,6 +4,7 @@
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.assurance.reference-retained-acquisition :as retained]
             [gesso.assurance.reference-writer-temporal-coverage :as temporal]
+            [gesso.assurance.reference-selected-refinement :as refinement]
             [gesso.live.consistency.xtdb :as xtdb]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.live.outbox.writer-policy :as policy]))
@@ -14,6 +15,8 @@
 (def ^:private read-cut recovery/read-local-recovery-cut!)
 (def ^:private read-acquisition retained/read-acquisition!)
 (def ^:private check-temporal temporal/check-selection!)
+(def ^:private read-invariant recovery/read-local-recovery-invariant-evidence!)
+(def ^:private compose-refinement refinement/compose!)
 (def ^:private current-token xtdb/current-submission-policy-token)
 (def ^:private active-root policy/activated-policy-root)
 (def ^:private read-observation publication/read-framed-submission-observation!)
@@ -27,6 +30,8 @@
                  (identical? read-cut recovery/read-local-recovery-cut!)
                  (identical? read-acquisition retained/read-acquisition!)
                  (identical? check-temporal temporal/check-selection!)
+                 (identical? read-invariant recovery/read-local-recovery-invariant-evidence!)
+                 (identical? compose-refinement refinement/compose!)
                  (identical? current-token xtdb/current-submission-policy-token)
                  (identical? active-root policy/activated-policy-root)
                  (identical? read-observation publication/read-framed-submission-observation!))
@@ -117,7 +122,9 @@
                 _ (when-not (and sample (= cut (select-keys sample (keys cut))))
                     (reject! :installed-history-temporal-sample-mismatch))
                 temporal-report (check-temporal (:replay-inputs sample) cut partition
-                                                (:protected-tables classified))]
+                                                (:protected-tables classified))
+                refinement-report (compose-refinement source declarations fingerprint cases classified cut partition temporal-report
+                                                      (read-invariant admission observation (:recovery-cut-observation compared)))]
             (boundaries!)
             (when-not (and (identical? token (current-token node))
                            (= root (active-root node admission token)))
@@ -127,7 +134,8 @@
                          :retained-transaction-classification :complete-at-selected-cut
                          :post-initialization-steps partition
                          :selected-temporal-coverage temporal-report
-                         :remaining-conditions (into (into (:remaining-conditions classified) (:remaining-conditions temporal-report))
+                         :selected-physical-refinement refinement-report
+                         :remaining-conditions (into (into (into (:remaining-conditions classified) (:remaining-conditions temporal-report)) (:remaining-conditions refinement-report))
                                                      #{:historical-generation-and-continuous-mediation
                                                        :provider-and-retained-source-completeness
                                                        :complete-read-only-and-temporal-observation-coverage})

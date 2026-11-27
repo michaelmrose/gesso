@@ -9251,3 +9251,39 @@ premise accepted or discharged.
 Next: compose the selected temporal and transaction classifications
 with the general conditional transition and replay arguments. Retain
 universal writer, provider and temporal completeness as open premises.
+
+* v2853 — compose selected physical refinement
+
+Read the exact issued recovery cut's retained invariant and physical
+transition diagnostics using the original admission and observation.
+Re-derive the committed, generic abort/maintenance and replay schemas.
+Bind the complete installed alternative identities to the same source
+catalog, payload fingerprint and historical cut. Require the ordered
+partition, temporal intervals and observed physical transition reports
+to cover exactly the same selected suffix and the identical pinned
+initial, prestate and poststate coordinates.
+
+For every selected step check its relation, checked row-effect class,
+original writing alternative identity or maintenance branch, and the
+corresponding conditional schema. Require no intervening protected
+valid-time boundaries. Attach the conditional refinement diagnostic to
+the existing issued writer-history result. Preserve all prior conditions,
+including the observed transition and temporal conditions. The replay
+schemas cover declared alternatives, not actual replay observations.
+The pure composition helper accepts diagnostic inputs, not credentials;
+the installed entry point obtains them from the issued recovery cut.
+
+Eleven-namespace assurance regression: 53 tests / 7619 assertions.
+Worker-interleaved persistent assembled-host recovery: 1 test / 1301
+assertions. Both passed without failures or errors, including new
+composition checks, restart and copied-store recovery. Focused negative
+checks reject changed cut, coordinates, interval sequence, alternative
+identity, policy branch and physical row-effect classification. Full
+project gates not run. Historical v12 unchanged; no original premise
+accepted or discharged.
+
+Next: formulate the general conditional admitted-step refinement
+statement with explicit exhaustive writer and temporal premises,
+separate from selected issued history correspondence. Then bind the
+result to the original CLM-R2 obligation and historical judgment
+without upgrading unproved assumptions to discharged premises.

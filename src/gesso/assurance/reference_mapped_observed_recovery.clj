@@ -414,6 +414,16 @@
                    (identical? observation (:observation entry)))
           (:historical-cut entry))))))
 
+(defn read-local-recovery-invariant-evidence!
+  "Read the exact issued cut's sensitive diagnostic evidence, not authority."
+  [admission observation handle]
+  (when (instance? RecoveryCutObservation handle)
+    (locking recovery-cuts
+      (let [entry (.get recovery-cuts handle)]
+        (when (and entry (identical? admission (:admission entry))
+                   (identical? observation (:observation entry)))
+          (:selected-invariant-evidence entry))))))
+
 (def conditional-profile :selected-conditional-historical-recovery-v1)
 (deftype ConditionalRecovery [])
 (def ^:private conditional-recoveries (java.util.WeakHashMap.))
