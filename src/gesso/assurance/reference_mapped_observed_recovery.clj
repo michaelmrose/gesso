@@ -228,7 +228,7 @@
    :recovery-linkage :provider-refinement :source-provenance :outcome-provenance
    :submission-provenance :aborted-receipt-identity :worker-observation-provenance
    :command-origin-correspondence :selected-command-origins :abort-recovery-execution
-   :command-authentication :worker-correspondence])
+   :command-authentication :intervening-maintenance :worker-correspondence])
 
 (defn- checked-abstract-induction [admission]
   ;; Reports are descriptive data. Only the captured checker over the exact
@@ -525,13 +525,79 @@
      :command-authentication :not-established
      :authority :none :certificate :not-issued}))
 
+(def worker-authentication-profile :selected-worker-authentication-premises-v1)
+
+(defn- maintenance-identity [selected]
+  ;; The assumption encoder admits pure structural values, not UUID or
+  ;; Instant objects. These positions have fixed types in the checked history.
+  (update (select-keys selected [:tx-id :intent-id :maintenance]) :intent-id str))
+
+(defn- worker-origin-identity [selected]
+  (assoc (maintenance-identity selected)
+         :system-time (str (:system-time selected))
+         :committed? (:committed? selected)
+         :worker-origin (update (:worker-origin selected) :lifecycle-ref str)))
+
+(defn- worker-authentication-premises
+  "Describe, never accept or discharge, the worker and dispatch premises of
+   the original issued cut. The cut fingerprint binds the full retained
+   envelopes, including acknowledgment receipts. Local origin does not
+   authenticate the configured worker or establish genuine source acceptance.
+   No browser delivery or durable external delivery proposition is implied."
+  [{:keys [scope original-recovery judgment-subject command-observation-ref]}]
+  (let [id :reference-worker/selected-maintenance
+        worker-id :reference-worker/worker-identity
+        attribution-id :reference-worker/maintenance-attribution
+        dispatch-id :reference-worker/dispatch-acceptance
+        selected (mapv maintenance-identity (:intervening-maintenance original-recovery))
+        observed (mapv worker-origin-identity (get-in original-recovery [:worker-correspondence :selected-maintenance]))
+        acknowledged (filterv #(= :dispatch-acknowledgment (:maintenance %)) selected)
+        interface {:profile worker-authentication-profile
+                   :publication-source-id (:publication-source-id scope)
+                   :historical-cut (:historical-cut scope)
+                   :recovery-cut-ref command-observation-ref
+                   :judgment-subject judgment-subject
+                   :selected-tx-ids (:selected-tx-ids original-recovery)
+                   :selected-commitments (:selected-commitments original-recovery)
+                   :selected-maintenance selected
+                   :selected-acknowledgments acknowledged
+                   :worker-observation-provenance (or (:worker-observation-provenance original-recovery)
+                                                      :not-established)
+                   :observed-maintenance observed}
+        describe (fn [premise proposition boundary dependencies origin]
+                   (original-assumption-description
+                    {:id premise :subject {:kind :runtime :id id :interface interface}
+                     :scope {:kind :runtime :id id} :proposition [proposition]
+                     :parameters {} :semantic-context {:profile worker-authentication-profile}
+                     :dependencies dependencies :origin origin
+                     :implementation-boundary boundary}))
+        obligations (cond-> []
+                      (seq selected)
+                      (conj (describe worker-id :reference-worker/authenticate-selected-worker-identities
+                                      :gesso.live.outbox.lifecycle/worker-identity #{} :environment)
+                            (describe attribution-id :reference-worker/authenticate-selected-maintenance-executions
+                                      :gesso.live.outbox.writer-policy/maintenance-attribution
+                                      #{worker-id} :implementation-correspondence))
+                      (seq acknowledged)
+                      (conj (describe dispatch-id :reference-worker/authenticate-selected-source-acceptance
+                                      :gesso.live.outbox.delivery/source-acceptance
+                                      #{attribution-id} :implementation-correspondence)))]
+    {:profile worker-authentication-profile
+     :scope interface
+     :obligations obligations
+     :open-premise-fingerprints (set (map :premise-fingerprint obligations))
+     :premise-acceptance :not-performed
+     :worker-authentication (if (seq selected) :not-established :not-applicable)
+     :dispatch-authentication (if (seq acknowledged) :not-established :not-applicable)
+     :authority :none :certificate :not-issued}))
+
 (defn- acceptance-boundaries-current? []
   (and (cut-boundaries-current?)
        (conditional-boundaries-current?)
        (identical? original-deployment-acceptance storage/describe-deployment-acceptance)
        (identical? original-assumption-description assumption/describe-assumption)))
 
-(def judgment-profile :selected-conditional-activated-recovery-judgment-v4)
+(def judgment-profile :selected-conditional-activated-recovery-judgment-v5)
 
 (defn- declare-recovery-trust* [entry declaration]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
@@ -544,7 +610,8 @@
         (try
           (let [r (original-deployment-acceptance scope declaration)
                 fresh (checked-abstract-induction admission)
-                command-premises (command-authentication-premises entry)]
+                command-premises (command-authentication-premises entry)
+                worker-premises (worker-authentication-premises entry)]
             (cond
               (not (and (acceptance-boundaries-current?)
                         (or (nil? (:worker-correspondence original-recovery))
@@ -561,6 +628,7 @@
                       :abstract-induction abstract-induction
                       :original-recovery original-recovery
                       :command-authentication-premises command-premises
+                      :worker-authentication-premises worker-premises
                       :cut-correspondence cut-correspondence
                       :historical-assurance :conditional-on-declared-trust
                       :open-premise-fingerprints (set (map :premise-fingerprint (:obligations r)))
@@ -577,8 +645,8 @@
    activated trajectory with its issued historical comparison and exact
    declared trust. Recheck the original issued abstract induction and
    retain its entire report, including all open obligations. Describe the
-   original command authentication premises separately: storage trust
-   neither accepts nor discharges them. Host adoption is recorded by the host
+   original command, worker and source-acceptance premises separately:
+   storage trust neither accepts nor discharges them. Host adoption is recorded by the host
    boundary, not by this declaration. Open premises remain open. No
    Claim invariant theorem or universal refinement is established.
    The four-argument form additionally requires the exact original issued

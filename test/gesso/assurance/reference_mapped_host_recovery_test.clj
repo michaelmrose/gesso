@@ -160,6 +160,46 @@
     (is (= :not-established (:command-authentication command)))
     (is (= :none (:authority command)))
     (is (= :not-issued (:certificate command))))
+  (let [worker (:worker-authentication-premises result)
+        interface (:scope worker)
+        selected (:intervening-maintenance original)
+        observed (get-in original [:worker-correspondence :selected-maintenance])
+        command (:command-authentication-premises result)
+        [identity attribution dispatch] (:obligations worker)]
+    (is (= observed-recovery/worker-authentication-profile (:profile worker)))
+    (is (= (:judgment-subject result) (:judgment-subject interface)))
+    (is (= (:historical-cut scope) (:historical-cut interface)))
+    (is (= (:publication-source-id scope) (:publication-source-id interface)))
+    (is (= (get-in command [:scope :command-observation-ref]) (:recovery-cut-ref interface)))
+    (is (= (:selected-tx-ids original) (:selected-tx-ids interface)))
+    (is (= (:selected-commitments original) (:selected-commitments interface)))
+    (is (= (mapv #(update % :intent-id str) selected) (:selected-maintenance interface)))
+    (is (= (filterv #(= :dispatch-acknowledgment (:maintenance %)) (:selected-maintenance interface))
+           (:selected-acknowledgments interface)))
+    (is (= (mapv :tx-id observed) (mapv :tx-id (:observed-maintenance interface))))
+    (is (= (mapv #(str (get-in % [:worker-origin :lifecycle-ref])) observed)
+           (mapv #(get-in % [:worker-origin :lifecycle-ref]) (:observed-maintenance interface))))
+    (is (= (mapv #(str (:system-time %)) observed) (mapv :system-time (:observed-maintenance interface))))
+    (is (= (or (:worker-observation-provenance original) :not-established)
+           (:worker-observation-provenance interface)))
+    (is (= (:open-premise-fingerprints worker) (set (map :premise-fingerprint (:obligations worker)))))
+    (is (not-any? (:trusted-assumptions result) (:open-premise-fingerprints worker)))
+    (is (not-any? (:open-premise-fingerprints command) (:open-premise-fingerprints worker)))
+    (is (every? #(= :open (:discharge-state %)) (:obligations worker)))
+    (is (every? #(= interface (get-in % [:assumption :subject :interface])) (:obligations worker)))
+    (is (= :not-performed (:premise-acceptance worker)))
+    (is (= :none (:authority worker)))
+    (is (= :not-issued (:certificate worker)))
+    (if (seq selected)
+      (do (is (= [:reference-worker/worker-identity :reference-worker/maintenance-attribution
+                  :reference-worker/dispatch-acceptance]
+                 (mapv #(get-in % [:assumption :id]) (:obligations worker))))
+          (is (= #{} (get-in identity [:assumption :dependencies])))
+          (is (= #{:reference-worker/worker-identity} (get-in attribution [:assumption :dependencies])))
+          (is (= #{:reference-worker/maintenance-attribution} (get-in dispatch [:assumption :dependencies])))
+          (is (= :not-established (:worker-authentication worker) (:dispatch-authentication worker))))
+      (do (is (empty? (:obligations worker)))
+          (is (= :not-applicable (:worker-authentication worker) (:dispatch-authentication worker))))))
   (is (= (set (map :premise-fingerprint (:obligations result)))
          (:open-premise-fingerprints result) (:trusted-assumptions result)))
   (is (every? #(= :open (:discharge-state %)) (:obligations result)))
@@ -382,7 +422,8 @@
                                  (is (= reason (:reason failure)))
                                  (is (not-any? #(contains? failure %)
                                                [:judgment-subject :judgment-profile :trusted-assumptions :original-recovery
-                                                :abstract-induction :abstract-induction-binding :command-authentication-premises]))))
+                                                :abstract-induction :abstract-induction-binding :command-authentication-premises
+                                                :worker-authentication-premises]))))
                              (is (not (contains? trusted :deployment-adoption)))
                              (is (not (contains? selected :judgment-profile)))
                              (is (= :explicit-declaration-only (:premise-acceptance trusted)))
@@ -404,7 +445,8 @@
                              (with-redefs [assumption/describe-assumption (constantly nil)]
                                (let [failure (observed-recovery/declare-conditional-recovery-trust! handle declaration)]
                                  (is (= :conditional-recovery-boundary-replaced (:reason failure)))
-                                 (is (not (contains? failure :command-authentication-premises)))))
+                                 (is (not (contains? failure :command-authentication-premises)))
+                                 (is (not (contains? failure :worker-authentication-premises)))))
                              (with-redefs [storage/describe-deployment-acceptance (constantly trusted)]
                                (is (= :conditional-recovery-boundary-replaced
                                       (:reason (observed-recovery/declare-conditional-recovery-trust! handle declaration)))))
@@ -982,3 +1024,59 @@
     (is (= ops (project :dispatch-acknowledgment ops)))
     (is (nil? (project :lease-acquisition (assoc-in ops [1 1] encoded))))
     (is (nil? (project :lease-acquisition (assoc-in ops [2 0] "unexpected guard"))))))
+
+(deftest worker-authentication-premises-bind-original-maintenance
+  (let [describe #'observed-recovery/worker-authentication-premises
+        intent (random-uuid)
+        lifecycle (random-uuid)
+        selected [{:tx-id 2 :intent-id intent :maintenance :lease-acquisition}
+                  {:tx-id 3 :intent-id intent :maintenance :dispatch-acknowledgment}]
+        observed (mapv #(assoc % :committed? true :system-time (java.time.Instant/parse "2026-11-26T20:00:00.123456Z")
+                               :worker-origin {:source-id "claim" :worker-id "worker" :lifecycle-ref lifecycle
+                                               :cycle-number 2 :maintenance (:maintenance %)
+                                               :origin :scheduled-local-cycle :authentication :not-established
+                                               :call-chain :matched-scheduled-maintenance}) selected)
+        entry {:scope {:publication-source-id "claim" :historical-cut {:payload-fingerprint "fixture"}}
+               :command-observation-ref "original-cut"
+               :judgment-subject {:catalog-id :fixture/claim :selected-operations [:accept :accept :refuse]}
+               :original-recovery {:selected-tx-ids [1 4 5] :selected-commitments [:committed :aborted :committed]
+                                   :intervening-maintenance selected
+                                   :worker-observation-provenance :matched-local-issued-host-capture
+                                   :worker-correspondence {:selected-maintenance observed}}}
+        r (describe entry)
+        fingerprints (:open-premise-fingerprints r)]
+    (is (= r (describe (assoc-in entry [:scope :retained-acquisition-ref] "new-target"))))
+    (is (= 3 (count fingerprints)))
+    (is (= :not-established (:worker-authentication r) (:dispatch-authentication r)))
+    (is (= :not-performed (:premise-acceptance r)))
+    (is (every? #(= :open (:discharge-state %)) (:obligations r)))
+    (doseq [changed [(assoc entry :command-observation-ref "other-cut")
+                     (assoc-in entry [:scope :publication-source-id] "other-source")
+                     (assoc-in entry [:scope :historical-cut :payload-fingerprint] "other-content")
+                     (assoc-in entry [:judgment-subject :catalog-id] :fixture/other)
+                     (assoc-in entry [:original-recovery :selected-tx-ids] [1 4 6])
+                     (assoc-in entry [:original-recovery :intervening-maintenance 0 :intent-id] (random-uuid))
+                     (update-in entry [:original-recovery :intervening-maintenance] #(vec (reverse %)))
+                     (assoc-in entry [:original-recovery :worker-correspondence :selected-maintenance 0 :worker-origin :lifecycle-ref] (random-uuid))
+                     (assoc-in entry [:original-recovery :worker-correspondence :selected-maintenance 0 :worker-origin :cycle-number] 3)
+                     (assoc-in entry [:original-recovery :worker-correspondence :selected-maintenance 0 :system-time] (java.time.Instant/parse "2026-11-26T20:00:01Z"))]]
+      (let [other (describe changed)]
+        (is (not-any? fingerprints (:open-premise-fingerprints other)))
+        (is (= :not-established (:worker-authentication other) (:dispatch-authentication other)))
+        (is (= :not-performed (:premise-acceptance other)))))
+    (let [absent (describe (update entry :original-recovery #(-> % (dissoc :worker-correspondence)
+                                                                  (assoc :worker-observation-provenance :not-established))))
+          acquisition-only (describe (update entry :original-recovery assoc :intervening-maintenance [(first selected)]
+                                             :worker-correspondence {:selected-maintenance [(first observed)]}))
+          adjacent (describe (update entry :original-recovery dissoc :intervening-maintenance
+                                     :worker-correspondence :worker-observation-provenance))]
+      (is (= 3 (count (:obligations absent))))
+      (is (empty? (get-in absent [:scope :observed-maintenance])))
+      (is (= :not-established (get-in absent [:scope :worker-observation-provenance])))
+      (is (= :not-established (:worker-authentication absent) (:dispatch-authentication absent)))
+      (is (not-any? fingerprints (:open-premise-fingerprints absent)))
+      (is (= 2 (count (:obligations acquisition-only))))
+      (is (= :not-applicable (:dispatch-authentication acquisition-only)))
+      (is (empty? (:obligations adjacent)))
+      (is (= :not-applicable (:worker-authentication adjacent) (:dispatch-authentication adjacent)))
+      (is (empty? (:open-premise-fingerprints adjacent))))))

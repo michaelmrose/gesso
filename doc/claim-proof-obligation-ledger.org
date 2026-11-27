@@ -7850,3 +7850,45 @@ Next: describe the outstanding worker and external dispatch
 authentication premises bound to the original cut, its selected
 maintenance identities, and the original semantic subject. Preserve
 the separate command, storage and abstract-induction obligations.
+
+* v2820 — describe subject-bound worker and dispatch authentication premises
+
+Retain the independently selected intervening maintenance identities
+even when the original cut has no issued worker capture. The v5
+conditional historical judgment describes open worker identity and
+maintenance attribution premises for nonempty selected maintenance,
+and an additional source-acceptance premise for selected dispatch
+acknowledgments. Attribution depends on worker identity; source
+acceptance depends on attribution. These are named propositions,
+not proof that any selected source actually accepted an emission.
+No durable external delivery or browser receipt proposition is implied.
+
+Bind the canonical premise subjects to the original cut reference,
+publication source, historical payload fingerprint and coordinates,
+ordered semantic subject and command identities, ordered maintenance
+identities and acknowledgment subset, and available original worker
+observations including lifecycle, cycle and system time. Project UUID
+and Instant positions to strings for the structural subject encoder;
+the original correspondence remains unchanged. Preserve distinctions
+between an unobserved worker, a selected acquisition without an
+acknowledgment and a trajectory with no selected maintenance. Changing
+the target reference alone does not change the original premises.
+
+Keep worker premise fingerprints, obligations and acceptance separate
+from command, storage and abstract induction material. Configured
+storage trust cannot accept worker authentication implicitly. All
+applicable worker premises remain open, unadmitted and unaccepted.
+
+Focused JVM: 5 tests / 1434 assertions, zero failures or errors, in the
+assembled-host recovery namespace, including both genuine persistent
+interleaved and adjacent fixtures, reopening and independently copied
+storage, command and worker premise regressions and the provider-specific
+deadline projection regression. Original worker polling and existing
+offline dependency bundle retained. Full project gates not run.
+No independent authentication, writer closure, provider refinement,
+invariant theorem, certificate or CLM-R2 discharge is established.
+
+Next: audit and compose the outstanding physical refinement and writer
+coverage obligations for the exact selected historical subject, keeping
+the original abstract, command, worker and storage obligations distinct
+from any universal CLM-R2 assertion.
