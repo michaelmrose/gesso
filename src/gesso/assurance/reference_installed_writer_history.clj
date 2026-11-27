@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-installed-writer-history
   "Conditional classification of the exact issued retained transaction cut."
-  (:require [gesso.assurance.reference-installed-writer-classification :as installed]
+  (:require [gesso.assurance.reference-clm-r2-binding :as clm-r2]
+            [gesso.assurance.reference-installed-writer-classification :as installed]
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.assurance.reference-retained-acquisition :as retained]
             [gesso.assurance.reference-writer-temporal-coverage :as temporal]
@@ -20,6 +21,10 @@
 (def ^:private current-token xtdb/current-submission-policy-token)
 (def ^:private active-root policy/activated-policy-root)
 (def ^:private read-observation publication/read-framed-submission-observation!)
+(def ^:private qualified-histories (java.util.WeakHashMap.))
+(def ^:private derive-clm-r2 clm-r2/derive!)
+(def ^:private declare-trust recovery/declare-conditional-recovery-trust!)
+(def refined-judgment-profile :selected-conditional-activated-recovery-refinement-judgment-v1)
 
 (defn- reject! [reason]
   (throw (ex-info "Unqualified installed writer history" {:reason reason})))
@@ -129,7 +134,7 @@
             (when-not (and (identical? token (current-token node))
                            (= root (active-root node admission token)))
               (reject! :installed-history-generation-changed))
-            (merge base {:status :conditional-installed-retained-writer-history
+            (let [result (merge base {:status :conditional-installed-retained-writer-history
                          :scope :selected-issued-post-initialization-transaction-cut
                          :retained-transaction-classification :complete-at-selected-cut
                          :post-initialization-steps partition
@@ -139,6 +144,110 @@
                                                      #{:historical-generation-and-continuous-mediation
                                                        :provider-and-retained-source-completeness
                                                        :complete-read-only-and-temporal-observation-coverage})
-                         :recovery compared}))))
+                         :recovery compared})]
+              ;; Do not retain the key (the cut handle) in its own weak-map value.
+              (locking qualified-histories
+                (.put qualified-histories (:recovery-cut-observation compared)
+                      {:admission admission :observation observation
+                       :source source :declarations declarations :fingerprint fingerprint :cases cases
+                       :history (dissoc result :recovery)}))
+              result))))
       (catch clojure.lang.ExceptionInfo e
         (assoc base :status :not-established :reason (or (:reason (ex-data e)) :unqualified-installed-history))))))
+
+
+(defn- judgment-boundaries! []
+  (boundaries!)
+  (when-not (and (identical? derive-clm-r2 clm-r2/derive!)
+                 (identical? declare-trust recovery/declare-conditional-recovery-trust!))
+    (reject! :refined-judgment-boundary-replaced)))
+
+(defn- qualified-history [admission observation handle]
+  (locking qualified-histories
+    (let [entry (.get qualified-histories handle)]
+      (when (and entry (identical? admission (:admission entry))
+                 (identical? observation (:observation entry)))
+        entry))))
+
+(defn- join-judgment! [history cut checked binding judgment]
+  (let [refinement (:selected-physical-refinement history)
+        subject (:judgment-subject judgment)
+        register (:original-open-obligation-ids-by-operation binding)
+        by-operation (:original-obligations-by-operation binding)
+        inventory (:obligation-inventory judgment)
+        selected (filterv :alternative (:steps refinement))]
+    (when-not (and (= :conditional (:status judgment))
+                   (= recovery/judgment-profile (:judgment-profile judgment))
+                   (= :conditional-installed-retained-writer-history (:status history))
+                   (= :conditional-selected-physical-refinement (:status refinement))
+                   (= :conditional-original-clm-r2-binding (:status binding))
+                   (= :open (:original-obligation-status binding))
+                   (= :not-performed (:proof-discharge history) (:proof-discharge refinement)
+                      (:proof-discharge binding) (:proof-discharge judgment) (:proof-discharge inventory))
+                   (= :not-performed (:premise-acceptance binding))
+                   (= :not-established (:universal-refinement history) (:universal-refinement refinement)
+                      (:universal-refinement binding) (:universal-refinement inventory))
+                   (= :not-established (:writer-coverage history) (:temporal-coverage history)
+                      (:replay-observation-coverage refinement))
+                   (some? checked) (= checked (:selected-invariant-evidence judgment))
+                   (= :checked (:status checked)) (string? (:recovery-cut-ref checked))
+                   (= cut (:historical-cut checked) (get-in judgment [:judgment-scope :historical-cut]))
+                   (= (:recovery-cut-ref checked) (get-in judgment [:physical-refinement-premises :scope :recovery-cut-ref]))
+                   (= subject (:judgment-subject checked))
+                   (= (:catalog-fingerprint binding) (:catalog-fingerprint subject))
+                   (= (:induction-fingerprint binding) (:induction-fingerprint subject))
+                   (= (:abstract-report-fingerprint binding) (:abstract-induction-fingerprint subject)
+                      (get-in inventory [:abstract :report-fingerprint]))
+                   (= register (get-in inventory [:abstract :original-obligations :by-operation]))
+                   (= (:abstract-open-assumptions binding) (get-in inventory [:abstract :open]))
+                   (= (subvec (:transaction-ids cut) 2) (mapv :tx-id (:steps refinement)))
+                   (= (get-in judgment [:original-recovery :selected-tx-ids]) (mapv :tx-id selected))
+                   (= (get-in judgment [:original-recovery :selected-commitments])
+                      (mapv #(case (:class %) :committed-mapped :committed :aborted-attempt :aborted nil) selected))
+                   (= (mapv #(select-keys (:alternative %) [:alternative-id :mapping-fingerprint :transition-fingerprint]) selected)
+                      (mapv #(select-keys % [:alternative-id :mapping-fingerprint :transition-fingerprint]) (:selected-operations subject)))
+                   (every? #(= (:alternative %) (get-in by-operation [(get-in % [:alternative :alternative-id]) :identity])) selected)
+                   (= (:declared-replay-schemas refinement)
+                      (set (keys (get-in binding [:argument :schemas :gesso.assurance.reference-admitted-step-argument/replay :alternatives])))))
+      (reject! :refined-judgment-cut-or-subject-mismatch))
+    {:status :conditional :judgment-profile refined-judgment-profile
+     :scope :original-issued-selected-history-and-separate-general-argument
+     :historical-judgment judgment
+     :judgment-subject subject :historical-cut cut :recovery-cut-ref (:recovery-cut-ref checked)
+     :original-clm-r2-binding binding :selected-physical-refinement refinement
+     :selected-temporal-coverage (:selected-temporal-coverage history)
+     :obligation-inventory inventory
+     :selected-remaining-conditions (:remaining-conditions history)
+     :general-remaining-conditions (:remaining-conditions binding)
+     :condition-scope :separate-selected-and-universal-no-implication
+     :universal-refinement :not-established :writer-coverage :not-established
+     :temporal-coverage :not-established :proof-discharge :not-performed
+     :new-premise-acceptance :not-performed :authority :none :certificate :not-issued}))
+
+(defn declare-refined-recovery-trust!
+  "Compose a separately issued writer-history cut with the exact prepared
+   historical judgment. The declaration is the original storage trust
+   declaration only; it grants no new authority. Re-derive the general
+   CLM-R2 binding from the captured original admission and source. The
+   original v12 judgment is preserved in full. No supplied diagnostic
+   report or matching-content cut may substitute for the issued cut."
+  [admission observation cut-handle conditional-handle declaration]
+  (try
+    (judgment-boundaries!)
+    (let [{:keys [source declarations fingerprint cases history] :as entry}
+          (qualified-history admission observation cut-handle)]
+      (when-not entry (reject! :unissued-qualified-writer-history))
+      (let [cut (read-cut admission observation cut-handle)
+            checked (read-invariant admission observation cut-handle)
+            judgment (declare-trust conditional-handle declaration)]
+        ;; Reject the wrong comparison before rechecking the expensive general argument.
+        (when-not (and cut checked (= :conditional (:status judgment))
+                       (= checked (:selected-invariant-evidence judgment)))
+          (reject! :refined-judgment-cut-or-subject-mismatch))
+        (let [binding (derive-clm-r2 admission source declarations fingerprint cases)
+              result (join-judgment! history cut checked binding judgment)]
+          (judgment-boundaries!)
+          result)))
+    (catch clojure.lang.ExceptionInfo e
+      {:status :not-established :reason (or (:reason (ex-data e)) :unqualified-refined-judgment)
+       :proof-discharge :not-performed :authority :none :certificate :not-issued})))

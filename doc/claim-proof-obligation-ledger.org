@@ -9363,3 +9363,38 @@ no original premise accepted or discharged.
 Next: bind the original conditional CLM-R2 argument and separately
 qualified selected physical refinement to the same issued historical
 judgment, preserving all original premise fingerprints and scope.
+
+* v2856 — compose the issued historical refinement judgment
+
+Retain the qualified selected writer-history diagnostics in a private
+weak registry keyed by the exact issued recovery cut, with the original
+admission, observation, source, declarations and catalog cases. Store no
+reference to the key in its value. Issue this entry only after the
+installed policy, complete selected transaction partition, temporal
+coverage and selected physical refinement have been checked.
+
+Provide a separate refined historical judgment entry point. Re-derive
+the original v12 judgment from the prepared comparison and the caller's
+original storage-trust declaration, and require the same exact issued
+invariant evidence and recovery-cut reference. Re-derive the general
+CLM-R2 binding from the original admission and source. Match the original
+catalog, induction, per-operation obligation register, selected operation
+identities, ordered transaction classes and declared replay schemas.
+Preserve the entire v12 historical judgment and its premise inventory.
+Keep selected-history and general conditional requirements separate;
+neither supplies a logical implication discharging the other's premises.
+This is not a new storage-trust adoption path, authority credential,
+or replacement of v12. No new premise acceptance or discharge.
+
+Focused three-namespace regression: 5 tests / 65 assertions. Actual
+worker-interleaved assembled persistent-host recovery: 1 test / 1312
+assertions. Both passed without failures or errors. Reject unissued
+history, substituted derivation boundaries, different observation and
+different issued cut with the same retained content. Includes existing
+persistent restart and copied-store checks. Initial registry syntax
+error corrected before the passing runs. Full project gates not run.
+
+Next: inspect and classify the remaining general CLM-R2 assumptions by
+their actual discharge or explicit trust boundary, prioritizing the
+universal writer-mediation and provider-semantics gap. Do not confuse
+the combined conditional historical judgment with universal refinement.

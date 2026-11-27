@@ -966,6 +966,37 @@
                                           [:authorized-historical-lineage :same-store-incarnation])]
                         (is (= :conditional-installed-retained-writer-history (:status qualified)) (pr-str (dissoc qualified :recovery)))
                         (is (= :complete-at-selected-cut (:retained-transaction-classification qualified)))
+                        (let [comparison (first foreign)
+                              scope (observed-recovery/read-conditional-recovery-scope! comparison)
+                              declaration {:deployment-id :fixture/refinement
+                                           :identity-policy (:identity-policy scope)
+                                           :acceptance :trust-open-premises
+                                           :premises (mapv :assumption (:obligations (storage/describe-obligations scope)))}
+                              refined (writer-history/declare-refined-recovery-trust!
+                                       admit observation enhanced-cut comparison declaration)
+                              original (:historical-judgment refined)]
+                          (is (= :conditional (:status refined)) (pr-str (select-keys refined [:status :reason])))
+                          (is (= writer-history/refined-judgment-profile (:judgment-profile refined)))
+                          (is (= observed-recovery/judgment-profile (:judgment-profile original)))
+                          (is (= (:obligation-inventory original) (:obligation-inventory refined)))
+                          (is (= (:selected-physical-refinement qualified) (:selected-physical-refinement refined)))
+                          (is (= :open (get-in refined [:original-clm-r2-binding :original-obligation-status])))
+                          (is (= :not-established (:universal-refinement refined) (:writer-coverage refined)))
+                          (is (= :not-performed (:proof-discharge refined) (:new-premise-acceptance refined)))
+                          (is (= :unissued-qualified-writer-history
+                                 (:reason (writer-history/declare-refined-recovery-trust!
+                                           admit observation cut-handle comparison declaration))))
+                          (is (= :unissued-qualified-writer-history
+                                 (:reason (writer-history/declare-refined-recovery-trust!
+                                           admit (Object.) enhanced-cut comparison declaration))))
+                          (let [other (observed-recovery/prepare-conditional-recovery!
+                                       admit observation cut-handle node handle (assoc policy :relation :authorized-historical-lineage))
+                                other-handle (:conditional-recovery other)
+                                other-scope (observed-recovery/read-conditional-recovery-scope! other-handle)
+                                other-declaration (assoc declaration :premises (mapv :assumption (:obligations (storage/describe-obligations other-scope))))]
+                            (is (= :refined-judgment-cut-or-subject-mismatch
+                                   (:reason (writer-history/declare-refined-recovery-trust!
+                                             admit observation enhanced-cut other-handle other-declaration))))))
                         (let [refinement (:selected-physical-refinement qualified)]
                           (is (= :conditional-selected-physical-refinement (:status refinement)))
                           (is (= (mapv :tx-id (subvec history 2)) (mapv :tx-id (:steps refinement))))

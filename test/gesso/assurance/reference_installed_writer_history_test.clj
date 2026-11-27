@@ -53,3 +53,15 @@
       (let [bad (history/derive! {} #{} nil {} {} "c" {} [] nil nil nil)]
         (is (= :installed-history-boundary-replaced (:reason bad)))
         (is (not (contains? bad :recovery)))))))
+
+(deftest refined-judgment-rejects-unissued-history-and-substituted-derivations
+  (let [admission (Object.) observation (Object.) cut (Object.) comparison (Object.)
+        args [admission observation cut comparison {}]
+        run #(apply history/declare-refined-recovery-trust! args)]
+    (is (= :unissued-qualified-writer-history (:reason (run))))
+    (is (= :not-performed (:proof-discharge (run))))
+    (is (not (contains? (run) :historical-judgment)))
+    (with-redefs [gesso.assurance.reference-clm-r2-binding/derive! (constantly {})]
+      (is (= :refined-judgment-boundary-replaced (:reason (run)))))
+    (with-redefs [gesso.assurance.reference-mapped-observed-recovery/declare-conditional-recovery-trust! (constantly {})]
+      (is (= :refined-judgment-boundary-replaced (:reason (run)))))))
