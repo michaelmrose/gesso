@@ -59,7 +59,9 @@
               (fail :unsupported :invalid-observed-recovery-retained-comparison)
               :else (merge retained
                            (select-keys observed [:observed-profile :observation-origin :framed-handoffs
-                                                 :adapter-payloads :returned-transaction-keys :aborted-call])
+                                                 :adapter-payloads :returned-transaction-keys :aborted-call
+                                                 :command-origin-correspondence :selected-command-origins
+                                                 :abort-recovery-execution :command-authentication])
                            base {:status :matched :submission-recovery-linkage :matched-local-observed-retained-steps}
                            (when interleaved? {:worker-observation-provenance :not-established})))))))))
 
@@ -212,7 +214,9 @@
    :local-acquisition-binding :activation-root-binding :submission-recovery-linkage
    :manifest-tx-id :initialization-tx-id :selected-tx-ids :selected-commitments
    :recovery-linkage :provider-refinement :source-provenance :outcome-provenance
-   :submission-provenance :aborted-receipt-identity :worker-observation-provenance])
+   :submission-provenance :aborted-receipt-identity :worker-observation-provenance
+   :command-origin-correspondence :selected-command-origins :abort-recovery-execution
+   :command-authentication])
 
 (defn- checked-abstract-induction [admission]
   ;; Reports are descriptive data. Only the captured checker over the exact

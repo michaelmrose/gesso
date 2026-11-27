@@ -7507,3 +7507,37 @@ retained command bindings and execution trajectory, distinguishing
 conditional local provenance from authenticated identity. Carry the
 result into the historical judgment without silently discharging any
 command authentication, worker provenance, or CLM-R2 premise.
+
+* v2811 — match issued command origin to retained execution
+
+Compare each available origin description with the canonical binding of
+the selected checked submission and retained recovery step. Require the
+exact origin fields, registered-invocation classification and typed
+execution identity. Distinguish complete, partial and absent origins;
+reject contradictions without exposing positive subcomparison material.
+Preserve the selected command, operation, observed execution and
+associated transaction identities. Classify whether the aborted candidate
+and guarded refusal share the same observed execution, without claiming
+an authenticated aborted transaction receipt.
+
+Supplied descriptions remain supplied observations. Only the locally
+issued framed observation, through the pinned original reader and
+comparison boundary, supports issued command-binding correspondence.
+Retain this classification and the selected origin summaries through
+the activated recovery comparison, issued historical cut and conditional
+judgment, including reopened and extended histories. Command
+authentication remains not established; no durable schema or writer
+authority changes.
+
+Focused JVM: 8 tests / 764 assertions in the direct Claim recovery and
+mapped recovery namespaces, and 2 tests / 885 assertions in the genuine
+persistent assembled-host recovery namespace. Both runs completed with
+zero failures or errors. Existing worker polling and older offline
+dependency bundle; full project gates not run. No proof premise is
+discharged, and the selected execution identities remain observed local
+data rather than independently authenticated XTDB fields.
+
+Next: make the remaining configured principal-resolution and command
+authentication premises explicit and subject-bound, separating local
+issued command-binding correspondence from authentication and worker
+provenance. Preserve all outstanding CLM-R2 obligations.

@@ -192,6 +192,44 @@
                      (let [r (submission/compare-observed! a steps h)]
                        (is (= :unissued-framed-submission-observation (:reason r)))
                        (is (not (contains? r :observation-origin)))))
+                   (is (= :not-observed (:command-origin-correspondence issued-observation)
+                          (:command-origin-correspondence trajectory)))
+                   (is (= [nil nil nil] (:selected-command-origins trajectory)))
+                   (is (= :not-established (:command-authentication trajectory)))
+                   (let [origins (mapv (fn [step]
+                                         (let [b (get-in step [:spec :binding])]
+                                           (assoc b :execution-id (identity/execution-id (str "e-" (resolution/record-id b)))
+                                                  :origin :registered-server-invocation
+                                                  :authentication :conditional-on-trusted-principal-resolver))) steps)
+                         supplied (mapv #(assoc %1 :command-origin %2) @claims origins)
+                         full (submission! supplied @captured)
+                         partial (submission! (update supplied 0 dissoc :command-origin) @captured)]
+                     (is (= :matched-supplied-command-bindings (:command-origin-correspondence full)))
+                     (is (= :partial-supplied-command-bindings (:command-origin-correspondence partial)))
+                     (is (nil? (first (:selected-command-origins partial))))
+                     (is (= :same-observed-execution (:abort-recovery-execution full)))
+                     (is (= (mapv #(get-in % [:expectation :tx-id]) steps)
+                            (mapv :selected-tx-id (:selected-command-origins full))))
+                     (is (= :distinct-observed-executions
+                            (:abort-recovery-execution
+                             (submission! (assoc-in supplied [2 :command-origin :execution-id]
+                                                    (identity/execution-id "another-attempt")) @captured))))
+                     (doseq [bad [(assoc-in supplied [0 :command-origin] nil)
+                                  (assoc-in supplied [0 :command-origin :principal] (:principal loser))
+                                  (assoc-in supplied [0 :command-origin :arguments] {})
+                                  (assoc-in supplied [0 :command-origin :operation] :other/op)
+                                  (assoc-in supplied [0 :command-origin :command-id] (:command-id loser))
+                                  (assoc-in supplied [0 :command-origin :execution-id] (:command-id winner))
+                                  (assoc-in supplied [0 :command-origin :authentication] :authenticated)]]
+                       (let [r (submission! bad @captured)]
+                         (is (= :mismatch (:status r)))
+                         (is (= :mapped-command-origin-mismatch (:reason r)))
+                         (is (not-any? #(contains? r %) [:command-origin-correspondence :selected-command-origins :framed-handoffs]))))
+                     (with-redefs [publication/read-framed-submission-observation!
+                                   (constantly {:claims supplied :capture @captured})]
+                       (let [r (submission/compare-observed! admit steps @observation-handle)]
+                         (is (= :command-origin-comparison-boundary-replaced (:reason r)))
+                         (is (not (contains? r :selected-command-origins))))))
                    (is (= :matched (:status observed)) (pr-str observed))
                    (is (= :matched-observed-checked-candidates (:framed-handoffs observed)))
                    (is (= :matched-selected-retained-operations (:adapter-payloads observed)))

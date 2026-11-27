@@ -1,6 +1,7 @@
 (ns gesso.assurance.reference-mapped-submission
   "Compare local observed framed handoffs and adapter calls to selected retained steps."
   (:require [gesso.assurance.xtdb-envelope :as envelope]
+            [gesso.choreo.identity :as identity]
             [gesso.live.consistency.xtdb :as live]
             [gesso.live.outbox.model-publication :as publication]
             [gesso.model.command-resolution :as resolution]
@@ -16,6 +17,40 @@
   (and (instance? TransactionKey result)
        (= (:tx-id expected) (.getTxId ^TransactionKey result))
        (= (:system-time expected) (.getSystemTime ^TransactionKey result))))
+
+(def ^:private origin-keys
+  (into resolution/binding-keys [:execution-id :origin :authentication]))
+
+(defn- compare-command-origins! [steps claims]
+  (let [selected
+        (mapv (fn [step claim]
+                (when (contains? claim :command-origin)
+                  (let [origin (:command-origin claim)
+                        binding (get-in step [:spec :binding])]
+                    (when-not (and (map? origin) (not (record? origin)) (nil? (meta origin))
+                                   (= origin-keys (set (keys origin)))
+                                   (= :registered-server-invocation (:origin origin))
+                                   (= :conditional-on-trusted-principal-resolver (:authentication origin))
+                                   (identity/execution-id? (:execution-id origin))
+                                   (= binding (select-keys origin resolution/binding-keys)))
+                      (reject! :mapped-command-origin-mismatch))
+                    ;; The execution ID is observed, not a retained XTDB field.
+                    ;; In particular, the abort association is not a receipt.
+                    (assoc (select-keys origin [:command-id :execution-id :operation])
+                           :selected-tx-id (get-in step [:expectation :tx-id])))))
+              steps claims)
+        n (count (filter some? selected))
+        [_ aborted recovered] selected]
+    {:command-origin-correspondence (case n
+                                      0 :not-observed
+                                      3 :matched-supplied-command-bindings
+                                      :partial-supplied-command-bindings)
+     :selected-command-origins selected
+     :abort-recovery-execution (if (and aborted recovered)
+                                 (if (= (:execution-id aborted) (:execution-id recovered))
+                                   :same-observed-execution :distinct-observed-executions)
+                                 :not-observed)
+     :command-authentication :not-established}))
 
 (defn compare-selected!
   "Compare three supplied policy-claim observations and one adapter capture
@@ -74,15 +109,19 @@
                   (when-not (and (= :returned (:phase finished))
                                  (receipt-matches? expectation (:tx-result finished)))
                     (reject! :mapped-submission-receipt-mismatch)))))
-            (assoc base :status :matched
-                   :framed-handoffs :matched-observed-checked-candidates
-                   :adapter-payloads :matched-selected-retained-operations
-                   :returned-transaction-keys :matched-selected-commit-identities
-                   :aborted-call :observed-throw-without-transaction-key))))
+            (merge base (compare-command-origins! steps claims)
+                   {:status :matched
+                    :framed-handoffs :matched-observed-checked-candidates
+                    :adapter-payloads :matched-selected-retained-operations
+                    :returned-transaction-keys :matched-selected-commit-identities
+                    :aborted-call :observed-throw-without-transaction-key}))))
       (catch clojure.lang.ExceptionInfo e
         (fail :mismatch (or (:reason (ex-data e)) :invalid-mapped-submission-handoff))))))
 
 (def observed-profile :selected-issued-mapped-submission-observation-v1)
+
+(def ^:private original-observation-reader publication/read-framed-submission-observation!)
+(def ^:private original-selected-comparison compare-selected!)
 
 (defn compare-observed!
   "Compare only a locally issued, completed framed observation. The handle
@@ -92,9 +131,22 @@
   [admission steps handle]
   (if-let [{:keys [claims capture]} (publication/read-framed-submission-observation! admission handle)]
     (let [result (assoc (compare-selected! admission steps claims capture) :observed-profile observed-profile)]
-      (cond-> result
-        (= :matched (:status result))
-        (assoc :observation-origin :matched-local-issued-policy-window)))
+      (if (and (= :matched (:status result))
+               (not= :not-observed (:command-origin-correspondence result))
+               (not (and (identical? original-observation-reader publication/read-framed-submission-observation!)
+                         (identical? original-selected-comparison compare-selected!))))
+        {:status :unsupported :reason :command-origin-comparison-boundary-replaced
+         :observed-profile observed-profile :authority :none :certificate :not-issued
+         :provider-refinement :not-established :submission-provenance :not-established
+         :aborted-receipt-identity :not-established}
+        (cond-> result
+          (= :matched (:status result))
+          (-> (assoc :observation-origin :matched-local-issued-policy-window)
+              (update :command-origin-correspondence
+                      #(case %
+                         :matched-supplied-command-bindings :matched-issued-command-bindings
+                         :partial-supplied-command-bindings :partial-issued-command-bindings
+                         %))))))
     {:status :unsupported :reason :unissued-framed-submission-observation
      :observed-profile observed-profile :authority :none :certificate :not-issued
      :provider-refinement :not-established :submission-provenance :not-established
