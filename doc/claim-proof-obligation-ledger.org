@@ -10899,3 +10899,32 @@ Next: derive the selected command-attribution support argument from the
 issued local command and route correspondence plus explicitly adopted
 application authority premises; keep the conditional conclusion distinct
 from independent authentication and universal implementation refinement.
+
+* v2900 — derive selected conditional command attribution support
+
+Compose an explicit selected command attribution support argument in the
+configured authority inventory. Recheck the typed raw/encoded origin
+correspondence, ordered transaction IDs and commitments, abort/recovery
+execution relationship and exact adopted environmental premise descriptions.
+Pin the reviewed command, HTTP, publication and observation sources and
+original derivation boundary. Bind request-gate, principal/session and
+combined attribution propositions to their exact trusted fingerprints and
+remaining implementation conditions. Distinguish returned commit keys from
+the middle aborted call's ordering and retained-payload association. This
+structural argument is not an entailment checker or independent authentication;
+its issued provenance comes from the existing owner-locked join. Version the
+extended inventory while preserving all original obligations and conditions.
+
+Focused JVM: configured inventory, command route/authority and reviewed
+writer classification, 8 tests / 210 assertions; full canonical worker-
+interleaved assembled recovery, 1 test / 1476 assertions. Both exited 0;
+total 9 tests / 1686 assertions, zero failures or errors. Includes mismatched
+origin/commitment/fingerprint rejection, replaced derivation boundary,
+canonical configured support, same-store reopening and storage substitution.
+Other assembled variants and full project gates were not rerun. All 39
+original general CLM-R2 conditions remain open. The two original command
+premises remain open, as do faithful loaded-code and aborted-call attribution.
+
+Next: qualify the worker/source authority environmental contract against the
+original issued worker lineage and observed source-return subject, keeping
+actual local execution, environmental trust and durable delivery distinct.

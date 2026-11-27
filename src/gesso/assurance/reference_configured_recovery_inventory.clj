@@ -4,6 +4,7 @@
   (:require [clojure.set :as set]
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-command-authority :as command-authority]
+            [gesso.assurance.reference-command-attribution-argument :as attribution]
             [gesso.live.outbox.http-route :as route]))
 
 (def profile :configured-selected-recovery-obligation-inventory-v1)
@@ -139,10 +140,11 @@
      :proof-discharge :not-performed :universal-refinement :not-established
      :authority :none :certificate :not-issued}))
 
-(def command-authority-profile :configured-selected-recovery-obligation-inventory-v2)
+(def command-authority-profile :configured-selected-recovery-obligation-inventory-v3)
 (def ^:private original-command-description command-authority/describe!)
 (def ^:private original-authority-acceptance? route/authority-acceptance?)
 (def ^:private original-authority-binding? route/authority-binding?)
+(def ^:private original-attribution attribution/derive!)
 
 (defn extend-command-authority!
   "Extend an already composed inventory with the original owner's adopted
@@ -161,6 +163,7 @@
                    (identical? original-command-description command-authority/describe!)
                    (identical? original-authority-acceptance? route/authority-acceptance?)
                    (identical? original-authority-binding? route/authority-binding?)
+                   (identical? original-attribution attribution/derive!)
                    (= profile (:profile inventory))
                    (= :conditional-configured-obligation-inventory (:status inventory))
                    (= original (:obligation-inventory refined))
@@ -194,6 +197,7 @@
                 :configured-inventory-command-authority-mismatch)
       (-> inventory
           (assoc :profile command-authority-profile
+                 :conditional-command-attribution (original-attribution command adopted)
                  :premises-by-fingerprint combined
                  :dependency-order (dependency-order! combined)
                  :command-authority-relevance {:scope :original-selected-command-only

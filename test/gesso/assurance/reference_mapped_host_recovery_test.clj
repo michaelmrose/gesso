@@ -1250,6 +1250,16 @@
                                   fps (:trusted-assumptions command)]
                               (is (= recovery-inventory/command-authority-profile (:profile i)))
                               (is (= fps (:command-authority adopted) (get-in i [:premise-families :command-authority])))
+                              (let [support (:conditional-command-attribution i)]
+                                (is (= :conditional-selected-command-attribution-support (:status support)))
+                                (is (= (get-in command [:scope :command-subject]) (:scope support)))
+                                (is (= fps (:trusted-assumptions support)))
+                                (is (= (:selected-tx-ids (:scope support))
+                                       (mapv #(get-in % [:origin :selected-tx-id]) (:selected-associations support))))
+                                (is (= :observed-order-and-retained-payload-not-receipt
+                                       (get-in support [:selected-associations 1 :association])))
+                                (is (= :not-established (:command-authentication support) (:aborted-receipt-identity support)))
+                                (is (= :not-performed (:proof-discharge support))))
                               (is (= (:scope command) (get-in i [:adoption-scopes :command-authority])))
                               (is (= (get-in original [:premise-families :command])
                                      (get-in i [:command-authority-relevance :original-command-premises])))

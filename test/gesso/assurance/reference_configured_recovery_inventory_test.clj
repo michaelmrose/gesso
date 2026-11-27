@@ -4,6 +4,7 @@
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-configured-recovery-inventory :as configured]
             [gesso.assurance.reference-command-authority :as authority]
+            [gesso.assurance.reference-command-attribution-argument :as attribution]
             [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.choreo.identity :as identity]
             [gesso.live.outbox.command-authority-owner :as owner]
@@ -147,6 +148,42 @@
         adopted (#'owner/adopt-selected! qualified declaration selected)
         joined (configured/extend-command-authority! base refined adopted)
         fps (:trusted-assumptions adopted)]
+    (let [argument (:conditional-command-attribution joined)
+          by-id (into {} (map (fn [p] [(get-in p [:assumption :id]) (:premise-fingerprint p)]))
+                      (:obligations adopted))
+          gate (by-id :reference-command-authority/request-gate)
+          session (by-id :reference-command-authority/principal-session)]
+      (is (= attribution/profile (:profile argument)))
+      (is (= :conditional-selected-command-attribution-support (:status argument)))
+      (is (= (:scope command) (:scope argument)))
+      (is (= binding (:installation-binding argument)))
+      (is (= fps (:trusted-assumptions argument)))
+      (is (= (:open-premise-fingerprints command) (:original-open-premise-fingerprints argument)))
+      (is (= [1 2 3] (mapv #(get-in % [:origin :selected-tx-id]) (:selected-associations argument))))
+      (is (= [:committed :aborted :committed] (mapv :commitment (:selected-associations argument))))
+      (is (= [:matched-returned-transaction-key :observed-order-and-retained-payload-not-receipt
+              :matched-returned-transaction-key] (mapv :association (:selected-associations argument))))
+      (is (= :same-observed-execution (:abort-recovery-execution argument)))
+      (is (= #{gate} (get-in argument [:conditional-conclusion :request-gate :conditional-on])))
+      (is (= #{session} (get-in argument [:conditional-conclusion :principal-resolution :conditional-on])))
+      (is (= fps (get-in argument [:conditional-conclusion :command-attribution :conditional-on])))
+      (is (= (:remaining-implementation-conditions argument)
+             (get-in argument [:conditional-conclusion :command-attribution :remaining-conditions])))
+      (is (contains? (:remaining-implementation-conditions argument) :faithful-aborted-call-ordering-association))
+      (is (= :not-established (:command-authentication argument) (:aborted-receipt-identity argument)
+             (:universal-refinement argument)))
+      (is (= :not-performed (:proof-discharge argument)))
+      (is (= :conditional-not-entailment-checker (:support-semantics argument)))
+      (doseq [bad [(assoc-in command [:scope :selected-tx-ids] [1 3 2])
+                   (assoc-in command [:scope :selected-commitments] [:committed :committed :committed])
+                   (assoc-in command [:selected-command-origins 1 :principal] (identity/principal "other"))
+                   (assoc-in command [:scope :selected-command-origins 1 :execution-id :gesso.choreo.identity/value] [:uuid "other"])
+                   (assoc command :abort-recovery-execution :distinct-observed-executions)
+                   (assoc-in command [:obligations 0 :premise-fingerprint] "forged")]]
+        (is (thrown? clojure.lang.ExceptionInfo (attribution/derive! bad adopted))))
+      (is (thrown? clojure.lang.ExceptionInfo (attribution/derive! command qualified)))
+      (with-redefs [attribution/derive! (constantly argument)]
+        (is (thrown? clojure.lang.ExceptionInfo (configured/extend-command-authority! base refined adopted)))))
     (is (= configured/command-authority-profile (:profile joined)))
     (is (= 18 (count (:deployment-declared-premise-fingerprints joined))))
     (is (= 22 (count (:all-described-open-premise-fingerprints joined)) (count (:dependency-order joined))))
