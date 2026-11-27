@@ -187,7 +187,7 @@
         checked-init (inductive/check-mapped-initialization! admission initializer)
         seed-ops (initialization/transaction source-id initializer (mapped-tables admission) checked-init)]
     (when-not connectable (reject! :missing-mapped-writer-connectable))
-    (let [policy (fn [{:keys [api tx-ops tx-options] :as envelope}]
+    (let [policy (fn installed-policy [{:keys [api tx-ops tx-options] :as envelope}]
       (boolean
        (when (and (= :execute-tx api) (empty? tx-options)
                   (vector? tx-ops) (seq tx-ops))
@@ -212,6 +212,8 @@
                             (observe-maintenance-origin connectable infrastructure tx-ops maintenance-kind))))]
            (when kind
              (observe! kind)
+             (when (:worker-origin kind)
+               (xtdb/observe-policy-admission! installed-policy envelope kind))
              true)))))]
       (locking policies
         (.put policies policy {:connectable connectable :config config

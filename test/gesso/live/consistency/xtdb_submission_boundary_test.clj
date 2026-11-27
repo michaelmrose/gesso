@@ -571,3 +571,64 @@
              (:reason (try (live/capture-policy-tx-api-calls! node (constantly :unregistered)) nil
                            (catch clojure.lang.ExceptionInfo e (ex-data e))))))
       (finally (release)))))
+
+(deftest policy-outcome-window-binds-admission-and-provider-result
+  (let [node (Object.) other (Object.) receipt (transaction-key 81)
+        policy (fn selected [envelope]
+                 (live/observe-policy-admission! selected (into {} envelope) :copied)
+                 (live/observe-policy-admission! (constantly true) envelope :foreign)
+                 (live/observe-policy-admission! selected envelope :original)
+                 (live/observe-policy-admission! selected envelope :duplicate)
+                 (= source-ops (:tx-ops envelope)))
+        release (live/register-submission-policy! node policy)]
+    (try
+      (with-seams {'*execute-tx* (fn [& _] receipt)}
+        (fn []
+          (let [report (live/capture-policy-outcomes!
+                        node 4 #(do @(future (live/execute-tx! node source-ops))
+                                    (live/execute-tx! other source-ops)
+                                    (try (live/execute-tx! node [[:put-docs :other {:xt/id "bad"}]])
+                                         (catch clojure.lang.ExceptionInfo _ :refused))))
+                [returned refused] (:calls report)]
+            (is (= :matched-local-policy-outcome-window (:policy-window report)))
+            (is (= :refused (:result report)))
+            (is (= 2 (count (:calls report))))
+            (is (= :original (:admission returned)))
+            (is (identical? source-ops (:tx-ops returned)))
+            (is (identical? receipt (:tx-result returned)))
+            (is (= :returned (:outcome returned)))
+            (is (= :not-invoked (:outcome refused)))
+            (is (not (contains? refused :admission)))
+            (is (live/policy-capture-origin-matches? report node))
+            (is (not (live/policy-capture-origin-matches? (into {} report) node)))
+            (is (not (live/policy-capture-origin-matches? report other))))
+          (let [report (live/capture-policy-outcomes!
+                        node 1 #(do (live/execute-tx! node source-ops)
+                                    (live/execute-tx! node source-ops)))]
+            (is (= :invalidated-local-policy-outcome-window (:policy-window report)))
+            (is (= :returned (:outcome report)))
+            (is (empty? (:calls report)))
+            (is (not (contains? report :local-origin))))))
+      (let [entered (promise) unblock (promise) task (atom nil)]
+        (with-seams {'*execute-tx* (fn [& _] (deliver entered true) @unblock receipt)}
+          (fn []
+            (try
+              (let [report (live/capture-policy-outcomes!
+                            node 4 #(do (reset! task (future (live/execute-tx! node source-ops)))
+                                        (deref entered 3000 :timeout)))]
+                (is (= true (:result report)))
+                (is (= :invalidated-local-policy-outcome-window (:policy-window report)))
+                (is (empty? (:calls report)))
+                (is (not (contains? report :local-origin))))
+              (finally (deliver unblock true) (when @task (deref @task 3000 :timeout)))))))
+      (with-seams {'*execute-tx* (fn [& _] (throw (ex-info "provider error" {})))}
+        (fn []
+          (let [report (live/capture-policy-outcomes! node 1 #(live/execute-tx! node source-ops))
+                call (first (:calls report))]
+            (is (= :threw (:outcome report) (:outcome call)))
+            (is (= :original (:admission call)))
+            (is (not (contains? call :tx-result))))))
+      (let [report (live/capture-policy-outcomes! node 1 #(release))]
+        (is (= :invalidated-local-policy-outcome-window (:policy-window report)))
+        (is (not (contains? report :local-origin))))
+      (finally (release)))))

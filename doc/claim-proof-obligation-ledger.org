@@ -7685,3 +7685,39 @@ adapter submission outcomes and returned transaction keys in an issued
 capture, and establish its owning lifecycle and host association.
 Retain explicit limits on raw writer closure and external dispatch
 authentication before composing worker provenance with retained history.
+
+* v2816 — bind worker maintenance to adapter outcomes
+
+Add a bounded opt-in policy outcome capture window for one exact physical
+connectable and registration generation. Unlike the synchronous command
+capture, it observes adapter calls from the scheduler thread as well as
+the opening thread. Reserve each observation at adapter admission, permit
+only the exact registered predicate and original envelope to annotate it,
+and retain that annotation only after literal admission succeeds. Join
+the annotation and exact payload to the actual bound provider call's
+return object or exception. Distinguish policy refusal before invocation
+from provider failure. The mapped writer attaches its matched worker-origin
+observation at this boundary without changing the boolean admission
+contract or durable payload.
+
+Close the bounded window under the reservation lock; overflow, pending
+calls at close, or changed registration suppress issuance of local origin
+and captured calls. Preserve the thunk outcome. Reports remain sensitive
+local observations; copied reports cannot substitute for issued reports.
+The window does not cover operations which bypass the adapter or calls
+outside its reservation interval. It does not authenticate the provider,
+establish transaction commitment merely from a return, or confer authority.
+
+Focused JVM: 53 tests / 641 assertions in the adapter submission-boundary
+and lifecycle suites; 1 test / 345 assertions in the genuine persistent
+worker-interleaved assembled-host recovery fixture. Both runs completed
+with zero failures or errors. The host test matches all four scheduled
+maintenance admissions and actual returned transaction IDs to the selected
+retained history, with original polling and reopened/copied store checks.
+The adjacent assembled-host fixture and full project gates were not rerun.
+Existing offline dependency bundle. No proof premise is discharged.
+
+Next: qualify capture ownership by the exact installed host, policy
+generation and lifecycle; then implement independent retained maintenance
+comparison of the issued payloads and returned transaction identities.
+Keep external dispatch authentication and CLM-R2 premises open.

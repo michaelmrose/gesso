@@ -329,11 +329,92 @@
   [node]
   (xt/status (physical-connectable! node)))
 
-(defn- require-submission-admission! [api entry tx-ops tx-options]
-  (when entry
-    (when-not (true? ((:admit? entry) {:api api :tx-ops tx-ops :tx-options tx-options}))
-      (throw (ex-info "XTDB submission refused before API invocation."
-                      {:error/type ::submission-refused :reason :submission-policy-refused})))))
+(def ^:private policy-outcome-windows (java.util.IdentityHashMap.))
+(def ^:private ^ThreadLocal policy-admission-scope (ThreadLocal.))
+
+(defn capture-policy-outcomes!
+  "Bounded opt-in adapter observation across threads for one installed policy
+   generation. The thunk must drain its selected calls before returning.
+   Overflow, an outstanding call, or a changed registration invalidates the
+   window. Only a closed intact report has an issued local origin. Contains
+   sensitive payloads and results; never publish it. Not writer closure,
+   authenticated provider evidence, or a proof of retained commit."
+  [connectable limit thunk]
+  (let [node (physical-connectable! connectable)
+        token (current-submission-policy-token node)
+        state (atom {:calls [] :pending 0 :invalid? false})
+        closed (volatile! nil)]
+    (when-not (and token (integer? limit) (<= 1 limit 4096) (fn? thunk))
+      (throw (ex-info "Invalid policy outcome window." {:reason :invalid-policy-outcome-window})))
+    (locking policy-outcome-windows
+      (when (.containsKey policy-outcome-windows node)
+        (throw (ex-info "Policy outcome window already active." {:reason :nested-policy-outcome-window})))
+      (.put policy-outcome-windows node {:token token :state state :limit limit}))
+    (let [execution (try {:outcome :returned :result (thunk)}
+                         (catch Throwable e
+                           (restore-interrupt! e)
+                           {:outcome :threw :error e})
+                         (finally
+                           (locking policy-outcome-windows
+                             (.remove policy-outcome-windows node)
+                             (vreset! closed @state))))
+          {:keys [calls pending invalid?]} @closed
+          intact? (and (zero? pending) (not invalid?) (submission-policy-current? node token))
+          report (merge execution {:type :gesso.live.consistency.xtdb/policy-outcome-capture
+                                   :policy-window (if intact? :matched-local-policy-outcome-window
+                                                              :invalidated-local-policy-outcome-window)
+                                   :calls (if intact? calls [])
+                                   :actual-xtdb-api-authenticated? false
+                                   :complete-writer-coverage :not-established
+                                   :authority :none :certificate :not-issued})]
+      (if intact? (bind-policy-capture-origin node report) report))))
+
+(defn- begin-policy-outcome! [node entry envelope]
+  (locking policy-outcome-windows
+    (when-let [{:keys [token state limit]} (.get policy-outcome-windows node)]
+      (if (and (identical? token (:token entry)) (< (count (:calls @state)) limit))
+        (let [index (count (:calls @state))]
+          (swap! state #(-> % (update :calls conj nil) (update :pending inc)))
+          {:state state :index index :envelope envelope :policy (:admit? entry)
+           :annotation (volatile! nil)})
+        (do (swap! state assoc :invalid? true) nil)))))
+
+(defn observe-policy-admission!
+  "Attach descriptive evidence from the exact installed predicate during its
+   active call. This does not admit a transaction or authenticate the policy.
+   A copied envelope or different predicate cannot annotate the observation."
+  [policy envelope observation]
+  (when-let [scope (.get policy-admission-scope)]
+    (when (and (identical? policy (:policy scope))
+               (identical? envelope (:envelope scope))
+               (nil? @(:annotation scope)))
+      (vreset! (:annotation scope) observation)))
+  nil)
+
+(defn- finish-policy-outcome! [scope admitted? result]
+  (when scope
+    ;; Diagnostic recording must not change a completed provider outcome.
+    (try
+      (let [{:keys [state index envelope annotation]} scope]
+        (locking policy-outcome-windows
+          (swap! state #(-> %
+                            (assoc-in [:calls index]
+                                      (cond-> (merge envelope result)
+                                        (and admitted? (some? @annotation))
+                                        (assoc :admission @annotation)))
+                            (update :pending dec)))))
+      (catch Throwable e (restore-interrupt! e)))))
+
+(defn- require-submission-admission! [entry envelope scope]
+  (let [prior (.get policy-admission-scope)]
+    (try
+      (if scope (.set policy-admission-scope scope) (.remove policy-admission-scope))
+      (when entry
+        (when-not (true? ((:admit? entry) envelope))
+          (throw (ex-info "XTDB submission refused before API invocation."
+                          {:error/type ::submission-refused :reason :submission-policy-refused}))))
+      (finally
+        (if prior (.set policy-admission-scope prior) (.remove policy-admission-scope))))))
 
 (defn- invoke-xtdb-api! [api operation connectable tx-ops tx-options]
   (let [[connectable entry] (locking submission-policies
@@ -344,28 +425,39 @@
                      (identical? token (:token entry))
                      (identical? thread (Thread/currentThread)))
         (reset! valid? false)))
-    (require-submission-admission! api entry tx-ops tx-options)
-    ;; Capture immediately adjacent to the *actual* adapter API invocation, not
-    ;; by replaying prepare or accepting an application-reported operation list.
-    ;; The recorded argument object is the exact argument handed to the bound
-    ;; XTDB API function. This remains spoofable by alternate writer paths,
-    ;; with-redefs, and malicious code inside the same process.
-    (let [capture? (boolean *submission-capture*)
-          call-id (when capture? (random-uuid))]
-      (when capture?
-        (capture-api-event! {:call-id call-id :api api :phase :invoked
-                             :tx-ops tx-ops :tx-options tx-options}))
+    (let [envelope {:api api :tx-ops tx-ops :tx-options tx-options}
+          scope (begin-policy-outcome! connectable entry envelope)
+          admitted? (volatile! false)]
       (try
-        (let [result (operation connectable tx-ops tx-options)]
+        (require-submission-admission! entry envelope scope)
+        (vreset! admitted? true)
+        ;; Capture immediately adjacent to the *actual* adapter API invocation, not
+        ;; by replaying prepare or accepting an application-reported operation list.
+        ;; The recorded argument object is the exact argument handed to the bound
+        ;; XTDB API function. This remains spoofable by alternate writer paths,
+        ;; with-redefs, and malicious code inside the same process.
+        (let [capture? (boolean *submission-capture*)
+              call-id (when capture? (random-uuid))]
           (when capture?
-            (capture-api-event! {:call-id call-id :api api :phase :returned
-                                 :tx-result result}))
-          result)
+            (capture-api-event! {:call-id call-id :api api :phase :invoked
+                                 :tx-ops tx-ops :tx-options tx-options}))
+          (try
+            (let [result (operation connectable tx-ops tx-options)]
+              (when capture?
+                (capture-api-event! {:call-id call-id :api api :phase :returned
+                                     :tx-result result}))
+              (finish-policy-outcome! scope true {:outcome :returned :tx-result result})
+              result)
+            (catch Throwable e
+              (restore-interrupt! e)
+              (when capture?
+                (capture-api-event! {:call-id call-id :api api :phase :threw
+                                     :exception-class (.getName (class e))}))
+              (throw e))))
         (catch Throwable e
-          (restore-interrupt! e)
-          (when capture?
-            (capture-api-event! {:call-id call-id :api api :phase :threw
-                                 :exception-class (.getName (class e))}))
+          (finish-policy-outcome! scope @admitted?
+                                  {:outcome (if @admitted? :threw :not-invoked)
+                                   :exception-class (.getName (class e))})
           (throw e))))))
 
 ;; -----------------------------------------------------------------------------

@@ -548,10 +548,13 @@
                                                    protected (disj tables :gesso_live_outbox)
                                                    prior (selected-rows (:xtdb/connectable ctx) protected)
                                                    pending (live-xtdb/q-from ctx "SELECT * FROM gesso_live_outbox")
-                                                   done (await-maintenance-cycle! @worker*)]
+                                                   worker-capture (live-xtdb/capture-policy-outcomes!
+                                                                   (:xtdb/connectable ctx) 16
+                                                                   #(await-maintenance-cycle! @worker*))
+                                                   done (:result worker-capture)]
                                                (reset! gap* {:before prior
                                                              :after (selected-rows (:xtdb/connectable ctx) protected)
-                                                             :pending pending :done done}))))
+                                                             :pending pending :done done :worker-capture worker-capture}))))
                                          candidate))
                          :construct-after-abort! (fn [invocation]
                                                    (swap! recovered inc)
@@ -672,7 +675,7 @@
                   (when-not interleaved?
                     (reset! restart* {:retained-handle handle :cut-handle cut-handle :comparison r}))
                   (when interleaved?
-                    (let [{:keys [before after pending done]} @gap*
+                    (let [{:keys [before after pending done worker-capture]} @gap*
                           ids (set (map :xt/id pending))
                           maintenance (:intervening-maintenance r)
                           audit (history-coverage/audit! node admit 16)
@@ -683,6 +686,18 @@
                       (is (= 9 (:replayed-transaction-count r)))
                       (is (= (mapv :tx-id (map #(nth history %) [2 7 8])) (:selected-tx-ids r)))
                       (is (= (mapv :tx-id (subvec history 3 7)) (mapv :tx-id maintenance)))
+                      (let [calls (:calls worker-capture)]
+                        (is (= :matched-local-policy-outcome-window (:policy-window worker-capture)))
+                        (is (live-xtdb/policy-capture-origin-matches? worker-capture node))
+                        (is (not (live-xtdb/policy-capture-origin-matches? (into {} worker-capture) node)))
+                        (is (= 4 (count calls)))
+                        (is (every? #(and (= :execute-tx (:api %)) (= :returned (:outcome %))
+                                          (empty? (:tx-options %))) calls))
+                        (is (= @policy-maintenance (mapv :admission calls)))
+                        (is (= (mapv :tx-id maintenance)
+                               (mapv #(.getTxId ^xtdb.api.TransactionKey (:tx-result %)) calls)))
+                        (is (= :none (:authority worker-capture)))
+                        (is (= :not-issued (:certificate worker-capture))))
                       ;; These are actual installed writer-policy observations,
                       ;; not a test policy calling the provenance helper.
                       (let [origins (mapv :worker-origin @policy-maintenance)]
