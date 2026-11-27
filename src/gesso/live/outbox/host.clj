@@ -201,12 +201,23 @@
 
 (defn- start-xtdb! [system]
   (let [release (atom nil)
+        owned-policy (atom nil)
+        provider-closed? (atom false)
         policy-token (volatile! nil)
         audit (atom nil)
         timeout-ms (get-in system [config-key :stop-timeout-ms] 10000)
         close! (fn [node]
                  (when-let [controller @audit] ((:close! controller) timeout-ms))
-                 (.close ^java.lang.AutoCloseable node)
+                 ;; The worker, request, SSE and audit owners have drained
+                 ;; before this callback. Also fence direct adapter callers
+                 ;; that are not part of those owners. Startup rollback uses
+                 ;; the same close callback. Timeout retains the node and
+                 ;; registration for retry.
+                 (when-not @provider-closed?
+                   (when-let [owner @owned-policy]
+                     ((:fence-and-await! owner) timeout-ms))
+                   (.close ^java.lang.AutoCloseable node)
+                   (reset! provider-closed? true))
                  (when-let [f @release] (f)))
         node (managed/acquire-startup-resource!
               :gesso.live.outbox.host/node
@@ -220,7 +231,11 @@
                                  :descriptor (::publication-manifest system)})
                    (:xtdb-submission-policy! config))]
       (when policy
-        (reset! release (xtdb/register-submission-policy! node policy))
+        (if (:mapped-writer-policy config)
+          (let [owner (xtdb/register-owned-submission-policy! node policy)]
+            (reset! owned-policy owner)
+            (reset! release (:release! owner)))
+          (reset! release (xtdb/register-submission-policy! node policy)))
         (vreset! policy-token (xtdb/submission-policy-token node policy)))
       (manifest/require-compatible! node (:source-id config)
                                     (::publication-manifest system))
@@ -579,7 +594,9 @@
 
 (defn stop!
   "Use the exact Biff system returned by start!. A drain timeout propagates
-   and prevents closing Live and XTDB; retry with the SAME system."
+   and retains the undrained provider and its dependencies. At the late
+   mapped adapter fence, Live and the worker may already be stopped, but
+   XTDB stays open and fenced. Retry with the SAME system."
   [system]
   (when-not (and (map? system) (some? (get system managed/handle-key)))
     (reject! :invalid-running-system {}))

@@ -23,6 +23,27 @@
 (defn- reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))
 
+(defn- with-entered-refusal [f]
+  ;; Pause after entry counting, before genuine mapped admission.
+  (let [boundary #'xtdb/invoke-admitted-xtdb-api!
+        original @boundary
+        ops [[:put-docs :requests {:xt/id "unadmitted-drain-test"}]]
+        entered (promise) proceed (promise)
+        call (atom nil)
+        launch! (fn [node]
+                  (reset! call (future (reason #(xtdb/execute-tx! node ops))))
+                  (is (= true (deref entered 10000 ::timeout))))]
+    (with-redefs-fn {boundary (fn [api operation node entry tx-ops opts]
+                                (when (= ops tx-ops)
+                                  (deliver entered true)
+                                  (when-not (true? (deref proceed 20000 false))
+                                    (throw (ex-info "Test drain wait timed out" {}))))
+                                (original api operation node entry tx-ops opts))}
+      (fn []
+        (try (f launch! proceed call ops)
+             (finally (deliver proceed true)
+                      (when @call (deref @call 20000 ::timeout))))))))
+
 (deftest assembled-host-owns-mapped-activation-and-request-adapter
   (let [root (Files/createTempDirectory "gesso-mapped-host-root-" (make-array FileAttribute 0))
         source-id "assembled-mapped-root"
@@ -43,6 +64,7 @@
         config {:xtdb-config {:log [:local {:path (str root "/log")}]
                               :storage [:local {:path (str root "/storage")}]}
                 :source-id source-id :rules-context {} :live-options {}
+                :stop-timeout-ms 500
                 :worker-options {:worker-id "mapped-host-root" :poll-ms 60000}
                 :assembled-publication mapping
                 :mapped-writer-policy {:admission admission :initializer seed
@@ -108,7 +130,20 @@
                               :adapter adapter :token token :initial initial :observation observation :history history}))
                 run! (fn []
                        (let [started (host/start! assembly handler config)]
-                         (try (inspect! started) (finally (host/stop! started)))))
+                         (try
+                           (let [{:keys [node adapter token] :as result} (inspect! started)]
+                             (with-entered-refusal
+                               (fn [launch! proceed call ops]
+                                 (launch! adapter)
+                                 (is (= :owned-submission-drain-timeout (reason #(host/stop! started))))
+                                 (is (identical? token (xtdb/current-submission-policy-token node)))
+                                 (is (= [{:x 1}] (xtdb/q node "SELECT 1 AS x")))
+                                 (is (= :owned-submission-fenced (reason #(xtdb/execute-tx! adapter ops))))
+                                 (is (= 503 (:status ((:biff.ring/handler started) {:uri "/"}))))
+                                 (deliver proceed true)
+                                 (is (= :submission-policy-refused (deref @call 20000 ::timeout)))))
+                             result)
+                           (finally (host/stop! started)))))
                 first-run (run!)]
             (is (= [:manifest :initializer] @policy-events))
             (is (= :stopped (:status (lifecycle/status (:worker first-run)))))
@@ -117,6 +152,33 @@
             (is (= :invalid-adapter-connectable (reason #(xtdb/q (:adapter first-run) "SELECT 1"))))
             (is (nil? (correspondence/initialization-observation (:node first-run) admission)))
             (is (= :not-established (:status (classify! (:node first-run) admission))))
+            (with-entered-refusal
+              (fn [launch! proceed call ops]
+                (let [opened (atom nil)
+                      original-register xtdb/register-owned-submission-policy!
+                      failure (with-redefs [xtdb/register-owned-submission-policy!
+                                            (fn [node admit?]
+                                              (reset! opened node)
+                                              (original-register node admit?))
+                                            live/create (fn [& _]
+                                                          (launch! @opened)
+                                                          (throw (ex-info "Test startup failure" {})))]
+                                (try (host/start! assembly handler config) nil
+                                     (catch clojure.lang.ExceptionInfo e (ex-data e))))
+                      cleanup (:cleanup/handle failure)]
+                  (try
+                    (is (= :gesso.live.outbox/checked-startup-failed (:error/type failure)))
+                    (is (= :blocked (:rollback/status failure)))
+                    (is (= host/xtdb-module-id (:rollback/blocked-module-id failure)))
+                    (is (= [{:x 1}] (xtdb/q @opened "SELECT 1 AS x")))
+                    (is (= :owned-submission-fenced (reason #(xtdb/execute-tx! @opened ops))))
+                    (finally
+                      (deliver proceed true)
+                      (is (= :submission-policy-refused (deref @call 20000 ::timeout)))
+                      (when cleanup
+                        (is (= :drained (:status (managed/retry-startup-cleanup! cleanup)))))))
+                  (is (nil? (xtdb/current-submission-policy-token @opened)))
+                  (is (thrown? Exception (xtdb/q @opened "SELECT 1 AS x"))))))
             (let [second-run (run!)]
               (is (= [:manifest :initializer] @policy-events))
               (is (not (identical? (:token first-run) (:token second-run))))

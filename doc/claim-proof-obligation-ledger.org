@@ -9507,3 +9507,53 @@ drain ordering. Exercise timeout, blocked cleanup and retry without
 closing an undrained provider. Preserve generic registration behavior
 and explicitly separate local lifecycle enforcement from deployment
 isolation.
+
+* v2860 — adopt owned submission fencing in the mapped host
+
+The mapped host now registers its genuine writer policy using the
+owned adapter registration introduced in v2859. Keep the generic
+custom-policy registration path unchanged. In the acquisition-owned
+XTDB close callback, after the existing audit close, fence and drain
+the registered adapter invocations before closing the node; release
+the registration only after successful provider close. Remember
+successful provider close to avoid repeating it on a release retry.
+Both ordinary reverse-order module stop and checked-startup rollback
+use this callback. A drain timeout retains the open node and the
+fenced registration. Retry the same owner rather than starting a
+replacement while cleanup remains blocked.
+
+Extend the real persistent mapped-host lifecycle test with a controlled
+pause after adapter entry counting and before genuine mapped-policy
+admission. During ordinary stop, require the late submission drain
+timeout, unchanged generation, readable node, fenced subsequent writes,
+and retired request admission. Resume the entered call and require
+genuine policy refusal before retrying stop. During a deliberately
+failed Live startup, require blocked rollback at the XTDB module,
+retained readable node and fenced submission boundary; resume the
+entered call and retry the original checked-startup cleanup handle.
+Verify retired registrations and persistent restart with the original
+initialization root. The test scheduling seam does not replace the
+actual mapped predicate or provider function.
+
+Persistent mapped-host lifecycle: 2 tests / 97 assertions.
+Adapter-handle and writer-classification regression: 7 tests /
+98 assertions. Both passed without failures or errors. Clarify the
+stop docstring after the physical run: at this late fence the worker
+and Live may already be stopped; only the undrained XTDB node is
+retained. Update the reviewed host source fingerprint and rerun the
+adapter/classification regression successfully on the final files.
+The physical lifecycle run preceded that documentation-only change
+and corresponding fingerprint update. Full project gates and
+worker-interleaved historical recovery not rerun.
+
+Local synchronous adapter fencing is now adopted by the mapped owner.
+This does not establish closure over raw callers, alternate JDBC
+identities, external writers, queries, arbitrary tasks, or database
+privileges. Historical judgments unchanged; no original premise
+accepted or discharged.
+
+Next: qualify the owned registration's actual lifecycle evidence and
+bind it to the installed writer classification, keeping fenced
+generations distinct from open ones. Then define the explicit external
+writer isolation boundary without claiming that local mediation is
+database-wide authorization.
