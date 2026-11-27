@@ -1,9 +1,9 @@
 (ns gesso.assurance.proof.mapped-prestate-lowering
   "Source-relative syntactic correspondence, independent of mapped-frame.
-   Shares the low-level transaction formatter and identifier normalization."
+   Builds exact SQL vectors independently of model.tx and HoneySQL.
+   Shares XTDB identifier normalization; no provider semantics theorem."
   (:require [clojure.string :as str]
             [gesso.assurance.proof.mapped-prestate-semantics :as semantics]
-            [gesso.model.tx :as tx]
             [xtdb.util :as xt-util])
   (:import (xtdb.api.query IKeyFn$KeyFn)))
 
@@ -29,15 +29,39 @@
       (reject! :noncanonical-decoded-field))
     columns))
 
+(defn- table-sql! [table]
+  (when-not (and (simple-keyword? table) (re-matches #"[a-z][a-z0-9_]*" (name table)))
+    (reject! :unsupported-table))
+  (name table))
+
+(defn- field-count-guard [table id n]
+  (when-not (and (integer? n) (<= 1 n 8192))
+    (reject! :unsupported-field-count))
+  [(str "ASSERT ? = (SELECT LENGTH(NEST_ONE (SELECT * FROM "
+        (table-sql! table) " WHERE _id = ?)))") n id])
+
+(defn- decoded-document-guard [table id fields]
+  (let [pairs (into [["_id" id]]
+                    (map (fn [[_ column value]]
+                           [(if (str/includes? column "$") (str "\"" column "\"") column) value]))
+                    fields)
+        clauses (mapcat (fn [[column _]]
+                          [(str "(" column " = ?)")
+                           (str "(STR(" column ") = STR(?))")
+                           (str "(STR(ARRAY[" column "]) = STR(ARRAY[?]))")]) pairs)]
+    (into [(str "ASSERT ? = (SELECT COUNT(*) FROM " (table-sql! table)
+                " WHERE " (str/join " AND " clauses) ")") 1]
+          (mapcat (fn [[_ value]] [value value value])) pairs)))
+
 (defn- document-guards [[_ table id] [kind row]]
   (case kind
-    :absent [(tx/format-assertion (tx/assert-document-absent table id))]
+    :absent [[(str "ASSERT ? = (SELECT COUNT(*) FROM " (table-sql! table)
+                   " WHERE _id = ?)") 0 id]]
     :exact-row
     (let [fields (columns! (dissoc row :xt/id) #"[a-z][a-z0-9_$]*")]
       (when-not (every? (comp scalar? last) fields) (reject! :unsupported-value))
-      [(tx/format-assertion
-        (tx/assert-document-decoded-current table id (mapv (fn [[k _ v]] [k v]) fields)))
-       (tx/format-assertion (tx/assert-document-field-count table id (count row)))])
+      [(decoded-document-guard table id fields)
+       (field-count-guard table id (count row))])
     (reject! :unsupported-predicate)))
 
 (defn- journal-leaf? [v]
@@ -91,7 +115,7 @@
                      (map (fn [start] [start (min n (+ start 12))]) (range 0 n 12))
                      [[0 n]])]
         (into [(count-guard 1)
-               (tx/format-assertion (tx/assert-document-field-count :gesso_commands (:xt/id row) (count row)))]
+               (field-count-guard :gesso_commands (:xt/id row) (count row))]
               (map (fn [[start end]]
                      (let [group (subvec constraints start end)]
                        (into [(str "ASSERT 1 = (SELECT COUNT(*)" slot-selector " AND "
@@ -119,7 +143,9 @@
      :mapping-fingerprint (:mapping-fingerprint description)
      :scope :source-relative-syntactic-prefix :status :checked-exact-prefix
      :groups groups :assertion-count (count expected)
+     :formatter-correspondence :independent-exact-sql-vectors
      :sql-refinement :not-established :authority :none :certificate :not-issued
-     :open-obligations #{:shared-formatter-and-identifier-refinement
+     :open-obligations #{:identifier-normalization-refinement
+                         :universal-production-formatter-correspondence
                          :sql-value-and-struct-semantics :faithful-row-acquisition
                          :transaction-internal-read-basis :decoder-congruence}}))

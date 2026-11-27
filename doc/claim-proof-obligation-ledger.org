@@ -8839,3 +8839,45 @@ transaction atomicity interface explicitly, checking the source
 relationship between the issued exact-row predicates and their SQL
 assertions. Preserve the distinction between source-level semantics,
 selected observed effects and universal provider correctness.
+
+* v2843 — independently construct exact mapped prestate SQL vectors
+
+Remove the shared model.tx assertion constructors and HoneySQL
+formatter from the independent mapped-prestate prefix checker.
+Construct canonical document absence, decoded scalar equality,
+scalar and singleton-array print comparisons and complete field-count
+assertions directly from the independently derived row predicates.
+Retain typed parameters in the exact required order. Quote normalized
+namespaced document columns containing dollar signs. Construct the
+journal row field-count assertion independently as well; existing
+independent nested journal constraints and partitioning are retained.
+Check the entire ordered prefix against the expected vectors.
+
+The accepted v5 prefix format and existing production SQL are unchanged.
+Add an explicit independent-exact-SQL-vector correspondence result,
+distinguishing still-open identifier normalization and universal
+production formatter correspondence from the checked finite instance.
+The independent checker still uses the provider's key normalization
+and denormalization. Neither syntactic equality nor formatter
+independence proves provider assertion, transaction basis or atomicity
+semantics. Existing historical v12 judgment and premise states remain
+unchanged.
+
+Focused JVM: new formatter-independence suite passed 1 test /
+34 assertions. Combined formatter, mapped projection, journal
+predicate partition, retained mapped execution and selected transition
+refinement suites passed 28 tests / 1772 assertions, zero failures
+or errors, including live XTDB guard and rollback cases. Exercise
+absent and occupied document and journal targets, supplemental scalar
+fields, namespaced identifiers, typed parameters, disabled production
+assertion constructors and a deliberately corrupted production
+formatter. Corrected an initial independent-template quoting mismatch
+before the passing runs. Both code blobs verified against tested files.
+Assembled-host recovery and full project gates not rerun; no premise
+accepted or discharged.
+
+Next: qualify the provider's ordered pre-write assertion and rollback
+behavior on the closed guard fragment, using the independent exact
+prefix and retained execution semantics. Distinguish selected
+transaction-internal basis and atomicity witnesses from a universal
+provider contract or implementation proof.
