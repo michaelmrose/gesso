@@ -5,6 +5,7 @@
             [gesso.assurance.reference-mapped-evidence :as evidence]
             [gesso.assurance.reference-mapped-outcome :as outcome]
             [gesso.assurance.reference-mapped-submission :as submission]
+            [gesso.assurance.reference-issued-envelope-argument :as issued-envelope]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
             [gesso.assurance.reference-provider :as provider]
             [gesso.assurance.reference-source-coverage :as coverage]
@@ -137,7 +138,7 @@
                                [[2 winner :accept (accepted "helper-1") "t1"]
                                 [3 loser :accept (accepted "helper-2") "t1"]
                                 [4 loser :refuse refused "t2"]]))
-        check! (fn [node history]
+        check! (fn [node history original-node?]
                  (let [sample (coverage/observe-local-processed-retained-replay-inputs! node)
                        actual (:replay-inputs sample)
                        prediction (temporal/replay (mapv #(dissoc % :tx-id) actual))
@@ -183,6 +184,27 @@
                      (is (not-any? #(contains? r %) [:submission-recovery-linkage :observation-origin :framed-handoffs
                                                     :returned-transaction-keys :issued-admission-binding :closed-decoder-binding
                                                     :selected-tx-ids :recovery-linkage :outcome-derivations])))
+                   (if original-node?
+                     (let [check-envelope! #(issued-envelope/compare-recovery! node admit mapped-source outcome-declarations %1 %2)
+                           result (check-envelope! steps @observation-handle)]
+                       (is (= :conditional-issued-source-envelope-recovery (:status result)) (pr-str result))
+                       (is (= 3 (count (:instances result))))
+                       (is (every? #(= :matched-original-live-handles (:induction-fingerprint-provenance %)) (:instances result)))
+                       (is (every? #(= :matched-consumed-candidate-witness (:preparation-correspondence %)) (:instances result)))
+                       (is (every? #(= :matched-local-issued-policy-window (:consumption-correspondence %)) (:instances result)))
+                       (is (= :not-established (:physical-prestate-provenance result) (:provider-refinement result)))
+                       (is (= :not-performed (:proof-discharge result)))
+                       (doseq [bad [(check-envelope! steps @captured)
+                                    (check-envelope! (assoc-in steps [0 :context :induction-fingerprint] "foreign") @observation-handle)
+                                    (check-envelope! (assoc-in steps [0 :docs :requests] []) @observation-handle)
+                                    (check-envelope! (assoc-in steps [0 :expectation :ops] []) @observation-handle)]]
+                         (is (= :not-established (:status bad)) (pr-str bad))
+                         (is (not (contains? bad :instances))))
+                       (with-redefs [publication/read-framed-submission-observation! (constantly {:claims @claims :capture @captured})]
+                         (is (= :issued-envelope-boundary-replaced (:reason (check-envelope! steps @observation-handle))))))
+                     (let [r (issued-envelope/compare-recovery! node admit mapped-source outcome-declarations steps @observation-handle)]
+                       (is (= :unissued-envelope-origin (:reason r)))
+                       (is (not (contains? r :instances)))))
                    (is (= :matched (:status issued-observation)) (pr-str issued-observation))
                    (is (= submission/observed-profile (:observed-profile issued-observation)))
                    (is (= :matched-local-issued-policy-window (:observation-origin issued-observation)))
@@ -475,10 +497,10 @@
                                 (let [basis (live-xtdb/tx-result-basis (:tx-result (:receipt (nth @attempts (- idx 2)))))]
                                   (is (= (select-keys (nth history idx) [:tx-id :system-time])
                                          {:tx-id (live-xtdb/basis-tx-id basis) :system-time (live-xtdb/basis-system-time basis)}))))
-                              (check! node history)
+                              (check! node history true)
                               history))
                           (finally (release)))))]
         (with-open [node (xtn/start-node config)]
           (.awaitSourceBlocking (db/primary-db node) (:tx-id (peek history)) (Duration/ofSeconds 30))
-          (check! node history)))
+          (check! node history false)))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))

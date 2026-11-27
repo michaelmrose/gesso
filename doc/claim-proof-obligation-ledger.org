@@ -10064,3 +10064,39 @@ Next: bind this source-relative argument to the original issued mapped
 admission and actual policy-scoped consumed handoff, independently
 qualifying the induction and preparation identity, rather than accepting
 a caller's admitted/consumed vectors as execution evidence.
+
+* v2872 — bind source envelopes to issued recovery observations
+
+Compose the conditional source-envelope argument with the actual local
+issued admission and commit/throw/commit policy-scoped observation.
+Require the original connectable identity, recheck the exact registered
+source, both live induction handles and the closed outcome decoder.
+Match the selected adapter calls and consumed checked candidates before
+reconstructing the source-relative envelope from the observation itself.
+Match the original operation, declarations, input selectors, exact guard
+prefix and reconstructed witness to the issued candidate, not a caller's
+admitted/consumed vector. Preserve every conditional source premise.
+
+The result is historical local correspondence. The admitted vector is
+reconstructed by stripping the known evidence extension, relying on the
+reviewed consumption boundary to have preserved its original ordering.
+Matching the candidate witness does not authenticate every field of the
+supplied snapshot, prove physical prestate provenance, authenticate the
+principal, or establish provider semantics or complete writer coverage.
+Reopening the same storage does not recreate the original connectable
+identity. No new authority or certificate is issued and no original
+condition is discharged. The 39-condition register remains unchanged.
+
+Final focused JVM regression: 3 tests / 659 assertions, zero failures or
+errors, across reference-claim-recovery and reference-source-envelope-
+argument. Exercise actual embedded XTDB commit, abort, recovered refusal
+and restart; reject copied capture, changed induction fingerprint,
+changed supplied rows, changed expected operations, replaced observation
+reader and reopened connectable. A superseded initial test run was
+stopped after correcting the reopened-node expectation. Full project
+gates not rerun. No production submission behavior changed.
+
+Next: join the issued source-envelope correspondence to independently
+acquired, pinned physical prestate and retained transaction evidence,
+keeping the aborted attempt's stale preparation separate from the
+actual preceding physical state and preserving the trust boundaries.
