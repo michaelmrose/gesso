@@ -5,7 +5,8 @@
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.delivery :as delivery]
             [gesso.live.core :as live]
-            [gesso.live.source :as source]))
+            [gesso.live.source :as source])
+  (:import [xtdb.api TransactionKey]))
 
 (defn- reject! [reason data]
   (throw (ex-info "Gesso single-node outbox host not admitted."
@@ -157,6 +158,8 @@
          (= :matched-synchronous-source-return (:evidence local-source-acceptance))
          (= (select-keys local-dispatch-receipt identities)
             (select-keys local-source-acceptance identities))
+         (= (get-in call [:admission :worker-origin :worker-id]) (:worker-id local-source-acceptance))
+         (= (get-in call [:admission :intent-id]) (:intent-id local-source-acceptance))
          (= source-id (:source-id local-source-acceptance))
          (= instance-id (:source-instance-id local-source-acceptance))
          (pos-int? (:count local-source-acceptance))
@@ -165,6 +168,19 @@
          (every? #{:emitted :queued} (:statuses local-source-acceptance)))))
 
 (def ^:private original-matched-source-return matched-source-return?)
+
+(defn- maintenance-attribution [call]
+  (let [{:keys [admission tx-result]} call]
+    (when-not (and (= :execute-tx (:api call)) (= :returned (:outcome call))
+                   (instance? TransactionKey tx-result))
+      (reject! :source-authority-maintenance-result-mismatch {}))
+    (assoc (select-keys admission [:intent-id :worker-origin :local-dispatch-receipt
+                                  :local-source-acceptance])
+           :maintenance (get-in admission [:worker-origin :maintenance])
+           :tx-id (.getTxId ^TransactionKey tx-result)
+           :system-time (.getSystemTime ^TransactionKey tx-result))))
+
+(def ^:private original-maintenance-attribution maintenance-attribution)
 
 (defn qualify-installed-source!
   "Match the exact issued capture to the installed synchronous source.
@@ -177,6 +193,7 @@
                        (identical? original-live-closed live/closed?)
                        (identical? original-source-closed source/closed?)
                        (identical? original-matched-source-return matched-source-return?)
+                       (identical? original-maintenance-attribution maintenance-attribution)
                        (worker-capture-boundaries-current?) (original-source-boundaries))]
     (when-not entry (reject! :unissued-worker-capture-host {}))
     (locking (:lock entry)
@@ -200,14 +217,19 @@
         (when-not (target-current?) (reject! :source-authority-installation-mismatch {}))
         (when-not (and (seq acknowledgments)
                        (every? #(original-matched-source-return source-id instance-id %) acknowledgments)
-                       (every? #(not (contains? (:admission %) :local-source-acceptance)) (remove ack? calls)))
+                       (every? #(not (or (contains? (:admission %) :local-source-acceptance)
+                                         (contains? (:admission %) :local-dispatch-receipt))) (remove ack? calls)))
           (reject! :source-authority-observation-mismatch {}))
-        (when-not (and @(:active entry) (current?) (target-current?)
-                       (original-worker-match system report)
-                       (= binding (original-worker-binding system origins)))
-          (reject! :source-authority-installation-changed {}))
-        {:owner-ref (:owner-ref binding) :source-id source-id :source-instance-id instance-id
-         :dispatch-target :gesso.live/synchronous-source
-         :correspondence :matched-installed-synchronous-source
-         :acknowledgments (mapv #(get-in % [:admission :local-source-acceptance]) acknowledgments)
-         :durable-delivery :not-established :browser-receipt :not-established}))))
+        (let [attribution (mapv original-maintenance-attribution calls)]
+          (when-not (apply < (map :tx-id attribution))
+            (reject! :source-authority-maintenance-order-mismatch {}))
+          (when-not (and @(:active entry) (current?) (target-current?)
+                         (original-worker-match system report)
+                         (= binding (original-worker-binding system origins)))
+            (reject! :source-authority-installation-changed {}))
+          {:owner-ref (:owner-ref binding) :source-id source-id :source-instance-id instance-id
+           :dispatch-target :gesso.live/synchronous-source
+           :correspondence :matched-installed-synchronous-source
+           :maintenance-attribution attribution
+           :acknowledgments (mapv #(get-in % [:admission :local-source-acceptance]) acknowledgments)
+           :durable-delivery :not-established :browser-receipt :not-established})))))

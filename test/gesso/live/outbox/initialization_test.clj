@@ -1240,6 +1240,25 @@
                       (is (= (vec (keep #(get-in % [:admission :local-source-acceptance]) calls))
                              (:acknowledgments binding)))
                       (is (= (:owner-ref (capture/qualify-installed-worker! owner origins)) (:owner-ref binding)))
+                      (let [attribution (:maintenance-attribution binding)
+                            root-ref (lifecycle/lifecycle-reference root)
+                            child-ref (lifecycle/lifecycle-reference @child*)]
+                        (is (= (mapv #(dissoc % :committed?) (:selected-maintenance checked)) attribution))
+                        (is (= [root-ref root-ref child-ref child-ref]
+                               (mapv #(get-in % [:worker-origin :lifecycle-ref]) attribution)))
+                        (is (= [nil "w" nil "successor"]
+                               (mapv #(get-in % [:local-source-acceptance :worker-id]) attribution)))
+                        (is (= (mapv :tx-id selected) (mapv :tx-id attribution)))
+                        (is (not= (:intent-id (nth attribution 1)) (:intent-id (nth attribution 3))))
+                        (is (not= (get-in attribution [1 :local-dispatch-receipt :receipt-id])
+                                  (get-in attribution [3 :local-dispatch-receipt :receipt-id])))
+                        (doseq [changed [(assoc-in report [:calls 3 :admission :worker-origin :lifecycle-ref] root-ref)
+                                         (assoc-in report [:calls 3 :admission :local-source-acceptance]
+                                                   (get-in calls [1 :admission :local-source-acceptance]))
+                                         (update report :calls #(assoc % 3 (nth % 1)))
+                                         (update report :calls #(vec (reverse %)))]]
+                          (is (= :unissued-worker-capture
+                                 (reason #(capture/qualify-installed-source! owner changed))))))
                       (is (= :not-established (:durable-delivery binding) (:browser-receipt binding)))
                       (is (= :unissued-worker-capture
                              (reason #(capture/qualify-installed-source! owner (into {} report)))))

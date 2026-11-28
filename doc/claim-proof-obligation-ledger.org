@@ -11051,3 +11051,33 @@ project suite were not rerun. No environmental premises were adopted.
 
 Next: qualify the managed successor against the original interrupted
 two-intent execution and its separately attributed acknowledgments.
+
+* v2905 — attribute maintenance to the exact managed generation
+
+Extend installed source qualification with ordered per-call maintenance
+attribution derived from the original issued capture. Preserve returned
+XTDB transaction identity and system time, intent, maintenance kind,
+worker lifecycle origin, dispatch receipt and source-return evidence.
+Require increasing transaction IDs and matching acknowledgment worker and
+intent; reject receipt or source evidence attached to non-acknowledgment
+calls. Join the complete attribution vector to the independently selected
+retained maintenance at original-cut qualification. The root's first
+acknowledgment is distinct from its managed successor's acknowledgment;
+sharing a publication source does not merge the two execution identities.
+Update reviewed source digests. No environmental premise is adopted or
+discharged, and all 39 general CLM-R2 conditions remain open.
+
+Focused JVM: 13 tests, 599 assertions, exit 0, zero failures or errors.
+The persistent worker/successor fixture matches all four transactions to
+independent retained correspondence, and refuses copied captures with
+substituted lineage, source return, duplicated or reversed calls. The
+canonical interrupted two-intent assembled fixture initially exposed a
+shadowed test-local worker binding; rename it to worker-premises. A fresh
+run passed the new assembled qualification and lineage assertions and
+reached subsequent storage-trust checks with at least 200 passing
+assertions and no reported failure or error. Stop the enclosing run
+without a final summary; do not count it as a completed gate. Adjacent,
+root-only assembled recovery and full project gates not rerun.
+
+Next: qualify retirement and reopening against the worker/source contract;
+preserve historical comparison while requiring fresh authority for new work.

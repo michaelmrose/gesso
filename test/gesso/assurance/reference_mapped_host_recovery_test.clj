@@ -1131,8 +1131,8 @@
                           (is (= writer-history/refined-judgment-profile (:judgment-profile refined)))
                           (is (= observed-recovery/judgment-profile (:judgment-profile original)))
                           (is (= (:obligation-inventory original) (:obligation-inventory refined)))
-                          (let [worker (:worker-authentication-premises original)
-                                subject (:scope worker)
+                          (let [worker-premises (:worker-authentication-premises original)
+                                subject (:scope worker-premises)
                                 describe observed-recovery/describe-worker-authority-contract!
                                 contract (describe comparison admit subject)
                                 source-index (first (keep-indexed #(when (:local-source-acceptance %2) %1)
@@ -1140,7 +1140,7 @@
                             (is (= :open-worker-authority-contract (:status contract)) (pr-str (:reason contract)))
                             (is (= :matched-original-issued-cut (:subject-provenance contract)))
                             (is (= subject (get-in contract [:scope :worker-subject])))
-                            (is (= (:open-premise-fingerprints worker) (get-in contract [:scope :original-worker-premises])))
+                            (is (= (:open-premise-fingerprints worker-premises) (get-in contract [:scope :original-worker-premises])))
                             (is (= [:reference-worker-authority/worker-identity :reference-worker-authority/source-acceptance]
                                    (mapv #(get-in % [:assumption :id]) (:obligations contract))))
                             (is (= 2 (count (:open-premise-fingerprints contract))))
@@ -1162,6 +1162,18 @@
                                 (is (= :matched-installed-synchronous-source (:correspondence source-binding)))
                                 (is (= (:owner-ref (:installation-binding qualified)) (:owner-ref source-binding)))
                                 (is (= (get-in started [:gesso.live/system :source :id]) (:source-instance-id source-binding)))
+                                (let [attribution (:maintenance-attribution source-binding)]
+                                  (is (= (mapv #(select-keys % [:tx-id :system-time :intent-id :maintenance
+                                                               :worker-origin :local-dispatch-receipt :local-source-acceptance])
+                                               (:selected-maintenance worker-evidence)) attribution))
+                                  (is (= (mapv lifecycle/lifecycle-reference
+                                               [worker worker (or successor worker) (or successor worker)])
+                                         (mapv #(get-in % [:worker-origin :lifecycle-ref]) attribution)))
+                                  (is (= (if successor? [nil "assembled-recovery" nil "assembled-successor"]
+                                                       [nil "assembled-recovery" nil "assembled-recovery"])
+                                         (mapv #(get-in % [:local-source-acceptance :worker-id]) attribution)))
+                                  (is (not= (get-in attribution [1 :local-dispatch-receipt :receipt-id])
+                                            (get-in attribution [3 :local-dispatch-receipt :receipt-id]))))
                                 (is (= :not-established (:durable-delivery source-binding) (:browser-receipt source-binding))))
                               (is (= qualified (host/qualify-worker-authority! started (second foreign) subject)))
                               (is (= :worker-authority-original-installation-mismatch

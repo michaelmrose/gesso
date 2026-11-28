@@ -983,6 +983,9 @@
                                  (= (get-in contract [:scope :worker-subject :publication-source-id])
                                     (:source-id source-binding))
                                  (= (vec (keep :local-source-acceptance selected)) (:acknowledgments source-binding))
+                                 (= (mapv #(select-keys % [:tx-id :system-time :intent-id :maintenance
+                                                           :worker-origin :local-dispatch-receipt :local-source-acceptance]) selected)
+                                    (:maintenance-attribution source-binding))
                                  (= binding (original-worker-installation system origins)))))
                   (fail :worker-authority-source-binding-mismatch)
                   :else

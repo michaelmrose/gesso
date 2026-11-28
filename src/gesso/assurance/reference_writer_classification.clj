@@ -24,7 +24,7 @@
    "gesso/live/outbox/initialization.clj" "36aac083e410e05b806137bf4540559f1ef3d77d4284dc6f387604aff3d81de7"
    "gesso/live/outbox/host.clj" "6029bb3c062a76d40a6ada1f77881ceda7367481f7fd2a6263253dfa1993dc6d"
    "gesso/live/outbox/lifecycle.clj" "05d489b78f09b3e5bc7cdc130753b1d54e82ccd1653595b18568d9b1a14a6b7c"
-   "gesso/live/outbox/worker_capture.clj" "8210cab512cbfcd86144d30692f5f2faab514ec0b4abdc8e68186d731360f638"
+   "gesso/live/outbox/worker_capture.clj" "569e5c1c62fa1bb3faeba4c9d24a821fe529fed57b43f8caa88d7bb79785a259"
    "gesso/live/outbox/biff.clj" "0a53c933f9c0f8c5cff6e60825cce396d8e49e31a552af5a20a7391d76020e1a"
    "gesso/live/consistency/xtdb.clj" "2f191e2cdba15d7ce2ce07da02bc35671b44babb713bd85fce01c6d396156697"})
 
