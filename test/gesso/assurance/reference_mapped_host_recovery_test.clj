@@ -361,7 +361,7 @@
 
 (defn- check-reopened-recovery!
   [assembly handler config tables admit mapped-source outcome-declarations
-   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle cut-handle foreign-comparisons worker-capture]}]
+   policy-events {:keys [node worker ring-handler token sample rows observation steps initial comparison events retained-handle cut-handle foreign-comparisons worker-capture worker-authority-contract]}]
   (is (= :stopped (:status (lifecycle/status worker))))
   (is (= 503 (:status (ring-handler {:uri "/"}))))
   (is (nil? (correspondence/initialization-observation node admit)))
@@ -371,6 +371,13 @@
         adopted-handle (volatile! nil)]
     (try
       (is (not (host/worker-outcome-capture-matches? started worker-capture)))
+      (let [subject (get-in worker-authority-contract [:scope :worker-subject])]
+        (doseq [foreign foreign-comparisons]
+          (is (= worker-authority-contract
+                 (observed-recovery/describe-worker-authority-contract! foreign admit subject)))
+          (let [r (host/qualify-worker-authority! started foreign subject)]
+            (is (= :worker-authority-original-installation-mismatch (:reason r)))
+            (is (not-any? #(contains? r %) [:installation-binding :source-installation-binding])))))
       (let [binding (host/read-command-authority-binding! started)
             original-binding (get-in comparison [:selected-command-origins 0 :http-route :authority-binding])]
         (is (= (:policy original-binding) (:policy binding)))
@@ -427,6 +434,12 @@
                                    :acceptance :trust-open-premises :premises premises})
                   adopted (host/adopt-storage-trust! started handle)]
               (vreset! adopted-handle handle)
+              (let [subject (get-in worker-authority-contract [:scope :worker-subject])
+                    r (host/qualify-worker-authority! started handle subject)]
+                (is (= worker-authority-contract
+                       (observed-recovery/describe-worker-authority-contract! handle admit subject)))
+                (is (= :worker-authority-original-installation-mismatch (:reason r)))
+                (is (not-any? #(contains? r %) [:installation-binding :source-installation-binding])))
               ;; A fresh target comparison does not change the original command installation.
               (is (= :command-authority-original-installation-mismatch
                      (trust-problem #(host/qualify-command-authority! started handle))))
@@ -1178,6 +1191,7 @@
                               (is (= qualified (host/qualify-worker-authority! started (second foreign) subject)))
                               (is (= :worker-authority-original-installation-mismatch
                                      (:reason (host/qualify-worker-authority! (into {} started) comparison subject)))))
+                            (swap! restart* assoc :worker-authority-contract contract)
                             (is (= contract (describe (second foreign) admit subject)))
                             (is (= :unissued-conditional-recovery (:reason (describe {} admit subject))))
                             (is (= :worker-authority-admission-mismatch (:reason (describe comparison {} subject))))
@@ -1430,7 +1444,7 @@
                           (check-recovery-judgment! adopted
                                                    (observed-recovery/read-conditional-recovery-scope! (first foreign))
                                                    enhanced admit))
-                        (reset! restart* {:foreign-comparisons foreign
+                        (swap! restart* merge {:foreign-comparisons foreign
                                          :worker-capture worker-capture
                                          :node node :worker (or successor worker) :ring-handler @handler*
                                         :token (live-xtdb/current-submission-policy-token node)
@@ -1517,6 +1531,12 @@
                      (trust-problem #(host/capture-worker-outcomes! started 1 (constantly nil)))))
               (is (host/worker-outcome-capture-matches? started (:worker-capture @restart*)))
               (doseq [foreign (:foreign-comparisons @restart*)]
+                (let [contract (:worker-authority-contract @restart*)
+                      subject (get-in contract [:scope :worker-subject])
+                      r (host/qualify-worker-authority! started foreign subject)]
+                  (is (= contract (observed-recovery/describe-worker-authority-contract! foreign admit subject)))
+                  (is (= :worker-capture-host-retired (:reason r)))
+                  (is (not-any? #(contains? r %) [:installation-binding :source-installation-binding])))
                 (is (= :storage-trust-host-retired
                        (trust-problem #(host/adopt-storage-trust! started foreign))))
                 (is (= :command-authority-host-retired

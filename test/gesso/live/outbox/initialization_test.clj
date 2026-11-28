@@ -12,6 +12,7 @@
             [gesso.live.outbox.lifecycle :as lifecycle]
             [gesso.live.outbox.worker-capture :as capture]
             [gesso.assurance.reference-retained-acquisition :as retained]
+            [gesso.assurance.reference-historical-cut :as cut]
             [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.live.outbox.discovery :as discovery]
             [gesso.live.core :as live]
@@ -1095,6 +1096,78 @@
             (finally (release))))))))
 
 
+(defn- check-reopened-worker-authority!
+  [provider-config config scope {:keys [owner report origins historical-cut old-binding]}]
+  (let [sys (live/create {:rules [{:when-topic :request
+                                  :expand (fn [_ change] [(select-keys change [:topic :id :change/kind])])}]})
+        lineage (lifecycle/new-managed-lineage)
+        register! @#'capture/register-worker-capture-host!]
+    (try
+      (with-open [node (xtn/start-node provider-config)]
+        (let [_ (.awaitSourceBlocking (db/primary-db node) (:processed-message-id historical-cut)
+                                      (java.time.Duration/ofSeconds 30))
+              acquisition (retained/capture! node)
+              target (:acquisition acquisition)
+              compared (cut/compare-exact-cut! historical-cut node target)
+              writer (policy/build-policy! node config (assoc scope :managed-lineage lineage))
+              release (xtdb/register-submission-policy! node writer)]
+          (try
+            (is (= :issued (:status acquisition)) (pr-str (dissoc acquisition :acquisition)))
+            (is (= :matched (:status compared)) (pr-str compared))
+            (is (= :exact-content (:cut-correspondence compared)))
+            (is (= :not-established (:observation-storage-identity compared)))
+            (is (capture/worker-outcome-capture-matches? owner report))
+            (is (= :worker-capture-host-retired (reason #(capture/qualify-installed-source! owner report))))
+            (is (= :worker-capture-host-retired (reason #(capture/qualify-installed-worker! owner origins))))
+            (policy/activate-policy! writer)
+            (let [root (lifecycle/start-managed! node sys {} "s" {:worker-id "w" :poll-ms 30} lineage)
+                  token (Object.) active (atom true)
+                  fresh-owner {:xtdb/connectable node :gesso.live/system sys
+                               :gesso.live.outbox/managed-handle root
+                               :gesso.live.outbox/source-id "s"
+                               :gesso.live.outbox.host/worker-capture-token token
+                               :gesso.live.outbox.host/mapped-policy-token (xtdb/submission-policy-token node writer)}]
+              (try
+                (register! fresh-owner token active (Object.))
+                (is (not (capture/worker-outcome-capture-matches? fresh-owner report)))
+                (is (= :unissued-worker-capture (reason #(capture/qualify-installed-source! fresh-owner report))))
+                (is (= :worker-authority-installation-mismatch
+                       (reason #(capture/qualify-installed-worker! fresh-owner origins))))
+                (let [id (random-uuid)
+                      plan (outbox/prepare! {:intent-ids [id] :source-id "s" :operation :example/update
+                                             :purpose :gesso.live/refresh}
+                                            [{:topic :request :id "r1" :change/kind :updated}])
+                      fresh-report (capture/capture-worker-outcomes!
+                                    fresh-owner 2
+                                    (fn []
+                                      ;; Fixture-only raw seeding, as in the original history.
+                                      (xt/execute-tx node (conj (vec (:guard-ops plan)) (:tx-op plan)))
+                                      (let [accepted? (loop [n 0]
+                                                        (let [row (first (xt/q node ["SELECT gesso$live$outbox$status AS outbox_status FROM gesso_live_outbox WHERE _id = ?" id]))]
+                                                          (cond (= :dispatch-accepted (:outbox-status row)) true
+                                                                (>= n 400) false
+                                                                :else (do (Thread/sleep 25) (recur (inc n))))))]
+                                        (is (= :drained (:outcome (lifecycle/stop! root 10000))))
+                                        accepted?)))
+                      _ (is (= :matched-local-policy-outcome-window (:policy-window fresh-report))
+                            (pr-str (select-keys fresh-report [:outcome :result :policy-window])))
+                      _ (is (true? (:result fresh-report)) (pr-str (lifecycle/status root)))
+                      binding (capture/qualify-installed-source! fresh-owner fresh-report)
+                      fresh-cut (:acquisition (retained/capture! node))]
+                  (is (= :returned (:outcome fresh-report)))
+                  (is (capture/worker-outcome-capture-matches? fresh-owner fresh-report))
+                  (is (not (capture/worker-outcome-capture-matches? owner fresh-report)))
+                  (is (= "s" (:source-id old-binding) (:source-id binding)))
+                  (is (not= (:owner-ref old-binding) (:owner-ref binding)))
+                  (is (not= (:source-instance-id old-binding) (:source-instance-id binding)))
+                  (is (= [id id] (mapv :intent-id (:maintenance-attribution binding))))
+                  (is (= :prefix-content (:cut-correspondence (cut/compare-prefix-cut! historical-cut node fresh-cut)))))
+                (finally
+                  (reset! active false)
+                  (is (= :drained (:outcome (lifecycle/retire! root 10000)))))))
+            (finally (release)))))
+      (finally (live/close! sys)))))
+
 (deftest installed-profile-requires-original-managed-worker-lineage
   (let [admission (admission! :requests #{} :example/initialization :request_assignments)
         seed [[:put-docs :requests {:xt/id "r1" :item-count 0}]]
@@ -1104,6 +1177,7 @@
                                :purpose :gesso.live/refresh}
                               [{:topic :request :id "r1" :change/kind :updated}])
         config {:admission admission :initializer seed :observe! #(swap! seen conj %)}
+        historical* (volatile! nil)
         lineage (lifecycle/new-managed-lineage)
         scope {:source-id "s" :worker-id "w" :require-worker-call-chain? true :managed-lineage lineage}
         directory (java.nio.file.Files/createTempDirectory
@@ -1338,6 +1412,9 @@
                     (with-redefs [lifecycle/managed-lineage-members (constantly [])]
                       (is (not (capture/worker-outcome-capture-matches? owner report)))
                       (is (= :worker-capture-boundary-replaced (reason #(capture/capture-worker-outcomes! owner 1 (constantly nil))))))
+                    (vreset! historical* {:owner owner :report report :origins origins
+                                          :historical-cut (:historical-cut (cut/derive-cut! node acquisition))
+                                          :old-binding (capture/qualify-installed-source! owner report)})
                     (reset! active false)
                     (is (= :worker-capture-host-retired
                            (reason #(capture/qualify-installed-source! owner report))))
@@ -1350,6 +1427,8 @@
                 (when-let [root @root*]
                   (is (= :drained (:successor-outcome (lifecycle/retire! root 10000)))))))
             (finally (release)))))
+      (live/close! sys)
+      (check-reopened-worker-authority! provider-config config scope @historical*)
       (finally
         (live/close! sys)
         (doseq [f (reverse (file-seq (.toFile directory)))]

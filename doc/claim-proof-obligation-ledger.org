@@ -11081,3 +11081,38 @@ root-only assembled recovery and full project gates not rerun.
 
 Next: qualify retirement and reopening against the worker/source contract;
 preserve historical comparison while requiring fresh authority for new work.
+
+* v2906 — qualify retirement and reopening of worker authority
+
+Exercise the existing distinction between historical correspondence and
+installed worker/source qualification. Retire the original managed lineage,
+close its provider and Live system, and reopen the same persistent XTDB
+store. Wait for the original retained frontier before acquiring the new
+sample. Match exact historical content without transferring the original
+owner, capture or lifecycle identity. Activate a fresh writer policy and
+managed root with the same configured worker and source names; capture a
+new acquisition and acknowledgment and require a different local owner and
+runtime source identity. Verify the original retained cut as a prefix of
+the new history. Use the existing fixture-only raw seed for the new intent;
+this does not demonstrate complete writer closure or public command admission.
+
+Extend the assembled recovery fixture to retain the original worker
+contract, describe it unchanged after retirement and on fresh same-store
+and independent-copy comparison handles, and refuse installed qualification
+without returning either installation binding. These added assembled
+assertions were compiled but the full persistent recovery variants were
+not rerun. Production enforcement and all premise fingerprints are unchanged.
+
+Focused JVM: 13 tests, 621 assertions, exit 0, zero failures or errors.
+The first test attempt returned an unsupported retained comparison and
+unissued fresh capture; the second exposed XTDB prepared-query-out-of-date
+on a reopened SELECT * query. Use an explicit source-frontier wait, a fixed
+status column and cooperative drain before closing the capture. The corrected gate covers
+real persistent reopening and fresh maintenance with fixture-owned worker
+registration, not a second fully assembled production host. Full project
+suite not rerun. No premise adoption or discharge; all 39 general CLM-R2
+conditions remain open.
+
+Next: adopt applicable worker and source environmental declarations at the
+exact configured owner, preserving omitted, partial, stale and foreign
+selection dispositions.
