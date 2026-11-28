@@ -1370,6 +1370,19 @@
                             (is (= :not-derived (get-in i [:storage-relevance :general-condition-links])))
                             (is (every? #(= :open (:discharge-state %)) (vals (:premises-by-fingerprint i))))
                             (is (= :not-performed (:proof-discharge i))))
+                          (let [subject (get-in (:worker-authority-contract @restart*) [:scope :worker-subject])
+                                qualified (host/qualify-worker-authority! started comparison subject)
+                                selection (host/worker-authority-selection qualified)
+                                extended (host/compare-configured-worker-storage-recovery!
+                                          started tables mapped-source outcome-declarations steps observation
+                                          handle worker-capture enhanced-cut comparison selection)
+                                i (:configured-obligation-inventory extended)
+                                base (:configured-obligation-inventory joined)]
+                            (is (= recovery-inventory/worker-authority-profile (:profile i)))
+                            (is (= 20 (count (:deployment-declared-premise-fingerprints i))))
+                            (is (= (:open-premise-fingerprints qualified) (get-in i [:adopted-by-contract :worker-authority])))
+                            (is (= (:remaining-conditions base) (:remaining-conditions i)))
+                            (is (= (:unaccepted-premise-fingerprints base) (:unaccepted-premise-fingerprints i))))
                           (with-redefs [recovery-inventory/compose! (constantly {})]
                             (is (= :configured-recovery-boundary-replaced (trust-problem #(storage! comparison)))))
                           (is (= :storage-trust-policy-mismatch (trust-problem #(storage! (second foreign)))))

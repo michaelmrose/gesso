@@ -30,7 +30,7 @@
              {:trusted-assumptions fps :deployment-adoption :configured-local-host :premise-acceptance :explicit-declaration-only}
              {:premise-acceptance :not-performed}))))
 
-(defn- fixture [& [command-builder]]
+(defn- fixture [& [command-builder worker-builder]]
   ;; Structural fixture only. The installed-host regression exercises the
   ;; actual issued, source-relative declarations and observations.
   (let [cut {:payload-binding-profile storage/cut-profile :record-offsets [0 1 2]
@@ -46,14 +46,18 @@
                                :premises (mapv :assumption (:obligations (storage/describe-obligations scope)))})
                       :status :conditional :judgment-scope scope :proof-discharge :not-performed)
         command (if command-builder (command-builder cut) (family :command 1 false))
-        stored (assoc stored :command-authentication-premises command)
+        worker-entry (when worker-builder (worker-builder cut))
+        worker (if worker-entry (#'recovery/worker-authentication-premises worker-entry) (family :worker 1 false))
+        stored (assoc stored :command-authentication-premises command
+                            :worker-authentication-premises worker
+                            :original-recovery (:original-recovery worker-entry))
         register {:fixture/operation #{:fixture/original}}
         abstract {:fingerprint "abstract" :declared-operation-ids (set (keys register))
                   :classification {:open {:assumptions #{} :assumption-classes {} :certificate-premises #{}}
                                    :certificate {:open-premises #{}}
                                    :original-obligations {:status :all-original-obligations-remain-open :by-operation register}}}
         original (historical/describe-inventory abstract stored command
-                                                (family :worker 1 false) (family :physical 1 false))
+                                                worker (family :physical 1 false))
         writer (family :writer-isolation 5 true) provider (family :provider-trust 8 true)
         general #{:writer-condition :provider-condition :other-condition}
         history-conditions #{:history-condition}
@@ -111,6 +115,110 @@
     (with-redefs [assumption/describe-assumption (constantly {})]
       (is (thrown? clojure.lang.ExceptionInfo (apply configured/compose! args))))))
 
+(defn- worker-entry [cut acknowledged?]
+  (let [intent (random-uuid) lifecycle (random-uuid)
+        selected (cond-> [{:tx-id 2 :intent-id intent :maintenance :lease-acquisition}]
+                   acknowledged? (conj {:tx-id 3 :intent-id intent :maintenance :dispatch-acknowledgment}))
+        observed (mapv #(assoc % :committed? true :system-time (java.time.Instant/parse "2026-11-26T20:00:00Z")
+                               :worker-origin {:source-id "source" :worker-id "worker" :lifecycle-ref lifecycle
+                                               :cycle-number 1 :maintenance (:maintenance %)
+                                               :origin :scheduled-local-cycle :authentication :not-established
+                                               :call-chain :matched-scheduled-maintenance}) selected)
+        receipt {:intent-id intent :lease-id (random-uuid) :worker-id "worker" :receipt-id (random-uuid)
+                 :adapter :gesso.live/synchronous-source :result :accepted :evidence :matched-local-delivery-handoff}
+        acceptance (merge (select-keys receipt [:intent-id :lease-id :worker-id :receipt-id])
+                          {:source-id "source" :source-instance-id (random-uuid) :count 1
+                           :statuses [:queued] :evidence :matched-synchronous-source-return})
+        observed (cond-> observed acknowledged? (assoc-in [1 :local-dispatch-receipt] receipt)
+                                  acknowledged? (assoc-in [1 :local-source-acceptance] acceptance))]
+    {:scope {:publication-source-id "source" :historical-cut cut}
+     :command-observation-ref "original"
+     :judgment-subject {:catalog-id :fixture/claim}
+     :original-recovery {:selected-tx-ids [1 4 5] :selected-commitments [:committed :aborted :committed]
+                         :intervening-maintenance selected
+                         :worker-observation-provenance :matched-local-issued-host-capture
+                         :worker-correspondence {:selected-maintenance observed
+                                                 :worker-lineage-correspondence :matched-issued-managed-lineage
+                                                 :maintenance-correspondence :matched-issued-worker-retained-transactions
+                                                 :retained-payload-fingerprint (:payload-fingerprint cut)
+                                                 :dispatch-receipt-correspondence (if acknowledged? :matched-local-handoff-retained-acknowledgments :not-applicable)
+                                                 :source-acceptance-correspondence (if acknowledged? :matched-local-source-return-retained-acknowledgments :not-applicable)}}}))
+
+(defn- check-worker-extensions! [command-builder]
+  (doseq [acknowledged? [false true]]
+    (let [[_ _ _ refined _ :as args] (fixture command-builder #(worker-entry % acknowledged?))
+          base (apply configured/compose! args)
+          historical (:historical-judgment refined)
+          worker (:worker-authentication-premises historical)
+          correspondence (get-in historical [:original-recovery :worker-correspondence])
+          selected (:selected-maintenance correspondence)
+          member (select-keys (:worker-origin (first selected)) [:lifecycle-ref :source-id :worker-id])
+          binding {:owner-ref "owner" :root member :current-generation member :lineage [member]}
+          returns (vec (keep :local-source-acceptance selected))
+          description (recovery/describe-worker-authority-subject worker correspondence (:scope worker))
+          qualified (cond-> (assoc description :configured-authority :matched-current-local-worker-installation
+                                               :installation-binding binding)
+                      acknowledged? (assoc :source-installation-binding
+                                           {:owner-ref "owner" :source-id "source" :source-instance-id (:source-instance-id (first returns))
+                                            :dispatch-target :gesso.live/synchronous-source :correspondence :matched-installed-synchronous-source
+                                            :maintenance-attribution (mapv #(dissoc % :committed?) selected)
+                                            :acknowledgments returns :durable-delivery :not-established :browser-receipt :not-established}))
+          declaration {:deployment-id :fixture/owner :acceptance :trust-open-premises
+                       :premise-ids #{:reference-worker-authority/worker-identity :reference-worker-authority/source-acceptance}}
+          adopted (assoc qualified :status :conditional-configured-worker-authority
+                                   :deployment-adoption :configured-local-host :premise-acceptance :explicit-declaration-only
+                                   :trusted-assumptions (:open-premise-fingerprints description) :deployment-acceptance declaration)
+          command (get historical :command-authentication-premises)
+          base (if command-builder
+                 (let [binding (get-in command [:selected-command-origins 0 :http-route :authority-binding])
+                       policy (:policy binding)
+                       d (authority/describe! command policy)
+                       q (#'owner/match-contract! binding (assoc d :subject-provenance :matched-original-issued-cut))
+                       s (assoc (authority/select! command policy (mapv :assumption (:obligations d)))
+                                :subject-provenance :matched-original-issued-cut)
+                       a (#'owner/adopt-selected! q {:acceptance :trust-open-premises
+                                                    :premise-ids #{:reference-command-authority/request-gate :reference-command-authority/principal-session}} s)]
+                   (configured/extend-command-authority! base refined a))
+                 base)
+          joined (configured/extend-worker-authority! base refined adopted)
+          fps (:trusted-assumptions adopted)
+          original (:original-historical-inventory base)]
+      (is (= configured/worker-authority-profile (:profile joined)))
+      (is (= (+ (if command-builder 18 16) (if acknowledged? 2 1))
+             (count (:deployment-declared-premise-fingerprints joined))))
+      (is (= fps (get-in joined [:adopted-by-contract :worker-authority]) (get-in joined [:premise-families :worker-authority])))
+      (is (= (:scope adopted) (get-in joined [:adoption-scopes :worker-authority])))
+      (is (= (if acknowledged? :acknowledged :maintenance-only) (get-in joined [:worker-authority-relevance :history-kind])))
+      (is (= (:open-premise-fingerprints worker) (get-in joined [:worker-authority-relevance :original-worker-premises])))
+      (is (every? (:unaccepted-premise-fingerprints joined) (:open-premise-fingerprints worker)))
+      (is (= (:unaccepted-premise-fingerprints base) (:unaccepted-premise-fingerprints joined)))
+      (is (= :not-derived (get-in joined [:worker-authority-relevance :general-condition-links])))
+      (is (= original (:original-historical-inventory joined)))
+      (is (= (:remaining-conditions base) (:remaining-conditions joined)))
+      (is (= (:remaining-general-conditions base) (:remaining-general-conditions joined)))
+      (is (= (:conditional-command-attribution base) (:conditional-command-attribution joined)))
+      (is (= (:premises-by-fingerprint base) (select-keys (:premises-by-fingerprint joined) (keys (:premises-by-fingerprint base)))))
+      (is (= (:all-described-open-premise-fingerprints joined) (set (:dependency-order joined))))
+      (is (every? #(= :open (:discharge-state %)) (vals (:premises-by-fingerprint joined))))
+      (is (= :not-performed (:proof-discharge joined)))
+      (doseq [bad (cond-> [qualified (assoc adopted :trusted-assumptions #{})
+                           (assoc adopted :proof-discharge :performed)
+                           (assoc-in adopted [:scope :worker-subject :recovery-cut-ref] "other")
+                           (assoc-in adopted [:deployment-acceptance :premise-ids] #{})
+                           (assoc-in adopted [:installation-binding :lineage 0 :worker-id] "foreign")
+                           (assoc-in adopted [:obligations 0 :discharge-state] :discharged)]
+                    acknowledged? (conj (assoc-in adopted [:source-installation-binding :owner-ref] "foreign")
+                                        (assoc-in adopted [:source-installation-binding :acknowledgments] [])
+                                        (assoc-in adopted [:source-installation-binding :maintenance-attribution] [])))]
+        (is (thrown? clojure.lang.ExceptionInfo (configured/extend-worker-authority! base refined bad))))
+      (is (thrown? clojure.lang.ExceptionInfo (configured/extend-worker-authority! joined refined adopted)))
+      (is (thrown? clojure.lang.ExceptionInfo (configured/extend-worker-authority! base (assoc refined :historical-cut {}) adopted)))
+      (with-redefs [recovery/describe-worker-authority-subject (constantly description)]
+        (is (thrown? clojure.lang.ExceptionInfo (configured/extend-worker-authority! base refined adopted)))))))
+
+(deftest worker-authority-extends-legacy-sixteen-premises
+  (check-worker-extensions! nil))
+
 (deftest command-authority-extension-retains-original-obligations
   (let [policy {:deployment-id :fixture/host :request-gate-policy :fixture/gate
                 :principal-session-policy :fixture/session}
@@ -148,6 +256,7 @@
         adopted (#'owner/adopt-selected! qualified declaration selected)
         joined (configured/extend-command-authority! base refined adopted)
         fps (:trusted-assumptions adopted)]
+    (check-worker-extensions! command-builder)
     (let [argument (:conditional-command-attribution joined)
           by-id (into {} (map (fn [p] [(get-in p [:assumption :id]) (:premise-fingerprint p)]))
                       (:obligations adopted))

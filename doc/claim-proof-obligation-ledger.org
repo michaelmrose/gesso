@@ -11146,3 +11146,30 @@ No full persistent recovery or project gate was run for this revision.
 
 Next: compose applicable adopted worker/source premises with the configured
 recovery inventory, preserving older 16- and 18-premise configurations.
+
+* v2908 — compose the configured worker authority inventory
+
+Extend the existing 16- and 18-premise configured inventories only when
+an explicit worker selection is offered to the owner-locked recovery join.
+Keep the original arity and both prior profiles unchanged. Re-derive the
+applicable contract from the refined original worker history and match the
+owner adoption, lineage, per-transaction maintenance and source returns.
+Maintenance-only adds one environmental premise; acknowledged maintenance
+adds two. Index them in a separate worker-authority family, preserving
+original unaccepted worker premises, dependency order, previous command
+support and all remaining selected and general conditions. Reject repeated
+extension, forged premise descriptions, mismatched subject or lineage and
+substituted acknowledgment evidence. The structural helper does not confer
+provenance; the host requalifies and adopts under the existing owner lock.
+Update the reviewed host and recovery source digests.
+
+Focused JVM: 15 tests, 607 assertions, exit 0, zero failures or errors.
+Structural tests cover 16/18 prior inventories and 17/18/19/20 extended
+adopted counts, with retained original obligations and adverse controls.
+Added a 20-premise assembled-host comparison, compiled but not executed.
+Full persistent recovery variants and project suite not rerun. No new
+entailment or proof discharge; all 39 general CLM-R2 conditions remain open.
+
+Next: derive conditional maintenance attribution and source acceptance
+from the exact applicable adopted premises and original implementation
+conditions; never infer durable delivery or browser receipt.

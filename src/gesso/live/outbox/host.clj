@@ -1020,6 +1020,8 @@
 (def ^:private original-configured-storage-adopt adopt-storage-trust!)
 (def ^:private original-recovery-inventory recovery-inventory/compose!)
 (def ^:private original-command-inventory command-authority/extend-inventory!)
+(def ^:private original-worker-inventory recovery-inventory/extend-worker-authority!)
+(def ^:private original-adopt-worker-inventory adopt-worker-authority!)
 (def ^:private original-physical-envelope physical-envelope/compare-recovery!)
 (def ^:private original-activated-recovery observed-recovery/compare-activated!)
 (def ^:private original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
@@ -1037,6 +1039,8 @@
                  (identical? original-configured-storage-adopt adopt-storage-trust!)
                  (identical? original-recovery-inventory recovery-inventory/compose!)
                  (identical? original-command-inventory command-authority/extend-inventory!)
+                 (identical? original-worker-inventory recovery-inventory/extend-worker-authority!)
+                 (identical? original-adopt-worker-inventory adopt-worker-authority!)
                  (identical? original-physical-envelope physical-envelope/compare-recovery!)
                  (identical? original-activated-recovery observed-recovery/compare-activated!)
                  (identical? original-interleaved-envelope physical-envelope/compare-worker-interleaved!)
@@ -1203,9 +1207,15 @@
               (reject! :configured-writer-history-changed {}))
             (configured-recovery-boundaries!)
             (require-open-provider-generation! system)
-            (let [inventory (when storage-adoption
-                              (original-command-inventory system (:comparison historical)
-                                (original-recovery-inventory configured physical history refined (:adopted storage-adoption)) refined))]
+            (let [base (when storage-adoption
+                         (original-command-inventory system (:comparison historical)
+                           (original-recovery-inventory configured physical history refined (:adopted storage-adoption)) refined))
+                  inventory (if (contains? historical :worker-authority-selection)
+                              (let [subject (get-in refined [:historical-judgment :worker-authentication-premises :scope])
+                                    adopted (original-adopt-worker-inventory system (:comparison historical) subject
+                                              (:worker-authority-selection historical))]
+                                (original-worker-inventory base refined adopted))
+                              base)]
               (configured-recovery-boundaries!)
               (cond-> {:status :conditional-configured-envelope-recovery
            :profile :configured-clm-r2-envelope-recovery-v1
@@ -1280,8 +1290,15 @@
 (defn compare-configured-worker-storage-recovery!
   "Join selected recovery to all three startup-selected trust contracts.
    Storage premises come from the exact owner's policy, not a caller's
-   declaration. Local adoption does not authenticate historical lineage."
-  [system tables source declarations steps observation acquisition capture history-cut comparison]
-  (compare-configured-envelope-recovery* system tables source declarations steps observation
-                                        {:acquisition acquisition :capture capture :history-cut history-cut
-                                         :historical {:comparison comparison :configured-storage? true}}))
+   declaration. An explicit worker-selection argument additionally adopts
+   the applicable current worker/source contract; omission retains the
+   existing inventory. Local adoption does not authenticate historical lineage."
+  ([system tables source declarations steps observation acquisition capture history-cut comparison]
+   (compare-configured-envelope-recovery* system tables source declarations steps observation
+                                         {:acquisition acquisition :capture capture :history-cut history-cut
+                                          :historical {:comparison comparison :configured-storage? true}}))
+  ([system tables source declarations steps observation acquisition capture history-cut comparison worker-selection]
+   (compare-configured-envelope-recovery* system tables source declarations steps observation
+                                         {:acquisition acquisition :capture capture :history-cut history-cut
+                                          :historical {:comparison comparison :configured-storage? true
+                                                       :worker-authority-selection worker-selection}})))

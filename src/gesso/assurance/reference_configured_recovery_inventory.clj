@@ -5,6 +5,7 @@
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-command-authority :as command-authority]
             [gesso.assurance.reference-command-attribution-argument :as attribution]
+            [gesso.assurance.reference-mapped-observed-recovery :as recovery]
             [gesso.live.outbox.http-route :as route]))
 
 (def profile :configured-selected-recovery-obligation-inventory-v1)
@@ -209,3 +210,102 @@
           (assoc-in [:premise-families :command-authority] fps)
           (assoc-in [:adopted-by-contract :command-authority] fps)
           (assoc-in [:adoption-scopes :command-authority] (:scope adopted))))))
+
+(def worker-authority-profile :configured-selected-recovery-obligation-inventory-v4)
+(def ^:private original-worker-description recovery/describe-worker-authority-subject)
+
+(defn extend-worker-authority!
+  "Extend a 16- or 18-premise inventory with the exact owner-adopted worker
+   contract. Re-derive its applicability from the original history. This
+   structural join is not a provenance boundary or an entailment checker."
+  [inventory refined adopted]
+  (let [historical (:historical-judgment refined)
+        worker (:worker-authentication-premises historical)
+        correspondence (get-in historical [:original-recovery :worker-correspondence])
+        selected (:selected-maintenance correspondence)
+        original (:original-historical-inventory inventory)
+        original-fps (get-in original [:premise-families :worker])
+        accepted (:deployment-declared-premise-fingerprints inventory)
+        all (:all-described-open-premise-fingerprints inventory)
+        index (:premises-by-fingerprint inventory)
+        binding (:installation-binding adopted)
+        source (:source-installation-binding adopted)
+        declaration (:deployment-acceptance adopted)]
+    (require! (and (identical? original-describe assumption/describe-assumption)
+                   (identical? original-worker-description recovery/describe-worker-authority-subject)
+                   (= :conditional-configured-obligation-inventory (:status inventory))
+                   (or (and (= profile (:profile inventory)) (= 16 (count accepted)))
+                       (and (= command-authority-profile (:profile inventory)) (= 18 (count accepted))))
+                   (= original (:obligation-inventory refined))
+                   (= :conditional (:status refined) (:status historical))
+                   (= (:historical-cut inventory) (:historical-cut refined)
+                      (get-in worker [:scope :historical-cut]))
+                   (= original-fps (:open-premise-fingerprints worker))
+                   (every? (:unaccepted-premise-fingerprints inventory) original-fps)
+                   (= :not-performed (:proof-discharge inventory) (:proof-discharge refined)))
+              :configured-inventory-worker-subject-mismatch)
+    (let [description (original-worker-description worker correspondence (:scope worker))
+          kind (get-in description [:scope :history-kind])
+          required (set (map #(get-in % [:assumption :id]) (:obligations description)))
+          family (implementation-family! :worker-authority adopted (:obligations adopted))
+          fps (:fingerprints family)
+          combined (merge index (:index family))
+          members (:lineage binding)
+          by-ref (into {} (map (juxt :lifecycle-ref identity)) members)
+          returns (vec (keep :local-source-acceptance selected))
+          source-id (get-in worker [:scope :publication-source-id])
+          expected (cond-> (assoc description :status :conditional-configured-worker-authority
+                                  :configured-authority :matched-current-local-worker-installation
+                                  :installation-binding binding :deployment-adoption :configured-local-host
+                                  :premise-acceptance :explicit-declaration-only
+                                  :trusted-assumptions (:open-premise-fingerprints description)
+                                  :deployment-acceptance declaration)
+                     (= :acknowledged kind) (assoc :source-installation-binding source))]
+      (require! (and (= :open-worker-authority-contract (:status description))
+                     (#{:maintenance-only :acknowledged} kind)
+                     (= expected adopted)
+                     (qualified-keyword? (:deployment-id declaration))
+                     (= :trust-open-premises (:acceptance declaration))
+                     (set? (:premise-ids declaration))
+                     (every? (:premise-ids declaration) required)
+                     (every? #{:reference-worker-authority/worker-identity
+                               :reference-worker-authority/source-acceptance} (:premise-ids declaration))
+                     (= fps (:trusted-assumptions adopted) (:open-premise-fingerprints description))
+                     (= (if (= :acknowledged kind) 2 1) (count fps))
+                     (string? (:owner-ref binding)) (seq members)
+                     (= (:root binding) (first members))
+                     (= (:current-generation binding) (peek members))
+                     (= (count members) (count by-ref))
+                     (every? (fn [{:keys [worker-origin]}]
+                               (= (get by-ref (:lifecycle-ref worker-origin))
+                                  (select-keys worker-origin [:lifecycle-ref :source-id :worker-id]))) selected)
+                     (if (= :acknowledged kind)
+                       (and (= :matched-installed-synchronous-source (:correspondence source))
+                            (= :gesso.live/synchronous-source (:dispatch-target source))
+                            (= (:owner-ref binding) (:owner-ref source))
+                            (= source-id (:source-id source))
+                            (some? (:source-instance-id source))
+                            (= returns (:acknowledgments source))
+                            (every? #(= (:source-instance-id source) (:source-instance-id %)) returns)
+                            (= (mapv #(select-keys % [:tx-id :system-time :intent-id :maintenance
+                                                     :worker-origin :local-dispatch-receipt :local-source-acceptance]) selected)
+                               (:maintenance-attribution source))
+                            (= :not-established (:durable-delivery source) (:browser-receipt source)))
+                       (nil? source))
+                     (empty? (set/intersection all fps))
+                     (= (+ (count all) (count fps)) (count combined) (count (set (map :id (vals combined))))))
+                :configured-inventory-worker-authority-mismatch)
+      (-> inventory
+          (assoc :profile worker-authority-profile
+                 :premises-by-fingerprint combined
+                 :dependency-order (dependency-order! combined)
+                 :worker-authority-relevance {:scope :original-selected-maintenance-only
+                                              :history-kind kind
+                                              :premise-fingerprints fps
+                                              :original-worker-premises original-fps
+                                              :general-condition-links :not-derived}
+                 :all-described-open-premise-fingerprints (set/union all fps)
+                 :deployment-declared-premise-fingerprints (set/union accepted fps))
+          (assoc-in [:premise-families :worker-authority] fps)
+          (assoc-in [:adopted-by-contract :worker-authority] fps)
+          (assoc-in [:adoption-scopes :worker-authority] (:scope adopted))))))

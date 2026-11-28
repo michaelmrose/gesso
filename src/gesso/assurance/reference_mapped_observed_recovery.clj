@@ -872,7 +872,9 @@
                                 (contains? step :local-source-acceptance))))) observed))
       :acknowledged)))
 
-(defn- describe-worker-authority-subject [worker correspondence expected-worker-subject]
+(defn describe-worker-authority-subject
+  "Structural description only; provenance requires original issued-cut qualification."
+  [worker correspondence expected-worker-subject]
   (let [scope (:scope worker)
         fail #(assoc (conditional-report :unsupported) :reason %)]
     (if-not (= expected-worker-subject scope)
