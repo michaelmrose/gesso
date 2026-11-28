@@ -16,7 +16,7 @@
 (def ^:private derive-transition transition/derive!)
 (def ^:private reviewed-sources
   {"gesso/live/outbox/writer_policy.clj" "2007cb7232625c6119b658a979455313cc8fab25d49b25d0ac8e489664c7ac74"
-   "gesso/live/outbox/delivery.clj" "04e2190e1acf265d1e67a4fd943ef2180fc87e283fa6725d46401e6a363cd58f"
+   "gesso/live/outbox/delivery.clj" "ba9fd70286c4c322314676dbbac9223f66f8a8f009a8b08b7bc4c9fccfc564e2"
    "gesso/live/core.clj" "d009b5bfa16ae6c0b3d4ab1795fc219be3738892104b8e8bafba1fa144865f27"
    "gesso/live/source.clj" "4afe52d94d00042cca32f2611d9fcc0f2b044a84cc0c9fbd256c941c887176dc"
    "gesso/live/dispatch.clj" "c9630e375f45a047f291fcd7927de5f472d3848553aadbe997197107bd25c2c2"
@@ -24,7 +24,7 @@
    "gesso/live/outbox/initialization.clj" "36aac083e410e05b806137bf4540559f1ef3d77d4284dc6f387604aff3d81de7"
    "gesso/live/outbox/host.clj" "6029bb3c062a76d40a6ada1f77881ceda7367481f7fd2a6263253dfa1993dc6d"
    "gesso/live/outbox/lifecycle.clj" "05d489b78f09b3e5bc7cdc130753b1d54e82ccd1653595b18568d9b1a14a6b7c"
-   "gesso/live/outbox/worker_capture.clj" "7ac234b08e4bf64a78366b1b633036ab7484cb81468a4ed30ef62a0847de3c58"
+   "gesso/live/outbox/worker_capture.clj" "8210cab512cbfcd86144d30692f5f2faab514ec0b4abdc8e68186d731360f638"
    "gesso/live/outbox/biff.clj" "0a53c933f9c0f8c5cff6e60825cce396d8e49e31a552af5a20a7391d76020e1a"
    "gesso/live/consistency/xtdb.clj" "2f191e2cdba15d7ce2ce07da02bc35671b44babb713bd85fce01c6d396156697"})
 

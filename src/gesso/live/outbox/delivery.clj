@@ -136,6 +136,14 @@
 (def ^:private original-source-emit-many source/emit-many!)
 (def ^:private original-source-emit source/emit!)
 
+(defn source-boundaries-current?
+  "Check installed synchronous dispatch and source function identities."
+  []
+  (and (identical? original-run-sync dispatch/run-sync!)
+       (identical? original-live-emit-many live/emit-many!)
+       (identical? original-source-emit-many source/emit-many!)
+       (identical? original-source-emit source/emit!)))
+
 (defn- run-source! [system expanded intent-id expected-source-id]
   ;; Verify the actual callback return, not a structurally plausible dispatch
   ;; report. The source functions are trusted in-process boundaries, not a

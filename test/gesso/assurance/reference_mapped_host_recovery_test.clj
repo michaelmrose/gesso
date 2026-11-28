@@ -1154,10 +1154,15 @@
                             (let [qualified (host/qualify-worker-authority! started comparison subject)]
                               (is (= :open-worker-authority-contract (:status qualified)) (pr-str (:reason qualified)))
                               (is (= :matched-current-local-worker-installation (:configured-authority qualified)))
-                              (is (= contract (-> qualified (dissoc :installation-binding)
+                              (is (= contract (-> qualified (dissoc :installation-binding :source-installation-binding)
                                                   (assoc :configured-authority :not-established))))
                               (is (= (:open-premise-fingerprints contract) (:open-premise-fingerprints qualified)))
                               (is (= :not-performed (:premise-acceptance qualified)))
+                              (let [source-binding (:source-installation-binding qualified)]
+                                (is (= :matched-installed-synchronous-source (:correspondence source-binding)))
+                                (is (= (:owner-ref (:installation-binding qualified)) (:owner-ref source-binding)))
+                                (is (= (get-in started [:gesso.live/system :source :id]) (:source-instance-id source-binding)))
+                                (is (= :not-established (:durable-delivery source-binding) (:browser-receipt source-binding))))
                               (is (= qualified (host/qualify-worker-authority! started (second foreign) subject)))
                               (is (= :worker-authority-original-installation-mismatch
                                      (:reason (host/qualify-worker-authority! (into {} started) comparison subject)))))

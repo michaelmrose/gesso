@@ -372,6 +372,7 @@
                       (.put recovery-cuts handle {:admission admission :observation observation
                                                   :historical-cut (:historical-cut derived)
                                                   :worker-owner (when worker? (java.lang.ref.WeakReference. system))
+                                                  :worker-capture (when worker? worker-capture)
                                                   :original-recovery (select-keys r original-recovery-keys)
                                                   :judgment-subject subject
                                                   :command-observation-ref cut-ref
@@ -941,6 +942,7 @@
         (fail :unissued-conditional-recovery)))))
 
 (def ^:private original-worker-installation worker-capture/qualify-installed-worker!)
+(def ^:private original-source-installation worker-capture/qualify-installed-source!)
 (def ^:private original-describe-worker-authority describe-worker-authority-contract!)
 
 (defn qualify-worker-authority!
@@ -952,6 +954,7 @@
         admission (:gesso.live.outbox.host/mapped-admission system)
         current? #(and (worker-authority-boundaries-current?)
                        (identical? original-worker-installation worker-capture/qualify-installed-worker!)
+                       (identical? original-source-installation worker-capture/qualify-installed-source!)
                        (identical? original-describe-worker-authority describe-worker-authority-contract!))]
     (if-not (current?)
       (fail :worker-authority-boundary-replaced)
@@ -967,12 +970,25 @@
             (fail :worker-authority-original-installation-mismatch)
             :else
             (try
-              (let [origins (mapv :worker-origin (get-in cut-entry [:original-recovery :worker-correspondence :selected-maintenance]))
-                    binding (original-worker-installation system origins)]
-                (if (current?)
-                  (assoc contract :configured-authority :matched-current-local-worker-installation
-                         :installation-binding binding)
-                  (fail :worker-authority-boundary-replaced)))
+              (let [selected (get-in cut-entry [:original-recovery :worker-correspondence :selected-maintenance])
+                    origins (mapv :worker-origin selected)
+                    binding (original-worker-installation system origins)
+                    acknowledged? (= :acknowledged (get-in contract [:scope :history-kind]))
+                    source-binding (when acknowledged?
+                                     (original-source-installation system (:worker-capture cut-entry)))]
+                (cond
+                  (not (current?)) (fail :worker-authority-boundary-replaced)
+                  (and acknowledged?
+                       (not (and (= (:owner-ref binding) (:owner-ref source-binding))
+                                 (= (get-in contract [:scope :worker-subject :publication-source-id])
+                                    (:source-id source-binding))
+                                 (= (vec (keep :local-source-acceptance selected)) (:acknowledgments source-binding))
+                                 (= binding (original-worker-installation system origins)))))
+                  (fail :worker-authority-source-binding-mismatch)
+                  :else
+                  (cond-> (assoc contract :configured-authority :matched-current-local-worker-installation
+                                 :installation-binding binding)
+                    acknowledged? (assoc :source-installation-binding source-binding))))
               (catch clojure.lang.ExceptionInfo e
                 (fail (or (:reason (ex-data e)) :invalid-worker-installation))))))
         (fail :unissued-conditional-recovery)))))

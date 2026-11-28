@@ -15,6 +15,7 @@
             [gesso.assurance.reference-mapped-worker-envelope :as worker-envelope]
             [gesso.live.outbox.discovery :as discovery]
             [gesso.live.core :as live]
+            [gesso.live.dispatch :as dispatch]
             [gesso.live.outbox.publication-manifest :as manifest]
             [gesso.live.outbox.history-coverage :as history]
             [gesso.live.outbox.history-controller :as controller]
@@ -1156,6 +1157,7 @@
                 (let [root (lifecycle/start-managed! node sys {} "s" {:worker-id "w" :poll-ms 30} lineage)
                       token (Object.) active (atom true)
                       owner {:xtdb/connectable node
+                             :gesso.live/system sys
                              :gesso.live.outbox/managed-handle root
                              :gesso.live.outbox/source-id "s"
                              :gesso.live.outbox.host/worker-capture-token token
@@ -1230,6 +1232,22 @@
                     (is (capture/worker-outcome-capture-matches? owner report))
                     (is (not (capture/worker-outcome-capture-matches? (into {} owner) report)))
                     (is (not (capture/worker-outcome-capture-matches? owner (into {} report))))
+                    (let [binding (capture/qualify-installed-source! owner report)]
+                      (is (= :matched-installed-synchronous-source (:correspondence binding)))
+                      (is (= :gesso.live/synchronous-source (:dispatch-target binding)))
+                      (is (= "s" (:source-id binding)))
+                      (is (= (get-in sys [:source :id]) (:source-instance-id binding)))
+                      (is (= (vec (keep #(get-in % [:admission :local-source-acceptance]) calls))
+                             (:acknowledgments binding)))
+                      (is (= (:owner-ref (capture/qualify-installed-worker! owner origins)) (:owner-ref binding)))
+                      (is (= :not-established (:durable-delivery binding) (:browser-receipt binding)))
+                      (is (= :unissued-worker-capture
+                             (reason #(capture/qualify-installed-source! owner (into {} report)))))
+                      (is (= :unissued-worker-capture-host
+                             (reason #(capture/qualify-installed-source! (into {} owner) report))))
+                      (with-redefs [dispatch/run-sync! (fn [job] {:status :ran :result ((:run job))})]
+                        (is (= :source-authority-boundary-replaced
+                               (reason #(capture/qualify-installed-source! owner report))))))
                     (is (= [:lease-acquisition :dispatch-acknowledgment :lease-acquisition :dispatch-acknowledgment]
                            (mapv :maintenance origins)))
                     (is (= ["w" "w" "successor" "successor"] (mapv :worker-id origins)))
@@ -1302,6 +1320,8 @@
                       (is (not (capture/worker-outcome-capture-matches? owner report)))
                       (is (= :worker-capture-boundary-replaced (reason #(capture/capture-worker-outcomes! owner 1 (constantly nil))))))
                     (reset! active false)
+                    (is (= :worker-capture-host-retired
+                           (reason #(capture/qualify-installed-source! owner report))))
                     (is (= :worker-capture-host-retired
                            (reason #(capture/qualify-installed-worker! owner origins))))
                     (is (capture/worker-outcome-capture-matches? owner report))

@@ -11019,3 +11019,35 @@ is not a second fully assembled production host.
 
 Next: bind the declared source to the exact installed synchronous dispatch
 target, runtime source identity and matched return.
+
+* v2904 — bind the installed synchronous source target
+
+Retain the exact issued bounded worker capture with the original cut and
+register the lifecycle's actual source object with its host owner. For an
+acknowledged history, require that same issued capture, original worker
+lineage, installed Live system and source instance, current synchronous
+runner and emission boundaries, and matching receipt/source-return
+identities and statuses at each acknowledgment. Recheck the binding under
+the host retirement lock. Join the returned diagnostic source binding to
+the original selected acknowledgments and worker owner. Maintenance-only
+qualification remains worker-only; adjacent histories have no such duty.
+Update reviewed writer and command attribution source digests.
+
+The existing delivery adapter refuses a copied callback result before
+acknowledgment. Qualification also refuses a copied capture, copied owner,
+replaced synchronous boundary and retired owner. Neither an emitted nor a
+queued source return establishes durable delivery or browser receipt. The
+contract and original premise fingerprints are unchanged. The bounded
+capture is retained for the lifetime of the issued cut. This is local
+correspondence under trusted in-process boundaries, not a proof against
+arbitrary code replacement, independent authentication or proof discharge.
+All 39 general CLM-R2 conditions remain open.
+
+Focused JVM: 13 tests, 589 assertions, exit 0, zero failures or errors.
+Includes persistent XTDB worker/successor execution, source qualification,
+and real copied-callback-result rejection. Added source-binding assertions
+to the assembled recovery fixture; full assembled recovery variants and
+project suite were not rerun. No environmental premises were adopted.
+
+Next: qualify the managed successor against the original interrupted
+two-intent execution and its separately attributed acknowledgments.
