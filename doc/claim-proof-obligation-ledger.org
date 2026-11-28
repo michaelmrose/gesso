@@ -10959,3 +10959,31 @@ the unavailable Recife dependency; explicit namespace selection avoided it.
 
 Next: derive applicable obligations for adjacent, maintenance-only and
 acknowledged histories without conflating acquisition and source acceptance.
+
+* v2902 — derive history-specific worker authority obligations
+
+Version the worker/source authority contract as v2. Derive applicability
+from the original issued cut, not the prepared comparison target. Adjacent
+histories with no worker correspondence require neither environmental
+premise. Maintenance-only histories require matched local worker lineage
+and one worker-identity premise, with no dispatch/source premise. Histories
+with acknowledgments require both environmental premises and matched
+receipt/source evidence at each acknowledgment. Match the ordered observed
+maintenance to the selected retained maintenance; reject missing lineage,
+substituted payloads, incomplete acknowledgments and misplaced source
+observations. Retain the original zero/two/three worker-premise
+inventory respectively. Neither acquisition nor source return establishes
+durable delivery or browser receipt. Bind the new classifier and subject
+constructor at the existing original issuance boundary and update the
+reviewed recovery-source digest.
+
+Focused JVM: 11 tests, 436 assertions, exit 0, zero failures or errors.
+The existing worker-premise fixture now exercises all three contract kinds
+and seven malformed subjects. These are structural qualification tests,
+not fresh physical histories. Add an adjacent issued-handle assertion to
+the assembled recovery fixture; the full persistent recovery variants and
+project gates were not rerun. No configured adoption or proof discharge;
+all 39 general CLM-R2 conditions remain open.
+
+Next: bind configured worker identity to the exact installed scheduler,
+owner and lifecycle generation, rejecting same-named foreign installations.

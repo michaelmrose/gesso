@@ -830,22 +830,96 @@
   [handle admission policy offered]
   (command-authority-contract* handle admission policy true offered))
 
-(def worker-authority-profile :selected-worker-source-authority-contract-v1)
+(def worker-authority-profile :selected-worker-source-authority-contract-v2)
 
 (def ^:private original-worker-authority-entry conditional-entry)
 (def ^:private original-worker-authority-premises worker-authentication-premises)
+
+(defn- worker-authority-history-kind [scope correspondence]
+  (let [selected (:selected-maintenance scope)
+        acknowledged (:selected-acknowledgments scope)
+        observed (:observed-maintenance scope)]
+    (cond
+      (and (empty? selected) (empty? acknowledged) (empty? observed)
+           (nil? correspondence))
+      :adjacent
+
+      (not (and (seq selected)
+                (= selected (mapv #(select-keys % [:tx-id :intent-id :maintenance]) observed))
+                (= acknowledged (filterv #(= :dispatch-acknowledgment (:maintenance %)) selected))
+                (= :matched-local-issued-host-capture (:worker-observation-provenance scope))
+                (= :matched-issued-managed-lineage (:worker-lineage-correspondence correspondence))
+                (= :matched-issued-worker-retained-transactions (:maintenance-correspondence correspondence))
+                (= (get-in scope [:historical-cut :payload-fingerprint]) (:retained-payload-fingerprint correspondence))))
+      nil
+
+      (and (empty? acknowledged)
+           (= :not-applicable (:dispatch-receipt-correspondence scope)
+              (:source-acceptance-correspondence scope))
+           (not-any? #(or (contains? % :local-dispatch-receipt)
+                          (contains? % :local-source-acceptance)) observed))
+      :maintenance-only
+
+      (and (seq acknowledged)
+           (= :matched-local-handoff-retained-acknowledgments (:dispatch-receipt-correspondence scope))
+           (= :matched-local-source-return-retained-acknowledgments (:source-acceptance-correspondence scope))
+           (every? (fn [step]
+                     (if (= :dispatch-acknowledgment (:maintenance step))
+                       (and (some? (:local-dispatch-receipt step)) (some? (:local-source-acceptance step)))
+                       (not (or (contains? step :local-dispatch-receipt)
+                                (contains? step :local-source-acceptance))))) observed))
+      :acknowledged)))
+
+(defn- describe-worker-authority-subject [worker correspondence expected-worker-subject]
+  (let [scope (:scope worker)
+        fail #(assoc (conditional-report :unsupported) :reason %)]
+    (if-not (= expected-worker-subject scope)
+      (fail :worker-authority-subject-mismatch)
+      (if-let [kind (worker-authority-history-kind scope correspondence)]
+        (let [id :reference-worker-authority/selected-maintenance
+              interface {:profile worker-authority-profile :history-kind kind :worker-subject scope
+                         :original-worker-premises (:open-premise-fingerprints worker)}
+              describe (fn [premise proposition boundary]
+                         (original-assumption-description
+                          {:id premise :subject {:kind :runtime :id id :interface interface}
+                           :scope {:kind :runtime :id id} :proposition [proposition]
+                           :parameters {} :semantic-context {:profile worker-authority-profile}
+                           :dependencies #{} :origin :environment :implementation-boundary boundary}))
+              obligations (cond-> []
+                            (not= :adjacent kind)
+                            (conj (describe :reference-worker-authority/worker-identity
+                                            :reference-worker-authority/authenticated-managed-worker-identity
+                                            :gesso.live.outbox.lifecycle/worker-identity))
+                            (= :acknowledged kind)
+                            (conj (describe :reference-worker-authority/source-acceptance
+                                            :reference-worker-authority/faithful-synchronous-source-acceptance
+                                            :gesso.live.outbox.delivery/source-acceptance)))]
+          {:profile worker-authority-profile :status :open-worker-authority-contract
+           :scope interface :subject-provenance :matched-original-issued-cut
+           :obligations obligations :open-premise-fingerprints (set (map :premise-fingerprint obligations))
+           :premise-acceptance :not-performed :configured-authority :not-established
+           :worker-authentication (if (= :adjacent kind) :not-applicable :not-established)
+           :dispatch-authentication (if (= :acknowledged kind) :not-established :not-applicable)
+           :durable-delivery :not-established :browser-receipt :not-established
+           :proof-discharge :not-performed :authority :none :certificate :not-issued})
+        (fail :incomplete-issued-worker-authority-subject)))))
+
+(def ^:private original-worker-authority-history-kind worker-authority-history-kind)
+(def ^:private original-worker-authority-subject describe-worker-authority-subject)
 
 (defn- worker-authority-boundaries-current? []
   (and (acceptance-boundaries-current?)
        (worker-boundaries-current?)
        (identical? original-worker-authority-entry conditional-entry)
-       (identical? original-worker-authority-premises worker-authentication-premises)))
+       (identical? original-worker-authority-premises worker-authentication-premises)
+       (identical? original-worker-authority-history-kind worker-authority-history-kind)
+       (identical? original-worker-authority-subject describe-worker-authority-subject)))
 
 (defn describe-worker-authority-contract!
-  "Describe open environmental worker and synchronous source premises for
-   the exact original issued cut and expected worker subject. This first
-   contract supports acknowledged histories with matched local lineage.
-   A prepared target, copied report or source return alone is not authority."
+  "Describe applicable open environmental premises for the exact original
+   issued cut. Maintenance requires matched local lineage; only acknowledged
+   maintenance requires matched synchronous source acceptance. A prepared
+   target, copied report or source return alone is not authority."
   [handle admission expected-worker-subject]
   (let [fail #(assoc (conditional-report :unsupported) :reason %)]
     (if-not (worker-authority-boundaries-current?)
@@ -854,45 +928,13 @@
         (if-not (identical? admission (:admission entry))
           (fail :worker-authority-admission-mismatch)
           (try
-            (let [worker (original-worker-authority-premises entry)
-                  scope (:scope worker)
-                  correspondence (get-in entry [:original-recovery :worker-correspondence])]
-              (cond
-                (not= expected-worker-subject scope)
-                (fail :worker-authority-subject-mismatch)
-                (not (and (= :matched-local-issued-host-capture (:worker-observation-provenance scope))
-                          (= :matched-issued-managed-lineage (:worker-lineage-correspondence correspondence))
-                          (= :matched-issued-worker-retained-transactions (:maintenance-correspondence correspondence))
-                          (= :matched-local-handoff-retained-acknowledgments (:dispatch-receipt-correspondence scope))
-                          (= :matched-local-source-return-retained-acknowledgments (:source-acceptance-correspondence scope))
-                          (= (get-in scope [:historical-cut :payload-fingerprint]) (:retained-payload-fingerprint correspondence))
-                          (seq (:selected-acknowledgments scope))))
-                (fail :incomplete-issued-worker-authority-subject)
-                :else
-                (let [id :reference-worker-authority/selected-maintenance
-                      interface {:profile worker-authority-profile :worker-subject scope
-                                 :original-worker-premises (:open-premise-fingerprints worker)}
-                      describe (fn [premise proposition boundary]
-                                 (original-assumption-description
-                                  {:id premise :subject {:kind :runtime :id id :interface interface}
-                                   :scope {:kind :runtime :id id} :proposition [proposition]
-                                   :parameters {} :semantic-context {:profile worker-authority-profile}
-                                   :dependencies #{} :origin :environment :implementation-boundary boundary}))
-                      obligations [(describe :reference-worker-authority/worker-identity
-                                             :reference-worker-authority/authenticated-managed-worker-identity
-                                             :gesso.live.outbox.lifecycle/worker-identity)
-                                   (describe :reference-worker-authority/source-acceptance
-                                             :reference-worker-authority/faithful-synchronous-source-acceptance
-                                             :gesso.live.outbox.delivery/source-acceptance)]]
-                  (if (worker-authority-boundaries-current?)
-                    {:profile worker-authority-profile :status :open-worker-authority-contract
-                     :scope interface :subject-provenance :matched-original-issued-cut
-                     :obligations obligations :open-premise-fingerprints (set (map :premise-fingerprint obligations))
-                     :premise-acceptance :not-performed :configured-authority :not-established
-                     :worker-authentication :not-established :dispatch-authentication :not-established
-                     :durable-delivery :not-established :browser-receipt :not-established
-                     :proof-discharge :not-performed :authority :none :certificate :not-issued}
-                    (fail :worker-authority-boundary-replaced)))))
+            (let [report (original-worker-authority-subject
+                          (original-worker-authority-premises entry)
+                          (get-in entry [:original-recovery :worker-correspondence])
+                          expected-worker-subject)]
+              (if (worker-authority-boundaries-current?)
+                report
+                (fail :worker-authority-boundary-replaced)))
             (catch clojure.lang.ExceptionInfo e
               (fail (or (:reason (ex-data e)) :invalid-worker-authority-contract)))))
         (fail :unissued-conditional-recovery)))))

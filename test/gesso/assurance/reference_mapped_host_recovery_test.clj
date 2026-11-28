@@ -655,6 +655,16 @@
           (is (= (:obligations contract) (:obligations selected)))
           (is (= :not-performed (:premise-acceptance selected) (:proof-discharge selected)))
           (is (not (contains? selected :trusted-assumptions))))))
+    (let [handle (get-in selections [[:authorized-historical-lineage :exact-content] :handle])
+          original (observed-recovery/declare-conditional-recovery-trust!
+                    handle (get-in selections [[:authorized-historical-lineage :exact-content] :declaration]))
+          subject (get-in original [:worker-authentication-premises :scope])
+          report (observed-recovery/describe-worker-authority-contract! handle admit subject)]
+      (is (= :open-worker-authority-contract (:status report)))
+      (is (= :adjacent (get-in report [:scope :history-kind])))
+      (is (empty? (:obligations report)))
+      (is (= :not-applicable (:worker-authentication report) (:dispatch-authentication report)))
+      (is (= :not-established (:durable-delivery report) (:browser-receipt report))))
     (is (not (identical? admit other-admission)))
     (is (= (induction/describe-mapped-admission admit)
            (induction/describe-mapped-admission other-admission)))
@@ -1679,4 +1689,52 @@
       (is (= :not-applicable (:dispatch-authentication acquisition-only)))
       (is (empty? (:obligations adjacent)))
       (is (= :not-applicable (:worker-authentication adjacent) (:dispatch-authentication adjacent)))
-      (is (empty? (:open-premise-fingerprints adjacent))))))
+      (is (empty? (:open-premise-fingerprints adjacent))))
+    (let [qualify #'observed-recovery/describe-worker-authority-subject
+          entry (update-in entry [:original-recovery :worker-correspondence]
+                           assoc :worker-lineage-correspondence :matched-issued-managed-lineage
+                           :maintenance-correspondence :matched-issued-worker-retained-transactions
+                           :retained-payload-fingerprint "fixture")
+          adjacent (update entry :original-recovery dissoc :intervening-maintenance
+                           :worker-correspondence :worker-observation-provenance)
+          acquisition (-> entry
+                          (assoc-in [:original-recovery :intervening-maintenance] [(first selected)])
+                          (update-in [:original-recovery :worker-correspondence]
+                                     assoc :selected-maintenance [(first observed)]
+                                     :dispatch-receipt-correspondence :not-applicable
+                                     :source-acceptance-correspondence :not-applicable))
+          contract (fn [e]
+                     (let [worker (describe e)]
+                       (qualify worker (get-in e [:original-recovery :worker-correspondence]) (:scope worker))))]
+      (doseq [[e kind ids worker-state dispatch-state original-count]
+              [[adjacent :adjacent [] :not-applicable :not-applicable 0]
+               [acquisition :maintenance-only [:reference-worker-authority/worker-identity]
+                :not-established :not-applicable 2]
+               [entry :acknowledged [:reference-worker-authority/worker-identity
+                                     :reference-worker-authority/source-acceptance]
+                :not-established :not-established 3]]]
+        (let [r (contract e)]
+          (is (= :open-worker-authority-contract (:status r)))
+          (is (= kind (get-in r [:scope :history-kind])))
+          (is (= ids (mapv #(get-in % [:assumption :id]) (:obligations r))))
+          (is (= (count ids) (count (:open-premise-fingerprints r))))
+          (is (= original-count (count (get-in r [:scope :original-worker-premises]))))
+          (is (= worker-state (:worker-authentication r)))
+          (is (= dispatch-state (:dispatch-authentication r)))
+          (is (= :not-performed (:premise-acceptance r) (:proof-discharge r)))
+          (is (= :not-established (:durable-delivery r) (:browser-receipt r)))
+          (is (= :none (:authority r)))
+          (is (= :not-issued (:certificate r)))
+          (is (every? #(= :open (:discharge-state %)) (:obligations r)))))
+      (doseq [bad [(update entry :original-recovery dissoc :worker-correspondence)
+                   (assoc-in entry [:original-recovery :worker-correspondence :retained-payload-fingerprint] "other")
+                   (update-in entry [:original-recovery :worker-correspondence :selected-maintenance 1] dissoc :local-source-acceptance)
+                   (assoc-in acquisition [:original-recovery :worker-correspondence :selected-maintenance 0 :local-source-acceptance] acceptance)
+                   (assoc-in acquisition [:original-recovery :worker-correspondence :source-acceptance-correspondence] :not-established)
+                   (assoc-in acquisition [:original-recovery :worker-correspondence :selected-maintenance 0 :tx-id] 42)
+                   (assoc-in adjacent [:original-recovery :worker-correspondence] {})]]
+        (let [r (contract bad)]
+          (is (= :incomplete-issued-worker-authority-subject (:reason r)))
+          (is (not (contains? r :obligations)))))
+      (is (not-any? (:open-premise-fingerprints (contract acquisition))
+                    (:open-premise-fingerprints (contract entry)))))))
