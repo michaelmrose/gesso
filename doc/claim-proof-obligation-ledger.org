@@ -11272,3 +11272,35 @@ not rerun. All 39 general CLM-R2 conditions remain open.
 Next: construct competing plausible aborted attempts and test whether the
 exception-issued key, timestamp precision and retained identity distinguish
 them without inferring identity from error code or ordering alone.
+
+* v2912 — distinguish competing aborted attempts
+
+Construct a persistent XTDB provider fixture with a winning guarded Claim-
+shaped write, two identical stale attempts and a guarded refusal journal
+write. Capture both actual exceptions and independently decode the retained
+transaction operations and read each corresponding xt.txs row. The two
+aborted attempts have identical operation vectors and anomaly summaries
+apart from their exception transaction keys. Both keys match their own
+retained error keys and the microsecond-normalized row timestamps.
+
+Add a narrow diagnostic matcher for supplied capture and candidate data.
+Match the exception's transaction coordinates, attempted operation vector,
+abort commitment, error code/category and failed operation index. Do not
+choose by candidate order. With no exposed key, two plausible candidates
+produce an explicit ambiguous result; one candidate remains unresolved.
+Reject absent matching rows, wrong raw keys, wrong row times, committed
+substitutions, duplicate candidate IDs and unusable advertised keys.
+
+This is a direct provider-boundary fixture, not a second assembled Claim
+application. The diagnostic does not establish capture issuance, candidate
+window completeness or authenticated aborted receipt identity. It is not
+yet connected to the existing production mapped-submission comparison.
+
+Persistent XTDB gate: 1 test, 59 assertions, exit 0, zero failures or
+errors. Prior v2911 gates confirmed from their completed logs. Full
+assembled recovery and project suite not rerun. All 39 general CLM-R2
+conditions remain open.
+
+Next: integrate the strongest justified exception-key association with the
+original issued mapped submission and retained trajectory, preserving the
+explicit ambiguous/unresolved cases and original open obligations.
