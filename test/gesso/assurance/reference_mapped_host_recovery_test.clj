@@ -711,7 +711,58 @@
           (is (not (contains? result :abstract-induction))))))
     (get-in selections [[:authorized-historical-lineage :prefix-content] :handle])))
 
-(defn- check-assembled-recovery! [interleaved? successor?]
+(defn- check-selected-invocation-boundary! [node capture selected]
+  (let [events (:events capture)
+        pairs (mapv vec (partition 2 events))
+        returned (mapv second pairs)
+        aborted (second returned)
+        rows (mapv (fn [{:keys [tx-id]}]
+                     (live-xtdb/q node ["SELECT _id, committed, system_time, error FROM xt.txs WHERE _id = ?" tx-id]))
+                   selected)
+        ledger (mapv first rows)
+        anomaly (get-in capture [:xtdb-anomalies (:call-id aborted)])
+        retained-error (ex-data (:error (second ledger)))]
+    (is (= 6 (count events)))
+    (is (= [:returned :threw :returned] (mapv :phase returned)))
+    (is (= 3 (count (set (map (comp :call-id first) pairs)))))
+    (is (every? (fn [[start finish]] (= (:call-id start) (:call-id finish))) pairs))
+    (is (= [1 1 1] (mapv count rows)))
+    (is (= (mapv :tx-id selected) (mapv :xt/id ledger)))
+    (is (= [true false true] (mapv :committed ledger)))
+    (is (= (mapv :system-time selected) (mapv #(.toInstant ^java.time.ZonedDateTime (:system-time %)) ledger)))
+    (doseq [i [0 2]]
+      (let [key (:tx-result (nth returned i)) tx (nth selected i)]
+        (is (instance? xtdb.api.TransactionKey key))
+        (is (= (:tx-id tx) (.getTxId ^xtdb.api.TransactionKey key)))
+        (is (= (:system-time tx) (.getSystemTime ^xtdb.api.TransactionKey key)))))
+    (is (= #{(:call-id aborted)} (set (keys (:xtdb-anomalies capture)))))
+    (is (= #{:call-id :api :phase :exception-class} (set (keys aborted))))
+    (is (not (contains? aborted :tx-result)))
+    (is (= "xtdb.error.Conflict" (:exception-class aborted)))
+    (is (= :xtdb/assert-failed (:code anomaly) (:xtdb.error/code retained-error)))
+    (is (= :cognitect.anomalies/conflict (:category anomaly)))
+    (is (= #{:tx-key} (:transaction-key-fields anomaly)))
+    (is (= #{:arg-idx :xtdb.error/code :tx-key :cognitect.anomalies/category :tx-op-idx :sql}
+           (:data-keys anomaly) (set (keys retained-error))))
+    (is (false? (:other-data-keys? anomaly)))
+    (is (nil? (:cause-class anomaly)))
+    (let [{:keys [tx-id system-time]} (:transaction-key anomaly)]
+      (is (= (:tx-id (second selected)) tx-id))
+      ;; The exception's key preserves nanoseconds, unlike the retained row.
+      ;; Compare microseconds for this pinned provider, but keep the raw key.
+      (is (= (:system-time (second selected))
+             (.truncatedTo ^java.time.Instant system-time java.time.temporal.ChronoUnit/MICROS))))
+    (let [key (:tx-key retained-error)]
+      (is (instance? xtdb.api.TransactionKey key))
+      (is (= (:transaction-key anomaly)
+             {:tx-id (.getTxId ^xtdb.api.TransactionKey key)
+              :system-time (.getSystemTime ^xtdb.api.TransactionKey key)})))
+    (is (= 5 (:failed-operation-index anomaly) (:tx-op-idx retained-error)))
+    ;; No successful return, no promotion to a receipt or proof of attribution.
+    (is (not (contains? anomaly :sql)))
+    (is (not (contains? anomaly :arg-idx)))))
+
+(defn- check-assembled-recovery! [interleaved? successor? & [invocation-only?]]
   (let [root (Files/createTempDirectory "gesso-claim-recovery-" (make-array FileAttribute 0))
         config {:log [:local {:path (str root "/log")}] :storage [:local {:path (str root "/storage")}]}
         source-id "assembled-recovery"
@@ -944,6 +995,8 @@
                        (set (live-xtdb/q node "SELECT * FROM gesso_commands"))))
                 (is (= :observed (:status sample)))
                 (is (= (if interleaved? 9 5) (count history)))
+                (check-selected-invocation-boundary! node capture (mapv #(nth history %) (if interleaved? [2 7 8] [2 3 4])))
+                (when-not invocation-only?
                 (let [steps (recovery-steps history)
                       handle (:acquisition (acquisition/capture! node))
                       local! #(observed-recovery/compare-local-activated!
@@ -1578,9 +1631,9 @@
                         target (:acquisition (acquisition/capture! node))]
                     (is (= sample2 (acquisition/read-acquisition! node target)))
                     (swap! restart* assoc :trust-handle
-                           (check-conditional-extension! started node admit mapped-source observation cut-handle retained-handle target (:comparison @restart*)))))))
+                           (check-conditional-extension! started node admit mapped-source observation cut-handle retained-handle target (:comparison @restart*))))))))
               (finally (host/stop! started)))
-            (when-not interleaved?
+            (when-not (or interleaved? invocation-only?)
               (is (= :storage-trust-host-retired
                      (trust-problem #(host/adopt-storage-trust! started (:trust-handle @restart*))))))
             (when interleaved?
@@ -1610,6 +1663,9 @@
                                           tables admit mapped-source outcome-declarations policy-events
                                           (update @restart* :foreign-comparisons conj reopened-handle)))))))
       (finally (doseq [f (reverse (file-seq (.toFile root)))] (io/delete-file f true))))))
+
+(deftest assembled-stale-claim-invocation-boundary
+  (check-assembled-recovery! false false true))
 
 (deftest assembled-command-transport-observed-recovery
   (check-assembled-recovery! false false))

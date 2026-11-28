@@ -6,6 +6,7 @@
    [clojure.test :refer [deftest is testing]]
    [gesso.live.consistency.xtdb :as live]
    [xtdb.api :as xt]
+   [xtdb.error :as error]
    [xtdb.node :as xtn])
   (:import
    [java.time Instant]
@@ -309,6 +310,28 @@
           (is (= :threw (:phase finished)))
           (is (= "java.lang.IllegalStateException" (:exception-class finished)))
           (is (not (contains? finished :tx-result)))
+          (assert-diagnostic-only report))))))
+
+(deftest xtdb-anomaly-observation-is-separate-and-structural-test
+  (let [failure (error/conflict :xtdb/assert-failed "private message"
+                                {:private-value "secret" :tx-op-idx 7
+                                 :receipt (transaction-key 20) :tx-key (transaction-key 19)})]
+    (with-seams
+      {'*execute-tx* (fn [& _] (throw failure))}
+      (fn []
+        (let [report (capture #(live/execute-tx! :connection source-ops))
+              [_ finished] (pair report)
+              anomaly (get-in report [:xtdb-anomalies (:call-id finished)])]
+          (is (identical? failure (:error report)))
+          (is (= #{:call-id :api :phase :exception-class} (set (keys finished))))
+          (is (= #{(:call-id finished)} (set (keys (:xtdb-anomalies report)))))
+          (is (= {:data-keys (set (keys (ex-data failure)))
+                  :other-data-keys? false :transaction-key-fields #{:receipt :tx-key}
+                  :transaction-key {:tx-id 19 :system-time (Instant/parse "2026-02-14T10:11:12Z")}
+                  :cause-class nil :code :xtdb/assert-failed
+                  :category :cognitect.anomalies/conflict :failed-operation-index 7}
+                 anomaly))
+          (is (not (re-find #"secret|private message" (pr-str anomaly))))
           (assert-diagnostic-only report))))))
 
 (deftest failure-followed-by-success-records-both-outcomes-test

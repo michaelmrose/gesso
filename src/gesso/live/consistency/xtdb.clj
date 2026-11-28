@@ -101,6 +101,9 @@
                   :result .../:error ... :events [...]}.
    It intentionally includes raw submitted operations, possible sensitive
    document values and exception objects: NEVER publish or log the report.
+   Optional :xtdb-anomalies records selected public exception structure by
+   local call ID, separately from the unchanged event pairs. The call ID
+   is not an XTDB transaction identity.
 
    This is process-local ADAPTER evidence, not authenticated evidence that
    XTDB received the payload, no guarantee that the bound functions are
@@ -127,7 +130,10 @@
                         (restore-interrupt! e)
                         {:outcome :threw :error e})
                       (finally (reset! active false))))]
-    (merge {:type submission-capture-type
+    (let [recorded @events
+          anomalies (into {} (keep (fn [{:keys [call-id xtdb-anomaly]}]
+                                     (when xtdb-anomaly [call-id xtdb-anomaly]))) recorded)]
+      (merge {:type submission-capture-type
             :version submission-capture-version
             :observation-origin :instrumented-xtdb-adapter-call-site
             :actual-xtdb-api-authenticated? false
@@ -136,8 +142,9 @@
             :proof-status :submission-diagnostic-only
             :certificate :not-issued
             :authority :none
-            :events @events}
-           execution)))
+            :events (mapv #(dissoc % :xtdb-anomaly) recorded)}
+           (when (seq anomalies) {:xtdb-anomalies anomalies})
+           execution))))
 
 (defn- capture-api-event! [event]
   (when-let [{:keys [events active]} *submission-capture*]
@@ -479,6 +486,40 @@
       (finally
         (if prior (.set policy-admission-scope prior) (.remove policy-admission-scope))))))
 
+(defn- thrown-api-event
+  "Observe the public exception boundary, not an inferred retained receipt.
+   Capture only XTDB anomaly structure and selected typed fields. Never
+   retain messages or arbitrary values, or replace the original exception."
+  [call-id api error]
+  (let [base {:call-id call-id :api api :phase :threw
+              :exception-class (.getName (class error))}]
+    (try
+      (if (instance? xtdb.error.Anomaly error)
+        (let [data (ex-data error)
+              code (:xtdb.error/code data)
+              category (:cognitect.anomalies/category data)
+              idx (:tx-op-idx data)
+              key (:tx-key data)
+              tx-key (when (instance? TransactionKey key)
+                       (let [id (.getTxId ^TransactionKey key)
+                             time (.getSystemTime ^TransactionKey key)]
+                         (when (and (integer? id) (not (neg? id)) (instance? Instant time))
+                           {:tx-id id :system-time time})))]
+          (assoc base :xtdb-anomaly
+                 (cond-> {:data-keys (set (filter keyword? (keys data)))
+                          :other-data-keys? (boolean (some (complement keyword?) (keys data)))
+                          :transaction-key-fields (into #{} (keep (fn [[k v]]
+                                                                    (when (and (keyword? k) (instance? TransactionKey v)) k))) data)
+                          :cause-class (some-> error .getCause class .getName)}
+                   (keyword? code) (assoc :code code)
+                   (keyword? category) (assoc :category category)
+                   (integer? idx) (assoc :failed-operation-index idx)
+                   tx-key (assoc :transaction-key tx-key))))
+        base)
+      (catch Throwable observation-error
+        (restore-interrupt! observation-error)
+        base))))
+
 (defn- invoke-admitted-xtdb-api! [api operation connectable entry tx-ops tx-options]
     (when-let [{:keys [node token thread valid?]} *policy-capture*]
       (when-not (and (identical? node connectable)
@@ -511,8 +552,7 @@
             (catch Throwable e
               (restore-interrupt! e)
               (when capture?
-                (capture-api-event! {:call-id call-id :api api :phase :threw
-                                     :exception-class (.getName (class e))}))
+                (capture-api-event! (thrown-api-event call-id api e)))
               (throw e))))
         (catch Throwable e
           (finish-policy-outcome! scope @admitted?

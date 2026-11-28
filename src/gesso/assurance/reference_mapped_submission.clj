@@ -81,8 +81,11 @@
    to the same three selected recovery steps. Reconstruct the checked
    handoff witness through the issued admission. Match each exact operation
    vector and default options; match returned public keys for the two commits.
-   The middle exception has no public transaction identity. Its association
-   relies on the observed ordering and retained payload, not a receipt.
+   The middle invocation throws instead of returning a transaction key.
+   The legacy :aborted-call disposition describes the missing returned key,
+   not absence of provider exception metadata. This comparison does not yet
+   consume the separate :xtdb-anomalies diagnostic; its abort association
+   relies on observed ordering and retained payload, not an identified key.
    Inputs are local observations, not authenticated attestations. No write
    or replay is performed by this diagnostic. Do not log raw observations."
   [admission steps claims capture]

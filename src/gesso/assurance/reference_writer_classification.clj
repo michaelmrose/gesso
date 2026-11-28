@@ -26,7 +26,7 @@
    "gesso/live/outbox/lifecycle.clj" "05d489b78f09b3e5bc7cdc130753b1d54e82ccd1653595b18568d9b1a14a6b7c"
    "gesso/live/outbox/worker_capture.clj" "d521ae73e94a40260e566b80224d5d89713d6c765d40a5a3967ee162612d0f66"
    "gesso/live/outbox/biff.clj" "0a53c933f9c0f8c5cff6e60825cce396d8e49e31a552af5a20a7391d76020e1a"
-   "gesso/live/consistency/xtdb.clj" "2f191e2cdba15d7ce2ce07da02bc35671b44babb713bd85fce01c6d396156697"})
+   "gesso/live/consistency/xtdb.clj" "63b7e4c6506ffce05909e6b0d6a1533a0e10eefd3800c8168d61580b0f2163fc"})
 
 (defn- reject! [reason]
   (throw (ex-info "Unqualified declared writer classification" {:reason reason})))

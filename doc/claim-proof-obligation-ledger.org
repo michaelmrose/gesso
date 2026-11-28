@@ -11232,3 +11232,43 @@ CLM-R2 conditions remain open; no source return entails browser receipt.
 
 Next: observe what the installed XTDB failing invocation actually returns
 or throws on the stale Claim and distinguish it from retained row identity.
+
+* v2911 — characterize the installed stale Claim invocation
+
+The pinned XTDB 2.2.0-beta1 public Clojure execute-tx invocation returns
+TransactionKey for the winning Claim and committed guarded refusal. The
+middle stale Claim throws xtdb.error.Conflict with :xtdb/assert-failed.
+Contrary to the earlier assumption of no exposed transaction identity,
+its ex-data contains a typed :tx-key. The observed data keys are
+:tx-key, :tx-op-idx, :arg-idx, :sql, :xtdb.error/code and
+:cognitect.anomalies/category. The failed operation index is 5 for this
+fixture. The exception key's ID and raw time equal the retained error
+key's ID and raw time. The raw exception time can contain nanoseconds;
+the independent retained row and decoded history use microseconds. Match
+the latter by truncation for this pinned provider, preserving the raw key.
+
+Capture selected XTDB anomaly structure under the existing opt-in adapter
+observation, separately indexed by local call ID. Preserve the original
+invocation/return/throw event shapes and exact exception propagation.
+Keep only the recognized typed :tx-key coordinates, code, category,
+operation index and structural field names; do not retain SQL or argument
+values in the anomaly summary. A local call ID is not a provider key.
+The legacy mapped submission comparison still uses ordering and payload
+association; its missing-return disposition does not deny that exception
+metadata exists. Do not adopt this key as an authenticated abort receipt
+or discharge any original premise until the competing-history controls
+and actual comparison are qualified. Update reviewed source digests.
+
+Final focused JVM gate: 65 tests, 947 assertions, exit 0, zero failures
+or errors, including submission boundary, captured-write-domain consumer,
+writer classification and configured inventory. Fresh narrow assembled
+stale Claim gate: 1 test, 55 assertions, exit 0, zero failures or errors.
+Initial characterization falsified the no-key assumption, and the next
+run falsified raw timestamp equality with the retained row. An interim
+focused run used a stale loaded source digest during editing; the final
+fresh gate passed. Full assembled recovery variants and project suite
+not rerun. All 39 general CLM-R2 conditions remain open.
+
+Next: construct competing plausible aborted attempts and test whether the
+exception-issued key, timestamp precision and retained identity distinguish
+them without inferring identity from error code or ordering alone.
