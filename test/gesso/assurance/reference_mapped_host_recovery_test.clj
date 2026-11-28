@@ -1151,6 +1151,16 @@
                                    (:durable-delivery contract) (:browser-receipt contract)))
                             (is (= :none (:authority contract)))
                             (is (= :not-issued (:certificate contract)))
+                            (let [qualified (host/qualify-worker-authority! started comparison subject)]
+                              (is (= :open-worker-authority-contract (:status qualified)) (pr-str (:reason qualified)))
+                              (is (= :matched-current-local-worker-installation (:configured-authority qualified)))
+                              (is (= contract (-> qualified (dissoc :installation-binding)
+                                                  (assoc :configured-authority :not-established))))
+                              (is (= (:open-premise-fingerprints contract) (:open-premise-fingerprints qualified)))
+                              (is (= :not-performed (:premise-acceptance qualified)))
+                              (is (= qualified (host/qualify-worker-authority! started (second foreign) subject)))
+                              (is (= :worker-authority-original-installation-mismatch
+                                     (:reason (host/qualify-worker-authority! (into {} started) comparison subject)))))
                             (is (= contract (describe (second foreign) admit subject)))
                             (is (= :unissued-conditional-recovery (:reason (describe {} admit subject))))
                             (is (= :worker-authority-admission-mismatch (:reason (describe comparison {} subject))))

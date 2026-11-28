@@ -10987,3 +10987,35 @@ all 39 general CLM-R2 conditions remain open.
 
 Next: bind configured worker identity to the exact installed scheduler,
 owner and lifecycle generation, rejecting same-named foreign installations.
+
+* v2903 — bind installed worker authority to the managed owner
+
+Keep a weak reference to the exact original worker-cut host at issuance.
+Qualify the original open contract only against that host's registered
+worker-capture owner, under the existing host shutdown lock. Match the
+installed mapped submission policy generation, managed root, source and
+selected raw lifecycle identities. Expose the local owner reference, root,
+current lineage generation and member identities as diagnostic binding;
+recheck the binding before returning. A prepared comparison against a
+foreign store is not itself a worker owner. An adjacent cut has no worker
+installation obligation and this qualification is not applicable to it.
+
+The environmental premise descriptions and fingerprints remain unchanged.
+This step binds worker installation only, not the synchronous dispatch
+target, worker authentication, deployment adoption or durable delivery.
+No proof discharge; all 39 general CLM-R2 conditions remain open. Update
+reviewed writer and command attribution source digests for the changed
+boundary implementations.
+
+Focused JVM: 12 tests, 566 assertions, exit 0, zero failures or errors.
+Includes persistent XTDB managed root/successor execution and an independent
+managed scheduler with identical worker/source names registered in the
+fixture. The local installation binding distinguishes their owner and root
+references and refuses exchanged origins, copied owner maps, empty selection,
+replaced lineage boundaries and retired hosts. Add assembled recovery
+assertions for the original cut join; those expensive full recovery variants
+and the full project suite were not rerun. The fixture-owned registration
+is not a second fully assembled production host.
+
+Next: bind the declared source to the exact installed synchronous dispatch
+target, runtime source identity and matched return.

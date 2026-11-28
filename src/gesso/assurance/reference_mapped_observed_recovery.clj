@@ -371,6 +371,7 @@
                     (locking recovery-cuts
                       (.put recovery-cuts handle {:admission admission :observation observation
                                                   :historical-cut (:historical-cut derived)
+                                                  :worker-owner (when worker? (java.lang.ref.WeakReference. system))
                                                   :original-recovery (select-keys r original-recovery-keys)
                                                   :judgment-subject subject
                                                   :command-observation-ref cut-ref
@@ -937,6 +938,43 @@
                 (fail :worker-authority-boundary-replaced)))
             (catch clojure.lang.ExceptionInfo e
               (fail (or (:reason (ex-data e)) :invalid-worker-authority-contract)))))
+        (fail :unissued-conditional-recovery)))))
+
+(def ^:private original-worker-installation worker-capture/qualify-installed-worker!)
+(def ^:private original-describe-worker-authority describe-worker-authority-contract!)
+
+(defn qualify-worker-authority!
+  "Bind a selected worker contract to its original installed owner and
+   current managed scheduler lineage. A historical comparison target does
+   not confer worker authority. No environmental premise is accepted."
+  [system handle expected-worker-subject]
+  (let [fail #(assoc (conditional-report :unsupported) :reason %)
+        admission (:gesso.live.outbox.host/mapped-admission system)
+        current? #(and (worker-authority-boundaries-current?)
+                       (identical? original-worker-installation worker-capture/qualify-installed-worker!)
+                       (identical? original-describe-worker-authority describe-worker-authority-contract!))]
+    (if-not (current?)
+      (fail :worker-authority-boundary-replaced)
+      (if-let [entry (original-worker-authority-entry handle)]
+        (let [contract (original-describe-worker-authority handle admission expected-worker-subject)
+              cut-entry (locking recovery-cuts (.get recovery-cuts (:original-cut entry)))
+              owner (:worker-owner cut-entry)]
+          (cond
+            (not= :open-worker-authority-contract (:status contract)) contract
+            (= :adjacent (get-in contract [:scope :history-kind]))
+            (fail :worker-authority-not-applicable)
+            (not (and owner (identical? system (.get ^java.lang.ref.WeakReference owner))))
+            (fail :worker-authority-original-installation-mismatch)
+            :else
+            (try
+              (let [origins (mapv :worker-origin (get-in cut-entry [:original-recovery :worker-correspondence :selected-maintenance]))
+                    binding (original-worker-installation system origins)]
+                (if (current?)
+                  (assoc contract :configured-authority :matched-current-local-worker-installation
+                         :installation-binding binding)
+                  (fail :worker-authority-boundary-replaced)))
+              (catch clojure.lang.ExceptionInfo e
+                (fail (or (:reason (ex-data e)) :invalid-worker-installation))))))
         (fail :unissued-conditional-recovery)))))
 
 (def judgment-profile :selected-conditional-activated-recovery-judgment-v17)

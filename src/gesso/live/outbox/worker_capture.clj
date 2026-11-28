@@ -22,12 +22,13 @@
        (identical? original-policy-current xtdb/submission-policy-current?)
        (identical? original-lineage-members lifecycle/managed-lineage-members)))
 
-(defn- register-worker-capture-host! [system token active]
+(defn- register-worker-capture-host! [system token active lock]
   (let [worker (get system managed/handle-key)]
     (locking worker-capture-hosts
       (.put worker-capture-hosts token
             {:system (java.lang.ref.WeakReference. system)
-             :active active :policy-token (:gesso.live.outbox.host/mapped-policy-token system)
+             :active active :lock lock :owner-ref (str (random-uuid))
+             :policy-token (:gesso.live.outbox.host/mapped-policy-token system)
              :root worker})))
   system)
 
@@ -36,6 +37,41 @@
                 (.get worker-capture-hosts (:gesso.live.outbox.host/worker-capture-token system)))]
     (when (and entry (identical? system (.get ^java.lang.ref.WeakReference (:system entry))))
       entry)))
+
+(defn qualify-installed-worker!
+  "Match selected historical origins to the exact registered owner's managed
+   scheduler lineage. Returns local installation identity, not authentication.
+   The caller must independently establish issuance of the selected origins."
+  [system origins]
+  (let [entry (worker-capture-owner system)
+        node (:xtdb/connectable system)]
+    (when-not entry (reject! :unissued-worker-capture-host {}))
+    (locking (:lock entry)
+      (letfn [(read-binding []
+                (when-not @(:active entry) (reject! :worker-capture-host-retired {}))
+                (when-not (worker-capture-boundaries-current?)
+                  (reject! :worker-capture-boundary-replaced {}))
+                (when-not (original-policy-current node (:policy-token entry))
+                  (reject! :worker-capture-policy-mismatch {}))
+                (let [members (original-lineage-members (:root entry))]
+                  (when-not (and (seq members)
+                                 (identical? (:root entry) (get system managed/handle-key))
+                                 (every? #(= (get system managed/source-id-key) (:source-id %)) members))
+                    (reject! :worker-authority-installation-mismatch {}))
+                  {:owner-ref (:owner-ref entry)
+                   :root (first members) :current-generation (peek members)
+                   :lineage members}))]
+        (let [binding (read-binding)
+              members (:lineage binding)
+              by-ref (into {} (map (juxt :lifecycle-ref identity)) members)]
+          (when-not (and (seq origins)
+                         (every? (fn [origin]
+                                   (= (get by-ref (:lifecycle-ref origin))
+                                      (select-keys origin [:lifecycle-ref :source-id :worker-id]))) origins))
+            (reject! :worker-authority-installation-mismatch {}))
+          (when-not (= binding (read-binding))
+            (reject! :worker-authority-installation-changed {}))
+          binding)))))
 
 (defn- owned-worker-calls? [system entry calls]
   (let [members (original-lineage-members (:root entry))

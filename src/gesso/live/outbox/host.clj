@@ -177,6 +177,7 @@
 (def read-command-authority-binding! command-authority/read-binding!)
 (def qualify-command-authority! command-authority/qualify!)
 (def adopt-command-authority! command-authority/adopt!)
+(def qualify-worker-authority! observed-recovery/qualify-worker-authority!)
 (def capture-worker-outcomes! worker-capture/capture-worker-outcomes!)
 (def worker-outcome-capture-matches? worker-capture/worker-outcome-capture-matches?)
 
@@ -643,7 +644,7 @@
           (when (get system command-authority/token-key)
             (register-command-authority! system stop-lock trust-active handler assembly (:assembled-operations config)))
           (when (::worker-capture-token system)
-            (register-worker-capture-host! system worker-capture-token trust-active))
+            (register-worker-capture-host! system worker-capture-token trust-active stop-lock))
           (when-let [trust (:writer-isolation config)]
             (register-writer-isolation! system isolation-token stop-lock trust-active trust))
           (when-let [trust (:provider-trust config)]

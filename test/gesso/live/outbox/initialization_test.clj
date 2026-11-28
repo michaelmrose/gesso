@@ -1164,7 +1164,7 @@
                   (reset! root* root)
                   ;; Use the real capture registration with a fixture-owned
                   ;; system, not a fabricated capture or provider response.
-                  (register! owner token active)
+                  (register! owner token active (Object.))
                   (is (= :submission-policy-refused (deref callback-result 10000 :timeout)))
                   (let [report (capture/capture-worker-outcomes!
                                 owner 4
@@ -1196,6 +1196,35 @@
                         acquired (retained/capture! node)
                         acquisition (:acquisition acquired)
                         checked (worker-envelope/compare-issued-selection! owner acquisition "s" selected report)]
+                    (let [binding (capture/qualify-installed-worker! owner origins)
+                          foreign-root (lifecycle/start-managed! node sys {} "s" {:worker-id "w" :poll-ms 60000}
+                                                                 (lifecycle/new-managed-lineage))
+                          foreign-token (Object.)
+                          foreign-owner (assoc owner :gesso.live.outbox/managed-handle foreign-root
+                                                     :gesso.live.outbox.host/worker-capture-token foreign-token)]
+                      (try
+                        (register! foreign-owner foreign-token (atom true) (Object.))
+                        (let [foreign-origin {:lifecycle-ref (lifecycle/lifecycle-reference foreign-root)
+                                              :source-id "s" :worker-id "w"}
+                              foreign-binding (capture/qualify-installed-worker! foreign-owner [foreign-origin])]
+                          (is (= (mapv lifecycle/lifecycle-reference [root @child*])
+                                 (mapv :lifecycle-ref (:lineage binding))))
+                          (is (= (peek (:lineage binding)) (:current-generation binding)))
+                          (is (= "w" (get-in binding [:root :worker-id]) (get-in foreign-binding [:root :worker-id])))
+                          (is (not= (:owner-ref binding) (:owner-ref foreign-binding)))
+                          (is (not= (:root binding) (:root foreign-binding)))
+                          (is (= :worker-authority-installation-mismatch
+                                 (reason #(capture/qualify-installed-worker! foreign-owner origins))))
+                          (is (= :worker-authority-installation-mismatch
+                                 (reason #(capture/qualify-installed-worker! owner [foreign-origin]))))
+                          (is (= :unissued-worker-capture-host
+                                 (reason #(capture/qualify-installed-worker! (into {} owner) origins))))
+                          (is (= :worker-authority-installation-mismatch
+                                 (reason #(capture/qualify-installed-worker! owner []))))
+                          (with-redefs [lifecycle/managed-lineage-members (constantly (:lineage binding))]
+                            (is (= :worker-capture-boundary-replaced
+                                   (reason #(capture/qualify-installed-worker! owner origins))))))
+                        (finally (lifecycle/retire! foreign-root 10000))))
                     (is (= :returned (:outcome report)))
                     (is (= :matched-local-policy-outcome-window (:policy-window report)))
                     (is (capture/worker-outcome-capture-matches? owner report))
@@ -1273,6 +1302,8 @@
                       (is (not (capture/worker-outcome-capture-matches? owner report)))
                       (is (= :worker-capture-boundary-replaced (reason #(capture/capture-worker-outcomes! owner 1 (constantly nil))))))
                     (reset! active false)
+                    (is (= :worker-capture-host-retired
+                           (reason #(capture/qualify-installed-worker! owner origins))))
                     (is (capture/worker-outcome-capture-matches? owner report))
                     (is (= :worker-capture-host-retired (reason #(capture/capture-worker-outcomes! owner 1 (constantly nil))))))))
               (finally
