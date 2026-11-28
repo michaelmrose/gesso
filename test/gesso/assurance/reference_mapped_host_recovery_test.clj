@@ -842,6 +842,9 @@
                                  (when (#{"helper-1" "helper-2"} h) (identity/principal h))))
         host-config {:xtdb-config config :source-id source-id :rules-context {} :live-options {}
                      :worker-options {:worker-id "assembled-recovery" :poll-ms 60000}
+                     :worker-authority {:deployment-id :fixture/deployment :acceptance :trust-open-premises
+                                        :premise-ids #{:reference-worker-authority/worker-identity
+                                                       :reference-worker-authority/source-acceptance}}
                      :storage-trust {:deployment-id :fixture/deployment :acceptance :trust-open-premises
                                      :policy {:comparison-id :fixture/recovery :relation :authorized-historical-lineage
                                               :identity-policy :fixture/custody :origin-boundary :fixture/origin
@@ -1188,6 +1191,13 @@
                                   (is (not= (get-in attribution [1 :local-dispatch-receipt :receipt-id])
                                             (get-in attribution [3 :local-dispatch-receipt :receipt-id]))))
                                 (is (= :not-established (:durable-delivery source-binding) (:browser-receipt source-binding))))
+                              (let [selection (host/worker-authority-selection qualified)
+                                    adopted (host/adopt-worker-authority! started comparison subject selection)]
+                                (is (= :conditional-configured-worker-authority (:status adopted)))
+                                (is (= (:open-premise-fingerprints qualified) (:trusted-assumptions adopted)))
+                                (is (= :not-performed (:proof-discharge adopted)))
+                                (is (= :not-established (:worker-authentication adopted) (:dispatch-authentication adopted)
+                                       (:durable-delivery adopted) (:browser-receipt adopted))))
                               (is (= qualified (host/qualify-worker-authority! started (second foreign) subject)))
                               (is (= :worker-authority-original-installation-mismatch
                                      (:reason (host/qualify-worker-authority! (into {} started) comparison subject)))))

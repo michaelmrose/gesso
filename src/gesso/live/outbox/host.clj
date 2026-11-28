@@ -71,9 +71,28 @@
 
 (def ^:private allowed-config
   #{:xtdb-config :xtdb-submission-policy! :mapped-writer-policy :history-audit :live-options :source-id :worker-options :rules-context
-    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication :storage-trust :writer-isolation :provider-trust})
+    :stop-timeout-ms :http-jdk :authorized-sse :sse-recovery :assembled-operations :assembled-fragments :assembled-sse :assembled-publication :storage-trust :writer-isolation :provider-trust :worker-authority})
 (def ^:private allowed-live-options
   #{:rules :source-options :dispatch-options})
+
+(def ^:private worker-authority-premise-ids
+  #{:reference-worker-authority/worker-identity
+    :reference-worker-authority/source-acceptance})
+
+(defn- worker-authority-declaration? [declaration]
+  (and (map? declaration) (not (record? declaration)) (nil? (meta declaration))
+       (= #{:deployment-id :acceptance :premise-ids} (set (keys declaration)))
+       (qualified-keyword? (:deployment-id declaration))
+       (= :trust-open-premises (:acceptance declaration))
+       (set? (:premise-ids declaration)) (nil? (meta (:premise-ids declaration)))
+       (every? worker-authority-premise-ids (:premise-ids declaration))))
+
+(defn- validate-worker-authority! [config]
+  (when (contains? config :worker-authority)
+    (when-not (worker-authority-declaration? (:worker-authority config))
+      (reject! :invalid-worker-authority {}))
+    (when-not (:mapped-writer-policy config)
+      (reject! :worker-authority-requires-mapped-writer {}))))
 
 (def ^:private storage-policy-keys
   #{:comparison-id :relation :identity-policy :origin-boundary
@@ -178,6 +197,68 @@
 (def qualify-command-authority! command-authority/qualify!)
 (def adopt-command-authority! command-authority/adopt!)
 (def qualify-worker-authority! observed-recovery/qualify-worker-authority!)
+(def ^:private original-qualify-worker-authority observed-recovery/qualify-worker-authority!)
+(def ^:private original-worker-authority-owner worker-capture/with-worker-authority-owner!)
+
+(defn worker-authority-selection
+  "Describe the exact selection to offer for adoption; this is not authority."
+  [qualified]
+  (select-keys qualified [:scope :installation-binding :source-installation-binding
+                         :open-premise-fingerprints]))
+
+(defn- adopt-selected-worker-authority! [contract declaration selection]
+  (let [expected (worker-authority-selection contract)
+        required (set (map #(get-in % [:assumption :id]) (:obligations contract)))]
+    (cond
+      (not= :open-worker-authority-contract (:status contract))
+      (reject! (or (:reason contract) :unqualified-worker-authority) {})
+      (not= :matched-current-local-worker-installation (:configured-authority contract))
+      (reject! :unqualified-worker-authority {})
+      (nil? declaration) (reject! :worker-authority-adoption-not-selected {})
+      (not (worker-authority-declaration? declaration))
+      (reject! :invalid-worker-authority {})
+      (not (every? (:premise-ids declaration) required))
+      (reject! :worker-authority-partial-declaration
+               {:missing (into #{} (remove (:premise-ids declaration)) required)})
+      (nil? selection) (reject! :worker-authority-selection-omitted {})
+      (not (and (map? selection) (not (record? selection)) (nil? (meta selection))))
+      (reject! :worker-authority-invalid-selection {})
+      (not= (get-in expected [:installation-binding :owner-ref])
+            (get-in selection [:installation-binding :owner-ref]))
+      (reject! :worker-authority-foreign-selection {})
+      (not= expected selection)
+      (reject! (if (and (= (dissoc expected :open-premise-fingerprints)
+                           (dissoc selection :open-premise-fingerprints))
+                        (set? (:open-premise-fingerprints selection))
+                        (every? (:open-premise-fingerprints expected) (:open-premise-fingerprints selection)))
+                 :worker-authority-partial-selection
+                 :worker-authority-stale-selection) {})
+      :else
+      (assoc contract :status :conditional-configured-worker-authority
+             :deployment-adoption :configured-local-host
+             :premise-acceptance :explicit-declaration-only
+             :trusted-assumptions (:open-premise-fingerprints contract)
+             :deployment-acceptance declaration))))
+
+(def ^:private original-adopt-selected-worker-authority adopt-selected-worker-authority!)
+
+(defn adopt-worker-authority!
+  "Adopt only applicable startup-selected environmental premises at the
+   exact current owner. A stale, partial or foreign selection confers no trust."
+  [system comparison subject selection]
+  (let [current? #(and (identical? original-qualify-worker-authority observed-recovery/qualify-worker-authority!)
+                       (identical? original-worker-authority-owner worker-capture/with-worker-authority-owner!)
+                       (identical? original-adopt-selected-worker-authority adopt-selected-worker-authority!))]
+    (when-not (current?) (reject! :worker-authority-boundary-replaced {}))
+    (original-worker-authority-owner
+     system
+     (fn [declaration]
+       (let [contract (original-qualify-worker-authority system comparison subject)
+             result (original-adopt-selected-worker-authority contract declaration selection)]
+         (when-not (and (current?) (= contract (original-qualify-worker-authority system comparison subject)))
+           (reject! :worker-authority-installation-changed {}))
+         result)))))
+
 (def capture-worker-outcomes! worker-capture/capture-worker-outcomes!)
 (def worker-outcome-capture-matches? worker-capture/worker-outcome-capture-matches?)
 
@@ -215,6 +296,7 @@
   (validate-storage-trust! config)
   (validate-writer-isolation! config)
   (validate-provider-trust! config)
+  (validate-worker-authority! config)
   (when-not (map? (:xtdb-config config))
     (reject! :invalid-xtdb-config {}))
   (let [options (:live-options config)]
@@ -488,6 +570,9 @@
    Optional :provider-trust selects the exact reviewed provider target and
    all open semantic premise IDs. Explicit owner adoption is separate from
    startup, storage trust and writer isolation.
+   Optional :worker-authority selects environmental worker/source premise IDs
+   for a named deployment. Explicit adoption requires exact current owner
+   qualification and a matching selection; no authentication is established.
    Optional :history-audit requires the mapped profile and trusted owner
    :load!, :save!, :key, :deployment-id and :max-steps options. Restore and
    persist a first bounded chunk before request admission. Further chunks
@@ -644,7 +729,8 @@
           (when (get system command-authority/token-key)
             (register-command-authority! system stop-lock trust-active handler assembly (:assembled-operations config)))
           (when (::worker-capture-token system)
-            (register-worker-capture-host! system worker-capture-token trust-active stop-lock))
+            (register-worker-capture-host! system worker-capture-token trust-active stop-lock
+                                           (:worker-authority config)))
           (when-let [trust (:writer-isolation config)]
             (register-writer-isolation! system isolation-token stop-lock trust-active trust))
           (when-let [trust (:provider-trust config)]

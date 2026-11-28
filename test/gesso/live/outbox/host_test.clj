@@ -76,12 +76,71 @@
   (is (fn? (:biff.core/stop host/xtdb-module)))
   (is (fn? (:biff.core/stop host/live-module))))
 
+(deftest worker-authority-adoption-selection-is-exact-and-conditional
+  (let [worker :reference-worker-authority/worker-identity
+        source :reference-worker-authority/source-acceptance
+        declaration {:deployment-id :fixture/owner :acceptance :trust-open-premises
+                     :premise-ids #{worker source}}
+        contract {:status :open-worker-authority-contract
+                  :configured-authority :matched-current-local-worker-installation
+                  :scope {:history-kind :acknowledged :worker-subject {:cut :original}}
+                  :installation-binding {:owner-ref "owner" :current-generation {:lifecycle-ref "root"}}
+                  :source-installation-binding {:owner-ref "owner" :source-instance-id "source"}
+                  :obligations [{:assumption {:id worker} :discharge-state :open}
+                                {:assumption {:id source} :discharge-state :open}]
+                  :open-premise-fingerprints #{"worker" "source"}
+                  :worker-authentication :not-established :dispatch-authentication :not-established
+                  :durable-delivery :not-established :browser-receipt :not-established
+                  :proof-discharge :not-performed :authority :none :certificate :not-issued}
+        selection (host/worker-authority-selection contract)
+        adopt @#'host/adopt-selected-worker-authority!
+        adopted (adopt contract declaration selection)]
+    (is (= :conditional-configured-worker-authority (:status adopted)))
+    (is (= :explicit-declaration-only (:premise-acceptance adopted)))
+    (is (= (:open-premise-fingerprints contract) (:trusted-assumptions adopted)))
+    (is (= declaration (:deployment-acceptance adopted)))
+    (is (= contract (-> adopted (dissoc :deployment-adoption :premise-acceptance :trusted-assumptions :deployment-acceptance)
+                        (assoc :status (:status contract)))))
+    (doseq [[d s expected]
+            [[nil selection :worker-authority-adoption-not-selected]
+             [(assoc declaration :premise-ids #{worker}) selection :worker-authority-partial-declaration]
+             [declaration nil :worker-authority-selection-omitted]
+             [declaration [] :worker-authority-invalid-selection]
+             [declaration (assoc selection :open-premise-fingerprints #{"worker"}) :worker-authority-partial-selection]
+             [declaration (assoc selection :open-premise-fingerprints #{"worker" "old"}) :worker-authority-stale-selection]
+             [declaration (assoc-in selection [:scope :worker-subject :cut] :old) :worker-authority-stale-selection]
+             [declaration (assoc-in selection [:installation-binding :current-generation :lifecycle-ref] "old") :worker-authority-stale-selection]
+             [declaration (assoc-in selection [:source-installation-binding :source-instance-id] "old") :worker-authority-stale-selection]
+             [declaration (assoc-in selection [:installation-binding :owner-ref] "other") :worker-authority-foreign-selection]]]
+      (is (= expected (:reason (problem #(adopt contract d s))))))
+    (let [maintenance (-> contract (assoc-in [:scope :history-kind] :maintenance-only)
+                          (dissoc :source-installation-binding)
+                          (assoc :obligations [(first (:obligations contract))]
+                                 :open-premise-fingerprints #{"worker"}
+                                 :dispatch-authentication :not-applicable))
+          s (host/worker-authority-selection maintenance)]
+      (doseq [d [declaration (assoc declaration :premise-ids #{worker})]]
+        (let [r (adopt maintenance d s)]
+          (is (= #{"worker"} (:trusted-assumptions r)))
+          (is (= :not-applicable (:dispatch-authentication r))))))
+    (is (= :unissued-worker-capture-host
+           (:reason (problem #(host/adopt-worker-authority! {} nil nil selection)))))
+    (with-redefs [worker-capture/with-worker-authority-owner! (fn [_ f] (f declaration))]
+      (is (= :worker-authority-boundary-replaced
+             (:reason (problem #(host/adopt-worker-authority! {} nil nil selection))))))))
+
 (deftest concrete-host-fails-closed-before-starting-invalid-config-test
   (doseq [[change reason]
           [[{:xtdb-config nil} :invalid-xtdb-config]
            [{:xtdb-submission-policy! nil} :invalid-xtdb-submission-policy]
            [{:history-audit {}} :history-audit-requires-mapped-writer]
            [{:storage-trust {}} :invalid-storage-trust]
+           [{:worker-authority {}} :invalid-worker-authority]
+           [{:worker-authority {:deployment-id :fixture/owner :acceptance :trust-open-premises
+                                :premise-ids #{:fixture/unrelated}}} :invalid-worker-authority]
+           [{:worker-authority {:deployment-id :fixture/owner :acceptance :trust-open-premises
+                                :premise-ids #{:reference-worker-authority/worker-identity}}}
+            :worker-authority-requires-mapped-writer]
            [{:provider-trust {}} :invalid-provider-trust]
            [{:provider-trust {:provider (assoc provider-contract/reviewed-provider :version "foreign")
                               :acceptance :trust-open-premises :premise-ids #{::provider-contract/decoded-assertions ::provider-contract/ordered-transaction-basis
@@ -836,16 +895,18 @@
         source-id "fixture/source"
         opts {:worker-id "same-worker" :poll-ms 60000}
         cycle-var (requiring-resolve 'gesso.live.outbox.cycle/process-cycle!)
-        seen? #'worker-capture/owned-worker-call?]
+        seen? (fn [owner entry call] (@#'worker-capture/owned-worker-calls? owner entry [call]))]
     (with-redefs-fn {cycle-var (fn [& _] (throw (ex-info "fixture exit" {})))}
       (fn []
-        (let [a (lifecycle/start! node {:source :fixture} {} source-id opts)
+        (let [a (lifecycle/start-managed! node {:source :fixture} {} source-id opts
+                                          (lifecycle/new-managed-lineage))
               b (lifecycle/start! node {:source :fixture} {} source-id opts)]
           (try
             (let [owner {managed/source-id-key source-id managed/options-key opts}
-                  entry {:lifecycle-ref (lifecycle/lifecycle-reference a)}
+                  entry {:root a :lifecycle-ref (lifecycle/lifecycle-reference a)}
                   call {:admission {:kind :worker
                                     :worker-origin {:lifecycle-ref (lifecycle/lifecycle-reference a)
+                                                    :cycle-number 1
                                                     :origin :scheduled-local-cycle
                                                     :call-chain :matched-scheduled-maintenance
                                                     :authentication :not-established

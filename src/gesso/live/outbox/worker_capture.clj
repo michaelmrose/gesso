@@ -26,21 +26,43 @@
        (identical? original-policy-current xtdb/submission-policy-current?)
        (identical? original-lineage-members lifecycle/managed-lineage-members)))
 
-(defn- register-worker-capture-host! [system token active lock]
+(defn- register-worker-capture-host!
+  ([system token active lock]
+   (register-worker-capture-host! system token active lock nil))
+  ([system token active lock authority]
   (let [worker (get system managed/handle-key)]
     (locking worker-capture-hosts
       (.put worker-capture-hosts token
             {:system (java.lang.ref.WeakReference. system)
              :active active :lock lock :owner-ref (str (random-uuid))
+             :authority authority
              :policy-token (:gesso.live.outbox.host/mapped-policy-token system)
              :root worker :source-target (get-in worker [:system :source])})))
-  system)
+  system))
 
 (defn- worker-capture-owner [system]
   (let [entry (locking worker-capture-hosts
                 (.get worker-capture-hosts (:gesso.live.outbox.host/worker-capture-token system)))]
     (when (and entry (identical? system (.get ^java.lang.ref.WeakReference (:system entry))))
       entry)))
+
+(defn with-worker-authority-owner!
+  "Internal owner-locked access to the startup-selected authority declaration.
+   The callback must qualify its exact issued cut separately."
+  [system f]
+  (let [entry (worker-capture-owner system)]
+    (when-not entry (reject! :unissued-worker-capture-host {}))
+    (locking (:lock entry)
+      (letfn [(check! []
+                (when-not @(:active entry) (reject! :worker-capture-host-retired {}))
+                (when-not (worker-capture-boundaries-current?)
+                  (reject! :worker-capture-boundary-replaced {}))
+                (when-not (original-policy-current (:xtdb/connectable system) (:policy-token entry))
+                  (reject! :worker-capture-policy-mismatch {})))]
+        (check!)
+        (let [result (f (:authority entry))]
+          (check!)
+          result)))))
 
 (defn qualify-installed-worker!
   "Match selected historical origins to the exact registered owner's managed

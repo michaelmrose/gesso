@@ -11116,3 +11116,33 @@ conditions remain open.
 Next: adopt applicable worker and source environmental declarations at the
 exact configured owner, preserving omitted, partial, stale and foreign
 selection dispositions.
+
+* v2907 — adopt configured worker and source authority
+
+Accept a startup-selected :worker-authority declaration only on a mapped
+writer host. The declaration selects a named deployment and permitted
+worker/source environmental premise IDs. Reuse the worker capture owner
+registry and retirement lock. Requalify the original issued cut and
+compare the offered selection against the exact current scope, installation,
+source binding and applicable premise fingerprints. Recheck qualification
+before returning. Distinguish absent declaration, partial declaration,
+omitted selection, partial selection, stale selection and foreign owner.
+Reject incomplete selections atomically. A maintenance-only history may
+adopt its worker premise without accepting the inapplicable source premise.
+Adjacent histories have no installed worker obligation.
+
+Adoption is explicit conditional trust only. The original open obligations,
+authentication, delivery, receipt, authority and certificate dispositions
+remain unchanged. No combined inventory extension yet; all 39 general
+CLM-R2 conditions remain open. Update reviewed writer source digests.
+
+Focused JVM: 14 tests, 493 assertions, exit 0, zero failures or errors.
+Includes structural adoption cases, host startup configuration refusals,
+worker-premise classification and the reviewed writer checks. Repair a
+pre-existing host-test compile error referencing the removed singular
+owned-worker-call? helper; exercise the current managed-lineage checker.
+Add positive assembled-host adoption assertions, compiled but not executed.
+No full persistent recovery or project gate was run for this revision.
+
+Next: compose applicable adopted worker/source premises with the configured
+recovery inventory, preserving older 16- and 18-premise configurations.
