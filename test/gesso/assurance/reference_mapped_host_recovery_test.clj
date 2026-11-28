@@ -1121,6 +1121,38 @@
                           (is (= writer-history/refined-judgment-profile (:judgment-profile refined)))
                           (is (= observed-recovery/judgment-profile (:judgment-profile original)))
                           (is (= (:obligation-inventory original) (:obligation-inventory refined)))
+                          (let [worker (:worker-authentication-premises original)
+                                subject (:scope worker)
+                                describe observed-recovery/describe-worker-authority-contract!
+                                contract (describe comparison admit subject)
+                                source-index (first (keep-indexed #(when (:local-source-acceptance %2) %1)
+                                                                  (:observed-maintenance subject)))]
+                            (is (= :open-worker-authority-contract (:status contract)) (pr-str (:reason contract)))
+                            (is (= :matched-original-issued-cut (:subject-provenance contract)))
+                            (is (= subject (get-in contract [:scope :worker-subject])))
+                            (is (= (:open-premise-fingerprints worker) (get-in contract [:scope :original-worker-premises])))
+                            (is (= [:reference-worker-authority/worker-identity :reference-worker-authority/source-acceptance]
+                                   (mapv #(get-in % [:assumption :id]) (:obligations contract))))
+                            (is (= 2 (count (:open-premise-fingerprints contract))))
+                            (is (every? #(and (= :open (:discharge-state %)) (= :environment (get-in % [:assumption :origin])))
+                                        (:obligations contract)))
+                            (is (= :not-performed (:premise-acceptance contract) (:proof-discharge contract)))
+                            (is (= :not-established (:worker-authentication contract) (:dispatch-authentication contract)
+                                   (:durable-delivery contract) (:browser-receipt contract)))
+                            (is (= :none (:authority contract)))
+                            (is (= :not-issued (:certificate contract)))
+                            (is (= contract (describe (second foreign) admit subject)))
+                            (is (= :unissued-conditional-recovery (:reason (describe {} admit subject))))
+                            (is (= :worker-authority-admission-mismatch (:reason (describe comparison {} subject))))
+                            (doseq [changed [(assoc subject :recovery-cut-ref "other-cut")
+                                             (assoc-in subject [:historical-cut :payload-fingerprint] "other-cut")
+                                             (assoc-in subject [:observed-maintenance 0 :worker-origin :lifecycle-ref] "other-lineage")
+                                             (assoc-in subject [:observed-maintenance source-index :local-source-acceptance :source-instance-id] "other-source")]]
+                              (let [failure (describe comparison admit changed)]
+                                (is (= :worker-authority-subject-mismatch (:reason failure)))
+                                (is (not (contains? failure :obligations)))))
+                            (with-redefs [worker-envelope/boundaries-current? (constantly true)]
+                              (is (= :worker-authority-boundary-replaced (:reason (describe comparison admit subject))))))
                           (let [contract (host/qualify-command-authority! started comparison)
                                 command-premises (:command-authentication-premises original)
                                 premises (mapv :assumption (:obligations contract))]

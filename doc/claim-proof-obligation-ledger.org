@@ -10928,3 +10928,34 @@ premises remain open, as do faithful loaded-code and aborted-call attribution.
 Next: qualify the worker/source authority environmental contract against the
 original issued worker lineage and observed source-return subject, keeping
 actual local execution, environmental trust and durable delivery distinct.
+
+* v2901 — qualify worker and source authority subjects
+
+Derive two new environmental premise descriptions from the original issued
+recovery cut: authenticated managed worker identity and faithful synchronous
+source acceptance. Require the exact admission and expected worker subject,
+locally issued worker capture, matched managed lineage, matched retained
+maintenance, dispatch receipt and synchronous source return. Bind both
+premises to the original cut, source-instance identities, ordered maintenance
+and original worker premise fingerprints. Reuse the same original subject
+across prepared historical comparison targets, never a supplied comparison
+report. Reject substituted subjects, admissions and replaced boundaries.
+Update the reviewed recovery-source digest for the command argument.
+
+The contract covers acknowledged histories with matched local lineage only.
+It establishes neither configured adoption nor independent authentication,
+durable delivery, browser receipt or proof discharge. All three original
+worker premises for this history and all 39 general CLM-R2 conditions remain
+open. No existing inventory or runtime admission policy is changed.
+
+Focused JVM: configured inventory, command route/authority and reviewed
+writer classification, 8 tests / 210 assertions, exit 0, zero failures or
+errors. The actual canonical worker-interleaved fixture reached and passed
+all new contract assertions, then proceeded into existing physical recovery
+composition. Stopped the enclosing run after over four minutes without a
+final test summary; do not count it as a completed gate. Adjacent, successor
+and full project gates not run. The first runner invocation also discovered
+the unavailable Recife dependency; explicit namespace selection avoided it.
+
+Next: derive applicable obligations for adjacent, maintenance-only and
+acknowledged histories without conflating acquisition and source acceptance.
