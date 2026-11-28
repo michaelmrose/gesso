@@ -214,6 +214,85 @@
 (def worker-authority-profile :configured-selected-recovery-obligation-inventory-v4)
 (def ^:private original-worker-description recovery/describe-worker-authority-subject)
 
+(defn- worker-attribution-support!
+  "Build conditional support only after the inventory's exact adoption join."
+  [worker description adopted original-index]
+  (let [kind (get-in description [:scope :history-kind])
+        acknowledged? (= :acknowledged kind)
+        obligations (:obligations worker)
+        by-id (into {} (map (juxt #(get-in % [:assumption :id]) identity)) obligations)
+        original-fps (:open-premise-fingerprints worker)
+        fp #(get-in by-id [% :premise-fingerprint])
+        identity-id :reference-worker/worker-identity
+        maintenance-id :reference-worker/maintenance-attribution
+        dispatch-id :reference-worker/dispatch-acceptance
+        required (cond-> #{identity-id maintenance-id} acknowledged? (conj dispatch-id))
+        deps {identity-id #{} maintenance-id #{identity-id} dispatch-id #{maintenance-id}}
+        propositions {identity-id :reference-worker/authenticate-selected-worker-identities
+                      maintenance-id :reference-worker/authenticate-selected-maintenance-executions
+                      dispatch-id :reference-worker/authenticate-selected-source-acceptance}
+        adopted-by-id (into {} (map (juxt #(get-in % [:assumption :id]) :premise-fingerprint))
+                            (:obligations description))
+        worker-trust (adopted-by-id :reference-worker-authority/worker-identity)
+        source-trust (adopted-by-id :reference-worker-authority/source-acceptance)
+        observed (get-in worker [:scope :observed-maintenance])
+        returns (vec (keep :local-source-acceptance observed))]
+    (require! (and (= required (set (keys by-id)))
+                   (= (count required) (count obligations) (count original-fps))
+                   (= original-fps (set (map :premise-fingerprint obligations)))
+                   (every? (fn [[id d]]
+                             (let [a (:assumption d) row (get original-index (fp id))]
+                               (and (= d (original-describe a))
+                                    (= (:scope worker) (get-in a [:subject :interface]))
+                                    (= (deps id) (:dependencies a))
+                                    (= [(propositions id)] (:proposition a))
+                                    (= (if (= id identity-id) :environment :implementation-correspondence) (:origin a))
+                                    (= :worker (:family row)) (= id (:id row))
+                                    (= :open (:discharge-state row)) (= :not-performed (:acceptance row))
+                                    (= (set (map fp (deps id))) (:dependency-fingerprints row))))) by-id)
+                   (some? worker-trust)
+                   (= acknowledged? (some? source-trust))
+                   (= (:trusted-assumptions adopted) (set (vals adopted-by-id)))
+                   (every? #(and (pos-int? (:count %)) (vector? (:statuses %))
+                                 (= (:count %) (count (:statuses %)))
+                                 (every? #{:queued :emitted} (:statuses %))) returns))
+              :configured-inventory-worker-attribution-mismatch)
+    {:profile :conditional-selected-worker-attribution-v1
+     :status :conditional-selected-worker-attribution-support
+     :scope (:scope worker) :history-kind kind
+     :installation-binding (:installation-binding adopted)
+     :source-installation-binding (:source-installation-binding adopted)
+     :selected-maintenance observed
+     :selected-source-returns returns
+     :trusted-assumptions (:trusted-assumptions adopted)
+     :original-open-premise-fingerprints original-fps
+     :conditional-conclusion
+     (cond-> {:worker-identity {:proposition :selected-managed-worker-identities-authenticated
+                               :conditional-on #{worker-trust}
+                               :original-premise-fingerprints #{(fp identity-id)}
+                               :remaining-implementation-premise-fingerprints #{}
+                               :remaining-conditions #{:faithful-installed-worker-and-loaded-code}}
+              :maintenance-attribution {:proposition :selected-maintenance-attributed-to-managed-worker-generations
+                                        :conditional-on #{worker-trust}
+                                        :original-premise-fingerprints #{(fp identity-id) (fp maintenance-id)}
+                                        :remaining-implementation-premise-fingerprints #{(fp maintenance-id)}
+                                        :remaining-conditions #{:faithful-installed-worker-and-loaded-code
+                                                                :faithful-issued-maintenance-and-retained-transaction-attribution}}}
+       acknowledged? (assoc :source-acceptance
+                            {:proposition :selected-synchronous-source-returns-faithfully-attributed
+                             :conditional-on #{worker-trust source-trust}
+                             :original-premise-fingerprints original-fps
+                             :remaining-implementation-premise-fingerprints #{(fp maintenance-id) (fp dispatch-id)}
+                             :remaining-conditions #{:faithful-installed-worker-and-loaded-code
+                                                     :faithful-issued-maintenance-and-retained-transaction-attribution
+                                                     :faithful-synchronous-source-and-receipt-correspondence}}))
+     :support-semantics :conditional-not-entailment-checker
+     :worker-authentication :not-established
+     :dispatch-authentication (if acknowledged? :not-established :not-applicable)
+     :durable-delivery :not-established :browser-receipt :not-established
+     :universal-refinement :not-established :proof-discharge :not-performed
+     :authority :none :certificate :not-issued}))
+
 (defn extend-worker-authority!
   "Extend a 16- or 18-premise inventory with the exact owner-adopted worker
    contract. Re-derive its applicability from the original history. This
@@ -297,6 +376,7 @@
                 :configured-inventory-worker-authority-mismatch)
       (-> inventory
           (assoc :profile worker-authority-profile
+                 :conditional-worker-attribution (worker-attribution-support! worker description adopted index)
                  :premises-by-fingerprint combined
                  :dependency-order (dependency-order! combined)
                  :worker-authority-relevance {:scope :original-selected-maintenance-only

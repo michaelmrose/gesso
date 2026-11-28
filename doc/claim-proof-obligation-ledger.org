@@ -11173,3 +11173,33 @@ entailment or proof discharge; all 39 general CLM-R2 conditions remain open.
 Next: derive conditional maintenance attribution and source acceptance
 from the exact applicable adopted premises and original implementation
 conditions; never infer durable delivery or browser receipt.
+
+* v2909 — derive selected conditional worker attribution support
+
+Extend the checked configured worker inventory with a conditional support
+argument for the original selected maintenance. Require the raw retained
+maintenance observations to encode to the original premise subject. Recheck
+original worker premise descriptions, exact propositions, origins, open
+states and dependency fingerprints. Bind worker identity and maintenance
+attribution to the adopted worker premise; acknowledged source acceptance
+additionally depends on the adopted synchronous source premise. Record the
+original implementation premise fingerprints and named remaining conditions
+for each conclusion. Preserve the original unaccepted premise inventory,
+all selected/general conditions and previous command support. Update the
+reviewed recovery-source digest. This is structural conditional support,
+not an entailment checker or independent loaded-code correspondence proof.
+
+Focused JVM: 16 tests, 687 assertions, exit 0, zero failures or errors.
+Both legacy bases and applicable history kinds retain their exact counts.
+Reject changed encoded/raw source observations, forged original premise
+fingerprints and altered dependency edges. The source regression observes
+an actual queued return with zero attempted fanout, then closes the local
+subscriber stream before trailing fanout. No browser or network connection
+was exercised; this is a local negative receipt control. The argument
+retains durable delivery and browser receipt as not established even with
+adopted source authority. Full assembled recovery and project gates not
+rerun. All 39 general CLM-R2 conditions remain open.
+
+Next: qualify the three assembled recovery variants together, preserving
+command attribution, exact applicable worker support and the original
+39-condition register.

@@ -399,6 +399,23 @@
       (finally
         (source/close! src)))))
 
+(deftest queued-source-return-does-not-establish-subscriber-receipt-test
+  (let [src (source/create {:coalesce-window-ms 30000})
+        tap (source/changes src)
+        leading (assoc invalidation-1 :marker :leading)
+        pending (assoc invalidation-1 :marker :pending)]
+    (try
+      (is (= :emitted (:status (source/emit! src leading))))
+      (is (= leading (take-value tap)))
+      (let [result (source/emit! src pending)]
+        (is (= :queued (:status result)))
+        (is (zero? (:attempted result)))
+        ;; A disconnect before the trailing fanout leaves no receipt for it.
+        (s/close! tap)
+        (is (s/closed? tap))
+        (is (nil? (take-value tap))))
+      (finally (source/close! src)))))
+
 (deftest leading-progression-is-not-folded-into-trailing-progression-test
   (let [src (source/create {:coalesce-window-ms coalesce-window-ms})
         tap (source/changes src)

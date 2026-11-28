@@ -183,6 +183,47 @@
           joined (configured/extend-worker-authority! base refined adopted)
           fps (:trusted-assumptions adopted)
           original (:original-historical-inventory base)]
+      (let [argument (:conditional-worker-attribution joined)
+            conclusions (:conditional-conclusion argument)
+            original-by-id (into {} (map (juxt #(get-in % [:assumption :id]) :premise-fingerprint)) (:obligations worker))
+            adopted-by-id (into {} (map (juxt #(get-in % [:assumption :id]) :premise-fingerprint)) (:obligations adopted))
+            identity-fp (original-by-id :reference-worker/worker-identity)
+            maintenance-fp (original-by-id :reference-worker/maintenance-attribution)
+            dispatch-fp (original-by-id :reference-worker/dispatch-acceptance)
+            worker-trust (adopted-by-id :reference-worker-authority/worker-identity)]
+        (is (= :conditional-selected-worker-attribution-v1 (:profile argument)))
+        (is (= :conditional-selected-worker-attribution-support (:status argument)))
+        (is (= (:scope worker) (:scope argument)))
+        (is (= (:open-premise-fingerprints worker) (:original-open-premise-fingerprints argument)))
+        (is (= fps (:trusted-assumptions argument)))
+        (is (= (get-in worker [:scope :observed-maintenance]) (:selected-maintenance argument)))
+        (is (= #{worker-trust} (get-in conclusions [:worker-identity :conditional-on])
+               (get-in conclusions [:maintenance-attribution :conditional-on])))
+        (is (= #{identity-fp maintenance-fp} (get-in conclusions [:maintenance-attribution :original-premise-fingerprints])))
+        (is (= #{maintenance-fp} (get-in conclusions [:maintenance-attribution :remaining-implementation-premise-fingerprints])))
+        (is (= :conditional-not-entailment-checker (:support-semantics argument)))
+        (is (= :not-performed (:proof-discharge argument)))
+        (is (= :not-established (:worker-authentication argument) (:durable-delivery argument)
+               (:browser-receipt argument) (:universal-refinement argument)))
+        (if acknowledged?
+          (do (is (= fps (get-in conclusions [:source-acceptance :conditional-on])))
+              (is (= #{maintenance-fp dispatch-fp} (get-in conclusions [:source-acceptance :remaining-implementation-premise-fingerprints])))
+              (is (= (:open-premise-fingerprints worker) (get-in conclusions [:source-acceptance :original-premise-fingerprints])))
+              (is (= [[:queued]] (mapv :statuses (:selected-source-returns argument))))
+              (is (= :not-established (:dispatch-authentication argument)))
+              (is (thrown? clojure.lang.ExceptionInfo
+                           (configured/extend-worker-authority!
+                            base (assoc-in refined [:historical-judgment :original-recovery :worker-correspondence
+                                                   :selected-maintenance 1 :local-source-acceptance :statuses] [:emitted]) adopted))))
+          (do (is (not (contains? conclusions :source-acceptance)))
+              (is (empty? (:selected-source-returns argument)))
+              (is (= :not-applicable (:dispatch-authentication argument)))))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (configured/extend-worker-authority!
+                      base (assoc-in refined [:historical-judgment :worker-authentication-premises :obligations 1 :premise-fingerprint] "forged") adopted)))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (configured/extend-worker-authority!
+                      (assoc-in base [:premises-by-fingerprint maintenance-fp :dependency-fingerprints] #{}) refined adopted))))
       (is (= configured/worker-authority-profile (:profile joined)))
       (is (= (+ (if command-builder 18 16) (if acknowledged? 2 1))
              (count (:deployment-declared-premise-fingerprints joined))))

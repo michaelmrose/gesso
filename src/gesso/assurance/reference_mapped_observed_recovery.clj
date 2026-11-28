@@ -847,6 +847,7 @@
       :adjacent
 
       (not (and (seq selected)
+                (= observed (mapv worker-origin-identity (:selected-maintenance correspondence)))
                 (= selected (mapv #(select-keys % [:tx-id :intent-id :maintenance]) observed))
                 (= acknowledged (filterv #(= :dispatch-acknowledgment (:maintenance %)) selected))
                 (= :matched-local-issued-host-capture (:worker-observation-provenance scope))
