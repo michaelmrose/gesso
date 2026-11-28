@@ -5,6 +5,7 @@
             [clojure.test :refer [deftest is]]
             [gesso.assurance.assumption :as assumption]
             [gesso.assurance.reference-mapped-observed-recovery :as observed-recovery]
+            [gesso.assurance.reference-clm-r2-condition-inventory :as condition-inventory]
             [gesso.assurance.reference-writer-isolation :as isolation]
             [gesso.assurance.reference-xtdb-provider-contract :as provider-contract]
             [gesso.assurance.reference-installed-writer-history :as writer-history]
@@ -541,6 +542,12 @@
                                   outcome-declarations policy-events original))
       (finally (doseq [f (reverse (file-seq (.toFile copy-root)))] (io/delete-file f true))))))
 
+(defn- check-original-general-register! [conditions]
+  (let [expected (into #{} (mapcat :conditions)
+                       (vals @#'condition-inventory/review-groups))]
+    (is (= 39 (count expected)))
+    (is (= expected conditions))))
+
 (defn- check-conditional-extension! [started node admit mapped-source observation cut-handle earlier target original]
   (let [required (observed-recovery/read-local-recovery-cut! admit observation cut-handle)
         extended (:historical-cut (cut/derive-cut! node target))
@@ -676,6 +683,10 @@
       (is (= :open-worker-authority-contract (:status report)))
       (is (= :adjacent (get-in report [:scope :history-kind])))
       (is (empty? (:obligations report)))
+      (is (= :worker-authority-not-applicable
+             (:reason (host/qualify-worker-authority! started handle subject))))
+      (is (empty? (:open-premise-fingerprints report)))
+      (is (not (contains? report :installation-binding)))
       (is (= :not-applicable (:worker-authentication report) (:dispatch-authentication report)))
       (is (= :not-established (:durable-delivery report) (:browser-receipt report))))
     (is (not (identical? admit other-admission)))
@@ -1382,7 +1393,30 @@
                             (is (= 20 (count (:deployment-declared-premise-fingerprints i))))
                             (is (= (:open-premise-fingerprints qualified) (get-in i [:adopted-by-contract :worker-authority])))
                             (is (= (:remaining-conditions base) (:remaining-conditions i)))
-                            (is (= (:unaccepted-premise-fingerprints base) (:unaccepted-premise-fingerprints i))))
+                            (is (= (:unaccepted-premise-fingerprints base) (:unaccepted-premise-fingerprints i)))
+                            (is (= (:conditional-command-attribution base) (:conditional-command-attribution i)))
+                            (is (= (:original-historical-inventory base) (:original-historical-inventory i)))
+                            (is (= (:original-open-obligations base) (:original-open-obligations i)))
+                            (check-original-general-register! (:remaining-general-conditions i))
+                            (let [support (:conditional-worker-attribution i)
+                                  conclusions (:conditional-conclusion support)
+                                  worker-fps (get-in i [:premise-families :worker-authority])
+                                  original-fps (get-in i [:original-historical-inventory :premise-families :worker])]
+                              (is (= :conditional-selected-worker-attribution-support (:status support)))
+                              (is (= :acknowledged (:history-kind support)))
+                              (is (= subject (:scope support)))
+                              (is (= worker-fps (:trusted-assumptions support)
+                                     (get-in conclusions [:source-acceptance :conditional-on])))
+                              (is (= original-fps (:original-open-premise-fingerprints support)))
+                              (is (every? (:unaccepted-premise-fingerprints i) original-fps))
+                              (is (= (:installation-binding qualified) (:installation-binding support)))
+                              (is (= (:source-installation-binding qualified) (:source-installation-binding support)))
+                              (is (= (:observed-maintenance subject) (:selected-maintenance support)))
+                              (is (= 4 (count (:selected-maintenance support))))
+                              (is (= 2 (count (:selected-source-returns support))))
+                              (is (= :not-established (:worker-authentication support) (:dispatch-authentication support)
+                                     (:durable-delivery support) (:browser-receipt support) (:universal-refinement support)))
+                              (is (= :not-performed (:proof-discharge support)))))
                           (with-redefs [recovery-inventory/compose! (constantly {})]
                             (is (= :configured-recovery-boundary-replaced (trust-problem #(storage! comparison)))))
                           (is (= :storage-trust-policy-mismatch (trust-problem #(storage! (second foreign)))))
@@ -1407,7 +1441,7 @@
                           (is (= (:selected-tx-ids r) (:selected-tx-ids joined)))
                           (is (= (:activation-root joined) (get-in joined [:adoption-scopes :writer-isolation :activation-root])))
                           (is (= [5 8] (mapv #(count (get-in joined [:trusted-assumptions-by-contract %])) [:writer-isolation :provider-trust])))
-                          (is (= 39 (count (:remaining-general-conditions joined))))
+                          (check-original-general-register! (:remaining-general-conditions joined))
                           (let [h (:qualified-writer-history joined)]
                             (is (= :conditional-configured-selected-writer-history (:status h)))
                             (is (= required (:historical-cut h)))
@@ -1530,7 +1564,7 @@
                     (is (= :adjacent (:recovery-scope joined)))
                     (is (= :matched-current-owner-and-issued-retained-root (:activation-root-binding joined)))
                     (is (= (:selected-tx-ids r) (:selected-tx-ids joined)))
-                    (is (= 39 (count (:remaining-general-conditions joined))))
+                    (check-original-general-register! (:remaining-general-conditions joined))
                     (is (every? (:remaining-conditions joined) (:remaining-general-conditions joined)))
                     (is (= (:activation-root joined) (get-in joined [:adoption-scopes :writer-isolation :activation-root])))
                     (is (= [5 8] (mapv #(count (get-in joined [:trusted-assumptions-by-contract %])) [:writer-isolation :provider-trust])))

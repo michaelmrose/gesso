@@ -11203,3 +11203,32 @@ rerun. All 39 general CLM-R2 conditions remain open.
 Next: qualify the three assembled recovery variants together, preserving
 command attribution, exact applicable worker support and the original
 39-condition register.
+
+* v2910 — qualify the three assembled recovery variants
+
+Strengthen the assembled fixture's integrated regressions. Check the exact
+39 general condition identities against the original review groups, not
+merely their count. The adjacent cut has no applicable worker authority
+premise or installation binding. For acknowledged interleaved histories,
+join the original owner-adopted worker and source authority to the existing
+18-premise inventory. Require 20 adopted environmental premises, unchanged
+command attribution, original historical inventory and open obligations,
+exact selected maintenance and source returns, and no independent
+worker/source authentication, delivery, browser receipt or proof discharge.
+The managed successor retains its distinct transaction attribution. No
+production code or original premise fingerprint changed in this revision.
+
+Run all three complete assembled recovery tests in separate JVMs against
+persistent XTDB, retaining the existing schedule and all adverse controls:
+- Adjacent commands: 1 test, 1779 assertions, exit 0.
+- Worker-interleaved commands: 1 test, 1569 assertions, exit 0.
+- Managed-successor commands: 1 test, 1577 assertions, exit 0.
+Total: 3 tests, 4925 assertions, zero failures or errors. Both interleaved
+variants include the configured worker join, retirement, same-store reopen
+and independent-copy controls. No Ygg or full project suite run. These are
+selected physical executions plus structural conditional support, not
+universal refinement or independent theorem proving. All 39 general
+CLM-R2 conditions remain open; no source return entails browser receipt.
+
+Next: observe what the installed XTDB failing invocation actually returns
+or throws on the stale Claim and distinguish it from retained row identity.
